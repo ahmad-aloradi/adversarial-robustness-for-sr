@@ -1,0 +1,11 @@
+model:
+  _target_: src.modules.models.classification.ClassifierVicReg
+  model_name: "torchvision.models/mobilenet_v3_large"
+  model_repo: null
+  weights: "IMAGENET1K_V2"
+
+loss:
+  _target_: "src.modules.losses.VicRegLoss"
+  sim_loss_weight: 25.0
+  var_loss_weight: 25.0
+  cov_loss_weight: 1.0

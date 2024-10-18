@@ -1,0 +1,24 @@
+model:
+  _target_: src.modules.models.classification.Classifier
+  model_name: "torchvision.models/mobilenet_v3_large"
+  model_repo: null
+  weights: "IMAGENET1K_V2"
+  num_classes: 1
+  freeze_layers: null
+
+loss:
+  _target_: "torch.nn.BCEWithLogitsLoss"
+
+metrics:
+  main:
+    _target_: "torchmetrics.Accuracy"
+    task: "binary"
+  valid_best:
+    _target_: "torchmetrics.MaxMetric"
+  additional:
+    AUROC:
+      _target_: "torchmetrics.AUROC"
+      task: "binary"
+
+output_activation:
+  _target_: "torch.sigmoid"

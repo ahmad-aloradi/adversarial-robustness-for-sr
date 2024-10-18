@@ -1,0 +1,56 @@
+_target_: src.datamodules.mnist_datamodule.MNISTDataModule
+
+# this config file is used for running the template default tests
+
+datasets:
+  data_dir: ${paths.data_dir}
+  train_val_test_split: [55_000, 5_000, 10_000]
+  seed: 42
+
+# During testing on MNIST, transformations should be the same
+# because we split initial train + test into train + valid + test
+transforms:
+  train:
+    order: ["normalize"]
+    normalize:
+      _target_: albumentations.Normalize
+      mean: [0.1307]
+      std: [0.3081]
+      p: 1.0
+
+  valid_test_predict:
+    order: ["normalize"]
+    normalize:
+      _target_: albumentations.Normalize
+      mean: [0.1307]
+      std: [0.3081]
+      p: 1.0
+
+loaders:
+  train:
+    batch_size: 128
+    shuffle: True
+    num_workers: 0
+    drop_last: True
+    pin_memory: False
+
+  valid:
+    batch_size: 128
+    shuffle: False
+    num_workers: 0
+    drop_last: False
+    pin_memory: False
+
+  test:
+    batch_size: 128
+    shuffle: False
+    num_workers: 0
+    drop_last: False
+    pin_memory: False
+
+  predict:
+    batch_size: 128
+    shuffle: False
+    num_workers: 0
+    drop_last: False
+    pin_memory: False
