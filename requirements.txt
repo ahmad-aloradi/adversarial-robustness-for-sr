@@ -1,7 +1,7 @@
 # --------- pytorch --------- #
 torch>=1.10.0
 torchvision>=0.11.0
-pytorch-lightning==1.8.3
+pytorch-lightning==1.8.4
 torchmetrics==0.11.0
 
 # --------- hydra --------- #
@@ -11,8 +11,8 @@ hydra-optuna-sweeper==1.2.0
 
 # --------- loggers --------- #
 wandb
+mlflow
 # neptune-client
-# mlflow
 # comet-ml
 
 # --------- others --------- #
