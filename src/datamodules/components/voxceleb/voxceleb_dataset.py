@@ -18,7 +18,6 @@ class VoxCelebConfig:
     train_list: str = "train_list.csv"
 
 
-
 class VoxCelebCollate:
     """Base collate class for variable length audio"""
     def __init__(self, pad_value: float = 0.0):

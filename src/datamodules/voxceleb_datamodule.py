@@ -81,23 +81,14 @@ class VoxCelebDataModule(LightningDataModule):
 
 #-----
 # Test
-@dataclass
-class VoxCelebConfig:
-    data_dir: str = "/path/to/voxceleb"  # Change this to your path
-    veri_test_path: str = "/path/to/veri_test.txt"  # Change this to your path
-    batch_size: int = 32
-    num_workers: int = 4
-    sample_rate: int = 16000
-    max_duration: float = 8.0
-    train_list: str = "train_list.txt"
 
 def test_datamodule():
     print("Starting VoxCeleb DataModule test...")
     
     # Initialize config
     cfg = VoxCelebConfig(
-        data_dir="./voxceleb1",  # Update with your path
-        veri_test_path="./voxceleb1/veri_test.txt"  # Update with your path
+        data_dir="adversarial-robustness-for-sr/data/voxceleb/wav",  # Update with your path
+        veri_test_path="adversarial-robustness-for-sr/data/voxceleb/meta/veri_test.txt"  # Update with your path
     )
     
     try:
