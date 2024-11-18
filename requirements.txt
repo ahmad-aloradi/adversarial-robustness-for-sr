@@ -26,17 +26,17 @@ omegaconf
 tqdm
 tensorflow
 pynvml
-
+wget
 # --------- data --------- #
 numpy
-Pillow
-opencv-python-headless
-albumentations
-h5py
+# Pillow
+# opencv-python-headless
+# albumentations
+# h5py
 
 # --------- models --------- #
-timm
-segmentation-models-pytorch
+# timm
+# segmentation-models-pytorch
 
 # --------- visualization --------- #
 seaborn

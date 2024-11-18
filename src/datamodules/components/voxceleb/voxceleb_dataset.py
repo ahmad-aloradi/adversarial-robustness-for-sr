@@ -1,21 +1,13 @@
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
-from dataclasses import dataclass
 from torch.nn.utils.rnn import pad_sequence
-from src.datamodules.components.audio_processor import AudioProcessor
+import pandas as pd
 
-
-@dataclass
-class VoxCelebConfig:
-    data_dir: str = "/path/to/voxceleb"  # Change this to your path
-    veri_test_path: str = "/path/to/veri_test.txt"  # Change this to your path
-    batch_size: int = 32
-    num_workers: int = 4
-    sample_rate: int = 16000
-    max_duration: float = 8.0  # maximum duration in seconds
-    train_list: str = "train_list.csv"
+import sys
+sys.path.append(f"/home/aloradi/adversarial-robustness-for-sr")
+from src.datamodules.components.utils import AudioProcessor
 
 
 class VoxCelebCollate:
@@ -51,10 +43,10 @@ class VerificationCollate(VoxCelebCollate):
         lengths2 = torch.tensor([wav.size(0) for wav in wav2s])
         padded_wav2s = pad_sequence(wav2s, batch_first=True, padding_value=self.pad_value)
         return {
-            'waveforms1': padded_wav1s,
-            'lengths1': lengths1,
-            'waveforms2': padded_wav2s,
-            'lengths2': lengths2,
+            'x_enrol': padded_wav1s,
+            'x_enrol_len': lengths1,
+            'x_test': padded_wav2s,
+            'x_test_len': lengths2,
             'labels': torch.tensor(labels)
         }
 
@@ -63,12 +55,13 @@ class VoxCelebDataset(Dataset):
     def __init__(
         self,
         data_dir: str,
-        metadata: List[Tuple[str, int]],
+        metadat_filepath: Tuple[str, Path],
         sample_rate: int = 16000,
-        max_duration: float = 15.0,
+        max_duration: float = 12.0,
+        sep: str = "|",
     ):
         self.data_dir = Path(data_dir)
-        self.metadata = metadata
+        self.metadata = pd.read_csv(metadat_filepath,sep=sep)
         self.max_samples = int(max_duration * sample_rate)
         self.audio_processor = AudioProcessor(sample_rate)
 
@@ -120,19 +113,23 @@ class VoxCelebVerificationDataset(Dataset):
         return wav1, wav2, label
 
 
+if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Generate train_list.txt for VoxCeleb")
-    parser.add_argument("--voxceleb_dir", type=str, required=True, 
-                      help="Root directory of VoxCeleb dataset")
-    parser.add_argument("--output_file", type=str, default="train_list.txt",
-                      help="Output file path")
-    parser.add_argument("--verification_file", type=str,
-                      help="Path to veri_test.txt if excluding verification files")
-    
-    args = parser.parse_args()
-    
-    generate_train_list(
-        voxceleb_dir=args.voxceleb_dir,
-        output_file=args.output_file,
-        verification_file=args.verification_file
-    )
+    parser.add_argument("--voxceleb_dir", 
+                        type=str,
+                        default="data/voxceleb/voxceleb1_2",)
+    parser.add_argument("--metadata_file", 
+                        type=str, 
+                        default="data/voxceleb/voxceleb_metadata/preprocessed/voxceleb_dev.csv",
+                        help="Output file path")
+    parser.add_argument("--verification_file",
+                        type=str,
+                        help="Path to veri_test.txt if excluding verification files")
+    args = parser.parse_args()    
+
+    voxceleb_data = VoxCelebDataset(data_dir=args.voxceleb_dir, 
+                                    metadat_filepath=args.metadata_file)
+
+    print("Number of samples: ", len(voxceleb_data))
+    print("Sample: ", voxceleb_data[0])

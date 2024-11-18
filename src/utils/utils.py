@@ -2,7 +2,9 @@ import argparse
 import warnings
 from functools import wraps
 from importlib.util import find_spec
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Union
+import pickle
+from pathlib import Path
 
 import hydra
 from hydra import compose, initialize_config_dir
@@ -386,3 +388,39 @@ def register_custom_resolvers(
         return wrapper
 
     return decorator
+
+
+def dump_pickle(stats: dict, output_path: Union[str, Path]) -> None:
+    """
+    Dump statistics dictionary to a pickle file
+    
+    Args:
+        stats: Dictionary containing statistics
+        output_path: Path where pickle file will be saved
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_path, 'wb') as f:
+        pickle.dump(stats, f)
+    print(f"Pickle saved to {output_path}")
+
+
+def load_pickle(pickle_path: Union[str, Path]) -> dict:
+    """
+    Load dictionary from a pickle file
+    
+    Args:
+        pickle_path: Path to pickle file
+    
+    Returns:
+        Dictionary
+    """
+    pickle_path = Path(pickle_path)
+    if not pickle_path.exists():
+        raise FileNotFoundError(f"Pickle file not found: {pickle_path}")
+        
+    with open(pickle_path, 'rb') as f:
+        stats = pickle.load(f)
+    print(f"Statistics loaded from {pickle_path}")
+    return stats

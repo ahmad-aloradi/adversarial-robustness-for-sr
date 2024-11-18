@@ -10,7 +10,6 @@ from torch.utils.data import Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
 
 
-
 class AudioProcessor:
     """Handles audio loading and preprocessing"""
     def __init__(self, sample_rate: int = 16000):
@@ -76,11 +75,6 @@ class AudioProcessor:
             
         Returns:
             Processed audio tensor
-            
-        Raises:
-            FileNotFoundError: If audio file not found
-            RuntimeError: If processing fails
-            ValueError: If input is invalid
         """
         try:
             # Resolve and validate path
