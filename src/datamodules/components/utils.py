@@ -1,13 +1,68 @@
 import os
 from operator import itemgetter
-from typing import Iterator, Optional, Tuple
+from typing import Iterator, Optional, Tuple, Union
 from pathlib import Path
+import random
 
+import pandas as pd
 import torch
 import torchaudio
 import torchaudio.functional as F
 from torch.utils.data import Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
+
+
+def split_dataset(
+        df: pd.DataFrame,
+        train_ratio: float = 0.95,
+        speaker_overlap: bool = False,
+        save_csv: bool = True,
+        output_dir: Optional[Union[str, Path]] = None,
+        speaker_id_col: str = "speaker_id",
+        train_csv: str = "train.csv",
+        val_csv: str = "validation.csv",
+        sep: str = '|',
+        RANDOM_SEED: int = 42
+        ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Split dataset CSV into train and validation sets. This function can split by speaker or randomly across all samples.
+    The function is generic for any dataset with a speaker_id column.
+
+    Args:
+        df: Dataset dataframe
+        train_ratio: Ratio of training data from 0 to 1 (default: 0.9)
+        speaker_overlap: Allow speaker overlap between sets (default: False)
+        save_csv: Save train and validation CSV files (default: True)
+        output_dir: Directory to save train.csv and validation.csv (default: None).
+        Only used if save_csv is True. Typically set to the same directory as your experiment.
+
+    Returns:
+        Tuple of (train_df, val_df)
+    """
+
+    if speaker_overlap:
+        # Random split across all samples
+        shuffled_df = df.sample(frac=1.0, random_state=RANDOM_SEED)
+        split_idx = int(len(shuffled_df) * train_ratio)
+        train_df = shuffled_df[:split_idx]
+        val_df = shuffled_df[split_idx:]
+    else:
+        # Split by speakers
+        speakers = df[speaker_id_col].unique()
+        random.seed(RANDOM_SEED)
+        random.shuffle(speakers)
+
+        train_speakers = speakers[:int(len(speakers) * train_ratio)]
+        train_df = df[df[speaker_id_col].isin(train_speakers)]
+        val_df = df[~df[speaker_id_col].isin(train_speakers)]
+
+    if save_csv:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        train_df.fillna('N/A').to_csv(output_dir / train_csv, index=False, sep=sep)
+        val_df.fillna('N/A').to_csv(output_dir / val_csv, index=False, sep=sep)
+
+    return train_df, val_df
 
 
 class AudioProcessor:
@@ -79,11 +134,10 @@ class AudioProcessor:
         try:
             # Resolve and validate path
             abs_path = self.resolve_path(audio_path)
-            # Load audio
             waveform, sr = self.load_audio(str(abs_path))
             # Process pipeline
             waveform = self.convert_to_mono(waveform)
-            waveform = self.resample(waveform, sr)
+            waveform = self.resample(waveform, orig_sr=sr)
             waveform = self.normalize_audio(waveform)
             return waveform
             
@@ -134,6 +188,7 @@ class AudioProcessor:
             waveform = waveform.unsqueeze(0)
             
         return F.deemphasis(waveform, coeff)
+
 
 class DatasetFromSampler(Dataset):
     """Dataset to create indexes from `Sampler`.
