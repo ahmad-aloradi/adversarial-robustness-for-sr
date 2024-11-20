@@ -85,14 +85,19 @@ class VoxCelebProcessor:
 
         # Download metadata files if needed
         self._ensure_metadata_files()
-        
-        # Load metadata
-        self.speaker_metadata = self._load_speaker_metadata()
-        self.test_files = self._load_test_files()
-        self.test_speakers = self._load_test_speakers(self.test_files)
-        
+
+        # Load test files and speakers
+        self.test_speakers, test_df = self._load_test_files_and_spks()
         if self.verbose:
-            print(f"Number of test files {len(self.test_files)} and test speakers {len(self.test_speakers)}")
+            print(f"Number of test files {len(test_df)} and test speakers {len(self.test_speakers)}")
+
+        # Create or load metadata
+        metadata, speaker_to_id = self.load_speaker_metadata()
+        self.speaker_metadata, self.speaker_metadata_df = metadata
+        self.speaker_to_id, speaker_to_id_df = speaker_to_id
+        self.save_csv(speaker_to_id_df, self.speaker_lookup_file)
+        if self.verbose:
+            print(f"Saved speaker_lookup in {self.speaker_lookup_file}")
 
     def _download_file(self, url: str, target_path: Path) -> None:
         """Download a file from URL to target path"""
@@ -125,15 +130,12 @@ class VoxCelebProcessor:
 
     def _process_vox1_metadata(self) -> pd.DataFrame:
         """Process VoxCeleb1 metadata"""
-        meta_path = self.vox1_metadata
-        df = pd.read_csv(meta_path, sep='\t', dtype='object')
+        df = pd.read_csv(self.vox1_metadata, sep='\t', dtype='object')
 
         # Replace spaces with underscores in column names
         df.columns = [col.replace(' ', '_') for col in df.columns]
-
         # Rename columns for consistency
-        df.columns = ['voxceleb_id', 'vggface_id', 'gender', 'nationality', 'split']
-        
+        df.columns = ['speaker_id', 'vggface_id', 'gender', 'nationality', 'split']
         # Add source column
         df['source'] = 'voxceleb1'
         
@@ -142,12 +144,10 @@ class VoxCelebProcessor:
 
     def _process_vox2_metadata(self) -> pd.DataFrame:
         """Process VoxCeleb2 metadata"""
-        meta_path = self.vox2_metadata
-        df = pd.read_csv(meta_path, sep=',', dtype='object')
+        df = pd.read_csv(self.vox2_metadata, sep=',', dtype='object')
 
         # Rename columns for consistency
-        df.columns = ['voxceleb_id', 'vggface_id', 'gender', 'split']
-
+        df.columns = ['speaker_id', 'vggface_id', 'gender', 'split']
         # Add missing columns
         df['nationality'] = None
         df['source'] = 'voxceleb2'
@@ -155,9 +155,19 @@ class VoxCelebProcessor:
         df = self._remove_white_spaces(df)
         return df
 
-    def generate_training_ids(self, 
-                              combined_df: pd.DataFrame,
-                              id_col: str = 'voxceleb_id') -> pd.DataFrame:
+    def _postprocess_vox_combined_metadata(self, df: pd.DataFrame, speaker_to_id: Dict[str, int]
+                                           ) -> pd.DataFrame:
+        df = self.update_metadata_with_training_ids(df=df, speaker_to_id=speaker_to_id, 
+                                                    id_col='speaker_id')
+        # Reorder columns to put class_id second
+        cols = df.columns.tolist()
+        cols.remove('class_id')
+        cols.insert(1, 'class_id')
+        df = df[cols]
+        return df
+
+    def generate_training_ids(self, combined_df: pd.DataFrame,id_col: str = 'speaker_id'
+                              ) -> pd.DataFrame:
         """
         Generate training IDs from combined VoxCeleb1 and VoxCeleb2 metadata
 
@@ -181,10 +191,8 @@ class VoxCelebProcessor:
 
         return speaker_to_id
 
-    def update_metadata_with_training_ids(self,
-                                          df: pd.DataFrame,
-                                          speaker_to_id: Dict[str, int],
-                                          id_col: str = 'voxceleb_id',
+    def update_metadata_with_training_ids(self, df: pd.DataFrame, speaker_to_id: Dict[str, int],
+                                          id_col: str = 'speaker_id',
                                           ) -> pd.DataFrame:
         """
         Update metadata CSV file with training_id column
@@ -213,43 +221,40 @@ class VoxCelebProcessor:
         df = df.fillna('N/A')
         df.to_csv(path, sep=self.sep, index=False)
 
-    def _load_speaker_metadata(self) -> Dict:
+    def _create_combined_speaker_metadata(self) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, int]]:
         """Load and merge speaker metadata from both VoxCeleb1 and VoxCeleb2"""
-        # Create combined metadata file if it doesn't exist
-        combined_path = self.vox_metadata
-        speaker_lookup_file = self.speaker_lookup_file
+        vox1_df = self._process_vox1_metadata()
+        vox2_df = self._process_vox2_metadata()
+        df = pd.concat([vox1_df, vox2_df], ignore_index=True)
+        # Append speaker_ids
+        speaker_to_id = self.generate_training_ids(combined_df=df)
+        df = self._postprocess_vox_combined_metadata(df=df, speaker_to_id=speaker_to_id)
+
+        # Save speaker lookup table with class IDs
+        speaker_to_id_df = pd.DataFrame({'speaker_id': speaker_to_id.keys(),
+                                         'class_id': speaker_to_id.values()})
+        return df, speaker_to_id_df, speaker_to_id
+
+    def load_speaker_metadata(self) -> Tuple[Tuple[Dict, pd.DataFrame], Tuple[Dict, pd.DataFrame]]:
+        """Load and merge speaker metadata from both VoxCeleb1 and VoxCeleb2"""
         
-        if not combined_path.exists():
-            # Process both datasets
-            vox1_df = self._process_vox1_metadata()
-            vox2_df = self._process_vox2_metadata()
-
-            # Combine datasets
-            df = pd.concat([vox1_df, vox2_df], ignore_index=True)
-
-            self.speaker_to_id = self.generate_training_ids(combined_df=df)
-            for df_, save_df_path in zip([df, vox1_df, vox2_df], 
-                                         [combined_path, self.vox1_metadata_training,
-                                          self.vox2_metadata_training]):
-                _df = self.update_metadata_with_training_ids(df=df_, speaker_to_id=self.speaker_to_id, id_col='voxceleb_id')
-                self.save_csv(_df, save_df_path)
- 
-            if self.verbose:
-                print(f"Saved combined metadata to {combined_path}")
+        if not self.vox_metadata.exists():
+            # Create combined metadata file if it doesn't exist
+            df, speaker_to_id_df, speaker_to_id = self._create_combined_speaker_metadata() 
 
         else:
             # Load combined metadata
             if self.verbose:
-                print(f"Loading metadata from {combined_path}")
-            df = pd.read_csv(combined_path, sep=self.sep, dtype='object')
-            assert speaker_lookup_file.exists(), f"Speaker lookup file not found: {speaker_lookup_file}"
-            speaker_to_id_df = pd.read_csv(speaker_lookup_file, sep=self.sep, dtype='object')
-            self.speaker_to_id = speaker_to_id_df.set_index('voxceleb_id').to_dict()['class_id']
+                print(f"Loading metadata from {self.vox_metadata}")
+            df = pd.read_csv(self.vox_metadata, sep=self.sep, dtype='object')
+            assert self.speaker_lookup_file.exists(), f"Speaker lookup file not found: {self.speaker_lookup_file}"
+            speaker_to_id_df = pd.read_csv(self.speaker_lookup_file, sep=self.sep, dtype='object')
+            speaker_to_id = speaker_to_id_df.set_index('speaker_id').to_dict()['class_id']
         
         # Convert to dictionary format
         metadata = {}
         for _, row in df.iterrows():
-            metadata[row['voxceleb_id']] = {
+            metadata[row['speaker_id']] = {
                 'gender': row['gender'],
                 'nationality': row['nationality'],
                 'source': row['source'],
@@ -260,31 +265,21 @@ class VoxCelebProcessor:
         if self.verbose:
             print(f"Loaded metadata for {len(metadata)} speakers")
 
-        return metadata
+        return (metadata, df), (speaker_to_id, speaker_to_id_df)
 
-    def _load_test_files(self) -> set:
+    def _load_test_files_and_spks(self) -> set:
         """Load verification test files to exclude"""
-        test_files = set()
-        veri_test_path = self.veri_test
+        if not self.veri_test.exists():
+            raise FileNotFoundError(f"veri_test.txt file not found: {self.veri_test}")
         
-        if not veri_test_path.exists():
-            raise FileNotFoundError(f"veri_test.txt file not found: {veri_test_path}")
+        # Read verification file
+        veri_df = pd.read_csv(self.veri_test, sep=' ', header=None, names=['label', 'enrollment', 'test'])
         
-        try:
-            with open(veri_test_path, 'r') as f:
-                for line in f:
-                    parts = line.strip().split()
-                    assert len(parts) == 3, 'Invalid veri_test.txt structure'
-                    test_files.add(parts[1])
-                    test_files.add(parts[2])
-            
-        except Exception as e:
-            raise RuntimeError(f"Error loading test files: {e}")
-        
-        return test_files
+        enrollment_spks = set(veri_df.enrollment.apply(lambda x: x.split(os.sep)[0]))
+        test_spks = set(veri_df.test.apply(lambda x: x.split(os.sep)[0]))
+        assert test_spks == enrollment_spks, "Enrollment and test speakers don't match"
 
-    def _load_test_speakers(self, test_files) -> set:
-        return set(col.split(os.sep)[0] for col in test_files)
+        return veri_df, test_spks
 
     def _generate_utterance_id(self, rel_path: Path, speaker_id: str, dataset: str) -> str:
         """Generate unique utterance ID"""
@@ -387,14 +382,14 @@ class VoxCelebProcessor:
         # Skip if in test files
         if speaker_id in self.test_speakers:
             stats['test']['count'] += 1
-            stats['duration']['paths'].append(rel_path_str)
+            stats['test']['paths'].append(rel_path_str)
             return None
         
         # Get audio info
         info = sf.info(wav_path)
         if info.duration < min_duration:
             stats['duration']['count'] += 1
-            stats['test']['paths'].append(rel_path_str)
+            stats['duration']['paths'].append(rel_path_str)
             return None
 
         return VoxCelebUtterance(
@@ -414,25 +409,30 @@ class VoxCelebProcessor:
             print(f"Iterating over {len(wav_paths)} audio files ...")
 
         # Process files with progress bar
-        utterances, stats = self._get_voxceleb_utterances(wav_paths, min_duration)
+        utterances, utterances_stats = self._get_voxceleb_utterances(wav_paths, min_duration)
+        utterances_stats = pd.DataFrame.from_dict(utterances_stats, orient='columns')
 
         # Print statistics
         if self.verbose:
             print("\nProcessing Summary:")
-            print(f"Total files scanned: {stats['total']}")
+            print(f"Total files scanned: {utterances_stats['total']}")
             print(f"Valid utterances: {len(utterances)}")
             print(f"Skipped files:")
-            for reason, count in stats['skipped'].items():
-                print(f"  - {reason}: {count}")
 
         # Save utterances ans stats as csvs
-        self.save_utterances_to_csv(utterances=utterances, dev_metadata_file=self.dev_metadata_file)
-        pd.DataFrame.from_dict(stats, orient='columns').to_csv(self.preprocess_stats_file, sep=args.sep, index=False)
+        dev_metadata, speaker_total_metadata = self.utterances_to_csv(utterances=utterances,
+                                                                      dev_metadata_file=self.dev_metadata_file)
+        self.save_csv(dev_metadata, self.dev_metadata_file)
+        self.save_csv(utterances_stats, self.preprocess_stats_file)
+        self.save_csv(speaker_total_metadata, self.vox_metadata)
 
-        return utterances, stats
+        if self.verbose:
+            print(f"Saved {len(utterances)} utterances to {self.dev_metadata_file}")
 
-    def save_utterances_to_csv(self, utterances: List[VoxCelebUtterance], 
-                               dev_metadata_file: Union[str, Path]) -> None:
+        return utterances, utterances_stats
+
+    def utterances_to_csv(self, utterances: List[VoxCelebUtterance], 
+                          dev_metadata_file: Union[str, Path]) -> None:
         """
         Save list of VoxCelebUtterance objects to CSV file with pipe delimiter
         
@@ -449,27 +449,26 @@ class VoxCelebProcessor:
 
         # Append speaker ids and their durations stats
         df = self.update_metadata_with_training_ids(df=df, speaker_to_id=self.speaker_to_id, id_col='speaker_id')
-        df = VoxCelebProcessor.aggregate_speaker_duration(df=df)
-        self.save_csv(df, dev_metadata_file)
+        
+        # Append speaker stats and Sort by total duration per speaker
+        speaker_stats = self._get_speakers_stats(df, col_id='speaker_id')
+        df_with_stats = self._append_speaker_stats(df, speaker_stats, col_id='speaker_id')
+        speaker_metadata_with_stats = self._append_speaker_stats(self.speaker_metadata_df, speaker_stats, col_id='speaker_id')      
+        
+        return df_with_stats, speaker_metadata_with_stats
+    
+    def _append_speaker_stats(self, df: pd.DataFrame, 
+                              speaker_stats: pd.DataFrame, 
+                              col_id: str = 'speaker_id') -> pd.DataFrame:
+        """Append speaker stats to metadata"""
+        df = df.merge(speaker_stats, on=col_id, how='left')
+        df = df.sort_values('total_dur/spk', ascending=False)
+        return df
 
-        if self.verbose:
-            print(f"Saved {len(utterances)} utterances to {dev_metadata_file}")
-
-    @staticmethod
-    def aggregate_speaker_duration(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Aggregate total duration per speaker from VoxCeleb metadata CSV.
-
-        Args:
-            df: metadata CSV
-
-        Returns:
-            DataFrame with speaker statistics
-        """
-        speaker_stats = df.groupby('speaker_id').agg({'duration': ['sum', 'mean', 'count']}
-                                                     ).round(4)
-
-        # Create multi-level column names
+    def _get_speakers_stats(self, df: pd.DataFrame, col_id: str = 'speaker_id') -> pd.DataFrame:
+        speaker_stats = df.groupby(col_id).agg(
+            {'duration': ['sum', 'mean', 'count']}).round(4)
+        
         speaker_stats.columns = pd.MultiIndex.from_tuples([
             ('duration', 'total_dur/spk'),
             ('duration', 'mean_dur/spk'),
@@ -478,12 +477,76 @@ class VoxCelebProcessor:
         speaker_stats.columns = speaker_stats.columns.get_level_values(1)
         # Reset index to make speaker_id a column
         speaker_stats = speaker_stats.reset_index()
-        # Merge stats back to original DataFrame
-        df_with_stats = df.merge(speaker_stats, on='speaker_id', how='left')
-        # Sort by total duration descending
-        df_with_stats = df_with_stats.sort_values('total_dur/spk', ascending=False)
+        return speaker_stats
 
-        return df_with_stats
+
+    @staticmethod
+    def enrich_verification_file(
+        veri_test_path: Union[str, Path],
+        metadata_path: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None
+    ) -> pd.DataFrame:
+        """
+        Enrich verification test file with metadata information.
+        
+        Args:
+            veri_test_path: Path to veri_test.txt
+            metadata_path: Path to vox_metadata.csv
+            output_path: Optional path to save the enriched CSV
+            
+        Returns:
+            DataFrame with enriched verification trials
+        """
+        # Read metadata
+        metadata_df = pd.read_csv(metadata_path, sep='|').fillna('N/A')
+        
+        # Create lookup dictionaries for faster access
+        metadata_lookup = metadata_df.set_index('speaker_id').to_dict('index')
+        
+        # Read verification file
+        veri_df = pd.read_csv(veri_test_path, sep=' ', header=None,
+                            names=['label', 'enrollment', 'test'])
+        
+        # Extract speaker IDs from paths
+        veri_df['enroll_id'] = veri_df['enrollment'].apply(lambda x: x.split('/')[0])
+        veri_df['test_id'] = veri_df['test'].apply(lambda x: x.split('/')[0])
+        
+        # Add metadata for both speakers
+        for field in ['nationality', 'gender', 'class_id']:
+            veri_df[f'enroll_{field}'] = veri_df['enroll_id'].map(
+                lambda x: metadata_lookup[x][field] if x in metadata_lookup else 'N/A'
+            )
+            veri_df[f'test_{field}'] = veri_df['test_id'].map(
+                lambda x: metadata_lookup[x][field] if x in metadata_lookup else 'N/A'
+            )
+        
+        # Add trial type (same/different nationality, gender)
+        veri_df['same_nationality'] = (
+            (veri_df['enroll_nationality'] == veri_df['test_nationality']) & 
+            (veri_df['enroll_nationality'] != 'N/A')
+        ).astype(int)
+        
+        veri_df['same_gender'] = (
+            veri_df['enroll_gender'] == veri_df['test_gender']
+        ).astype(int)
+        
+        # Reorder columns for clarity
+        column_order = [
+            'label', 
+            'enroll_path', 'test_path',
+            'enroll_id', 'test_id',
+            'enroll_gender', 'test_gender',
+            'enroll_nationality', 'test_nationality',
+            'enroll_class_id', 'test_class_id',
+            'same_gender', 'same_nationality'
+        ]
+        veri_df = veri_df[column_order]
+        
+        # Save if output path provided
+        if output_path:
+            veri_df.to_csv(output_path, sep='|', index=False)
+        
+        return veri_df
 
 
 if __name__ == "__main__":
@@ -511,9 +574,9 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # # Test Voxceleb Processor
+    # Run Voxceleb Processor
     voxceleb_processor = VoxCelebProcessor(args.root_dir,  verbose=args.verbose, sep=args.sep)
-    utterances, stats = voxceleb_processor.generate_metadata(args.min_duration)
+    utterances, utterances_stats = voxceleb_processor.generate_metadata(args.min_duration)
 
     # Print statistics
     total_vox1 = sum(1 for u in utterances if u.source == 'voxceleb1')
@@ -522,3 +585,21 @@ if __name__ == "__main__":
     print(f"VoxCeleb1 utterances: {total_vox1}")
     print(f"VoxCeleb2 utterances: {total_vox2}")
     print(f"Unique speakers: {len({u.speaker_id for u in utterances})}")
+
+     # Run veri_test.txt enricher
+    output_path = 'data/voxceleb/voxceleb_metadata/_preprocessed/veri_test_rich.csv' 
+    if os.path.exists(output_path):
+        print(f"Output file already exists: {output_path}")
+        enriched_df = pd.read_csv(output_path, sep='|')
+    else:
+        enriched_df = voxceleb_processor.enrich_verification_file(
+            'data/voxceleb/voxceleb_metadata/downloaded/veri_test.txt',
+            'data/voxceleb/voxceleb_metadata/preprocessed/vox_meta.csv',
+            'data/voxceleb/voxceleb_metadata/preprocessed/veri_test_rich.csv'
+            )
+
+    # Print sample statistics
+    print(f"Total trials: {len(enriched_df)}")
+    print(f"Positive trials: {(enriched_df['label'] == 1).sum()}")
+    print(f"Same gender trials: {enriched_df['same_gender'].sum()}")
+    print(f"Same nationality trials: {enriched_df['same_nationality'].sum()}")
