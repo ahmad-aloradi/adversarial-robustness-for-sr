@@ -23,7 +23,7 @@ def split_dataset(
         val_csv: str = "validation.csv",
         sep: str = '|',
         RANDOM_SEED: int = 42
-        ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
     """
     Split dataset CSV into train and validation sets. This function can split by speaker or randomly across all samples.
     The function is generic for any dataset with a speaker_id column.
@@ -62,7 +62,8 @@ def split_dataset(
         train_df.fillna('N/A').to_csv(output_dir / train_csv, index=False, sep=sep)
         val_df.fillna('N/A').to_csv(output_dir / val_csv, index=False, sep=sep)
 
-    return train_df, val_df
+    else:
+        return train_df, val_df
 
 
 class AudioProcessor:

@@ -36,7 +36,7 @@ class VoxCelebProcessor:
         'vox1': 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/vox1_meta.csv',
         'vox2': 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/vox2_meta.csv',
         'test_file': 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test.txt'
-    }    
+    }
     DATASET_PATHS = {
         'wav_dir': 'voxceleb1_2',
         'downloaded_metadata_dir': 'voxceleb_metadata/downloaded',
@@ -454,7 +454,6 @@ class VoxCelebProcessor:
                 log.info(f"Total files: {len(dev_metadata)}")
             return (None, None), (dev_metadata, speaker_total_metadata)
 
-
     def utterances_to_csv(self, utterances: List[VoxCelebUtterance],
                           dev_metadata_file: Union[str, Path]) -> None:
         """
@@ -565,15 +564,15 @@ class VoxCelebProcessor:
             'same_gender', 'same_nationality'
         ]
         veri_df = veri_df[column_order]
-        
-        # Save if output path provided
-        if output_path:
-            VoxCelebProcessor.save_csv(veri_df, output_path, sep=sep)            
-        
+
         # Print statistics
         VoxCelebProcessor.print_test_statistics(veri_df)
 
-        return veri_df
+        # Save if output path provided
+        if output_path:
+            VoxCelebProcessor.save_csv(veri_df, output_path, sep=sep)            
+        else:
+            return veri_df
 
     @staticmethod
     def print_utts_statistics(utterances: List[VoxCelebUtterance]) -> None:
@@ -638,5 +637,5 @@ if __name__ == "__main__":
         enriched_df = VoxCelebProcessor.enrich_verification_file(
             'data/voxceleb/voxceleb_metadata/downloaded/veri_test.txt',
             'data/voxceleb/voxceleb_metadata/preprocessed/vox_meta.csv',
-            'data/voxceleb/voxceleb_metadata/preprocessed/veri_test_rich.csv'
+            output_path=None
             )
