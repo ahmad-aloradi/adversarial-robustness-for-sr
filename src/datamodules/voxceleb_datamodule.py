@@ -2,30 +2,45 @@ import os
 from typing import Dict, List, Optional
 import torch
 from dataclasses import dataclass
+from pathlib import Path
+import pandas as pd
 
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 
+import sys
+sys.path.append(f"/home/aloradi/adversarial-robustness-for-sr")
 from src.datamodules.components.voxceleb.voxceleb_dataset import (
     VoxCelebDataset, 
     VoxCelebVerificationDataset, 
     TrainCollate, 
     VerificationCollate)
 
+from src.datamodules.components.voxceleb.voxceleb_prep import VoxCelebProcessor
+from src import utils
+from src.datamodules.components.utils import split_dataset
+
+log = utils.get_pylogger(__name__)
 
 @dataclass
 class VoxCelebConfig:
-    data_dir: str = "/path/to/voxceleb"  # Change this to your path
+    data_dir: str = "data/voxceleb"  # Change this to voxceleb path
+    voxceleb_artifacts_dir: str = "/path/to/voxceleb_artifacts"  # Change this to your path
     veri_test_path: str = "/path/to/veri_test.txt"  # Change this to your path
+    veri_test_csv_filename: str = "veri_test.csv" 
+    verbose: bool = True
     batch_size: int = 32
     num_workers: int = 4
     sample_rate: int = 16000
+    min_duration: float = 0.5  # minimum duration in seconds
     max_duration: float = 8.0  # maximum duration in seconds
-    train_list: str = "train_list.csv"
+    dev_csv_filename: str = "voxceleb_dev.csv"
+    train_csv_filename: str = "train_csv.csv",
+    val_csv_filename: str = "val_csv.csv",
 
 
 class VoxCelebDataModule(LightningDataModule):
-    def __init__(self, cfg: VoxCelebConfig):
+    def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         self.train_data = None
@@ -33,124 +48,116 @@ class VoxCelebDataModule(LightningDataModule):
         self.test_data = None
 
     def prepare_data(self):
-        pass
+        voxceleb_processor = VoxCelebProcessor(root_dir=self.cfg.dataset.data_dir,  
+                                               verbose=self.cfg.dataset.verbose, 
+                                               artifcats_dir=self.cfg.dataset.voxceleb_artifacts_dir,
+                                               sep=self.cfg.dataset.sep)
+        
+        _ = voxceleb_processor.generate_metadata(base_search_dir=self.cfg.dataset.base_search_dir,
+                                                 min_duration=self.cfg.dataset.min_duration,
+                                                 save_df=self.cfg.dataset.save_csv)
+        
+        _ = voxceleb_processor.enrich_verification_file(
+            veri_test_path=self.cfg.dataset.veri_test_path,
+            metadata_path=self.cfg.dataset.metadata_csv_file,
+            output_path=self.cfg.dataset.veri_test_output_path,
+            sep=self.cfg.dataset.sep,
+            )
+        
+        split_dataset(df=pd.read_csv(self.cfg.dataset.dev_csv_file, sep='|'), 
+                      train_ratio = self.cfg.dataset.train_ratio,
+                      save_csv=self.cfg.dataset.save_csv,
+                      speaker_overlap=self.cfg.dataset.speaker_overlap,
+                      speaker_id_col='speaker_id',
+                      train_csv=self.cfg.dataset.train_csv_file,
+                      val_csv=self.cfg.dataset.val_csv_file,
+                      sep=self.cfg.dataset.sep,
+                      seed=self.cfg.dataset.seed)        
         
     def setup(self, stage: Optional[str] = None):
         if stage == 'fit' or stage is None:
             self.train_data = VoxCelebDataset(
-                self.cfg.data_dir,
-                self.cfg.train_metadata,
-                self.cfg.sample_rate,
-                self.cfg.max_duration
+                self.cfg.dataset.wav_dir,
+                self.cfg.dataset.train_csv_file,
+                self.cfg.dataset.sample_rate,
+                self.cfg.dataset.max_duration
             )
             self.val_data = VoxCelebDataset(
-                self.cfg.data_dir,
-                self.cfg.val_metadata,
-                self.cfg.sample_rate,
-                self.cfg.max_duration
+                self.cfg.dataset.wav_dir,
+                self.cfg.dataset.val_csv_file,
+                self.cfg.dataset.sample_rate,
+                self.cfg.dataset.max_duration
             )
         
         if stage == 'test' or stage is None:
             self.test_data = VoxCelebVerificationDataset(
-                self.cfg.data_dir,
-                self.cfg.veri_test_path,
-                self.cfg.sample_rate,
+                self.cfg.dataset.wav_dir,
+                self.cfg.dataset.veri_test_path,
+                self.cfg.dataset.sample_rate,
             )
 
     def train_dataloader(self):
         return DataLoader(
             self.train_data,
-            batch_size=self.cfg.batch_size,
-            num_workers=self.cfg.num_workers,
-            shuffle=True,
-            pin_memory=True,
+            batch_size=self.cfg.loaders.train.batch_size,
+            num_workers=self.cfg.loaders.train.num_workers,
+            shuffle=self.cfg.loaders.train.shuffle,
+            drop_last=self.cfg.loaders.train.drop_last,
+            pin_memory=self.cfg.loaders.train.pin_memory,
             collate_fn=TrainCollate()
         )
 
     def val_dataloader(self):
         return DataLoader(
             self.val_data,
-            batch_size=self.cfg.batch_size,
-            num_workers=self.cfg.num_workers,
-            shuffle=False,
-            pin_memory=True,
+            batch_size=self.cfg.loaders.valid.batch_size,
+            num_workers=self.cfg.loaders.valid.num_workers,
+            shuffle=self.cfg.loaders.valid.shuffle,
+            drop_last=self.cfg.loaders.valid.drop_last,
+            pin_memory=self.cfg.loaders.valid.pin_memory,
             collate_fn=TrainCollate()
         )
 
     def test_dataloader(self):
         return DataLoader(
             self.test_data,
-            batch_size=self.cfg.batch_size,
-            num_workers=self.cfg.num_workers,
-            shuffle=False,
-            pin_memory=True,
+            batch_size=self.cfg.loaders.test.batch_size,
+            num_workers=self.cfg.loaders.test.num_workers,
+            shuffle=self.cfg.loaders.test.shuffle,
+            pin_memory=self.cfg.loaders.test.pin_memory,
+            drop_last=self.cfg.loaders.test.drop_last,
             collate_fn=VerificationCollate()
         )
 
 
-#-----
-# Test
+@hydra.main(config_path="../../configs", config_name="train")
+def test_datamodule(cfg):
 
-def test_datamodule():
     print("Starting VoxCeleb DataModule test...")
-    
-    # Initialize config
-    cfg = VoxCelebConfig(
-        data_dir="adversarial-robustness-for-sr/data/voxceleb/wav",  # Update with your path
-        veri_test_path="adversarial-robustness-for-sr/data/voxceleb/meta/veri_test.txt"  # Update with your path
-    )
-    
-    try:
-        # Initialize datamodule
-        print("Initializing DataModule...")
-        datamodule = VoxCelebDataModule(cfg)
-        
-        # Prepare data (this loads metadata)
-        print("Preparing data...")
-        datamodule.prepare_data()
-        
-        # Setup train/val/test splits
-        print("Setting up splits...")
-        datamodule.setup()
-        
-        # Test train dataloader
-        print("Testing train dataloader...")
-        train_loader = datamodule.train_dataloader()
-        batch = next(iter(train_loader))
-        print("\nTrain batch structure:")
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor):
-                print(f"{key}: shape={value.shape}, dtype={value.dtype}")
-            else:
-                print(f"{key}: type={type(value)}")
-        
-        # Test validation dataloader
-        print("\nTesting validation dataloader...")
-        val_loader = datamodule.val_dataloader()
-        batch = next(iter(val_loader))
-        print("\nValidation batch structure:")
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor):
-                print(f"{key}: shape={value.shape}, dtype={value.dtype}")
-            else:
-                print(f"{key}: type={type(value)}")
-        
-        # Test verification dataloader
-        print("\nTesting verification dataloader...")
-        test_loader = datamodule.test_dataloader()
-        batch = next(iter(test_loader))
-        print("\nTest batch structure:")
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor):
-                print(f"{key}: shape={value.shape}, dtype={value.dtype}")
-            else:
-                print(f"{key}: type={type(value)}")
-        
-        print("\nAll tests passed successfully!")
-        
-    except Exception as e:
-        print(f"\nError during testing: {str(e)}")
-        raise
+
+    datamodule: VoxCelebDataModule = hydra.utils.instantiate(
+        cfg.datamodule, _recursive_=False)
+
+    datamodule.prepare_data()
+
+    assert not datamodule.train_data
+    assert not datamodule.val_data
+    assert not datamodule.test_data
+    # assert not datamodule.predict_set
+
+    datamodule.setup()
+    assert datamodule.train_data
+    assert datamodule.val_data
+    assert datamodule.test_data
+
+    assert datamodule.train_dataloader()
+    assert datamodule.val_dataloader()
+    assert datamodule.test_dataloader()
+
+    batch = next(iter(datamodule.train_dataloader()))
+    print(batch)
+
 
 if __name__ == "__main__":
+    import hydra
     test_datamodule()

@@ -406,11 +406,42 @@ class VoxCelebProcessor:
                 **self.speaker_metadata.get(speaker_id, {})
             )
 
-    def generate_metadata(self, min_duration: float = 1.0, save_df: bool = True
-                          ) -> Tuple[Tuple[List[VoxCelebUtterance], pd.DataFrame], 
-                                     Tuple[pd.DataFrame, pd.DataFrame]]:
-        """Generate metadata for all valid utterances"""
-        if not os.path.exists(self.dev_metadata_file):
+    def generate_metadata(self,
+                          base_search_dir: str,
+                          min_duration: float = 1.0, 
+                          save_df: bool = True,
+                          ) -> Tuple[Tuple[List[VoxCelebUtterance], pd.DataFrame], Tuple[pd.DataFrame, pd.DataFrame]]:
+        """Generate metadata for all valid utterances in the VoxCeleb dataset.
+        This method scans through wav files in the dataset directory, processes them to extract utterance
+        information, and generates metadata files containing utterance and speaker statistics.
+        Args:
+            min_duration (float, optional): Minimum duration in seconds for a valid utterance. Defaults to 1.0.
+            save_df (bool, optional): Whether to save the generated metadata to CSV files. Defaults to True.
+            save_dir (str, optional): Directory to save metadata files. If None, uses default paths. Defaults to None.
+        Returns:
+            Tuple[Tuple[List[VoxCelebUtterance], pd.DataFrame], Tuple[pd.DataFrame, pd.DataFrame]]:
+                A nested tuple containing:
+                - First tuple:
+                    - List of VoxCelebUtterance objects for valid utterances (None if metadata exists)
+                    - DataFrame with utterance statistics (None if metadata exists)
+                - Second tuple:
+                    - DataFrame with development set metadata
+                    - DataFrame with speaker total metadata
+        Notes:
+            - If metadata files already exist, loads and returns existing metadata instead of regenerating
+            - Saves three CSV files if save_df=True:
+                1. Development metadata file
+                2. Preprocessing statistics file
+                3. VoxCeleb metadata file
+        """        
+
+        base_search_dir = Path(base_search_dir)
+        dev_file_location = base_search_dir / self.DATASET_PATHS['dev_metadata_file']
+        vox_metadata_file = base_search_dir / self.DATASET_PATHS['vox_metadata']
+        dev_metadata_file = base_search_dir / self.DATASET_PATHS['dev_metadata_file']
+        speaker_lookup_file = base_search_dir / self.DATASET_PATHS['speaker_lookup']
+
+        if not dev_file_location.is_file():
             wav_paths = list(self.wav_dir.rglob("*.wav"))
 
             if self.verbose:
@@ -444,15 +475,23 @@ class VoxCelebProcessor:
             return (utterances, utterances_stats), (dev_metadata, speaker_total_metadata)
 
         else:
-            # Load existing metadata
-            dev_metadata = pd.read_csv(self.dev_metadata_file, sep=self.sep)
-            speaker_total_metadata = pd.read_csv(self.vox_metadata, sep=self.sep)
-            # Print statistics
+            assert vox_metadata_file.is_file(), f"Vox metadata file not found: {vox_metadata_file}"
+            assert speaker_lookup_file.is_file(), f"Speaker lookup file not found: {speaker_lookup_file}"
+            assert vox_metadata_file.is_file(), f"Vox metadata file not found: {vox_metadata_file}"
+
+            vox_metadata = pd.read_csv(vox_metadata_file, sep=self.sep)
+            dev_metadata = pd.read_csv(dev_metadata_file, sep=self.sep)
+            speaker_lookup = pd.read_csv(speaker_lookup_file, sep=self.sep)
+
             if self.verbose:
-                log.info(f"Metadata file already exists: {self.dev_metadata_file}")
-                log.info("\nProcessing Summary:")
-                log.info(f"Total files: {len(dev_metadata)}")
-            return (None, None), (dev_metadata, speaker_total_metadata)
+                log.info(f"Loading existing metadata file {dev_metadata_file} with {len(dev_metadata)} total files")
+
+            if save_df:
+                VoxCelebProcessor.save_csv(vox_metadata, self.vox_metadata, sep=self.sep)
+                VoxCelebProcessor.save_csv(dev_metadata, self.dev_metadata_file, sep=self.sep)
+                VoxCelebProcessor.save_csv(speaker_lookup, self.speaker_lookup_file, sep=self.sep)
+
+            return (None, None), (dev_metadata, speaker_lookup)
 
     def utterances_to_csv(self, utterances: List[VoxCelebUtterance],
                           dev_metadata_file: Union[str, Path]) -> None:
@@ -501,6 +540,7 @@ class VoxCelebProcessor:
         # Reset index to make speaker_id a column
         speaker_stats = speaker_stats.reset_index()
         return speaker_stats
+
 
     @staticmethod
     def enrich_verification_file(
@@ -573,6 +613,7 @@ class VoxCelebProcessor:
             VoxCelebProcessor.save_csv(veri_df, output_path, sep=sep)            
         else:
             return veri_df
+
 
     @staticmethod
     def print_utts_statistics(utterances: List[VoxCelebUtterance]) -> None:

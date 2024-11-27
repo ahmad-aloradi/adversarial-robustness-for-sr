@@ -17,27 +17,27 @@ def split_dataset(
         train_ratio: float = 0.95,
         speaker_overlap: bool = False,
         save_csv: bool = True,
-        output_dir: Optional[Union[str, Path]] = None,
         speaker_id_col: str = "speaker_id",
         train_csv: str = "train.csv",
         val_csv: str = "validation.csv",
         sep: str = '|',
-        RANDOM_SEED: int = 42
+        seed: int = 42
         ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
-    """
-    Split dataset CSV into train and validation sets. This function can split by speaker or randomly across all samples.
-    The function is generic for any dataset with a speaker_id column.
+    """Splits a dataset into training and validation sets.
 
-    Args:
-        df: Dataset dataframe
-        train_ratio: Ratio of training data from 0 to 1 (default: 0.9)
-        speaker_overlap: Allow speaker overlap between sets (default: False)
-        save_csv: Save train and validation CSV files (default: True)
-        output_dir: Directory to save train.csv and validation.csv (default: None).
-        Only used if save_csv is True. Typically set to the same directory as your experiment.
+    Parameters:
+    df (pd.DataFrame): The input dataframe to split.
+    train_ratio (float): The ratio of the dataset to use for training. Default is 95%
+    speaker_overlap (bool): If True, splits randomly across all samples. If False, splits by unique speakers. Default is False.
+    save_csv (bool): If True, saves the splits to CSV files. If False, returns the splits as dataframes. Default is True.
+    speaker_id_col (str): The column name for speaker IDs. Default is "speaker_id".
+    train_csv (str): The filename for the training set CSV. Default is "train.csv".
+    val_csv (str): The filename for the validation set CSV. Default is "validation.csv".
+    sep (str): The delimiter to use in the CSV files. Default is '|'.
+    seed (int): The random seed for reproducibility. Default is 42.
 
     Returns:
-        Tuple of (train_df, val_df)
+    Optional[Tuple[pd.DataFrame, pd.DataFrame]]: A tuple containing the training and validation dataframes if save_csv is False. Otherwise, returns None.
     """
 
     if speaker_overlap:
@@ -49,7 +49,7 @@ def split_dataset(
     else:
         # Split by speakers
         speakers = df[speaker_id_col].unique()
-        random.seed(RANDOM_SEED)
+        random.seed(seed)
         random.shuffle(speakers)
 
         train_speakers = speakers[:int(len(speakers) * train_ratio)]
@@ -57,10 +57,8 @@ def split_dataset(
         val_df = df[~df[speaker_id_col].isin(train_speakers)]
 
     if save_csv:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        train_df.fillna('N/A').to_csv(output_dir / train_csv, index=False, sep=sep)
-        val_df.fillna('N/A').to_csv(output_dir / val_csv, index=False, sep=sep)
+        train_df.fillna('N/A').to_csv(train_csv, index=False, sep=sep)
+        val_df.fillna('N/A').to_csv(val_csv, index=False, sep=sep)
 
     else:
         return train_df, val_df
@@ -140,7 +138,7 @@ class AudioProcessor:
             waveform = self.convert_to_mono(waveform)
             waveform = self.resample(waveform, orig_sr=sr)
             waveform = self.normalize_audio(waveform)
-            return waveform
+            return waveform.squeeze(0)
             
         except FileNotFoundError as e:
             raise FileNotFoundError(f"Audio file not found: {audio_path}") from e
