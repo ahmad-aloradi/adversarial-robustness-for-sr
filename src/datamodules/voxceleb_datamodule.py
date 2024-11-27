@@ -1,13 +1,11 @@
-import os
 from typing import Dict, List, Optional
-import torch
 from dataclasses import dataclass
-from pathlib import Path
 import pandas as pd
 
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 
+import hydra
 import sys
 sys.path.append(f"/home/aloradi/adversarial-robustness-for-sr")
 from src.datamodules.components.voxceleb.voxceleb_dataset import (
@@ -159,5 +157,4 @@ def test_datamodule(cfg):
 
 
 if __name__ == "__main__":
-    import hydra
     test_datamodule()
