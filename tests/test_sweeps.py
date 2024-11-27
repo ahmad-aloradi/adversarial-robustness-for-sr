@@ -4,7 +4,7 @@ from tests.helpers.run_if import RunIf
 from tests.helpers.run_sh_command import run_sh_command
 
 _STARTFILE = "src/train.py"
-_HYDRA_OPTIONS = ["--multirun", "--config-name=mnist_train.yaml"]
+_HYDRA_OPTIONS = ["--multirun", "--config-name=train.yaml"]
 _OVERRIDES = ["logger=[]"]
 
 

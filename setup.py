@@ -4,11 +4,11 @@ setup(
     name="src",
     version="0.1.0",
     description=(
-        "Deep Learning training pipeline template"
-        "based on pytorch_lightning and hydra"
+        "Adversarial Robustness for Speaker Recognition"
+        "This is a sub-project of the COMFORT project."
     ),
-    author="Your Name",
-    author_email="Your Email",
+    author="Ahmad Aloradi",
+    author_email="ahmad.aloradi94@gmail.com",
     install_requires=["pytorch-lightning", "hydra-core"],
     packages=find_packages(exclude=["tests"]),
 )

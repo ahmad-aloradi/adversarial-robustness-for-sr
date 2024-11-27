@@ -1,44 +1,49 @@
 from typing import Any
 
-import albumentations
 import hydra
-import numpy as np
 from omegaconf import DictConfig
-from PIL import Image
-
+from torch import Tensor
 
 class TransformsWrapper:
     def __init__(self, transforms_cfg: DictConfig) -> None:
-        """TransformsWrapper module.
+        """TransformsWrapper module for applying GPU-based audio augmentations.
+        Handles batched audio data of fixed length.
 
         Args:
-            transforms_cfg (DictConfig): Transforms config.
+            transforms_cfg (DictConfig): Transforms config containing order and parameters
+                for audio augmentations.
         """
-
-        augmentations = []
         if not transforms_cfg.get("order"):
             raise RuntimeError(
-                "TransformsWrapper requires param <order>, i.e."
+                "TransformsWrapper requires param <order>, i.e. "
                 "order of augmentations as List[augmentation name]"
             )
-        for augmentation_name in transforms_cfg.get("order"):
-            augmentation = hydra.utils.instantiate(
-                transforms_cfg.get(augmentation_name), _convert_="object"
-            )
-            augmentations.append(augmentation)
-        self.augmentations = albumentations.Compose(augmentations)
 
-    def __call__(self, image: Any, **kwargs: Any) -> Any:
-        """Apply TransformsWrapper module.
+        self.transforms = []
+        for transform_name in transforms_cfg.get("order"):
+            transform = hydra.utils.instantiate(
+                transforms_cfg.get(transform_name), _convert_="object"
+            )
+            self.transforms.append(transform)
+
+    def __call__(
+        self, 
+        audio: Tensor,  # Shape: (batch_size, num_channels, audio_length)
+        sample_rate: int,
+        **kwargs: Any
+    ) -> Tensor:
+        """Apply GPU-based audio transformations in sequence to batched data.
 
         Args:
-            image (Any): Input image.
-            kwargs (Any): Additional arguments.
+            audio: Input audio tensor of shape (batch_size, num_channels, audio_length)
+                Already on GPU
+            sample_rate: Sample rate of the audio
+            kwargs: Additional arguments passed to transforms
 
         Returns:
-            Any: Transformation results.
+            Tensor: Transformed audio
         """
-
-        if isinstance(image, Image.Image):
-            image = np.asarray(image)
-        return self.augmentations(image=image, **kwargs)
+        transformed_audio = audio.clone()
+        for transform in self.transforms:
+            transformed_audio = transform(transformed_audio, sample_rate, **kwargs)
+        return transformed_audio

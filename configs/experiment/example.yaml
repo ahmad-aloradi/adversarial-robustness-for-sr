@@ -5,8 +5,8 @@
 
 defaults:
   - override /datamodule: mnist.yaml
-  - override /module: mnist.yaml
-  - override /callbacks: mnist.yaml
+  - override /module: single.yaml
+  - override /callbacks: default.yaml
   - override /trainer: default.yaml
 
 # all parameters below will be merged with parameters from default configurations set above
