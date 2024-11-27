@@ -46,5 +46,3 @@ jobs:
       matrix:
         os: ["macos-latest"]
         python-version: ["3.10"]
-
-    timeout-minutes: 20

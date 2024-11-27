@@ -56,13 +56,12 @@ repos:
   - repo: https://github.com/myint/docformatter
     rev: v1.4
     hooks:
-      # - id: docformatter
-      #   args: [--in-place, --wrap-summaries=79, --wrap-descriptions=79]
       - id: docformatter
         name: docformatter
         description: 'Formats docstrings to follow PEP 257.'
         entry: docformatter
         args: [-i]
+        # args: [--in-place, --wrap-summaries=79, --wrap-descriptions=79]
         language: python
         types: [python]        
 
