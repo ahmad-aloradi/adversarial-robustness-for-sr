@@ -1,0 +1,41 @@
+_target_: src.datamodules.vpc_datamodule.AnonymizedLibriSpeechDataModule
+
+root_dir: ${paths.data_dir}/vpc25_data/data
+
+subset_dirs: 
+  - ${datamodule.root_dir}/b2_mcadams
+  - ${datamodule.root_dir}/b3_sttts
+  - ${datamodule.root_dir}/b4_nac
+  - ${datamodule.root_dir}/b5_asrbn_hifigan_bn_tdnnf_600h
+  - ${datamodule.root_dir}/b6_asrbn_hifigan_bn_tdnnf_wav2vec2
+
+transform: null
+
+loaders:
+  train:
+    batch_size: 64
+    shuffle: True
+    num_workers: 4
+    drop_last: True
+    pin_memory: False
+
+  valid:
+    batch_size: 64
+    shuffle: False
+    num_workers: 4
+    drop_last: False
+    pin_memory: False
+
+  test:
+    batch_size: 8
+    shuffle: False
+    num_workers: 0
+    drop_last: False
+    pin_memory: False
+
+  predict:
+    batch_size: 8
+    shuffle: False
+    num_workers: 0
+    drop_last: False
+    pin_memory: False
