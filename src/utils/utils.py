@@ -11,7 +11,7 @@ from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning import Callback
-from pytorch_lightning.loggers import LightningLoggerBase
+from pytorch_lightning.loggers import logger as LightningLoggerBase
 from pytorch_lightning.utilities import rank_zero_only
 
 from src.modules.losses import load_loss
