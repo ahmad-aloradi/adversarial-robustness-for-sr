@@ -10,7 +10,7 @@ import pandas as pd
 
 sys.path.append(f"/home/aloradi/adversarial-robustness-for-sr")
 from src.datamodules.components.utils import AudioProcessor # NOQA E402
-from src.datamodules.components.utils import split_dataset  # NOQA E402
+from src.datamodules.components.utils import CsvProcessor  # NOQA E402
 
 
 
@@ -228,11 +228,11 @@ if __name__ == "__main__":
     # Test II
     df = pd.read_csv("data/voxceleb/voxceleb_metadata/preprocessed/voxceleb_dev.csv", sep='|')
 
-    train_df, val_df = split_dataset(df=df, 
-                                     save_csv=False, 
-                                     train_ratio = 0.98,
-                                     speaker_overlap=False,
-                                     output_dir="data/voxceleb/voxceleb_metadata/preprocessed")
+    train_df, val_df = CsvProcessor.split_dataset(df=df,
+                                                  save_csv=False,
+                                                  train_ratio = 0.98,
+                                                  speaker_overlap=False,
+                                                  output_dir="data/voxceleb/voxceleb_metadata/preprocessed")
     
     # Print statistics
     print(f"\nDataset split statistics:")

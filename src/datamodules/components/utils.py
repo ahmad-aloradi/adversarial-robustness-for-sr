@@ -1,6 +1,6 @@
 import os
 from operator import itemgetter
-from typing import Iterator, Optional, Tuple, Union
+from typing import Iterator, Optional, Tuple, Union, Dict
 from pathlib import Path
 import random
 
@@ -11,57 +11,221 @@ import torchaudio.functional as F
 from torch.utils.data import Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
 
+from src import utils
+log = utils.get_logger(__name__)
 
-def split_dataset(
-        df: pd.DataFrame,
-        train_ratio: float = 0.95,
-        speaker_overlap: bool = False,
-        save_csv: bool = True,
-        speaker_id_col: str = "speaker_id",
-        train_csv: str = "train.csv",
-        val_csv: str = "validation.csv",
-        sep: str = '|',
-        seed: int = 42
-        ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
-    """Splits a dataset into training and validation sets.
 
-    Parameters:
-    df (pd.DataFrame): The input dataframe to split.
-    train_ratio (float): The ratio of the dataset to use for training. Default is 95%
-    speaker_overlap (bool): If True, splits randomly across all samples. If False, splits by unique speakers. Default is False.
-    save_csv (bool): If True, saves the splits to CSV files. If False, returns the splits as dataframes. Default is True.
-    speaker_id_col (str): The column name for speaker IDs. Default is "speaker_id".
-    train_csv (str): The filename for the training set CSV. Default is "train.csv".
-    val_csv (str): The filename for the validation set CSV. Default is "validation.csv".
-    sep (str): The delimiter to use in the CSV files. Default is '|'.
-    seed (int): The random seed for reproducibility. Default is 42.
-
-    Returns:
-    Optional[Tuple[pd.DataFrame, pd.DataFrame]]: A tuple containing the training and validation dataframes if save_csv is False. Otherwise, returns None.
+class CsvProcessor:
     """
+    Utility class for handling CSV files with metadata.
+    """
+        
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
 
-    if speaker_overlap:
-        # Random split across all samples
-        shuffled_df = df.sample(frac=1.0, random_state=RANDOM_SEED)
-        split_idx = int(len(shuffled_df) * train_ratio)
-        train_df = shuffled_df[:split_idx]
-        val_df = shuffled_df[split_idx:]
-    else:
-        # Split by speakers
-        speakers = df[speaker_id_col].unique()
-        random.seed(seed)
-        random.shuffle(speakers)
 
-        train_speakers = speakers[:int(len(speakers) * train_ratio)]
-        train_df = df[df[speaker_id_col].isin(train_speakers)]
-        val_df = df[~df[speaker_id_col].isin(train_speakers)]
+    @staticmethod
+    def concatenate_csvs(csv_paths, 
+                         fill_value='N/A', 
+                         speaker_id_col='speaker_id', 
+                         utterance_id_col='utterance_id',
+                         rel_path_col='rel_path'):
+        """
+        Concatenate multiple CSVs with handling for different columns and unique IDs.
+        
+        Args:
+            csv_paths (list): List of paths to CSV files
+            fill_value: Value to fill missing columns with (default: None)
+            speaker_id_col (str): Name of the speaker ID column (default: 'speaker_id')
+            utterance_id_col (str): Name of the utterance ID column (default: 'utterance_id')
+            rel_path_col (str): Name of the relative path column (default: 'rel_path')
+        
+        Returns:
+            pd.DataFrame: Concatenated DataFrame with unique IDs
+        """
+        # Read all CSVs and store their DataFrames
+        dfs = []
+        for path in csv_paths:
+            df = pd.read_csv(path)
+            
+            # Ensure rel_path column exists
+            assert rel_path_col in df.columns, f"Missing column: {rel_path_col} from csv {path}"
 
-    if save_csv:
-        train_df.fillna('N/A').to_csv(train_csv, index=False, sep=sep)
-        val_df.fillna('N/A').to_csv(val_csv, index=False, sep=sep)
+            # Create utterance_id if not exists
+            if utterance_id_col not in df.columns:
+                df[utterance_id_col] = df[rel_path_col].apply(
+                    lambda x: os.path.splitext(x)[0].replace(os.sep, '_'))
+                
+            dfs.append(df)
+        
+        # Concatenate all DataFrames
+        combined_df = pd.concat(dfs, ignore_index=True)
+        
+        # Ensure speaker IDs are unique by adding prefix if needed
+        if speaker_id_col in combined_df.columns:
+            speaker_counts = combined_df[speaker_id_col].value_counts()
+            duplicate_speakers = speaker_counts[speaker_counts > 1].index
+            
+            for speaker in duplicate_speakers:
+                mask = combined_df[speaker_id_col] == speaker
+                indices = combined_df[mask].index
+                for i, idx in enumerate(indices):
+                    if i > 0:  # Skip first occurrence
+                        combined_df.loc[idx, speaker_id_col] = f"{speaker}_v{i}"
+        
+        # Ensure utterance IDs are unique
+        utterance_counts = combined_df[utterance_id_col].value_counts()
+        duplicate_utterances = utterance_counts[utterance_counts > 1].index
+        
+        if not duplicate_utterances.empty:
+            error_msg = "Duplicate utterance IDs found:\n"
+            for utterance, count in duplicate_utterances.items():
+                error_msg += f"- '{utterance}' appears {count} times\n"
+            raise ValueError(error_msg)
+            
+        # Fill missing values
+        combined_df = combined_df.fillna(fill_value)
+        
+        return combined_df
 
-    else:
-        return train_df, val_df
+
+    @staticmethod
+    def append_speaker_stats(df: pd.DataFrame, 
+                             speaker_stats: pd.DataFrame,
+                             col_id: str = 'speaker_id') -> pd.DataFrame:
+        """Append speaker stats to metadata"""
+        df = df.merge(speaker_stats, on=col_id, how='left')
+        df = df.sort_values('total_dur/spk', ascending=False)
+        return df
+
+
+    @staticmethod
+    def get_speakers_stats(df: pd.DataFrame,
+                           col_id: str = 'speaker_id',
+                           duration_col: str = 'duration',
+                           rounding=4) -> pd.DataFrame:
+        speaker_stats = df.groupby(col_id).agg(
+            {'duration': ['sum', 'mean', 'count']}).round(rounding)
+
+        speaker_stats.columns = pd.MultiIndex.from_tuples([
+            (duration_col, 'total_dur/spk'),
+            (duration_col, 'mean_dur/spk'),
+            (duration_col, 'utterances/spk')
+        ])
+        speaker_stats.columns = speaker_stats.columns.get_level_values(1)
+        # Reset index to make speaker_id a column
+        speaker_stats = speaker_stats.reset_index()
+        return speaker_stats
+
+
+    @staticmethod
+    def generate_training_ids(combined_df: pd.DataFrame,
+                              id_col: str = 'speaker_id', 
+                              verbose=True) -> pd.DataFrame:
+        """
+        Generate training IDs from combined VoxCeleb1 and VoxCeleb2 metadata
+
+        Args:
+            metadata_files: List of paths to metadata CSV files
+            
+        Returns:
+            Dictionary mapping original speaker IDs to numerical training IDs
+            
+        Example:
+            {'id1': 0, 'id2': 1, ...}
+        """        
+        # Sort speakers for consistent ordering
+        sorted_speakers = sorted(combined_df[id_col].unique())
+
+        # Create mapping dictionary
+        speaker_to_id = {speaker: idx for idx, speaker in enumerate(sorted_speakers)}
+        
+        if verbose:
+            log.info(f"Generated training IDs for {len(speaker_to_id)} unique speakers")
+
+        return speaker_to_id
+
+
+    @staticmethod
+    def update_metadata_with_training_ids(df: pd.DataFrame,
+                                          speaker_to_id: Dict[str, int],
+                                          id_col: str = 'speaker_id', 
+                                          verbose: bool = True,
+                                          class_id_col: str = 'class_id') -> pd.DataFrame:
+        """
+        Update metadata CSV file with training_id column
+        
+        Args:
+            df: metadata as da dataframe
+            speaker_to_id: Dictionary mapping speaker IDs to training IDs
+            backup: Whether to create backup of original file
+        """                        
+        # Add class_id column
+        df[class_id_col] = df[id_col].map(speaker_to_id)
+        
+        # Verify no missing mappings
+        missing_ids = df[df[class_id_col].isna()][id_col].unique()
+        if len(missing_ids) > 0:
+            raise RuntimeWarning(f"Warning: No training ID mapping for speakers: {missing_ids}")
+        
+        if verbose:
+            log.info(f"Total speakers: {len(df[id_col].unique())}")
+            log.info(f"Training ID range: {df[class_id_col].min()} - {df[class_id_col].max()}")
+        
+        return df
+
+
+    @staticmethod
+    def split_dataset(
+            df: pd.DataFrame,
+            train_ratio: float = 0.95,
+            speaker_overlap: bool = False,
+            save_csv: bool = True,
+            speaker_id_col: str = "speaker_id",
+            train_csv: str = "train.csv",
+            val_csv: str = "validation.csv",
+            sep: str = '|',
+            seed: int = 42
+            ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
+        """Splits a dataset into training and validation sets.
+
+        Parameters:
+        df (pd.DataFrame): The input dataframe to split.
+        train_ratio (float): The ratio of the dataset to use for training. Default is 95%
+        speaker_overlap (bool): If True, splits randomly across all samples. If False, splits by unique speakers. Default is False.
+        save_csv (bool): If True, saves the splits to CSV files. If False, returns the splits as dataframes. Default is True.
+        speaker_id_col (str): The column name for speaker IDs. Default is "speaker_id".
+        train_csv (str): The filename for the training set CSV. Default is "train.csv".
+        val_csv (str): The filename for the validation set CSV. Default is "validation.csv".
+        sep (str): The delimiter to use in the CSV files. Default is '|'.
+        seed (int): The random seed for reproducibility. Default is 42.
+
+        Returns:
+        Optional[Tuple[pd.DataFrame, pd.DataFrame]]: A tuple containing the training and validation dataframes if save_csv is False. Otherwise, returns None.
+        """
+
+        if speaker_overlap:
+            # Random split across all samples
+            shuffled_df = df.sample(frac=1.0, random_state=RANDOM_SEED)
+            split_idx = int(len(shuffled_df) * train_ratio)
+            train_df = shuffled_df[:split_idx]
+            val_df = shuffled_df[split_idx:]
+        else:
+            # Split by speakers
+            speakers = df[speaker_id_col].unique()
+            random.seed(seed)
+            random.shuffle(speakers)
+
+            train_speakers = speakers[:int(len(speakers) * train_ratio)]
+            train_df = df[df[speaker_id_col].isin(train_speakers)]
+            val_df = df[~df[speaker_id_col].isin(train_speakers)]
+
+        if save_csv:
+            train_df.fillna('N/A').to_csv(train_csv, index=False, sep=sep)
+            val_df.fillna('N/A').to_csv(val_csv, index=False, sep=sep)
+
+        else:
+            return train_df, val_df
 
 
 class AudioProcessor:

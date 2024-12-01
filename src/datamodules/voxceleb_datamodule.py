@@ -16,7 +16,7 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
 
 from src.datamodules.components.voxceleb.voxceleb_prep import VoxCelebProcessor
 from src import utils
-from src.datamodules.components.utils import split_dataset
+from src.datamodules.components.utils import CsvProcessor
 
 log = utils.get_pylogger(__name__)
 
@@ -54,6 +54,18 @@ class VoxCelebDataModule(LightningDataModule):
         _ = voxceleb_processor.generate_metadata(base_search_dir=self.cfg.dataset.base_search_dir,
                                                  min_duration=self.cfg.dataset.min_duration,
                                                  save_df=self.cfg.dataset.save_csv)
+
+        CsvProcessor.split_dataset(
+            df=pd.read_csv(self.cfg.dataset.dev_csv_file, sep='|'),
+            train_ratio = self.cfg.dataset.train_ratio,
+            save_csv=self.cfg.dataset.save_csv,
+            speaker_overlap=self.cfg.dataset.speaker_overlap,
+            speaker_id_col='speaker_id',
+            train_csv=self.cfg.dataset.train_csv_file,
+            val_csv=self.cfg.dataset.val_csv_file,
+            sep=self.cfg.dataset.sep,
+            seed=self.cfg.dataset.seed
+            )
         
         _ = voxceleb_processor.enrich_verification_file(
             veri_test_path=self.cfg.dataset.veri_test_path,
@@ -61,16 +73,7 @@ class VoxCelebDataModule(LightningDataModule):
             output_path=self.cfg.dataset.veri_test_output_path,
             sep=self.cfg.dataset.sep,
             )
-        
-        split_dataset(df=pd.read_csv(self.cfg.dataset.dev_csv_file, sep='|'), 
-                      train_ratio = self.cfg.dataset.train_ratio,
-                      save_csv=self.cfg.dataset.save_csv,
-                      speaker_overlap=self.cfg.dataset.speaker_overlap,
-                      speaker_id_col='speaker_id',
-                      train_csv=self.cfg.dataset.train_csv_file,
-                      val_csv=self.cfg.dataset.val_csv_file,
-                      sep=self.cfg.dataset.sep,
-                      seed=self.cfg.dataset.seed)        
+
         
     def setup(self, stage: Optional[str] = None):
         if stage == 'fit' or stage is None:
