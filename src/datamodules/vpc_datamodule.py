@@ -16,10 +16,9 @@ class AnonymizedLibriSpeechDataModule(pl.LightningDataModule):
     def __init__(
         self,
         root_dir: Union[str, Path],
-        subset_dirs: List[str] = ['b2_system', 'b5_b6_systems'],
-        batch_size: int = 32,
-        num_workers: int = 4,
+        loaders: Dict[str, Dict[str, int]],
         transform=None,
+        subset_dirs: List[str] = ['b2_system', 'b5_b6_systems'],
     ):
         """
         Initialize the DataModule.
@@ -34,8 +33,7 @@ class AnonymizedLibriSpeechDataModule(pl.LightningDataModule):
         super().__init__()
         self.root_dir = Path(root_dir)
         self.subset_dirs = subset_dirs
-        self.batch_size = batch_size
-        self.num_workers = num_workers
+        self.loaders = loaders
         self.transform = transform
         
     def setup(self, stage: Optional[str] = None):
@@ -66,30 +64,30 @@ class AnonymizedLibriSpeechDataModule(pl.LightningDataModule):
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
             self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True,
+            batch_size=self.loaders.train.batch_size,
+            shuffle=self.loaders.train.shuffle,
+            num_workers=self.loaders.train.num_workers,
+            pin_memory=self.loaders.train.pin_memory,
             collate_fn=VPC25PaddingCollate()
         )
     
     def val_dataloader(self) -> DataLoader:
         return DataLoader(
             self.eval_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
+            batch_size=self.loaders.valid.batch_size,
+            shuffle=self.loaders.valid.shuffle,
+            num_workers=self.loaders.valid.num_workers,
+            pin_memory=self.loaders.valid.pin_memory,
             collate_fn=VPC25PaddingCollate()
         )
     
     def test_dataloader(self) -> DataLoader:
         return DataLoader(
             self.test_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
+            batch_size=self.loaders.valid.batch_size,
+            shuffle=self.loaders.valid.shuffle,
+            num_workers=self.loaders.valid.num_workers,
+            pin_memory=self.loaders.valid.pin_memory,
             collate_fn=VPC25PaddingCollate()
         )
 
