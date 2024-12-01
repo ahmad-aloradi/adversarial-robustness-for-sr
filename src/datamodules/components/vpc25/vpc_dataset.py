@@ -5,7 +5,23 @@ import torch
 from torch.utils.data import Dataset
 import torchaudio
 import glob
+from dataclasses import dataclass
 
+from src.utils import get_pylogger
+
+log = get_pylogger(__name__)
+
+@dataclass
+class VPCBatch:
+    audio: torch.Tensor
+    audio_lens: torch.Tensor
+    sample_rate: List[int]
+    text: List[str]
+    speaker_id: List[str]
+    utterance_id: List[str]
+    gender: List[str]
+    duration: torch.Tensor
+    source_dir: List[str]
 
 class AnonymizedLibriSpeechDataset(Dataset):
     """Dataset for anonymized LibriSpeech-like data."""
@@ -49,7 +65,7 @@ class AnonymizedLibriSpeechDataset(Dataset):
         for subset_dir in self.subset_dirs:
             subset_path = self.root_dir / subset_dir
             if not subset_path.exists():
-                print(f"Warning: Directory {subset_path} does not exist")
+                log.warining(f"Directory {subset_path} does not exist")
                 continue
                 
             # Find all combined_data.csv files in subdirectories
@@ -153,15 +169,15 @@ class VPC25PaddingCollate:
         waveforms = [item['audio'] for item in batch]
         lengths = torch.tensor([wav.shape[0] for wav in waveforms])
         padded_waveform = torch.nn.utils.rnn.pad_sequence(waveforms, batch_first=True, padding_value=self.pad_value)
-        
-        return {
-            'audio': padded_waveform,
-            'audio_lens': lengths,
-            'sample_rate': [item['sample_rate'] for item in batch],  # Same for all items
-            'text': [item['text'] for item in batch],
-            'speaker_id': [item['speaker_id'] for item in batch],
-            'utterance_id': [item['utterance_id'] for item in batch],
-            'gender': [item['gender'] for item in batch],
-            'duration': torch.tensor([item['duration'] for item in batch]),
-            'source_dir': [item['source_dir'] for item in batch]
-        }
+
+        return VPCBatch(
+            audio=padded_waveform,
+            audio_lens=lengths,
+            sample_rate=([item['sample_rate'] for item in batch]),
+            text=[item['text'] for item in batch],
+            speaker_id=[item['speaker_id'] for item in batch],
+            utterance_id=[item['utterance_id'] for item in batch],
+            gender=[item['gender'] for item in batch],
+            duration=torch.tensor([item['duration'] for item in batch]),
+            source_dir=[item['source_dir'] for item in batch]
+        )
