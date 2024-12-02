@@ -374,7 +374,6 @@ class VoxCelebProcessor:
 
         if not dev_file_location.is_file():
             wav_paths = list(self.wav_dir.rglob("*.wav"))
-            wav_paths = wav_paths[:1000]  # For testing
 
             if self.verbose:
                 log.info(f"Iterating over {len(wav_paths)} audio files ...")
