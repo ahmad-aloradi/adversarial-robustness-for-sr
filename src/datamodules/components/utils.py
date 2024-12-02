@@ -1,6 +1,6 @@
 import os
 from operator import itemgetter
-from typing import Iterator, Optional, Tuple, Union, Dict
+from typing import Iterator, Optional, Tuple, List, Dict
 from pathlib import Path
 import random
 
@@ -11,8 +11,10 @@ import torchaudio.functional as F
 from torch.utils.data import Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
 
+import sys
+sys.path.append(f"/home/aloradi/adversarial-robustness-for-sr")
 from src import utils
-log = utils.get_logger(__name__)
+log = utils.get_pylogger(__name__)
 
 
 class CsvProcessor:
@@ -20,16 +22,16 @@ class CsvProcessor:
     Utility class for handling CSV files with metadata.
     """
         
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, fill_value: str = 'N/A'):
         self.verbose = verbose
+        self.fill_value = fill_value
 
 
     @staticmethod
-    def concatenate_csvs(csv_paths, 
-                         fill_value='N/A', 
-                         speaker_id_col='speaker_id', 
-                         utterance_id_col='utterance_id',
-                         rel_path_col='rel_path'):
+    def concatenate_metadata(csv_paths, 
+                             fill_value='N/A', 
+                             speaker_id_col='speaker_id', 
+                             sep='|') -> pd.DataFrame:
         """
         Concatenate multiple CSVs with handling for different columns and unique IDs.
         
@@ -46,10 +48,57 @@ class CsvProcessor:
         # Read all CSVs and store their DataFrames
         dfs = []
         for path in csv_paths:
-            df = pd.read_csv(path)
-            
+            df = pd.read_csv(path, sep=sep)
+            dfs.append(df)
+        
+        combined_df = pd.concat(dfs, ignore_index=True)        
+        # Ensure speaker IDs are unique by adding prefix if needed
+        if speaker_id_col in combined_df.columns:
+            speaker_counts = combined_df[speaker_id_col].value_counts()
+            duplicate_speakers = speaker_counts[speaker_counts > 1].index
+           
+            for speaker in duplicate_speakers:
+                mask = combined_df[speaker_id_col] == speaker
+                indices = combined_df[mask].index
+                for i, idx in enumerate(indices):
+                    if i > 0:  # Skip first occurrence
+                        combined_df.loc[idx, speaker_id_col] = f"{speaker}_v{i}"
+                    
+        combined_df = combined_df.fillna(fill_value)
+        
+        return combined_df
+
+
+    @staticmethod
+    def concatenate_csvs(csv_paths, 
+                         fill_value='N/A', 
+                         speaker_id_col='speaker_id', 
+                         utterance_id_col='utterance_id',
+                         rel_path_col='rel_path',
+                         sep='|') -> pd.DataFrame:
+        """
+        Concatenate multiple CSVs with handling for different columns and unique IDs.
+        
+        Args:
+            csv_paths (list): List of paths to CSV files
+            fill_value: Value to fill missing columns with (default: None)
+            speaker_id_col (str): Name of the speaker ID column (default: 'speaker_id')
+            utterance_id_col (str): Name of the utterance ID column (default: 'utterance_id')
+            rel_path_col (str): Name of the relative path column (default: 'rel_path')
+        
+        Returns:
+            pd.DataFrame: Concatenated DataFrame with unique IDs
+        """
+        # Read all CSVs and store their DataFrames
+        dfs = []
+        for path in csv_paths:
+            df = pd.read_csv(path, sep=sep)
+        
             # Ensure rel_path column exists
-            assert rel_path_col in df.columns, f"Missing column: {rel_path_col} from csv {path}"
+            # if 'path' in df.columns:
+            #     df = df.rename(columns={'path': rel_path_col})
+            # assert rel_path_col in df.columns, \
+            # f"Missing columns 'path' and {rel_path_col} from csv {path}"
 
             # Create utterance_id if not exists
             if utterance_id_col not in df.columns:
@@ -61,17 +110,17 @@ class CsvProcessor:
         # Concatenate all DataFrames
         combined_df = pd.concat(dfs, ignore_index=True)
         
-        # Ensure speaker IDs are unique by adding prefix if needed
-        if speaker_id_col in combined_df.columns:
-            speaker_counts = combined_df[speaker_id_col].value_counts()
-            duplicate_speakers = speaker_counts[speaker_counts > 1].index
-            
-            for speaker in duplicate_speakers:
-                mask = combined_df[speaker_id_col] == speaker
-                indices = combined_df[mask].index
-                for i, idx in enumerate(indices):
-                    if i > 0:  # Skip first occurrence
-                        combined_df.loc[idx, speaker_id_col] = f"{speaker}_v{i}"
+        # # Ensure speaker IDs are unique by adding prefix if needed
+        # if speaker_id_col in combined_df.columns:
+        #     speaker_counts = combined_df[speaker_id_col].value_counts()
+        #     duplicate_speakers = speaker_counts[speaker_counts > 1].index
+           
+        #     for speaker in duplicate_speakers:
+        #         mask = combined_df[speaker_id_col] == speaker
+        #         indices = combined_df[mask].index
+        #         for i, idx in enumerate(indices):
+        #             if i > 0:  # Skip first occurrence
+        #                 combined_df.loc[idx, speaker_id_col] = f"{speaker}_v{i}"
         
         # Ensure utterance IDs are unique
         utterance_counts = combined_df[utterance_id_col].value_counts()
@@ -96,6 +145,7 @@ class CsvProcessor:
         """Append speaker stats to metadata"""
         df = df.merge(speaker_stats, on=col_id, how='left')
         df = df.sort_values('total_dur/spk', ascending=False)
+        df = df.reset_index(drop=True)
         return df
 
 
@@ -103,7 +153,7 @@ class CsvProcessor:
     def get_speakers_stats(df: pd.DataFrame,
                            col_id: str = 'speaker_id',
                            duration_col: str = 'duration',
-                           rounding=4) -> pd.DataFrame:
+                           rounding: int = 4) -> pd.DataFrame:
         speaker_stats = df.groupby(col_id).agg(
             {'duration': ['sum', 'mean', 'count']}).round(rounding)
 
@@ -161,7 +211,7 @@ class CsvProcessor:
             backup: Whether to create backup of original file
         """                        
         # Add class_id column
-        df[class_id_col] = df[id_col].map(speaker_to_id)
+        df[class_id_col] = df[id_col].map(speaker_to_id).astype(int)
         
         # Verify no missing mappings
         missing_ids = df[df[class_id_col].isna()][id_col].unique()
@@ -174,6 +224,67 @@ class CsvProcessor:
         
         return df
 
+    def process(self,
+                dataset_files: List[str],
+                spks_metadata_paths: List[str],
+                speaker_id_col: str = 'speaker_id',
+                utterance_id_col: str = 'utterance_id',
+                rel_path_col: str = 'rel_path',
+                duration_col: str = 'duration',
+                rounding: int = 4,
+                class_id: str = 'class_id',
+                verbose: bool = True):
+        
+        # read and append metadata
+        dataset_df = self.concatenate_csvs(dataset_files, 
+                                           fill_value=self.fill_value,
+                                           speaker_id_col=speaker_id_col,
+                                           utterance_id_col=utterance_id_col,
+                                           rel_path_col=rel_path_col)
+
+        # generate training ids
+        speaker_to_id = self.generate_training_ids(dataset_df, id_col=speaker_id_col, verbose=verbose)
+
+        # append training ids to metadata
+        updated_dataset_df = self.update_metadata_with_training_ids(df=dataset_df,
+                                                                    speaker_to_id=speaker_to_id,
+                                                                    id_col=speaker_id_col,
+                                                                    verbose=verbose,
+                                                                    class_id_col=class_id)
+                
+        # get speaker stats
+        speaker_stats = self.get_speakers_stats(df=updated_dataset_df,
+                                                col_id=speaker_id_col,
+                                                duration_col=duration_col,
+                                                rounding=rounding)
+
+        # append speaker stats to metadata
+        final_df = self.append_speaker_stats(df=updated_dataset_df, speaker_stats=speaker_stats, col_id=speaker_id_col)
+
+        # get combined speakers' metadata
+        combined_metadatda = self.concatenate_metadata(spks_metadata_paths, 
+                                                       fill_value='N/A',
+                                                       speaker_id_col=speaker_id_col,
+                                                       sep='|')
+
+        speaker_to_id_df = self.lookup_with_metadata(speaker_to_id=speaker_to_id, 
+                                                     speaker_stats=speaker_stats,
+                                                     metadata=combined_metadatda)
+
+        return final_df, speaker_to_id_df
+
+    def lookup_with_metadata(self,
+                             speaker_to_id: Dict,
+                             speaker_stats: pd.DataFrame,
+                             metadata: pd.DataFrame,
+                             speaker_id_col: str = 'speaker_id'):
+        
+        # Save speaker lookup table with class IDs
+        speaker_to_id_df = pd.DataFrame({'speaker_id': speaker_to_id.keys(), 'class_id': speaker_to_id.values()})
+        speaker_to_id_df = self.append_speaker_stats(df=speaker_to_id_df, speaker_stats=speaker_stats, col_id=speaker_id_col)
+        speaker_to_id_df = speaker_to_id_df.merge(metadata, on=speaker_id_col, how='left')
+        return speaker_to_id_df
+
 
     @staticmethod
     def split_dataset(
@@ -185,7 +296,8 @@ class CsvProcessor:
             train_csv: str = "train.csv",
             val_csv: str = "validation.csv",
             sep: str = '|',
-            seed: int = 42
+            seed: int = 42,
+            fill_value: str = 'N/A'
             ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
         """Splits a dataset into training and validation sets.
 
@@ -206,7 +318,7 @@ class CsvProcessor:
 
         if speaker_overlap:
             # Random split across all samples
-            shuffled_df = df.sample(frac=1.0, random_state=RANDOM_SEED)
+            shuffled_df = df.sample(frac=1.0, random_state=seed)
             split_idx = int(len(shuffled_df) * train_ratio)
             train_df = shuffled_df[:split_idx]
             val_df = shuffled_df[split_idx:]
@@ -221,8 +333,8 @@ class CsvProcessor:
             val_df = df[~df[speaker_id_col].isin(train_speakers)]
 
         if save_csv:
-            train_df.fillna('N/A').to_csv(train_csv, index=False, sep=sep)
-            val_df.fillna('N/A').to_csv(val_csv, index=False, sep=sep)
+            train_df.fillna(fill_value).to_csv(train_csv, index=False, sep=sep)
+            val_df.fillna(fill_value).to_csv(val_csv, index=False, sep=sep)
 
         else:
             return train_df, val_df

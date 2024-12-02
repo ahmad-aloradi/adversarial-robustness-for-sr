@@ -44,6 +44,8 @@ class VoxCelebDataModule(LightningDataModule):
         self.train_data = None
         self.val_data = None
         self.test_data = None
+        self.csv_processor = CsvProcessor(verbose=self.cfg.dataset.verbose,
+                                          fill_value='N/A')
 
     def prepare_data(self):
         voxceleb_processor = VoxCelebProcessor(root_dir=self.cfg.dataset.data_dir,  
@@ -51,12 +53,25 @@ class VoxCelebDataModule(LightningDataModule):
                                                artifcats_dir=self.cfg.dataset.voxceleb_artifacts_dir,
                                                sep=self.cfg.dataset.sep)
         
-        _ = voxceleb_processor.generate_metadata(base_search_dir=self.cfg.dataset.base_search_dir,
-                                                 min_duration=self.cfg.dataset.min_duration,
-                                                 save_df=self.cfg.dataset.save_csv)
+        _, _ = voxceleb_processor.generate_metadata(
+            base_search_dir=self.cfg.dataset.base_search_dir,
+            min_duration=self.cfg.dataset.min_duration,
+            save_df=self.cfg.dataset.save_csv
+            )
 
+        # Get class id and speaker stats
+        updated_dev_csv, speaker_lookup_csv = self.csv_processor.process(
+            dataset_files=[self.cfg.dataset.dev_csv_file],
+            spks_metadata_paths=[self.cfg.dataset.metadata_csv_file],
+            verbose=self.cfg.dataset.verbose)
+        
+        # save the updated csv
+        VoxCelebProcessor.save_csv(updated_dev_csv, self.cfg.dataset.dev_csv_file)
+        VoxCelebProcessor.save_csv(speaker_lookup_csv, self.cfg.dataset.speaker_lookup)
+        
+        # split the dataset into train and validation
         CsvProcessor.split_dataset(
-            df=pd.read_csv(self.cfg.dataset.dev_csv_file, sep='|'),
+            df=updated_dev_csv,
             train_ratio = self.cfg.dataset.train_ratio,
             save_csv=self.cfg.dataset.save_csv,
             speaker_overlap=self.cfg.dataset.speaker_overlap,
@@ -67,14 +82,15 @@ class VoxCelebDataModule(LightningDataModule):
             seed=self.cfg.dataset.seed
             )
         
+        # enrich the verification file
         _ = voxceleb_processor.enrich_verification_file(
             veri_test_path=self.cfg.dataset.veri_test_path,
             metadata_path=self.cfg.dataset.metadata_csv_file,
             output_path=self.cfg.dataset.veri_test_output_path,
             sep=self.cfg.dataset.sep,
             )
-
         
+
     def setup(self, stage: Optional[str] = None):
         if stage == 'fit' or stage is None:
             self.train_data = VoxCelebDataset(

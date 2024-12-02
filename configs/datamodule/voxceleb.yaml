@@ -15,8 +15,9 @@ cfg:
     metadata_csv_file: ${datamodule.cfg.dataset.voxceleb_artifacts_dir}/vox_meta.csv
     train_csv_file: ${datamodule.cfg.dataset.voxceleb_artifacts_dir}/train_csv.csv
     val_csv_file: ${datamodule.cfg.dataset.voxceleb_artifacts_dir}/val_csv.csv
-    seed: ${seed}
+    speaker_lookup: ${datamodule.cfg.dataset.voxceleb_artifacts_dir}/speaker_lookup.csv
 
+    seed: ${seed}
     sep: "|"
     verbose: true
     save_csv: true

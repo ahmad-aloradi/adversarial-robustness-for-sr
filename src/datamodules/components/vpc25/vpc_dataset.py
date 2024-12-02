@@ -65,7 +65,7 @@ class AnonymizedLibriSpeechDataset(Dataset):
         for subset_dir in self.subset_dirs:
             subset_path = self.root_dir / subset_dir
             if not subset_path.exists():
-                log.warining(f"Directory {subset_path} does not exist")
+                log.warning(f"Directory {subset_path} does not exist")
                 continue
                 
             # Find all combined_data.csv files in subdirectories
