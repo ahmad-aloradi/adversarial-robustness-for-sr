@@ -15,8 +15,10 @@ model:
     pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
 
   audio_encoder:
-    _target_: speechbrain.pretrained.EncoderClassifier.from_hparams
+    _target_: speechbrain.inference.EncoderClassifier.from_hparams
     source: "speechbrain/spkrec-xvect-voxceleb"
+    savedir: "pretrained_models/spkrec-xvect-voxceleb"
+    run_opts: {"device":"cuda:0"}
 
   gender_classifier:
     hidden_size: 256

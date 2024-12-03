@@ -147,7 +147,7 @@ class VoxCelebDataModule(LightningDataModule):
         )
 
 
-@hydra.main(config_path="../../configs", config_name="train")
+@hydra.main(config_path="../../configs", config_name="train", version_base="1.3")
 def test_datamodule(cfg):
 
     print("Starting VoxCeleb DataModule test...")

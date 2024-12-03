@@ -24,23 +24,20 @@ class MultiModalVPCModel(pl.LightningModule):
         self.num_classes = 7204
         self.text_encoder_output_dim = 768
         self.audio_encoder_output_dim = 512
+        self.sample_rate = 16000
 
-        self.text_encoder = instantiate(model.text_encoder)
+        self.text_encoder = instantiate(model.text_encoder).to(self.device)
         self.processor = instantiate(model.processor)
-        self.text_classifier = nn.Linear(self.text_encoder_output_dim, 
-                                         self.num_classes)
+        self.text_classifier = nn.Linear(self.text_encoder_output_dim, self.num_classes)
         
         self.audio_encoder = instantiate(model.audio_encoder)
-        self.audio_classifier = nn.Linear(self.audio_encoder_output_dim,
-                                          self.num_classes)
+        self.audio_classifier = nn.Linear(self.audio_encoder_output_dim, self.num_classes)
         
         self.gender_classifier = nn.Sequential(
-            nn.Linear(self.audio_encoder_output_dim, 
-                     model.gender_classifier.hidden_size),
+            nn.Linear(self.audio_encoder_output_dim, model.gender_classifier.hidden_size),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(model.gender_classifier.hidden_size,
-                     model.gender_classifier.num_classes)
+            nn.Linear(model.gender_classifier.hidden_size, model.gender_classifier.num_classes)
         )
         
         # Losses
@@ -60,11 +57,11 @@ class MultiModalVPCModel(pl.LightningModule):
 
     def forward(self, batch: VPCBatch):
         encoded = self.processor(
-            batch.audio, 
-            sampling_rate=16000, 
-              return_tensors="pt"
-              ).input_values
-        encoded = encoded.squeeze(0)
+            batch.audio,
+            sampling_rate=self.sample_rate, 
+            return_tensors="pt"
+            ).input_values
+        encoded = encoded.squeeze(0).to(batch.audio.device)
 
         text_embeddings = self.text_encoder(encoded).logits
         pred_ids = text_embeddings.argmax(dim=-1)
@@ -87,16 +84,21 @@ class MultiModalVPCModel(pl.LightningModule):
     def _step(self, batch: VPCBatch, criterion: Optional[Any] = None) -> Dict[str, torch.Tensor]:
         outputs = self(batch)
         
-        speaker_labels = torch.tensor([int(id) for id in batch.speaker_id])
-        gender_labels = torch.tensor([0 if g == "M" else 1 for g in batch.gender])
+        # Re-define labels
+        speaker_labels = torch.tensor([int(id) for id in batch.speaker_id], device=batch.audio.device)
+        gender_labels = torch.tensor([0 if g == "M" else 1 for g in batch.gender], device=batch.audio.device)
         
-        criterion = criterion or self.criterion_train
-        
+        # Cpompute losses
+        try:
+            audio_speaker_loss = criterion(outputs["audio_speaker_logits"].unsqueeze(1), speaker_labels.unsqueeze(1))
+            gender_loss = criterion(outputs["gender_logits"].unsqueeze(1), gender_labels.unsqueeze(-1))
+        except:
+            import ipdb; ipdb.set_trace()
+
         losses = {
             # "text_speaker": criterion(outputs["text_speaker_logits"], speaker_labels),
-            "audio_speaker": criterion(outputs["audio_speaker_logits"].unsqueeze(1), 
-                                       speaker_labels.unsqueeze(1)),
-            "gender": criterion(outputs["gender_logits"].unsqueeze(1), gender_labels.unsqueeze(-1))
+            "audio_speaker": audio_speaker_loss,
+            "gender": gender_loss
         }
         
         accuracies = {
