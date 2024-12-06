@@ -56,13 +56,15 @@ class TrainCollate(VoxCelebCollate):
         lengths = torch.tensor([wav.shape[0] for wav in waveforms])
         padded_waveforms = pad_sequence(waveforms, batch_first=True, padding_value=self.pad_value)
 
+        gender_labels = torch.tensor([float(0) if item.gender == 'm' else float(1) for item in batch])
+
         return VoxCelebItem(
             audio=padded_waveforms,
             speaker_id=torch.tensor(speaker_ids),
             audio_length=lengths,
             audio_path=audio_paths,
             nationality= nationalities,
-            gender=genders
+            gender=gender_labels
         )
 
 

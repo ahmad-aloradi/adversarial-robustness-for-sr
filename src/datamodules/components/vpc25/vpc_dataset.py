@@ -56,21 +56,37 @@ class AnonymizedLibriSpeechDataset(Dataset):
         self.max_len = max_len
         
         # Load and combine all CSV files
-        self.data = self._load_all_csvs()
-        
-    def _load_all_csvs(self) -> pd.DataFrame:
-        """Load and combine all CSV files from the specified directories."""
+        self.data = self._load_all_csvs(split=self.split)
+        self.speaker_to_id = self.generate_training_ids(self.data, id_col='speaker_id')
+
+    def generate_training_ids(self, combined_df: pd.DataFrame, id_col: str = 'speaker_id') -> pd.DataFrame:
+        """Generate sequential training IDs (0 to N-1) for LibriSpeech speakers."""
+        unique_speakers = combined_df[id_col].unique()
+        speaker_to_id = {speaker.item(): idx for idx, speaker in enumerate(unique_speakers)}
+        return speaker_to_id
+
+    def _load_all_csvs(self, split: str) -> pd.DataFrame:
+        """Load and combine all CSV files from the specified directories.
+        This method searches for CSV files in the subset directories, reads them into DataFrames,
+        and combines them into a single DataFrame. It also adds a unique identifier for each
+        utterance and filters out utterances with a duration less than the specified minimum duration.
+        Args:
+            split (str): The split of the dataset as named in the VPC dataset (e.g., 'train-clean-360', 'libri_test_trials').
+        Returns:
+            pd.DataFrame: A combined DataFrame containing data from all valid CSV files.
+        """
         all_dfs = []
         
         for subset_dir in self.subset_dirs:
+            subset_dir = Path(subset_dir)
             subset_path = self.root_dir / subset_dir
             if not subset_path.exists():
                 log.warning(f"Directory {subset_path} does not exist")
                 continue
                 
             # Find all combined_data.csv files in subdirectories
-            system_ext = '_'.join(subset_path.name.split('_')[1: ])
-            csv_files = glob.glob(str(subset_path / f"*{self.split}_{system_ext}*" / self.csv_filename), recursive=True)
+            csv_files = glob.glob(
+                str(subset_path / f'data/{split}_{subset_dir.name}' / self.csv_filename), recursive=True)
             
             for csv_file in csv_files:
                 try:
@@ -120,12 +136,11 @@ class AnonymizedLibriSpeechDataset(Dataset):
                 - duration: audio duration
                 - source_dir: source directory name
         """
+
         row = self.data.iloc[idx]
         
-        # Construct full path to audio file
-        audio_path = self.root_dir / row['wav_path']
-        
         # Load audio
+        audio_path = self.root_dir / Path(row['wav_path'])
         waveform, sample_rate = torchaudio.load(audio_path)
         waveform = waveform.squeeze(0)
         max_duration_sec = int(self.max_len * sample_rate)
@@ -142,7 +157,7 @@ class AnonymizedLibriSpeechDataset(Dataset):
             'audio': waveform,
             'sample_rate': sample_rate,
             'text': row['text'],
-            'speaker_id': row['speaker_id'],
+            'speaker_id': self.speaker_to_id[row['speaker_id']],
             'utterance_id': row['utterance_id'],
             'gender': row['gender'],
             'duration': row['duration'],
@@ -169,15 +184,17 @@ class VPC25PaddingCollate:
         waveforms = [item['audio'] for item in batch]
         lengths = torch.tensor([wav.shape[0] for wav in waveforms])
         padded_waveform = torch.nn.utils.rnn.pad_sequence(waveforms, batch_first=True, padding_value=self.pad_value)
+        speaker_id = torch.tensor([int(item['speaker_id']) for item in batch])
+        gender_labels = torch.tensor([float(0) if item['gender'] == 'M' else float(1) for item in batch])
 
         return VPCBatch(
             audio=padded_waveform,
             audio_lens=lengths,
+            speaker_id=speaker_id,
+            gender=gender_labels,
             sample_rate=([item['sample_rate'] for item in batch]),
             text=[item['text'] for item in batch],
-            speaker_id=[item['speaker_id'] for item in batch],
             utterance_id=[item['utterance_id'] for item in batch],
-            gender=[item['gender'] for item in batch],
             duration=torch.tensor([item['duration'] for item in batch]),
             source_dir=[item['source_dir'] for item in batch]
         )

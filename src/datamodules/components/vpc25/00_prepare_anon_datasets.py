@@ -2,6 +2,7 @@ import os
 import pandas as pd
 from pathlib import Path
 import glob
+import argparse
 from typing import List, Dict, Optional
 
 class KaldiDataProcessor:
@@ -13,7 +14,6 @@ class KaldiDataProcessor:
     def __init__(self, base_dirs: List[str]):
         """
         Initialize processor with list of base directories.
-        
         Args:
             base_dirs: List of directory paths (relative or absolute)
         """
@@ -22,10 +22,8 @@ class KaldiDataProcessor:
     def read_kaldi_file(self, filepath: Path) -> Dict[str, str]:
         """
         Read space-separated Kaldi file into dictionary.
-        
         Args:
             filepath: Path to Kaldi format file
-            
         Returns:
             Dictionary mapping first column to rest of line
         """
@@ -41,57 +39,50 @@ class KaldiDataProcessor:
             if line.strip() and (parts := line.strip().split(maxsplit=1))
         }
         
-    def update_wav_paths(self, wav_scp_path: Path, base_dir: Path, subdir: Path) -> Dict[str, str]:
-        """
-        Update paths in wav.scp to match relative structure.
-        
-        Args:
-            wav_scp_path: Path to wav.scp file
-            base_dir: Base directory path
-            subdir: Current subdirectory being processed
-            
-        Returns:
-            Dictionary mapping utterance IDs to updated wav paths
-        """
-        if not wav_scp_path.exists():
+    def get_wav_paths(self, base_dir: Path, subdir: Path) -> Dict[str, str]:
+        wav_dir = subdir / 'wav'
+        if not wav_dir.exists() or not wav_dir.is_dir():
             return {}
             
         wav_dict = {}
-        with open(wav_scp_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            
-        for line in lines:
-            if not line.strip():
-                continue
+        for wav_file in wav_dir.glob('*'):
+            if wav_file.is_file():
+                utt_id = wav_file.stem
+                wav_path = f"{base_dir.name}/{subdir.name}/wav/{wav_file.name}"
+                wav_dict[utt_id] = wav_path
                 
-            parts = line.strip().split(maxsplit=1)
-            if len(parts) != 2:
-                continue
-                
-            utt_id, wav_path = parts
-            wav_filename = Path(wav_path).name
-            new_wav_path = f"{base_dir.name}/{subdir.name}/wav/{wav_filename}"
-            wav_dict[utt_id] = new_wav_path
-            
         return wav_dict
-        
-    def process_subdir(self, base_dir: Path, subdir: Path) -> Optional[pd.DataFrame]:
-        """
-        Process a single Kaldi subdirectory.
-        
-        Args:
-            base_dir: Base directory path
-            subdir: Path to subdirectory containing Kaldi files
+
+    def get_wav_paths(self, base_dir: Path, subdir: Path) -> Dict[str, str]:
+        wav_dir = subdir / 'wav'
+        if not wav_dir.exists() or not wav_dir.is_dir():
+            return {}
             
-        Returns:
-            DataFrame containing combined data, or None if no data found
+        wav_dict = {}
+        prefix = base_dir.parts[-2]  # Gets 'B3'
+        
+        for wav_file in wav_dir.glob('*'):
+            if wav_file.is_file():
+                utt_id = wav_file.stem
+                wav_path = f"{prefix}/data/{subdir.name}/wav/{wav_file.name}"
+                wav_dict[utt_id] = wav_path
+                
+        return wav_dict
+
+    def process_subdir(self, base_dir: Path, subdir: Path) -> Optional[pd.DataFrame]:
+        """Process a single Kaldi subdirectory.
+
+            Args:
+                base_dir: Base directory path
+                subdir: Path to subdirectory containing Kaldi files
+
+            Returns:
+                DataFrame containing combined data, or None if no data found
         """
         print(f"Processing {subdir}...")
         
-        # Read all files preserving original IDs
         utt2spk = self.read_kaldi_file(subdir / 'utt2spk')
-        
-        if not utt2spk:  # If no utt2spk file, skip this directory
+        if not utt2spk:
             return None
             
         file_data = {
@@ -99,43 +90,40 @@ class KaldiDataProcessor:
             'text': self.read_kaldi_file(subdir / 'text'),
             'utt2dur': self.read_kaldi_file(subdir / 'utt2dur'),
             'utt2spk': utt2spk,
-            'wav_scp': self.update_wav_paths(subdir / 'wav.scp', base_dir, subdir)
+            'wav_paths': self.get_wav_paths(base_dir, subdir)
         }
         
-        # Return None if no wav_scp data
-        if not file_data['wav_scp']:
+        if not file_data['wav_paths']:
             return None
             
-        # Combine all information preserving original IDs
         combined_data = []
-        for utt_id in file_data['wav_scp'].keys():
+        for utt_id in file_data['wav_paths'].keys():
             spk_id = file_data['utt2spk'].get(utt_id, '')
+            # Extract B3 from path like data/vpc2025_official/B3/data
+            prefix = base_dir.parts[-2]
             
             entry = {
-                'utterance_id': utt_id,  # Original utterance ID from files
-                'speaker_id': spk_id,    # Original speaker ID from utt2spk
+                'utterance_id': f"{prefix}_{utt_id}",
+                'speaker_id': spk_id,
+                'wav_path': file_data['wav_paths'].get(utt_id, ''),
                 'gender': file_data['spk2gender'].get(spk_id, ''),
-                'text': file_data['text'].get(utt_id, ''),
                 'duration': float(file_data['utt2dur'].get(utt_id, '0')),
-                'wav_path': file_data['wav_scp'].get(utt_id, '')
+                'text': file_data['text'].get(utt_id, '')
             }
             combined_data.append(entry)
             
         return pd.DataFrame(combined_data) if combined_data else None
         
     def process_all(self):
-        """Process all base directories and save combined data to CSV files."""
         for base_dir in self.base_dirs:
             if not base_dir.exists():
-                print(f"Warning: Directory {base_dir} does not exist")
                 continue
                 
-            # Find all subdirectories
             subdirs = [d for d in base_dir.glob("*") if d.is_dir()]
+            print([str(d) for d in base_dir.glob("*") if d.is_dir()])
             
             for subdir in subdirs:
                 df = self.process_subdir(base_dir, subdir)
-                
                 if df is not None:
                     output_file = subdir / 'combined_data.csv'
                     df.to_csv(output_file, index=False, sep='|')
@@ -144,16 +132,12 @@ class KaldiDataProcessor:
                     print(f"No data found in {subdir}")
 
 def main():
-    """Main entry point."""
-    import argparse
-    
     parser = argparse.ArgumentParser(description='Process Kaldi data directories.')
     parser.add_argument('dirs', nargs='+', help='Base directories to process')
     args = parser.parse_args()
     
     processor = KaldiDataProcessor(args.dirs)
     processor.process_all()
-
 
 if __name__ == "__main__":
     main()

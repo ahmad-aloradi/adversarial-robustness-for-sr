@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Union
 import torch
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
+import pandas as pd
 
 import sys
 sys.path.append(f"/home/aloradi/adversarial-robustness-for-sr")
@@ -17,8 +18,9 @@ class AnonymizedLibriSpeechDataModule(pl.LightningDataModule):
         self,
         root_dir: Union[str, Path],
         loaders: Dict[str, Dict[str, int]],
+        splits: List[Dict],
+        subset_dirs: List[str],
         transform=None,
-        subset_dirs: List[str] = ['b2_system', 'b5_b6_systems'],
     ):
         """
         Initialize the DataModule.
@@ -35,7 +37,14 @@ class AnonymizedLibriSpeechDataModule(pl.LightningDataModule):
         self.subset_dirs = subset_dirs
         self.loaders = loaders
         self.transform = transform
-        
+        self.splits = splits
+
+    def generate_training_ids(self, combined_df: pd.DataFrame, id_col: str = 'ID') -> pd.DataFrame:
+        """Generate sequential training IDs (0 to N-1) for LibriSpeech speakers."""
+        unique_speakers = combined_df[id_col].unique()
+        speaker_to_id = {speaker.item(): idx for idx, speaker in enumerate(unique_speakers)}
+        return speaker_to_id
+
     def setup(self, stage: Optional[str] = None):
         """Set up the datasets for each stage (fit, test, predict)."""
         if stage == 'fit' or stage is None:
@@ -44,13 +53,13 @@ class AnonymizedLibriSpeechDataModule(pl.LightningDataModule):
                 root_dir=self.root_dir,
                 subset_dirs=self.subset_dirs,
                 transform=self.transform,
-                split='train-clean-360'
+                split=self.splits.train
             )
             self.eval_dataset = AnonymizedLibriSpeechDataset(
                 root_dir=self.root_dir,
                 subset_dirs=self.subset_dirs,
                 transform=self.transform,
-                split='dev_enrolls'
+                split=self.splits.valid
             )
         if stage == 'test' or stage is None:
             # Create test dataset
@@ -58,7 +67,7 @@ class AnonymizedLibriSpeechDataModule(pl.LightningDataModule):
                 root_dir=self.root_dir,
                 subset_dirs=self.subset_dirs,
                 transform=self.transform,
-                split='test_enrolls'
+                split=self.splits.test
             )
     
     def train_dataloader(self) -> DataLoader:
