@@ -1,0 +1,73 @@
+_target_: src.modules.multimodal_vpc.MultiModalVPCModel
+
+defaults:
+  - _self_
+  - network: classification.yaml
+
+model:
+
+  text_encoder:
+    _target_: transformers.Wav2Vec2ForCTC.from_pretrained
+    pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
+
+  processor:
+    _target_: transformers.Wav2Vec2Processor.from_pretrained
+    pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
+
+  audio_encoder:
+    _target_: speechbrain.inference.EncoderClassifier.from_hparams
+    source: "speechbrain/spkrec-xvect-voxceleb"
+    savedir: "local/.pretrained_models/spkrec-xvect-voxceleb"
+    run_opts: {"device":"cuda:0"}
+
+  gender_classifier:
+    hidden_size: 256
+    num_classes: 1
+
+
+  # _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
+  # loss_fn:
+  #   _target_: speechbrain.nnet.losses.AdditiveAngularMargin
+  #   margin: 0.2
+  #   scale: 30
+
+criterion:
+
+  _base_text_criterion:
+    _target_: torch.nn.CrossEntropyLoss
+
+  _base_audio_criterion:
+    _target_: torch.nn.CrossEntropyLoss
+    label_smoothing: 0.1
+
+  _base_gender_criterion:
+    _target_: torch.nn.BCEWithLogitsLoss
+
+  criterion_train:
+    text_criterion: ${module.criterion._base_text_criterion}
+    audio_criterion: ${module.criterion._base_audio_criterion}
+    gender_criterion: ${module.criterion._base_gender_criterion}
+
+  criterion_val:
+    text_criterion: ${module.criterion._base_text_criterion}
+    audio_criterion: ${module.criterion._base_audio_criterion}
+    gender_criterion: ${module.criterion._base_gender_criterion}
+
+  criterion_test:
+    text_criterion: ${module.criterion._base_text_criterion}
+    audio_criterion: ${module.criterion._base_audio_criterion}
+    gender_criterion: ${module.criterion._base_gender_criterion}
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: True
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+
+lr_scheduler:
+  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+  _partial_: True
+  mode: 'min'
+  factor: 0.5
+  patience: 1
+  min_lr: 0.000001

@@ -1,65 +1,59 @@
 _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
 
-cfg:
-  dataset:
-    data_dir: ${paths.data_dir}/voxceleb
-    wav_dir: ${datamodule.cfg.dataset.data_dir}/voxceleb1_2
-    voxceleb_metadata: ${datamodule.cfg.dataset.data_dir}/voxceleb_metadata
-    # For copying the metadata files to the preprocessed directory
-    veri_test_path: ${datamodule.cfg.dataset.voxceleb_metadata}/downloaded/veri_test.txt
-    base_search_dir: ${datamodule.cfg.dataset.voxceleb_metadata}/preprocessed
+dataset:
+  data_dir: ${paths.data_dir}/voxceleb
+  wav_dir: ${datamodule.dataset.data_dir}/voxceleb1_2
+  voxceleb_metadata: ${datamodule.dataset.data_dir}/voxceleb_metadata
+  # For copying the metadata files to the preprocessed directory
+  veri_test_path: ${datamodule.dataset.voxceleb_metadata}/downloaded/veri_test.txt
+  base_search_dir: ${datamodule.dataset.voxceleb_metadata}/preprocessed
 
-    voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
-    veri_test_output_path: ${datamodule.cfg.dataset.voxceleb_artifacts_dir}/veri_test.csv
-    dev_csv_file: ${datamodule.cfg.dataset.voxceleb_artifacts_dir}/voxceleb_dev.csv
-    metadata_csv_file: ${datamodule.cfg.dataset.voxceleb_artifacts_dir}/vox_meta.csv
-    train_csv_file: ${datamodule.cfg.dataset.voxceleb_artifacts_dir}/train_csv.csv
-    val_csv_file: ${datamodule.cfg.dataset.voxceleb_artifacts_dir}/val_csv.csv
-    seed: ${seed}
+  voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
+  veri_test_output_path: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test.csv
+  dev_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/voxceleb_dev.csv
+  metadata_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/vox_meta.csv
+  train_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/train_csv.csv
+  val_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/val_csv.csv
+  speaker_lookup: ${datamodule.dataset.voxceleb_artifacts_dir}/speaker_lookup.csv
 
-    sep: "|"
-    verbose: true
-    save_csv: true
-    sample_rate: 16000
+  seed: ${seed}
+  sep: "|"
+  verbose: true
+  save_csv: true
+  sample_rate: 16000
 
-    min_duration: 0.5
-    max_duration: 10.0
-    speaker_overlap: False
-    train_ratio: 0.98
+  min_duration: 0.5
+  max_duration: 10.0
+  speaker_overlap: False
+  train_ratio: 0.98
 
-  transforms: null
-    # train:
-    #   order: ["normalize"]
+transforms: null
 
-    # valid_test_predict:
-    #   order: ["normalize"]
+loaders:
+  train:
+    batch_size: 8
+    shuffle: True
+    num_workers: 4
+    drop_last: True
+    pin_memory: False
 
+  valid:
+    batch_size: 8
+    shuffle: False
+    num_workers: 4
+    drop_last: False
+    pin_memory: False
 
-  loaders:
-    train:
-      batch_size: 64
-      shuffle: True
-      num_workers: 4
-      drop_last: True
-      pin_memory: False
+  test:
+    batch_size: 8
+    shuffle: False
+    num_workers: 0
+    drop_last: False
+    pin_memory: False
 
-    valid:
-      batch_size: 64
-      shuffle: False
-      num_workers: 4
-      drop_last: False
-      pin_memory: False
-
-    test:
-      batch_size: 8
-      shuffle: False
-      num_workers: 0
-      drop_last: False
-      pin_memory: False
-
-    predict:
-      batch_size: 8
-      shuffle: False
-      num_workers: 0
-      drop_last: False
-      pin_memory: False
+  predict:
+    batch_size: 8
+    shuffle: False
+    num_workers: 0
+    drop_last: False
+    pin_memory: False

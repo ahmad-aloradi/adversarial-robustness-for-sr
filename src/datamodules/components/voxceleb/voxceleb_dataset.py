@@ -10,7 +10,7 @@ import pandas as pd
 
 sys.path.append(f"/home/aloradi/adversarial-robustness-for-sr")
 from src.datamodules.components.utils import AudioProcessor # NOQA E402
-from src.datamodules.components.utils import split_dataset  # NOQA E402
+from src.datamodules.components.utils import CsvProcessor  # NOQA E402
 
 
 
@@ -56,13 +56,15 @@ class TrainCollate(VoxCelebCollate):
         lengths = torch.tensor([wav.shape[0] for wav in waveforms])
         padded_waveforms = pad_sequence(waveforms, batch_first=True, padding_value=self.pad_value)
 
+        gender_labels = torch.tensor([float(0) if item.gender == 'm' else float(1) for item in batch])
+
         return VoxCelebItem(
             audio=padded_waveforms,
             speaker_id=torch.tensor(speaker_ids),
             audio_length=lengths,
             audio_path=audio_paths,
             nationality= nationalities,
-            gender=genders
+            gender=gender_labels
         )
 
 
@@ -228,11 +230,11 @@ if __name__ == "__main__":
     # Test II
     df = pd.read_csv("data/voxceleb/voxceleb_metadata/preprocessed/voxceleb_dev.csv", sep='|')
 
-    train_df, val_df = split_dataset(df=df, 
-                                     save_csv=False, 
-                                     train_ratio = 0.98,
-                                     speaker_overlap=False,
-                                     output_dir="data/voxceleb/voxceleb_metadata/preprocessed")
+    train_df, val_df = CsvProcessor.split_dataset(df=df,
+                                                  save_csv=False,
+                                                  train_ratio = 0.98,
+                                                  speaker_overlap=False,
+                                                  output_dir="data/voxceleb/voxceleb_metadata/preprocessed")
     
     # Print statistics
     print(f"\nDataset split statistics:")
