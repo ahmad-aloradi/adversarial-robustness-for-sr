@@ -1,8 +1,8 @@
 _target_: src.modules.multimodal_vpc.MultiModalVPCModel
 
 defaults:
+  # - network: classification.yaml
   - _self_
-  - network: classification.yaml
 
 model:
 
@@ -23,13 +23,6 @@ model:
   gender_classifier:
     hidden_size: 256
     num_classes: 1
-
-
-  # _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
-  # loss_fn:
-  #   _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-  #   margin: 0.2
-  #   scale: 30
 
 criterion:
 
@@ -58,6 +51,8 @@ criterion:
     audio_criterion: ${module.criterion._base_audio_criterion}
     gender_criterion: ${module.criterion._base_gender_criterion}
 
+  loss: ${module.criterion._base_audio_criterion} # for callbacks
+
 optimizer:
   _target_: torch.optim.AdamW
   _partial_: True
@@ -65,9 +60,28 @@ optimizer:
   weight_decay: 1.0e-5
 
 lr_scheduler:
-  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-  _partial_: True
-  mode: 'min'
-  factor: 0.5
-  patience: 1
-  min_lr: 0.000001
+  scheduler:
+    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+    mode: "max"
+    factor: 0.3
+    min_lr: 1.0e-9
+    patience: 10
+    verbose: True
+  extras:
+    monitor: ${replace:"__metric__/valid"}
+    interval: "epoch"
+    frequency: 1
+
+metrics:
+  main:
+    _target_: "torchmetrics.Accuracy"
+    task: "multiclass"
+    num_classes: 921
+  valid_best:
+    _target_: "torchmetrics.MaxMetric"
+
+logging:
+  on_step: False
+  on_epoch: True
+  sync_dist: True
+  prog_bar: True

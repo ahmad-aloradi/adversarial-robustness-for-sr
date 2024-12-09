@@ -9,7 +9,8 @@ splits:
 
 subset_dirs: 
   - ${datamodule.root_dir}/B3
-  # - ${datamodule.root_dir}/b4_nac
+  - ${datamodule.root_dir}/B5
+  - ${datamodule.root_dir}/T12-5
 
 transform: null
 

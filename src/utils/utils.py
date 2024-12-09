@@ -369,8 +369,8 @@ def register_custom_resolvers(
                 config_name=config_name, return_hydra_config=True, overrides=[]
             )
         cfg_tmp = cfg.copy()
-        loss = load_loss(cfg_tmp.module.network.loss)
-        metric, _, _ = load_metrics(cfg_tmp.module.network.metrics)
+        loss = load_loss(cfg_tmp.module.criterion.loss)
+        metric, _, _ = load_metrics(cfg_tmp.module.metrics)
         GlobalHydra.instance().clear()
 
         OmegaConf.register_new_resolver(
