@@ -71,9 +71,9 @@ class MultiModalVPCModel(pl.LightningModule):
         
         # Freeze pretrained
         for param in self.text_encoder.parameters():
-            param.requires_grad = False
+            param.requires_grad = True
         for param in self.audio_encoder.parameters():
-            param.requires_grad = False
+            param.requires_grad = True
 
     def forward(self, batch: VPCBatch):
         encoded = self.processor(
@@ -102,7 +102,8 @@ class MultiModalVPCModel(pl.LightningModule):
             "gender_logits": gender_logits
         }
 
-    def _agg_text_pred(self, text_preds: torch.Tensor, method = 'mean', keepdim=True) -> torch.Tensor:
+    def _agg_text_pred(self, text_preds: torch.Tensor, method: str ='mean', keepdim: bool = True
+                       ) -> torch.Tensor:
         if method == 'mean':
             text_pred = text_preds.mean(1, keepdim=keepdim)
         elif method == 'max':
@@ -111,29 +112,16 @@ class MultiModalVPCModel(pl.LightningModule):
             raise NotImplementedError(f"aggregation method: {method} Not implemented")
         return text_pred
 
-    def log_step(self, metric, postfix: str) -> None:
-        self.log(f"{metric.__class__.__name__}/{postfix}",
-                 metric,
-                 **self.logging_params,
-            )
-
     def model_step(self, batch: VPCBatch, criterion: Optional[Any] = None) -> Dict[str, torch.Tensor]:
         outputs = self(batch)
-        
-        # Re-define labels
-        speaker_labels = batch.speaker_id
-        gender_labels = batch.gender
-        text_criterion = criterion.text_criterion
-        audio_criterion = criterion.audio_criterion
-        gender_criterion = criterion.gender_criterion
-        
+                
         # Cpompute losses
-        text_loss = text_criterion(outputs["text_speaker_logits"], speaker_labels)
-        audio_speaker_loss = audio_criterion(outputs["audio_speaker_logits"], speaker_labels)
-        gender_loss = gender_criterion(outputs["gender_logits"].squeeze(-1), gender_labels)
+        text_loss = criterion.text_criterion(outputs["text_speaker_logits"], batch.speaker_id)
+        audio_speaker_loss = criterion.audio_criterion(outputs["audio_speaker_logits"], batch.speaker_id)
+        gender_loss = criterion.gender_criterion(outputs["gender_logits"].squeeze(-1), batch.gender)
 
         # TODO: Make these configurable
-        total_loss = text_loss + 0.5 * audio_speaker_loss + 0.1 * gender_loss
+        total_loss = 0.3 * text_loss + 0.6 * audio_speaker_loss + 0.1 * gender_loss
         
         losses = {
             "text": text_loss,
@@ -151,15 +139,16 @@ class MultiModalVPCModel(pl.LightningModule):
         results = self.model_step(batch, self.criterion_train)
         
         self.log_dict({
-            f"{self.criterion_train.text_criterion.__class__.__name__}/train": results["losses"]["text"],
-            f"{self.criterion_train.audio_criterion.__class__.__name__}/train": results["losses"]["audio"],
-            f"{self.criterion_train.gender_criterion.__class__.__name__}/train": results["losses"]["gender"],
+            f"text_{self.criterion_train.text_criterion.__class__.__name__}/train": results["losses"]["text"],
+            f"audio_{self.criterion_train.audio_criterion.__class__.__name__}/train": results["losses"]["audio"],
+            f"gender{self.criterion_train.gender_criterion.__class__.__name__}/train": results["losses"]["gender"],
             f"total_loss/train": results["losses"]["total"]
             }, **self.logging_params)
 
         self.train_metric(results["outputs"]["audio_speaker_logits"],  batch.speaker_id)
         self.log(f"{self.train_metric.__class__.__name__}/train",
                  self.train_metric,
+                 batch_size=batch.speaker_id.shape[0],
                  **self.logging_params)
 
         self.train_add_metrics(results["outputs"]["audio_speaker_logits"],  batch.speaker_id)
@@ -174,9 +163,9 @@ class MultiModalVPCModel(pl.LightningModule):
         results = self.model_step(batch, self.criterion_val)
 
         self.log_dict({
-            f"{self.criterion_val.text_criterion.__class__.__name__}/valid": results["losses"]["text"],
-            f"{self.criterion_val.audio_criterion.__class__.__name__}/valid": results["losses"]["audio"],
-            f"{self.criterion_val.gender_criterion.__class__.__name__}/valid": results["losses"]["gender"],
+            f"text_{self.criterion_val.text_criterion.__class__.__name__}/valid": results["losses"]["text"],
+            f"audio_{self.criterion_val.audio_criterion.__class__.__name__}/valid": results["losses"]["audio"],
+            f"gender_{self.criterion_val.gender_criterion.__class__.__name__}/valid": results["losses"]["gender"],
             f"total_loss/valid": results["losses"]["total"]
             }, **self.logging_params)
 
@@ -184,6 +173,7 @@ class MultiModalVPCModel(pl.LightningModule):
         self.log(
             f"{self.valid_metric.__class__.__name__}/valid",
             self.valid_metric,
+            batch_size=batch.speaker_id.shape[0],
             **self.logging_params,
         )
         self.valid_add_metrics(results["outputs"]["audio_speaker_logits"],  batch.speaker_id)
@@ -197,15 +187,15 @@ class MultiModalVPCModel(pl.LightningModule):
         self.log(
             f"{self.valid_metric.__class__.__name__}/valid_best",
             self.valid_metric_best.compute(),
-            **self.logging_params,
-        )
+            **self.logging_params
+            )
 
     def test_step(self, batch: VPCBatch, batch_idx: int) -> None:
         results = self.model_step(batch, self.criterion_test)
         self.log_dict({
-            f"{self.criterion_test.text_criterion.__class__.__name__}/test": results["losses"]["text"],
-            f"{self.criterion_test.audio_criterion.__class__.__name__}/test": results["losses"]["audio"],
-            f"{self.criterion_test.gender_criterion.__class__.__name__}/test": results["losses"]["gender"],
+            f"text_{self.criterion_test.text_criterion.__class__.__name__}/test": results["losses"]["text"],
+            f"audio_{self.criterion_test.audio_criterion.__class__.__name__}/test": results["losses"]["audio"],
+            f"gender_{self.criterion_test.gender_criterion.__class__.__name__}/test": results["losses"]["gender"],
             f"total_loss/test": results["losses"]["total"]
             }, **self.logging_params)
         
@@ -213,6 +203,7 @@ class MultiModalVPCModel(pl.LightningModule):
         self.log(
             f"{self.test_metric.__class__.__name__}/test",
             self.test_metric,
+            batch_size=batch.speaker_id.shape[0],
             **self.logging_params,
         )
         self.test_add_metrics(results["outputs"]["audio_speaker_logits"],  batch.speaker_id)

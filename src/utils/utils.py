@@ -390,6 +390,7 @@ def register_custom_resolvers(
     return decorator
 
 
+@rank_zero_only
 def dump_pickle(stats: dict, output_path: Union[str, Path]) -> None:
     """
     Dump statistics dictionary to a pickle file
