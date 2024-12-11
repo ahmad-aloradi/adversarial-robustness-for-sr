@@ -18,52 +18,46 @@ class MultiModalVPCModel(pl.LightningModule):
         criterion: DictConfig,
         optimizer: DictConfig,
         lr_scheduler: DictConfig,
-        logging: DictConfig,
+        logging_params: DictConfig,
         metrics: DictConfig,
         *args: Any,
         **kwargs: Any, 
     ):
         super().__init__()
         self.save_hyperparameters(logger=False)
-        
-        # HARD-CODED Fields
-        self.num_classes = 921 # 7205
-        self.text_encoder_output_dim = 32
-        self.audio_encoder_output_dim = 512
-        self.sample_rate = 16000
+
+        self.batch_sizes = kwargs.get("batch_sizes")
 
         # Get Metrics
         main_metric, valid_metric_best, add_metrics = load_metrics(metrics)
         self.train_metric = main_metric.clone()
-        self.train_add_metrics = add_metrics.clone(postfix="/train")
+        # self.train_add_metrics = add_metrics.clone(postfix="/train")
         self.valid_metric = main_metric.clone()
         self.valid_metric_best = valid_metric_best.clone()
-        self.valid_add_metrics = add_metrics.clone(postfix="/valid")
+        # self.valid_add_metrics = add_metrics.clone(postfix="/valid")
         self.test_metric = main_metric.clone()
         self.test_add_metrics = add_metrics.clone(postfix="/test")
 
         # Logging params
-        self.logging_params = logging
+        self.logging_params = logging_params
 
         # Text classifier
         self.text_encoder = instantiate(model.text_encoder).to(self.device)
         self.processor = instantiate(model.processor)
-        self.text_classifier = nn.Linear(self.text_encoder_output_dim, self.num_classes)
+        self.text_classifier = instantiate(model.classifiers.text_classifier)
+
         # Speaker classifier
         self.audio_encoder = instantiate(model.audio_encoder)
-        self.audio_classifier = nn.Linear(self.audio_encoder_output_dim, self.num_classes)
+        self.audio_classifier = instantiate(model.classifiers.audio_classifier)
+
         # Gender classifier
-        self.gender_classifier = nn.Sequential(
-            nn.Linear(self.audio_encoder_output_dim, model.gender_classifier.hidden_size),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(model.gender_classifier.hidden_size, model.gender_classifier.num_classes)
-        )
+        self.gender_classifier = instantiate(model.classifiers.gender_classifier)
         
         # Losses
         self.criterion_train = instantiate(criterion.criterion_train)
         self.criterion_val = instantiate(criterion.criterion_val)
         self.criterion_test = instantiate(criterion.criterion_test)
+        self.weights = instantiate(criterion.loss_weights)
         
         # Training configs
         self.optimizer = optimizer
@@ -71,36 +65,30 @@ class MultiModalVPCModel(pl.LightningModule):
         
         # Freeze pretrained
         for param in self.text_encoder.parameters():
-            param.requires_grad = True
+            param.requires_grad = False
         for param in self.audio_encoder.parameters():
             param.requires_grad = True
 
     def forward(self, batch: VPCBatch):
-        encoded = self.processor(
-            batch.audio,
-            sampling_rate=self.sample_rate, 
-            return_tensors="pt"
-            ).input_values
+        assert len(set(batch.sample_rate)) == 1, "All audio samples should have the same sample rate"
+
+        encoded = self.processor(batch.audio, sampling_rate=batch.sample_rate[0], return_tensors="pt"
+                                 ).input_values
         encoded = encoded.squeeze(0).to(batch.audio.device)
 
         text_embeddings = self.text_encoder(encoded).logits
         # TODO: Anything to do with decoded_preds?
-        # pred_ids = text_embeddings.argmax(dim=-1)
-        # decoded_preds = self.processor.batch_decode(pred_ids)
+        # decoded_preds = self.processor.batch_decode(text_embeddings.argmax(dim=-1))
 
-        # TODO: Implement text classifier
-        text_speaker_logits = self._agg_text_pred(text_embeddings, method='mean', keepdim=False)
-        text_speaker_logits = self.text_classifier(text_speaker_logits)
+        # Text classifier
+        text_logits = self._agg_text_pred(text_embeddings, method='mean', keepdim=False)
+        text_logits = self.text_classifier(text_logits)
         
         audio_embeddings = self.audio_encoder.encode_batch(batch.audio.squeeze(0)).squeeze(1)
-        audio_speaker_logits = self.audio_classifier(audio_embeddings)
+        audio_logits = self.audio_classifier(audio_embeddings)
         gender_logits = self.gender_classifier(audio_embeddings)
         
-        return {
-            "text_speaker_logits": text_speaker_logits,
-            "audio_speaker_logits": audio_speaker_logits,
-            "gender_logits": gender_logits
-        }
+        return {"text_logits": text_logits, "audio_logits": audio_logits, "gender_logits": gender_logits}
 
     def _agg_text_pred(self, text_preds: torch.Tensor, method: str ='mean', keepdim: bool = True
                        ) -> torch.Tensor:
@@ -116,19 +104,12 @@ class MultiModalVPCModel(pl.LightningModule):
         outputs = self(batch)
                 
         # Cpompute losses
-        text_loss = criterion.text_criterion(outputs["text_speaker_logits"], batch.speaker_id)
-        audio_speaker_loss = criterion.audio_criterion(outputs["audio_speaker_logits"], batch.speaker_id)
+        text_loss = criterion.text_criterion(outputs["text_logits"], batch.speaker_id)
+        audio_loss = criterion.audio_criterion(outputs["audio_logits"], batch.speaker_id)
         gender_loss = criterion.gender_criterion(outputs["gender_logits"].squeeze(-1), batch.gender)
-
-        # TODO: Make these configurable
-        total_loss = 0.3 * text_loss + 0.6 * audio_speaker_loss + 0.1 * gender_loss
+        total_loss = self.weights["text"] * text_loss + self.weights["audio"] * audio_loss + self.weights["gender"] * gender_loss
         
-        losses = {
-            "text": text_loss,
-            "audio": audio_speaker_loss,
-            "gender": gender_loss,
-            "total": total_loss
-        }
+        losses = {"text": text_loss, "audio": audio_loss, "gender": gender_loss, "total": total_loss}
         
         return {"losses": losses, "outputs": outputs}
 
@@ -141,18 +122,15 @@ class MultiModalVPCModel(pl.LightningModule):
         self.log_dict({
             f"text_{self.criterion_train.text_criterion.__class__.__name__}/train": results["losses"]["text"],
             f"audio_{self.criterion_train.audio_criterion.__class__.__name__}/train": results["losses"]["audio"],
-            f"gender{self.criterion_train.gender_criterion.__class__.__name__}/train": results["losses"]["gender"],
+            f"gender_{self.criterion_train.gender_criterion.__class__.__name__}/train": results["losses"]["gender"],
             f"total_loss/train": results["losses"]["total"]
             }, **self.logging_params)
 
-        self.train_metric(results["outputs"]["audio_speaker_logits"],  batch.speaker_id)
+        self.train_metric(results["outputs"]["audio_logits"],  batch.speaker_id)
         self.log(f"{self.train_metric.__class__.__name__}/train",
                  self.train_metric,
-                 batch_size=batch.speaker_id.shape[0],
+                 batch_size=self.batch_sizes.train,
                  **self.logging_params)
-
-        self.train_add_metrics(results["outputs"]["audio_speaker_logits"],  batch.speaker_id)
-        self.log_dict(self.train_add_metrics, **self.logging_params)
 
         return {"loss": results["losses"]["total"]}
 
@@ -169,15 +147,15 @@ class MultiModalVPCModel(pl.LightningModule):
             f"total_loss/valid": results["losses"]["total"]
             }, **self.logging_params)
 
-        self.valid_metric(results["outputs"]["audio_speaker_logits"],  batch.speaker_id)
+        self.valid_metric(results["outputs"]["audio_logits"],  batch.speaker_id)
         self.log(
             f"{self.valid_metric.__class__.__name__}/valid",
             self.valid_metric,
-            batch_size=batch.speaker_id.shape[0],
+            batch_size=self.batch_sizes.valid,
             **self.logging_params,
         )
-        self.valid_add_metrics(results["outputs"]["audio_speaker_logits"],  batch.speaker_id)
-        self.log_dict(self.valid_add_metrics, **self.logging_params)
+        # self.valid_add_metrics(results["outputs"]["audio_logits"],  batch.speaker_id)
+        # self.log_dict(self.valid_add_metrics, **self.logging_params)
 
         return {"loss": results["losses"]["total"]}
     
@@ -189,7 +167,7 @@ class MultiModalVPCModel(pl.LightningModule):
             self.valid_metric_best.compute(),
             **self.logging_params
             )
-
+        
     def test_step(self, batch: VPCBatch, batch_idx: int) -> None:
         results = self.model_step(batch, self.criterion_test)
         self.log_dict({
@@ -199,14 +177,14 @@ class MultiModalVPCModel(pl.LightningModule):
             f"total_loss/test": results["losses"]["total"]
             }, **self.logging_params)
         
-        self.test_metric(results["outputs"]["audio_speaker_logits"],  batch.speaker_id)
+        self.test_metric(results["outputs"]["audio_logits"],  batch.speaker_id)
         self.log(
             f"{self.test_metric.__class__.__name__}/test",
             self.test_metric,
-            batch_size=batch.speaker_id.shape[0],
+            batch_size=self.batch_sizes.test,
             **self.logging_params,
         )
-        self.test_add_metrics(results["outputs"]["audio_speaker_logits"],  batch.speaker_id)
+        self.test_add_metrics(results["outputs"]["audio_logits"],  batch.speaker_id)
         self.log_dict(self.test_add_metrics, **self.logging_params)
         
         return {"loss": results["losses"]["total"]}
