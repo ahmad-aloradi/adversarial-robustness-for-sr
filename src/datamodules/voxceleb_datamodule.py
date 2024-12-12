@@ -41,7 +41,8 @@ class VoxCelebDataModule(LightningDataModule):
     def __init__(self,
                  dataset: Dict[str, Dict[str, int]],
                  transforms: Optional[List[Dict]],
-                 loaders: Dict[str, Dict[str, int]]):
+                 loaders: Dict[str, Dict[str, int]],
+                 *args, **kwargs):
         super().__init__()
         self.train_data = None
         self.val_data = None
@@ -50,7 +51,7 @@ class VoxCelebDataModule(LightningDataModule):
         self.transforms = transforms
         self.loaders = loaders
         self.csv_processor = CsvProcessor(verbose=self.dataset.verbose, fill_value='N/A')
-    
+
     def prepare_data(self):
         voxceleb_processor = VoxCelebProcessor(root_dir=self.dataset.data_dir,
                                                verbose=self.dataset.verbose,

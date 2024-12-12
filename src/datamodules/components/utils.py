@@ -409,7 +409,7 @@ class AudioProcessor:
             waveform = self.convert_to_mono(waveform)
             waveform = self.resample(waveform, orig_sr=sr)
             waveform = self.normalize_audio(waveform)
-            return waveform.squeeze(0)
+            return waveform.squeeze(0), self.sample_rate
             
         except FileNotFoundError as e:
             raise FileNotFoundError(f"Audio file not found: {audio_path}") from e

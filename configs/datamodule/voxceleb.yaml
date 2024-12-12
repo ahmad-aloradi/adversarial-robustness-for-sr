@@ -29,6 +29,8 @@ dataset:
 
 transforms: null
 
+num_classes: 7205
+
 loaders:
   train:
     batch_size: 8

@@ -21,6 +21,7 @@ class AnonymizedLibriSpeechDataModule(pl.LightningDataModule):
         splits: List[Dict],
         subset_dirs: List[str],
         transform=None,
+        *args, **kwargs
     ):
         """
         Initialize the DataModule.

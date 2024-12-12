@@ -18,7 +18,7 @@ model:
     _target_: speechbrain.inference.EncoderClassifier.from_hparams
     source: "speechbrain/spkrec-xvect-voxceleb"
     savedir: "local/.pretrained_models/spkrec-xvect-voxceleb"
-    run_opts: {"device":"cuda:0"}
+    run_opts: {"device":"cuda"}
 
   classifiers:
     text_classifier: 
@@ -45,7 +45,7 @@ model:
           out_features: 1
 
     classifiers_config:
-      num_classes: 921 # 7205
+      num_classes: ${datamodule.num_classes}
       text_encoder_output_dim: 32
       audio_encoder_output_dim: 512
       gender_out_features: 256
@@ -84,6 +84,8 @@ criterion:
     
   loss: ${module.criterion._base_audio_criterion} # for callbacks
 
+gradient_clip_val: 5.0
+
 optimizer:
   _target_: torch.optim.AdamW
   _partial_: True
@@ -110,10 +112,10 @@ metrics:
     num_classes: ${module.model.classifiers.classifiers_config.num_classes}
   valid_best:
     _target_: "torchmetrics.MaxMetric"
-  additional:
-    AUROC:
-      _target_: "torchmetrics.AUROC"
-      task: "binary"
+  # additional:
+  #   AUROC:
+  #     _target_: "torchmetrics.AUROC"
+  #     task: "binary"
 
 logging_params:
   on_step: False

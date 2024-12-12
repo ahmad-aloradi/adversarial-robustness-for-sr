@@ -13,7 +13,6 @@ from src.datamodules.components.utils import AudioProcessor # NOQA E402
 from src.datamodules.components.utils import CsvProcessor  # NOQA E402
 
 
-
 @dataclass
 class VoxCelebItem:
     """Single item from VoxCeleb dataset."""
@@ -23,6 +22,7 @@ class VoxCelebItem:
     audio_path: str
     nationality: str
     gender: str
+    sample_rate: int
     
 @dataclass
 class VoxCelebVerificationItem:
@@ -36,6 +36,7 @@ class VoxCelebVerificationItem:
     nationality_label: int
     enroll_path: str
     test_path: str
+    sample_rate: int
 
 
 class VoxCelebCollate:
@@ -50,13 +51,13 @@ class VoxCelebCollate:
 class TrainCollate(VoxCelebCollate):
     """Collate function for training data"""
     def __call__(self, batch) -> VoxCelebItem:
-        waveforms, speaker_ids, audio_paths, nationalities, genders = zip(
-            *[(item.audio, item.speaker_id, item.audio_path, item.nationality, item.gender
+        waveforms, speaker_ids, audio_paths, nationalities, genders, sample_rate = zip(
+            *[(item.audio, item.speaker_id, item.audio_path, item.nationality, item.gender, item.sample_rate
                ) for item in batch])
         lengths = torch.tensor([wav.shape[0] for wav in waveforms])
         padded_waveforms = pad_sequence(waveforms, batch_first=True, padding_value=self.pad_value)
 
-        gender_labels = torch.tensor([float(0) if item.gender == 'm' else float(1) for item in batch])
+        gender_labels = torch.tensor([float(0) if gender == 'm' else float(1) for gender in genders])
 
         return VoxCelebItem(
             audio=padded_waveforms,
@@ -64,14 +65,15 @@ class TrainCollate(VoxCelebCollate):
             audio_length=lengths,
             audio_path=audio_paths,
             nationality= nationalities,
-            gender=gender_labels
+            gender=gender_labels,
+            sample_rate=sample_rate
         )
 
 
 class VerificationCollate(VoxCelebCollate):
     """Collate function for verification pairs"""
     def __call__(self, batch) -> VoxCelebVerificationItem:
-        enroll_wavs, test_wavs, labels, same_gender_labels, nationality_labels, enroll_paths, test_paths = zip(
+        enroll_wavs, test_wavs, labels, same_gender_labels, nationality_labels, enroll_paths, test_paths, sample_rate = zip(
             *[(item.enroll_audio, item.test_audio, item.trial_label, 
                item.same_gender_label, item.nationality_label,
                item.enroll_path, item.test_path) for item in batch])
@@ -93,7 +95,8 @@ class VerificationCollate(VoxCelebCollate):
             same_gender_label=torch.tensor(same_gender_labels),
             nationality_label=torch.tensor(nationality_labels),
             enroll_path=enroll_paths,
-            test_path=test_paths
+            test_path=test_paths,
+            sample_rate=sample_rate
         )
 
 
@@ -112,7 +115,7 @@ class VoxCelebDataset(Dataset):
         self,
         data_dir: str,
         data_filepath: Tuple[str, Path],
-        sample_rate: int = 16000,
+        sample_rate: int,
         max_duration: Union[None, float, int, list] = 12.0,
         sep: str = "|",
     ):
@@ -132,7 +135,7 @@ class VoxCelebDataset(Dataset):
     def __getitem__(self, idx) -> VoxCelebItem:
         # Retrieve data from csv
         audio_path = self.dataset.iloc[idx].path        
-        waveform = self.audio_processor.process_audio(str(self.data_dir / audio_path))
+        waveform, _ = self.audio_processor.process_audio(str(self.data_dir / audio_path))
 
         # Trim if longer than max_duration
         if self.max_samples != -1 and waveform.size(0) > self.max_samples:
@@ -145,7 +148,8 @@ class VoxCelebDataset(Dataset):
             audio_length=waveform.shape[0],
             audio_path=audio_path,
             nationality= self.dataset.iloc[idx].nationality,
-            gender=self.dataset.iloc[idx].gender
+            gender=self.dataset.iloc[idx].gender,
+            sample_rate=self.audio_processor.sample_rate
         )
 
 
@@ -189,8 +193,8 @@ class VoxCelebVerificationDataset(Dataset):
         test_path = row.test_path
         
         # Load and process both utterances
-        enroll_wav = self.audio_processor.process_audio(str(self.data_dir / enroll_path))
-        test_wav = self.audio_processor.process_audio(str(self.data_dir / test_path))
+        enroll_wav, _ = self.audio_processor.process_audio(str(self.data_dir / enroll_path))
+        test_wav, _ = self.audio_processor.process_audio(str(self.data_dir / test_path))
         
         return VoxCelebVerificationItem(
             enroll_audio=enroll_wav,
@@ -198,11 +202,11 @@ class VoxCelebVerificationDataset(Dataset):
             enroll_length=enroll_wav.shape[0],
             test_length=test_wav.shape[0],
             trial_label=row.label,
-            # TODO: Add same
             same_gender_label=row, 
             nationality_label=-1,
             enroll_path=enroll_path,
-            test_path=test_path
+            test_path=test_path,
+            sample_rate=self.audio_processor.sample_rate
         )
 
 
