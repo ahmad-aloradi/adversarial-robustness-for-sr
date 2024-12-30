@@ -11,8 +11,6 @@ from pytorch_lightning import (
 )
 from pytorch_lightning.loggers import LightningLoggerBase
 
-from src import utils
-
 # --------------------------------------------------------------------------- #
 # `pyrootutils.setup_root(...)` above is optional line to make environment more
 # convenient should be placed at the top of each entry file
@@ -45,7 +43,7 @@ from src import utils
 
 root = pyrootutils.setup_root(
     search_from=__file__,
-    indicator=[".git", "pyproject.toml"],
+    indicator=[".env", "setup.py", "pyproject.toml"],
     pythonpath=True,
     dotenv=True,
 )
@@ -54,6 +52,7 @@ _HYDRA_PARAMS = {
     "config_path": str(root / "configs"),
     "config_name": "eval.yaml",
 }
+from src import utils   # noqa: E501
 log = utils.get_pylogger(__name__)
 
 
