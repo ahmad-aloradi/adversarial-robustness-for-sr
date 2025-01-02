@@ -1,0 +1,26 @@
+dataset_df_cols:
+  dataset_name: libriSpeech
+  language: en
+  country: us
+  sample_rate: null
+
+speaker_df_cols:
+  ID: speaker_id
+  SEX: gender
+  SUBSET: split
+  MINUTES: total_dur/spk
+  NAME: speaker_name
+
+audio_file_type: flac
+
+dataset_dir: /home/aloradi/adversarial-robustness-for-sr/data/libriSpeech
+metdata_path: /home/aloradi/adversarial-robustness-for-sr/data/libriSpeech/metadata
+
+train_dir: ${dataset_dir}/train-clean-360
+test_dir: ${dataset_dir}/test-clean
+dev_dir: ${dataset_dir}/dev-clean
+
+annotation_format: .trans.txt
+sep: '|'
+speaker_filepath: ${train_dir}/LibriSpeech/SPEAKERS.TXT
+speaker_csv: speaker.csv

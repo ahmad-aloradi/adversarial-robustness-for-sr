@@ -1,5 +1,21 @@
 _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
 
+
+dataset_df_cols:
+  dataset_name: voxceleb
+  language: en
+  nationality: us
+  sample_rate: null
+
+speaker_df_cols:
+  speaker_id: speaker_id
+  gender: gender
+  vggface_id: speaker_name
+  nationality: country
+  split: split
+  source: source
+
+
 dataset:
   data_dir: ${paths.data_dir}/voxceleb
   wav_dir: ${datamodule.dataset.data_dir}/voxceleb1_2

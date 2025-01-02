@@ -460,6 +460,56 @@ class AudioProcessor:
         return F.deemphasis(waveform, coeff)
 
 
+class SimpleAudioDataset(Dataset):
+    def __init__(self, df, wav_dir, crop_len=None, sr=16000):
+        self.df = df
+        self.wav_dir = wav_dir
+        self.crop_len = crop_len # in seconds
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        wav_path = str(self.wav_dir / self.df.iloc[idx].rel_filepath)
+        waveform, sr = torchaudio.load(wav_path)
+        if self.crop_len:
+            waveform = waveform[:, : int(sr * self.crop_len)]
+        return waveform.squeeze(0), idx
+
+    @staticmethod
+    def collate_fn(batch):
+        """Collate function to ensure all audio data are of same length.
+        Pads shorter sequences and truncates longer ones.
+
+        Args:
+            batch: List of tuples (waveform, index)
+        
+        Returns:
+            Tuple of (padded_waveforms, indices)
+        """
+        # Extract waveforms and indices
+        waveforms, indices = zip(*batch)
+
+        # Find max length in current batch
+        max_len = max(len(waveform) for waveform in waveforms)
+
+        # Pad or truncate each waveform to max_len
+        processed_waveforms = []
+        for waveform in waveforms:
+            curr_len = len(waveform)
+            if curr_len > max_len:
+                # Truncate
+                processed_waveforms.append(waveform[:max_len])
+            else:
+                # Pad with zeros
+                padding = torch.zeros(max_len - curr_len)
+                processed_waveforms.append(torch.cat([waveform, padding]))
+
+        # Stack all waveforms into a single tensor
+        waveforms_tensor = torch.stack(processed_waveforms)
+        return waveforms_tensor, indices
+
+
 class DatasetFromSampler(Dataset):
     """Dataset to create indexes from `Sampler`.
 
@@ -540,8 +590,6 @@ class DistributedSamplerWrapper(DistributedSampler):
         return iter(itemgetter(*indexes_of_indexes)(sub_sampler_indexes))
 
 
-
-# Example usage and test
 if __name__ == "__main__":
     # Create a sample waveform
     from matplotlib import pyplot as plt
