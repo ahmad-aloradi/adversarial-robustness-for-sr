@@ -11,9 +11,10 @@ class LanguagePredictionModel():
     """
     Identifies the language of an audio file using a pre-trained model.
     """
-    def __init__(self, wav_dir: str):
+    def __init__(self, wav_dir: str, crop_len: float = 8.0):
         self.wav_dir = wav_dir
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.crop_len = crop_len
 
         # https://huggingface.co/speechbrain/lang-id-commonlanguage_ecapa
         self.model = EncoderClassifier.from_hparams(
@@ -120,7 +121,7 @@ class LanguagePredictionModel():
             }
     
     def preprare_dataloader(self, df: pd.DataFrame, cfg: Dict) -> DataLoader:
-        dataset = SimpleAudioDataset(df, self.wav_dir)
+        dataset = SimpleAudioDataset(df, self.wav_dir, crop_len=self.crop_len)
         dataloader = DataLoader(dataset=dataset, collate_fn=SimpleAudioDataset.collate_fn, **cfg)
         return dataloader
 

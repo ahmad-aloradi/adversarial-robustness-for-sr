@@ -13,6 +13,10 @@ import hydra
 from hydra import initialize, compose
 from omegaconf import DictConfig
 
+from src.datamodules.components.common import get_dataset_class
+
+DatasetCols, DF_COLS = get_dataset_class('librispeech')
+
 
 def init_default_config_to_df(df, config):
     for key in config['dataset_df_cols']:
@@ -121,8 +125,7 @@ def process(config, delimiter):
                       df['rel_filepath'].apply(lambda rel_filepath: os.path.join(subset, rel_filepath)))
 
         # Re-order columns such that 'text'and 'rel_filepath' are the first two columns
-        df = df[[col for col in df.columns if col not in ['rel_filepath', 'text']] + 
-                ['rel_filepath', 'text']]
+        df = df[DF_COLS]
 
         write_dataset_csv(df=df,
                           path=os.path.join(config['metdata_path'], f'{os.path.basename(subset)}.csv')
