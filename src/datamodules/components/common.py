@@ -1,9 +1,8 @@
 """
 Common constants and functions used across the datamodules.
 """
-
-from dataclasses import dataclass, asdict, astuple
-from typing import Literal
+from dataclasses import dataclass, astuple, asdict
+from typing import Literal, NamedTuple
 
 
 @dataclass(frozen=True)
@@ -20,15 +19,50 @@ class BaseDatasetCols:
     TEXT: Literal['text'] = 'text'
 
 
+#########   Voxceleb dataclass   #########
+
 @dataclass(frozen=True)
 class Voxceleb(BaseDatasetCols):
     SPEAKER_NAME: Literal['speaker_name'] = 'speaker_name'
     SOURCE: Literal['source'] = 'source'
 
 @dataclass(frozen=True)
+class VoxcelebSpeaker:
+    speaker_id: Literal['speaker_id'] = 'speaker_id'
+    gender: Literal['gender'] = 'gender'
+    vggface_id: Literal['speaker_name'] = 'speaker_name'
+    nationality: Literal['country'] = 'country'
+    split: Literal['split'] = 'split'
+    source: Literal['source'] = 'source'
+
+class VoxcelebDefaults(NamedTuple):
+  dataset_name: str = 'voxceleb'
+  language: str = None 
+  country: str = None
+  sample_rate: float = 16000
+
+
+#########   LibriSpeech dataclasses   #########
+
+@dataclass(frozen=True)
 class Librispeech(BaseDatasetCols):
     SPEAKER_NAME: Literal['speaker_name'] = 'speaker_name'
 
+@dataclass(frozen=True)
+class LibrispeechSpeaker:
+    ID: Literal['speaker_id'] = 'speaker_id'
+    SEX: Literal['gender'] = 'gender'
+    SUBSET: Literal['split'] = 'split'
+    MINUTES: Literal['total_dur/spk'] = 'total_dur/spk'
+    NAME: Literal['speaker_name'] = 'speaker_name'
+    
+class LibriSpeechDefaults(NamedTuple):
+  dataset_name: str = 'librispeech'
+  language: str = 'en'
+  country: str = 'us'
+  sample_rate: float = 16000
+
+#########   Common functions   #########
 
 def get_dataset_class(dataset: str):
     """
@@ -45,4 +79,21 @@ def get_dataset_class(dataset: str):
         dataclass_instance = Librispeech()
     else:
         dataclass_instance =  BaseDatasetCols()    
+    return dataclass_instance, list(astuple(dataclass_instance))
+
+
+def get_speaker_class(dataset: str):
+    """
+    Get the dataset-specific dataclass columns based on the dataset name.
+    Args:
+        dataset (str): Name of the dataset.
+    Returns:
+        dataclass_instance (dataclass): Dataclass
+    """
+    if dataset == 'librispeech':
+        dataclass_instance = LibrispeechSpeaker()
+    elif dataset == 'voxceleb':
+        dataclass_instance = VoxcelebSpeaker()
+    else:
+        raise NotImplementedError(f"Speaker dataclass not implemented for {dataset}")
     return dataclass_instance, list(astuple(dataclass_instance))
