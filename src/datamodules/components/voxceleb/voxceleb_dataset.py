@@ -59,7 +59,7 @@ class TrainCollate(VoxCelebCollate):
             speaker_id=speaker_ids,
             audio_length=lengths,
             audio_path=audio_paths,
-            nationality=nationalities,
+            country=nationalities,
             gender=gender_labels,
             sample_rate=sample_rates,
             recording_duration=recording_durations,
