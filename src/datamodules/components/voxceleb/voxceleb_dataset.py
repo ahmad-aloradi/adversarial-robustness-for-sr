@@ -8,22 +8,14 @@ from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 import pandas as pd
 
-sys.path.append(f"/home/aloradi/adversarial-robustness-for-sr")
-from src.datamodules.components.utils import AudioProcessor # NOQA E402
-from src.datamodules.components.utils import CsvProcessor  # NOQA E402
+from src.datamodules.components.utils import AudioProcessor
+from src.datamodules.components.utils import CsvProcessor
+from src.datamodules.components.common import get_dataset_class, VoxcelebDefaults, DatasetItem, CLASS_ID
+
+DATASET_DEFAULTS = VoxcelebDefaults()
+DATASET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
 
 
-@dataclass
-class VoxCelebItem:
-    """Single item from VoxCeleb dataset."""
-    audio: torch.Tensor
-    speaker_id: int
-    audio_length: int
-    audio_path: str
-    nationality: str
-    gender: str
-    sample_rate: int
-    
 @dataclass
 class VoxCelebVerificationItem:
     """Single verification trial from VoxCeleb dataset."""
@@ -33,50 +25,54 @@ class VoxCelebVerificationItem:
     test_length: int
     trial_label: int
     same_gender_label: int
-    nationality_label: int
+    same_nationality_label: int
     enroll_path: str
     test_path: str
     sample_rate: int
 
+@dataclass
+class VoxcelebItem(DatasetItem):
+    """Single item from dataset."""
+    sample_rate: float = 16000.0
 
+####### Coallate functions #######
 class VoxCelebCollate:
     """Base collate class for variable length audio"""
     def __init__(self, pad_value: float = 0.0):
         self.pad_value = pad_value
-
     def __call__(self, batch):
         raise NotImplementedError
 
-
 class TrainCollate(VoxCelebCollate):
     """Collate function for training data"""
-    def __call__(self, batch) -> VoxCelebItem:
-        waveforms, speaker_ids, audio_paths, nationalities, genders, sample_rate = zip(
-            *[(item.audio, item.speaker_id, item.audio_path, item.nationality, item.gender, item.sample_rate
-               ) for item in batch])
+    def __call__(self, batch) -> VoxcelebItem:
+        waveforms, speaker_ids, audio_paths, nationalities, genders, sample_rates, recording_durations, texts = zip(
+            *[(item.audio, item.speaker_id, item.audio_path, item.country, 
+               item.gender, item.sample_rate, item.recording_duration, item.text) for item in batch])
         lengths = torch.tensor([wav.shape[0] for wav in waveforms])
         padded_waveforms = pad_sequence(waveforms, batch_first=True, padding_value=self.pad_value)
 
-        gender_labels = torch.tensor([float(0) if gender == 'm' else float(1) for gender in genders])
+        gender_labels = torch.tensor([float(0) if gender == 'male' else float(1) for gender in genders])
 
-        return VoxCelebItem(
+        return VoxcelebItem(
             audio=padded_waveforms,
-            speaker_id=torch.tensor(speaker_ids),
+            speaker_id=speaker_ids,
             audio_length=lengths,
             audio_path=audio_paths,
-            nationality= nationalities,
+            nationality=nationalities,
             gender=gender_labels,
-            sample_rate=sample_rate
+            sample_rate=sample_rates,
+            recording_duration=recording_durations,
+            text=texts
         )
-
 
 class VerificationCollate(VoxCelebCollate):
     """Collate function for verification pairs"""
     def __call__(self, batch) -> VoxCelebVerificationItem:
-        enroll_wavs, test_wavs, labels, same_gender_labels, nationality_labels, enroll_paths, test_paths, sample_rate = zip(
+        enroll_wavs, test_wavs, labels, same_gender_labels, same_nationality_labels, enroll_paths, test_paths, sample_rate = zip(
             *[(item.enroll_audio, item.test_audio, item.trial_label, 
-               item.same_gender_label, item.nationality_label,
-               item.enroll_path, item.test_path) for item in batch])
+               item.same_gender_label, item.same_nationality_label,
+               item.enroll_path, item.test_path, item.sample_rate) for item in batch])
         
         # Process enrollment utterances
         lengths1 = torch.tensor([wav.size(0) for wav in enroll_wavs])
@@ -91,14 +87,16 @@ class VerificationCollate(VoxCelebCollate):
             enroll_length=lengths1,
             test_audio=padded_wav2s,
             test_length=lengths2,
-            trial_label=torch.tensor(labels),
-            same_gender_label=torch.tensor(same_gender_labels),
-            nationality_label=torch.tensor(nationality_labels),
+            trial_label=labels,
+            same_gender_label=same_gender_labels,
+            same_nationality_label=same_nationality_labels,
             enroll_path=enroll_paths,
             test_path=test_paths,
             sample_rate=sample_rate
         )
 
+
+####### Datasets #######
 
 class VoxCelebDataset(Dataset):
     """Initialize the VoxCelebDataset
@@ -120,7 +118,7 @@ class VoxCelebDataset(Dataset):
         sep: str = "|",
     ):
         self.data_dir = Path(data_dir)
-        self.dataset = pd.read_csv(data_filepath,sep=sep)
+        self.dataset = pd.read_csv(data_filepath, sep=sep)
         self.audio_processor = AudioProcessor(sample_rate)
         if isinstance(max_duration, (int, float)):
             self.max_samples = int(max_duration * sample_rate)
@@ -132,9 +130,10 @@ class VoxCelebDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-    def __getitem__(self, idx) -> VoxCelebItem:
+    def __getitem__(self, idx) -> VoxcelebItem:
         # Retrieve data from csv
-        audio_path = self.dataset.iloc[idx].path        
+        row = self.dataset.iloc[idx]
+        audio_path = row[DATASET_CLS.REL_FILEPATH]
         waveform, _ = self.audio_processor.process_audio(str(self.data_dir / audio_path))
 
         # Trim if longer than max_duration
@@ -142,16 +141,17 @@ class VoxCelebDataset(Dataset):
             start = torch.randint(0, waveform.size(0) - self.max_samples, (1,))
             waveform = waveform[start:start + self.max_samples]
                 
-        return VoxCelebItem(
+        return VoxcelebItem(
             audio=waveform,
-            speaker_id=self.dataset.iloc[idx].class_id,
+            speaker_id=row[CLASS_ID].item(),
             audio_length=waveform.shape[0],
             audio_path=audio_path,
-            nationality= self.dataset.iloc[idx].nationality,
-            gender=self.dataset.iloc[idx].gender,
-            sample_rate=self.audio_processor.sample_rate
+            country=row[DATASET_CLS.NATIONALITY],
+            gender=row[DATASET_CLS.GENDER],
+            sample_rate=self.audio_processor.sample_rate,
+            recording_duration=row[DATASET_CLS.REC_DURATION],
+            text=row.get(DATASET_CLS.TEXT, '')
         )
-
 
 class VoxCelebVerificationDataset(Dataset):
     """
@@ -202,8 +202,8 @@ class VoxCelebVerificationDataset(Dataset):
             enroll_length=enroll_wav.shape[0],
             test_length=test_wav.shape[0],
             trial_label=row.label,
-            same_gender_label=row, 
-            nationality_label=-1,
+            same_gender_label=row.same_gender.item(), 
+            same_nationality_label=row.same_nationality.item(),
             enroll_path=enroll_path,
             test_path=test_path,
             sample_rate=self.audio_processor.sample_rate
@@ -212,13 +212,15 @@ class VoxCelebVerificationDataset(Dataset):
 
 if __name__ == "__main__":
     import argparse
+    from torch.utils.data import DataLoader
+    
     parser = argparse.ArgumentParser(description="Generate train_list.txt for VoxCeleb")
     parser.add_argument("--voxceleb_dir", 
                         type=str,
                         default="data/voxceleb/voxceleb1_2",)
     parser.add_argument("--data_filepath", 
                         type=str, 
-                        default="data/voxceleb/voxceleb_metadata/preprocessed/voxceleb_dev.csv",
+                        default="data/voxceleb/voxceleb_metadata/metadata/voxceleb_dev.csv",
                         help="Output file path")
     parser.add_argument("--verification_file",
                         type=str,
@@ -226,19 +228,24 @@ if __name__ == "__main__":
     args = parser.parse_args()    
 
     voxceleb_data = VoxCelebDataset(data_dir=args.voxceleb_dir, 
-                                    data_filepath=args.data_filepath)
+                                    data_filepath=args.data_filepath,
+                                    sample_rate=16000.0,)
 
     print("Number of samples: ", len(voxceleb_data))
     print("Sample: ", voxceleb_data.__getitem__(0))
 
+    dataloder = DataLoader(voxceleb_data, batch_size=2, collate_fn=TrainCollate())
+    for batch in dataloder:
+        print(batch)
+        break
+
     # Test II
-    df = pd.read_csv("data/voxceleb/voxceleb_metadata/preprocessed/voxceleb_dev.csv", sep='|')
+    df = pd.read_csv("data/voxceleb/voxceleb_metadata/metadata/voxceleb_dev.csv", sep='|')
 
     train_df, val_df = CsvProcessor.split_dataset(df=df,
                                                   save_csv=False,
                                                   train_ratio = 0.98,
-                                                  speaker_overlap=False,
-                                                  output_dir="data/voxceleb/voxceleb_metadata/preprocessed")
+                                                  speaker_overlap=False)
     
     # Print statistics
     print(f"\nDataset split statistics:")
@@ -246,3 +253,16 @@ if __name__ == "__main__":
     print(f"Validation samples: {len(val_df)} ({len(val_df)/len(df):.1%})")
     print(f"Training speakers: {len(train_df['speaker_id'].unique())}")
     print(f"Validation speakers: {len(val_df['speaker_id'].unique())}")
+
+    # Test III
+    test_filepath = '/home/aloradi/adversarial-robustness-for-sr/data/voxceleb/voxceleb_metadata/preprocessed/veri_test_rich.csv'
+    voxceleb_data = VoxCelebVerificationDataset(data_dir=args.voxceleb_dir, 
+                                                data_filepath=test_filepath, 
+                                                sample_rate=16000.0)
+    print("Number of samples in test set: ", len(voxceleb_data))
+    print("Sample: ", voxceleb_data.__getitem__(0))
+
+    dataloder = DataLoader(voxceleb_data, batch_size=2, collate_fn=VerificationCollate())
+    for batch in dataloder:
+        print(batch)
+        break

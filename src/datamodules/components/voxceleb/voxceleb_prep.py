@@ -425,7 +425,7 @@ class VoxCelebProcessor:
         metadata_df = pd.read_csv(metadata_path, sep='|').fillna('N/A')
 
         # Create lookup dictionaries for faster access
-        metadata_lookup = metadata_df.set_index({DATESET_CLS.SPEAKER_ID}).to_dict('index')
+        metadata_lookup = metadata_df.set_index(DATESET_CLS.SPEAKER_ID).to_dict('index')
 
         # Read verification file
         veri_df = pd.read_csv(veri_test_path, sep=' ', header=None,
@@ -436,7 +436,7 @@ class VoxCelebProcessor:
         veri_df['test_id'] = veri_df['test_path'].apply(lambda x: DATASET_DEFAULTS.dataset_name + '_' + x.split('/')[0])
         
         # Add metadata for both speakers
-        for field in [DATESET_CLS.NATIONALITY, 'gender']:
+        for field in [DATESET_CLS.NATIONALITY, DATESET_CLS.GENDER]:
             veri_df[f'enroll_{field}'] = veri_df['enroll_id'].map(
                 lambda x: metadata_lookup[x][field] if x in metadata_lookup else 'N/A'
             )
@@ -459,9 +459,9 @@ class VoxCelebProcessor:
             'label', 
             'enroll_path', 'test_path',
             'enroll_id', 'test_id',
-            f'enroll_{DATESET_CLS.GENDER}',f'test_{DATESET_CLS.NATIONALITY}',
+            f'enroll_{DATESET_CLS.GENDER}',f'test_{DATESET_CLS.GENDER}',
             f'enroll_{DATESET_CLS.NATIONALITY}', f'test_{DATESET_CLS.NATIONALITY}',
-            f'same_{DATESET_CLS.NATIONALITY}', f'same_{DATESET_CLS.NATIONALITY}'
+            f'same_{DATESET_CLS.GENDER}', f'same_{DATESET_CLS.NATIONALITY}'
         ]
         veri_df = veri_df[column_order]
 

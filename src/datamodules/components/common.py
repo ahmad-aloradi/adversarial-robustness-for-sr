@@ -1,9 +1,13 @@
 """
 Common constants and functions used across the datamodules.
 """
-from dataclasses import dataclass, astuple, asdict
+from dataclasses import dataclass, astuple
 from typing import Literal, NamedTuple
+import torch
 
+#########   Base dataclasses   #########
+
+CLASS_ID = 'class_id'
 
 @dataclass(frozen=True)
 class BaseDatasetCols:
@@ -18,6 +22,19 @@ class BaseDatasetCols:
     REL_FILEPATH: Literal['rel_filepath'] = 'rel_filepath'
     TEXT: Literal['text'] = 'text'
 
+
+@dataclass
+class DatasetItem:
+    """Single item from dataset."""
+    audio: torch.Tensor
+    audio_length: int
+    audio_path: str
+    speaker_id: int
+    recording_duration: float
+    gender: str
+    sample_rate: int
+    country: str = None
+    text: str = ''
 
 #########   Voxceleb dataclass   #########
 

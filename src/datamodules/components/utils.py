@@ -1,4 +1,3 @@
-import os
 from operator import itemgetter
 from typing import Iterator, Optional, Tuple, List, Dict
 from pathlib import Path
@@ -10,12 +9,11 @@ import torchaudio
 import torchaudio.functional as F
 from torch.utils.data import Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
-
-import sys
-sys.path.append(f"/home/aloradi/adversarial-robustness-for-sr")
+from src.datamodules.components.common import BaseDatasetCols, CLASS_ID
 from src import utils
-log = utils.get_pylogger(__name__)
 
+log = utils.get_pylogger(__name__)
+DATESET_CLS = BaseDatasetCols()
 
 class CsvProcessor:
     """
@@ -84,19 +82,15 @@ class CsvProcessor:
 
     @staticmethod
     def concatenate_csvs(csv_paths, 
-                         fill_value='N/A', 
-                         speaker_id_col='speaker_id', 
-                         utterance_id_col='utterance_id',
-                         rel_path_col='rel_path',
+                         fill_value='N/A',
+                         rel_path_col=DATESET_CLS.REL_FILEPATH,
                          sep='|') -> pd.DataFrame:
         """
-        Concatenate multiple CSVs with handling for different columns and unique IDs.
+        Concatenate multiple CSVs with handling for different columns and unique paths.
         
         Args:
             csv_paths (list): List of paths to CSV files
             fill_value: Value to fill missing columns with (default: None)
-            speaker_id_col (str): Name of the speaker ID column (default: 'speaker_id')
-            utterance_id_col (str): Name of the utterance ID column (default: 'utterance_id')
             rel_path_col (str): Name of the relative path column (default: 'rel_path')
         
         Returns:
@@ -105,19 +99,14 @@ class CsvProcessor:
         # Read all CSVs and store their DataFrames
         dfs = []
         for path in csv_paths:
-            df = pd.read_csv(path, sep=sep)
-
-            if utterance_id_col not in df.columns:
-                df[utterance_id_col] = df[rel_path_col].apply(
-                    lambda x: os.path.splitext(x)[0].replace(os.sep, '_'))
-                
+            df = pd.read_csv(path, sep=sep)                
             dfs.append(df)
         
         # Concatenate all DataFrames
         combined_df = pd.concat(dfs, ignore_index=True)
         
-        # Ensure utterance IDs are unique
-        utterance_counts = combined_df[utterance_id_col].value_counts()
+        # Ensure relative paths are unique
+        utterance_counts = combined_df[rel_path_col].value_counts()
         duplicate_utterances = utterance_counts[utterance_counts > 1].index
         
         if not duplicate_utterances.empty:
@@ -135,7 +124,7 @@ class CsvProcessor:
     @staticmethod
     def append_speaker_stats(df: pd.DataFrame, 
                              speaker_stats: pd.DataFrame,
-                             col_id: str = 'speaker_id') -> pd.DataFrame:
+                             col_id: str = DATESET_CLS.SPEAKER_ID) -> pd.DataFrame:
         """Append speaker stats to metadata"""
         df = df.merge(speaker_stats, on=col_id, how='left')
         df = df.sort_values('total_dur/spk', ascending=False)
@@ -145,11 +134,11 @@ class CsvProcessor:
 
     @staticmethod
     def get_speakers_stats(df: pd.DataFrame,
-                           col_id: str = 'speaker_id',
-                           duration_col: str = 'duration',
+                           col_id: str,
+                           duration_col: str,
                            rounding: int = 4) -> pd.DataFrame:
         speaker_stats = df.groupby(col_id).agg(
-            {'duration': ['sum', 'mean', 'count']}).round(rounding)
+            {duration_col: ['sum', 'mean', 'count']}).round(rounding)
 
         speaker_stats.columns = pd.MultiIndex.from_tuples([
             (duration_col, 'total_dur/spk'),
@@ -164,7 +153,7 @@ class CsvProcessor:
 
     @staticmethod
     def generate_training_ids(combined_df: pd.DataFrame,
-                              id_col: str = 'speaker_id', 
+                              id_col: str = DATESET_CLS.SPEAKER_ID,
                               verbose=True) -> pd.DataFrame:
         """
         Generate training IDs from combined VoxCeleb1 and VoxCeleb2 metadata
@@ -193,9 +182,9 @@ class CsvProcessor:
     @staticmethod
     def update_metadata_with_training_ids(df: pd.DataFrame,
                                           speaker_to_id: Dict[str, int],
-                                          id_col: str = 'speaker_id', 
+                                          id_col: str = DATESET_CLS.SPEAKER_ID, 
                                           verbose: bool = True,
-                                          class_id_col: str = 'class_id') -> pd.DataFrame:
+                                          class_id_col: str = CLASS_ID) -> pd.DataFrame:
         """
         Update metadata CSV file with training_id column
         
@@ -222,31 +211,27 @@ class CsvProcessor:
     def process(self,
                 dataset_files: List[str],
                 spks_metadata_paths: List[str],
-                speaker_id_col: str = 'speaker_id',
-                utterance_id_col: str = 'utterance_id',
-                rel_path_col: str = 'rel_path',
-                duration_col: str = 'duration',
+                speaker_id_col: str = DATESET_CLS.SPEAKER_ID,
+                rel_path_col: str = DATESET_CLS.REL_FILEPATH,
+                duration_col: str = DATESET_CLS.REC_DURATION,
                 rounding: int = 4,
-                class_id: str = 'class_id',
-                verbose: bool = True):
+                class_id: str = CLASS_ID,
+                verbose: bool = True,
+                sep: str = '|') -> Tuple[pd.DataFrame, pd.DataFrame]:
         
         # read and append metadata
-        dataset_df = self.concatenate_csvs(dataset_files, 
-                                           fill_value=self.fill_value,
-                                           speaker_id_col=speaker_id_col,
-                                           utterance_id_col=utterance_id_col,
-                                           rel_path_col=rel_path_col)
+        dataset_df = self.concatenate_csvs(dataset_files, fill_value=self.fill_value, rel_path_col=rel_path_col, sep=sep)
 
         # generate training ids
         speaker_to_id = self.generate_training_ids(dataset_df, id_col=speaker_id_col, verbose=verbose)
 
-        # append training ids to metadata
+        # append training ids to metadata        
         updated_dataset_df = self.update_metadata_with_training_ids(df=dataset_df,
                                                                     speaker_to_id=speaker_to_id,
                                                                     id_col=speaker_id_col,
                                                                     verbose=verbose,
                                                                     class_id_col=class_id)
-                
+
         # get speaker stats
         speaker_stats = self.get_speakers_stats(df=updated_dataset_df,
                                                 col_id=speaker_id_col,
@@ -260,22 +245,24 @@ class CsvProcessor:
         combined_metadatda = self.concatenate_metadata(spks_metadata_paths, 
                                                        fill_value='N/A',
                                                        speaker_id_col=speaker_id_col,
-                                                       sep='|')
+                                                       sep=sep)
 
         speaker_to_id_df = self.lookup_with_metadata(speaker_to_id=speaker_to_id, 
                                                      speaker_stats=speaker_stats,
-                                                     metadata=combined_metadatda)
-
+                                                     metadata=combined_metadatda,
+                                                     speaker_id_col=speaker_id_col,
+                                                     class_id=class_id)
         return final_df, speaker_to_id_df
-
+            
 
     def lookup_with_metadata(self,
                              speaker_to_id: Dict,
                              speaker_stats: pd.DataFrame,
                              metadata: pd.DataFrame,
-                             speaker_id_col: str = 'speaker_id'):
+                             speaker_id_col: str = DATESET_CLS.SPEAKER_ID,
+                             class_id: str = CLASS_ID) -> pd.DataFrame:
         # Save speaker lookup table with class IDs
-        speaker_to_id_df = pd.DataFrame({'speaker_id': speaker_to_id.keys(), 'class_id': speaker_to_id.values()})
+        speaker_to_id_df = pd.DataFrame({speaker_id_col: speaker_to_id.keys(), class_id: speaker_to_id.values()})
         speaker_to_id_df = self.append_speaker_stats(df=speaker_to_id_df, speaker_stats=speaker_stats, col_id=speaker_id_col)
         speaker_to_id_df = speaker_to_id_df.merge(metadata, on=speaker_id_col, how='left')
         return speaker_to_id_df

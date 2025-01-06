@@ -3,7 +3,7 @@ LibriSpeech dataset preparation
 """
 
 import os
-import glob
+from pathlib import Path
 from multiprocessing.dummy import Pool as ThreadPool
 from dataclasses import asdict
 
@@ -34,12 +34,12 @@ def write_dataset_csv(df, path, sep='|', fillna_value='N/A'):
     df.to_csv(path, sep=sep, index=False)
 
 
-def get_audio_based_features(audio_filepath):
-    audio = sf.SoundFile(audio_filepath)
+def get_audio_based_features(audio_filepath, dataset_dir):
+    audio = sf.SoundFile(dataset_dir + os.sep + audio_filepath)
     return pd.Series([audio.samplerate,  float(len(audio)/audio.samplerate)], [DATESET_CLS.SR, DATESET_CLS.REC_DURATION])
 
 
-def process(config, delimiter):
+def process(config, delimiter, save_csv=True):
     """Generates .csv file for the dataset
 
     Parameters
@@ -70,22 +70,28 @@ def process(config, delimiter):
     df_speaker[SPEAKER_CLS.SEX] = df_speaker[SPEAKER_CLS.SEX].apply(lambda gender: 'male' if 'M' in gender else 'female')
     df_speaker[SPEAKER_CLS.ID] = df_speaker[SPEAKER_CLS.ID].apply(lambda speaker_id: DATASET_DEFAULTS.dataset_name + '_' + str(speaker_id))
     df_speaker[SPEAKER_CLS.MINUTES] = df_speaker[SPEAKER_CLS.MINUTES].apply(lambda minutes: round(float(minutes) * 60, 2))
-    
-    write_dataset_csv(df=df_speaker, path=os.path.join(config['metdata_path'], config['speaker_csv']))
+    if save_csv:
+        write_dataset_csv(df=df_speaker,path=config['speaker_csv_path'])
 
-    for subset in [config['train_dir'], config['dev_dir'], config['test_dir']]:
+
+    dfs = {
+        config['train_dir']: pd.DataFrame([], columns=list(set(DF_COLS) - set(df_speaker.columns))),
+        config['dev_dir']: pd.DataFrame([], columns=list(set(DF_COLS) - set(df_speaker.columns))),
+        config['test_dir']: pd.DataFrame([], columns=list(set(DF_COLS) - set(df_speaker.columns)))
+        }
+
+    for subset in dfs.keys():
         # Get the list of relative audio filepaths from directory        
         audio_filepaths, listed_audio_rel_filepaths = get_audio_filepaths_from_dir(config, subset)
         annotations = list()
         speaker_ids = list()
         audio_rel_filepaths = list()
         chapter_paths = set(os.path.dirname(filepath) for filepath in audio_filepaths if subset in filepath)
-        df = pd.DataFrame([], columns=list(set(DF_COLS) - set(df_speaker.columns)))
 
         # Iterate over chapters
         for chapter_path in tqdm(chapter_paths):
             # Get all audio files in this chapter
-            chapter_audio_files = glob.glob(os.path.join(chapter_path, f"*.{config['audio_file_type']}"))
+            chapter_audio_files = Path(chapter_path).rglob(f"*.{config['audio_file_type']}")
             
             # Get chapter text file
             chapter_id = os.path.basename(chapter_path)
@@ -101,8 +107,8 @@ def process(config, delimiter):
                 
             # Process each audio file in the chapter
             for audio_filepath in chapter_audio_files:
-                audio_file_rel_path = os.path.relpath(audio_filepath, subset)
-                _, _, speaker_id_file, chapter_id_file, utt_id = os.path.splitext(audio_file_rel_path)[0].split(os.sep)
+                audio_file_rel_path = os.path.join(os.path.basename(subset), os.path.relpath(audio_filepath, subset))
+                _, _, _, speaker_id_file, chapter_id_file, utt_id = os.path.splitext(audio_file_rel_path)[0].split(os.sep)
                 assert chapter_id_file == chapter_id, 'Chapter ID mismatch'
                 assert speaker_id_file == speaker_id, 'Speaker ID mismatch'
 
@@ -114,41 +120,39 @@ def process(config, delimiter):
             'Audio files and annotations don\'t match'
 
         # Write the information extracted within the loop into the dataframe
-        df[DATESET_CLS.REL_FILEPATH] = audio_rel_filepaths
-        df[DATESET_CLS.TEXT] = annotations
-        df[DATESET_CLS.SPEAKER_ID] = speaker_ids
+        dfs[subset][DATESET_CLS.REL_FILEPATH] = audio_rel_filepaths
+        dfs[subset][DATESET_CLS.TEXT] = annotations
+        dfs[subset][DATESET_CLS.SPEAKER_ID] = speaker_ids
 
         # Initialize the default config to the dataframe
-        df = init_default_config_to_df(df)
+        dfs[subset] = init_default_config_to_df(dfs[subset])
         # Add database name as prefix to avoid any future ambiguity due to non-unique speaker_ids
-        df[DATESET_CLS.SPEAKER_ID] = df[DATESET_CLS.SPEAKER_ID].apply(lambda s_id: DATASET_DEFAULTS.dataset_name + '_' + str(s_id))
+        dfs[subset][DATESET_CLS.SPEAKER_ID] = dfs[subset][DATESET_CLS.SPEAKER_ID].apply(lambda s_id: DATASET_DEFAULTS.dataset_name + '_' + str(s_id))
         # Join the speaker information to the dataframe
-        df = df.join(df_speaker.set_index(DATESET_CLS.SPEAKER_ID), on=DATESET_CLS.SPEAKER_ID, rsuffix='_')
+        dfs[subset] = dfs[subset].join(df_speaker.set_index(DATESET_CLS.SPEAKER_ID), on=DATESET_CLS.SPEAKER_ID, rsuffix='_')
 
         # Add audio based features to the df (this may take a while)
         print(f'Processing audio based features... subset: {subset}')
         with ThreadPool(100) as p:
-            df[[DATESET_CLS.SR, DATESET_CLS.REC_DURATION]] =\
-                p.map(get_audio_based_features,
-                      df[DATESET_CLS.REL_FILEPATH].apply(lambda rel_filepath: os.path.join(subset, rel_filepath)))
+            dfs[subset][[DATESET_CLS.SR, DATESET_CLS.REC_DURATION]] =\
+                p.map(lambda x: get_audio_based_features(x, config['dataset_dir']), dfs[subset][DATESET_CLS.REL_FILEPATH])
+                # p.map(get_audio_based_features, dfs[subset][DATESET_CLS.REL_FILEPATH], config['dataset_dir'])
 
         # Re-order columns such that 'text'and 'rel_filepath' are the first two columns
-        df = df[DF_COLS]
-        write_dataset_csv(df=df, path=os.path.join(config['metdata_path'], f'{os.path.basename(subset)}.csv'))
+        dfs[subset] = dfs[subset][DF_COLS]
 
+        if save_csv:
+            write_dataset_csv(df=dfs[subset], path=os.path.join(config['metdata_path'], f'{os.path.basename(subset)}.csv'))
+        
+    return dfs, df_speaker
 
 def get_audio_filepaths_from_dir(config, subset):
-    # Find all the audio and text files in the dataset directory
-    audio_filepaths = [
-        audio_filepath for audio_filepath in glob.glob(
-            os.path.join(subset,f"*/*/*/*/*.{config['audio_file_type']}")) if os.path.isfile(audio_filepath)
-            ]
-    print('Total speech files found in the audio directory: {}'.format(len(audio_filepaths)))
-
-    audio_rel_filepaths_from_dir = [os.path.relpath(audio_filepath, config['dataset_dir'])
-                                    for audio_filepath in audio_filepaths]
-
-    return audio_filepaths, audio_rel_filepaths_from_dir
+    # Find all the audio and files in the dataset directory
+    subset = Path(subset)
+    filepaths = [str(path) for path in subset.rglob(f"*.{config['audio_file_type']}")]
+    print('Total speech files found in the audio directory: {}'.format(len(filepaths)))
+    rel_filepaths_from_dir = [os.path.relpath(filepath, config['dataset_dir']) for filepath in filepaths]
+    return filepaths, rel_filepaths_from_dir
 
 def read_config(config_path):
     try:
@@ -162,11 +166,19 @@ def read_hydra_config(config_path: str = "conf", config_name: str = "config") ->
         cfg = compose(config_name=config_name)
         return cfg
 
-
-def main():
-    config = read_hydra_config(config_path='../../../../configs/datamodule/datasets', config_name='librispeech.yaml')
+def generate_csvs(config, save_csv=True, delimiter="|"):
     os.makedirs(config['metdata_path'], exist_ok=True)
-    process(config, delimiter=config['sep'])
+    if config['train_csv'] and config['dev_csv'] and config['test_csv'] and config['speaker_csv_path']:
+        # load them and return them
+        read_paths = [config['train_csv'], config['dev_csv'], config['test_csv']]
+        write_paths = [config['train_csv_exp_filepath'], config['dev_csv_exp_filepath'], config['test_csv_exp_filepath']]
+        return {write_path: pd.read_csv(read_path, sep=delimiter) for read_path, write_path in zip(read_paths, write_paths)},\
+                pd.read_csv(config['speaker_csv_path'], sep=delimiter)
+    
+    dfs, df_speaker = process(config, delimiter=config['sep'], save_csv=save_csv)
+    return dfs, df_speaker
+
 
 if __name__ == '__main__':
-    main()
+    config = read_hydra_config(config_path='../../../../configs/datamodule/datasets', config_name='librispeech.yaml')
+    dfs, df_speaker = generate_csvs(config=config)
