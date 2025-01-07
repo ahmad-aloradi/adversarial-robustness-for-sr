@@ -29,7 +29,7 @@ class LibrispeechDataModule(LightningDataModule):
         self.loaders = loaders
         self.csv_processor = CsvProcessor(verbose=self.dataset.verbose, fill_value='N/A')
 
-    def prepare_data(self, config):
+    def prepare_data(self):
         dfs_data, df_speaker = generate_csvs(self.dataset, 
                                              delimiter=self.dataset.sep, 
                                              save_csv=self.dataset.save_csv)
@@ -110,33 +110,33 @@ class LibrispeechDataModule(LightningDataModule):
         )
 
 
-@hydra.main(config_path="../../configs", config_name="train", version_base="1.3")
-def test_datamodule(cfg):
-
-    print("Starting Librispeech DataModule test...")
-
-    datamodule: LibrispeechDataModule = hydra.utils.instantiate(
-        cfg.datamodule, _recursive_=False)
-
-    datamodule.prepare_data(datamodule)
-
-    assert not datamodule.train_data
-    assert not datamodule.val_data
-    assert not datamodule.test_data
-    # assert not datamodule.predict_set
-
-    datamodule.setup()
-    assert datamodule.train_data
-    assert datamodule.val_data
-    assert datamodule.test_data
-
-    assert datamodule.train_dataloader()
-    assert datamodule.val_dataloader()
-    assert datamodule.test_dataloader()
-
-    batch = next(iter(datamodule.train_dataloader()))
-    print(batch)
-
-
 if __name__ == "__main__":
+    import pyrootutils
+    root = pyrootutils.setup_root(search_from=__file__, indicator=[".env"], pythonpath=True, dotenv=True,)
+    _HYDRA_PARAMS = {"version_base": "1.3", "config_path": str(root / "configs"), "config_name": "train.yaml"}
+
+    @hydra.main(**_HYDRA_PARAMS)
+    def test_datamodule(cfg):
+
+        print("Starting Librispeech DataModule test...")
+        datamodule: LibrispeechDataModule = hydra.utils.instantiate(cfg.datamodule, _recursive_=False)
+        datamodule.prepare_data()
+
+        assert not datamodule.train_data
+        assert not datamodule.val_data
+        assert not datamodule.test_data
+        # assert not datamodule.predict_set
+
+        datamodule.setup()
+        assert datamodule.train_data
+        assert datamodule.val_data
+        assert datamodule.test_data
+
+        assert datamodule.train_dataloader()
+        assert datamodule.val_dataloader()
+        assert datamodule.test_dataloader()
+
+        batch = next(iter(datamodule.train_dataloader()))
+        print(batch)
+
     test_datamodule()

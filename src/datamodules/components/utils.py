@@ -1,5 +1,5 @@
 from operator import itemgetter
-from typing import Iterator, Optional, Tuple, List, Dict
+from typing import Iterator, Optional, Tuple, List, Dict, Union
 from pathlib import Path
 import random
 
@@ -9,11 +9,15 @@ import torchaudio
 import torchaudio.functional as F
 from torch.utils.data import Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
-from src.datamodules.components.common import BaseDatasetCols, CLASS_ID
+from torch.nn.utils.rnn import pad_sequence
+
+from src.datamodules.components.common import BaseDatasetCols, DatasetItem
 from src import utils
 
 log = utils.get_pylogger(__name__)
 DATESET_CLS = BaseDatasetCols()
+
+######### Processing utils #########
 
 class CsvProcessor:
     """
@@ -184,7 +188,7 @@ class CsvProcessor:
                                           speaker_to_id: Dict[str, int],
                                           id_col: str = DATESET_CLS.SPEAKER_ID, 
                                           verbose: bool = True,
-                                          class_id_col: str = CLASS_ID) -> pd.DataFrame:
+                                          class_id_col: str = DATESET_CLS.CLASS_ID) -> pd.DataFrame:
         """
         Update metadata CSV file with training_id column
         
@@ -215,7 +219,7 @@ class CsvProcessor:
                 rel_path_col: str = DATESET_CLS.REL_FILEPATH,
                 duration_col: str = DATESET_CLS.REC_DURATION,
                 rounding: int = 4,
-                class_id: str = CLASS_ID,
+                class_id: str = DATESET_CLS.CLASS_ID,
                 verbose: bool = True,
                 sep: str = '|') -> Tuple[pd.DataFrame, pd.DataFrame]:
         
@@ -260,7 +264,7 @@ class CsvProcessor:
                              speaker_stats: pd.DataFrame,
                              metadata: pd.DataFrame,
                              speaker_id_col: str = DATESET_CLS.SPEAKER_ID,
-                             class_id: str = CLASS_ID) -> pd.DataFrame:
+                             class_id: str = DATESET_CLS.CLASS_ID) -> pd.DataFrame:
         # Save speaker lookup table with class IDs
         speaker_to_id_df = pd.DataFrame({speaker_id_col: speaker_to_id.keys(), class_id: speaker_to_id.values()})
         speaker_to_id_df = self.append_speaker_stats(df=speaker_to_id_df, speaker_stats=speaker_stats, col_id=speaker_id_col)
@@ -447,6 +451,144 @@ class AudioProcessor:
         return F.deemphasis(waveform, coeff)
 
 
+######### Datasets #########
+
+class BaseCollate:
+    """Static collate class for batching data items."""
+    def __init__(self, pad_value: float = 0.0):
+        self.pad_value = pad_value
+    
+    def __call__(self, batch: list[DatasetItem]) -> DatasetItem:
+        """
+        Collate a batch of DatasetItems into a single batched DatasetItem.
+        
+        Args:
+            batch: List of DatasetItem instances to be collated
+            
+        Returns:
+            DatasetItem: Batched data with padded sequences and processed labels
+        """
+        # Unzip the batch into separate lists
+        waveforms, speaker_ids, class_id, audio_paths, nationalities, genders, \
+        sample_rates, recording_durations, texts = zip(
+            *[(item.audio, item.speaker_id, item.class_id, item.audio_path, item.country,
+               item.gender, item.sample_rate, item.recording_duration, item.text) 
+              for item in batch]
+        )
+        
+        # Process audio lengths and pad sequences
+        lengths = torch.tensor([wav.shape[0] for wav in waveforms])
+        padded_waveforms = pad_sequence(waveforms, batch_first=True, padding_value=self.pad_value)
+        
+        # Convert gender labels to numerical values
+        gender_labels = torch.tensor([0 if gender == 'male' else 1 for gender in genders])
+        
+        return DatasetItem(
+            audio=padded_waveforms,
+            speaker_id=speaker_ids,
+            class_id=class_id,
+            audio_length=lengths,
+            audio_path=audio_paths,
+            country=nationalities,
+            gender=gender_labels,
+            sample_rate=sample_rates,
+            recording_duration=recording_durations,
+            text=texts
+        )
+
+
+class BaseDataset(Dataset):
+    """Static base dataset class for audio processing and feature extraction."""
+    
+    DATASET_CLS = BaseDatasetCols()
+    
+    @staticmethod
+    def _calculate_max_samples(max_duration: Union[None, float, int], sample_rate: int) -> int:
+        """Calculate maximum number of samples based on duration and sample rate."""
+        if isinstance(max_duration, (int, float)):
+            return int(max_duration * sample_rate)
+        elif max_duration is None:
+            return -1
+        raise ValueError("max_duration must be an int, float, or None")
+    
+    @staticmethod
+    def _process_audio(audio_path: Union[str, Path], audio_processor: AudioProcessor, max_samples: int) -> torch.Tensor:
+        """Process and optionally trim audio file."""
+        waveform, _ = audio_processor.process_audio(str(audio_path))
+        
+        if max_samples != -1 and waveform.size(0) > max_samples:
+            start = torch.randint(0, waveform.size(0) - max_samples, (1,))
+            waveform = waveform[start:start + max_samples]
+        
+        return waveform
+    
+    @staticmethod
+    def _load_dataset(data_filepath: Union[str, Path], sep: str = "|") -> pd.DataFrame:
+        """Load and validate dataset from CSV file."""
+        try:
+            df = pd.read_csv(data_filepath, sep=sep)
+            # append class_id columns if it does not exist
+            if BaseDataset.DATASET_CLS.CLASS_ID not in df.columns:
+                df[BaseDataset.DATASET_CLS.CLASS_ID] = None
+            return df
+        except Exception as e:
+            raise RuntimeError(f"Failed to load dataset from {data_filepath}: {str(e)}")
+    
+    def __init__(
+        self,
+        data_dir: Union[str, Path],
+        data_filepath: Union[str, Path],
+        sample_rate: Union[int, float],
+        max_duration: Union[None, float, int] = 12.0,
+        sep: str = "|",
+    ):
+        """
+        Initialize the BaseDataset.
+        
+        Args:
+            data_dir: Directory containing the audio files
+            data_filepath: Path to the metadata CSV file
+            sample_rate: Target sample rate for audio processing
+            max_duration: Maximum duration of audio samples in seconds (-1 for full length)
+            sep: Separator used in the metadata CSV file
+        """
+        self.data_dir = Path(data_dir)
+        self.dataset = self._load_dataset(data_filepath, sep)
+        self.audio_processor = AudioProcessor(sample_rate)
+        self.max_samples = self._calculate_max_samples(max_duration, sample_rate)
+    
+    def __len__(self) -> int:
+        """Return the number of items in the dataset."""
+        return len(self.dataset)
+    
+    def __getitem__(self, idx: int) -> DatasetItem:
+        """
+        Get a single item from the dataset.
+        
+        Args:
+            idx: Index of the item to retrieve
+            
+        Returns:
+            DatasetItem containing processed audio and metadata
+        """
+        row = self.dataset.iloc[idx]
+        audio_path = self.data_dir / row[BaseDataset.DATASET_CLS.REL_FILEPATH]
+        waveform = self._process_audio(audio_path, self.audio_processor, self.max_samples)
+        
+        return DatasetItem(
+            audio=waveform,
+            speaker_id=row[BaseDataset.DATASET_CLS.SPEAKER_ID],
+            class_id=row[BaseDataset.DATASET_CLS.CLASS_ID].item(),
+            audio_length=waveform.shape[0],
+            audio_path=str(audio_path),
+            country=row[BaseDataset.DATASET_CLS.NATIONALITY],
+            gender=row[BaseDataset.DATASET_CLS.GENDER],
+            sample_rate=self.audio_processor.sample_rate,
+            recording_duration=row[BaseDataset.DATASET_CLS.REC_DURATION].item(),
+            text=row.get(BaseDataset.DATASET_CLS.TEXT, '')
+        )
+
+
 class SimpleAudioDataset(Dataset):
     def __init__(self, df, wav_dir, crop_len=None, sr=16000):
         self.df = df
@@ -496,6 +638,8 @@ class SimpleAudioDataset(Dataset):
         waveforms_tensor = torch.stack(processed_waveforms)
         return waveforms_tensor, indices
 
+
+######### Datasets utils #########
 
 class DatasetFromSampler(Dataset):
     """Dataset to create indexes from `Sampler`.
@@ -578,19 +722,34 @@ class DistributedSamplerWrapper(DistributedSampler):
 
 
 if __name__ == "__main__":
-    # Create a sample waveform
+    import argparse
+    from torch.utils.data import DataLoader
     from matplotlib import pyplot as plt
-    waveform, sample_rate = torchaudio.load("data/sample.wav") 
+
+    parser = argparse.ArgumentParser(description="Generate train_list.txt for VoxCeleb")
+    parser.add_argument("--data_dir", 
+                        type=str,
+                        default="data/librispeech",)
+    parser.add_argument("--data_filepath", 
+                        type=str, 
+                        default="data/librispeech/metadata/dev-clean.csv")
+    args = parser.parse_args() 
+
+    print("Starting BASE Dataset test...")
+    dataset = BaseDataset(data_dir=args.data_dir, data_filepath=args.data_filepath, sample_rate=16000.0)
+    dataloader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=BaseCollate())
+
+    for batch in dataloader:
+        print(batch)
+        break
     
-    ap = AudioProcessor(sample_rate=sample_rate)
-    # Apply pre-emphasis
-    emphasized = ap.apply_preemphasis(waveform, coeff=0.09)
-    # Remove pre-emphasis to verify reconstruction
+    ap = AudioProcessor(sample_rate=batch.sample_rate[0])
+    emphasized = ap.apply_preemphasis(batch.audio[0], coeff=0.09)
     reconstructed = ap.remove_preemphasis(emphasized, coeff=0.09)
     
     # Plot original and reconstructed waveforms
     plt.figure(figsize=(12, 6))
-    plt.plot(waveform, label="Original waveform")
+    plt.plot(batch.audio[0], label="Original waveform")
     plt.plot(emphasized.T, label="emphasized waveform")
     plt.plot(reconstructed.T, label="Reconstructed waveform")
     plt.legend()

@@ -8,9 +8,8 @@ from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 import pandas as pd
 
-from src.datamodules.components.utils import AudioProcessor
-from src.datamodules.components.utils import CsvProcessor
-from src.datamodules.components.common import get_dataset_class, VoxcelebDefaults, DatasetItem, CLASS_ID
+from src.datamodules.components.utils import AudioProcessor, CsvProcessor, BaseCollate, BaseDataset
+from src.datamodules.components.common import get_dataset_class, VoxcelebDefaults, DatasetItem
 
 DATASET_DEFAULTS = VoxcelebDefaults()
 DATASET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
@@ -36,37 +35,10 @@ class VoxcelebItem(DatasetItem):
     sample_rate: float = 16000.0
 
 ####### Coallate functions #######
-class VoxCelebCollate:
-    """Base collate class for variable length audio"""
-    def __init__(self, pad_value: float = 0.0):
-        self.pad_value = pad_value
-    def __call__(self, batch):
-        raise NotImplementedError
+class TrainCollate(BaseCollate):
+    pass
 
-class TrainCollate(VoxCelebCollate):
-    """Collate function for training data"""
-    def __call__(self, batch) -> VoxcelebItem:
-        waveforms, speaker_ids, audio_paths, nationalities, genders, sample_rates, recording_durations, texts = zip(
-            *[(item.audio, item.speaker_id, item.audio_path, item.country, 
-               item.gender, item.sample_rate, item.recording_duration, item.text) for item in batch])
-        lengths = torch.tensor([wav.shape[0] for wav in waveforms])
-        padded_waveforms = pad_sequence(waveforms, batch_first=True, padding_value=self.pad_value)
-
-        gender_labels = torch.tensor([float(0) if gender == 'male' else float(1) for gender in genders])
-
-        return VoxcelebItem(
-            audio=padded_waveforms,
-            speaker_id=speaker_ids,
-            audio_length=lengths,
-            audio_path=audio_paths,
-            country=nationalities,
-            gender=gender_labels,
-            sample_rate=sample_rates,
-            recording_duration=recording_durations,
-            text=texts
-        )
-
-class VerificationCollate(VoxCelebCollate):
+class VerificationCollate(BaseCollate):
     """Collate function for verification pairs"""
     def __call__(self, batch) -> VoxCelebVerificationItem:
         enroll_wavs, test_wavs, labels, same_gender_labels, same_nationality_labels, enroll_paths, test_paths, sample_rate = zip(
@@ -98,60 +70,8 @@ class VerificationCollate(VoxCelebCollate):
 
 ####### Datasets #######
 
-class VoxCelebDataset(Dataset):
-    """Initialize the VoxCelebDataset
-    Args:
-        data_dir (str): Directory where the dataset is stored.
-        metadat_filepath (Tuple[str, Path]): Path to the metadata file.
-        sample_rate (int, optional): Sample rate for audio processing. Defaults to 16000.
-        max_duration (float, int, optional): Maximum duration of audio samples in seconds. 
-            Use -1 for the entire utterances. Defaults to 12.0.
-        sep (str, optional): Separator used in the metadata file. Defaults to "|".
-    """
-
-    def __init__(
-        self,
-        data_dir: str,
-        data_filepath: Tuple[str, Path],
-        sample_rate: int,
-        max_duration: Union[None, float, int, list] = 12.0,
-        sep: str = "|",
-    ):
-        self.data_dir = Path(data_dir)
-        self.dataset = pd.read_csv(data_filepath, sep=sep)
-        self.audio_processor = AudioProcessor(sample_rate)
-        if isinstance(max_duration, (int, float)):
-            self.max_samples = int(max_duration * sample_rate)
-        elif isinstance(max_duration, None):
-            self.max_samples = -1
-        else:
-            raise ValueError("max_duration must be an int, float, or None")
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx) -> VoxcelebItem:
-        # Retrieve data from csv
-        row = self.dataset.iloc[idx]
-        audio_path = row[DATASET_CLS.REL_FILEPATH]
-        waveform, _ = self.audio_processor.process_audio(str(self.data_dir / audio_path))
-
-        # Trim if longer than max_duration
-        if self.max_samples != -1 and waveform.size(0) > self.max_samples:
-            start = torch.randint(0, waveform.size(0) - self.max_samples, (1,))
-            waveform = waveform[start:start + self.max_samples]
-                
-        return VoxcelebItem(
-            audio=waveform,
-            speaker_id=row[CLASS_ID].item(),
-            audio_length=waveform.shape[0],
-            audio_path=audio_path,
-            country=row[DATASET_CLS.NATIONALITY],
-            gender=row[DATASET_CLS.GENDER],
-            sample_rate=self.audio_processor.sample_rate,
-            recording_duration=row[DATASET_CLS.REC_DURATION],
-            text=row.get(DATASET_CLS.TEXT, '')
-        )
+class VoxCelebDataset(BaseDataset):
+    pass
 
 class VoxCelebVerificationDataset(Dataset):
     """
@@ -227,13 +147,9 @@ if __name__ == "__main__":
                         help="Path to veri_test.txt if excluding verification files")
     args = parser.parse_args()    
 
-    voxceleb_data = VoxCelebDataset(data_dir=args.voxceleb_dir, 
-                                    data_filepath=args.data_filepath,
-                                    sample_rate=16000.0,)
+    voxceleb_data = VoxCelebDataset(data_dir=args.voxceleb_dir, data_filepath=args.data_filepath, sample_rate=16000.0,)
 
     print("Number of samples: ", len(voxceleb_data))
-    print("Sample: ", voxceleb_data.__getitem__(0))
-
     dataloder = DataLoader(voxceleb_data, batch_size=2, collate_fn=TrainCollate())
     for batch in dataloder:
         print(batch)
@@ -241,12 +157,7 @@ if __name__ == "__main__":
 
     # Test II
     df = pd.read_csv("data/voxceleb/voxceleb_metadata/metadata/voxceleb_dev.csv", sep='|')
-
-    train_df, val_df = CsvProcessor.split_dataset(df=df,
-                                                  save_csv=False,
-                                                  train_ratio = 0.98,
-                                                  speaker_overlap=False)
-    
+    train_df, val_df = CsvProcessor.split_dataset(df=df, save_csv=False, train_ratio = 0.98, speaker_overlap=False)
     # Print statistics
     print(f"\nDataset split statistics:")
     print(f"Training samples: {len(train_df)} ({len(train_df)/len(df):.1%})")

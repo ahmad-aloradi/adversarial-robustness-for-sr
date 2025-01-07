@@ -5,9 +5,8 @@ from dataclasses import dataclass, astuple
 from typing import Literal, NamedTuple
 import torch
 
-#########   Base dataclasses   #########
 
-CLASS_ID = 'class_id'
+#########   Base dataclasses   #########
 
 @dataclass(frozen=True)
 class BaseDatasetCols:
@@ -16,6 +15,8 @@ class BaseDatasetCols:
     NATIONALITY: Literal['country'] = 'country'
     SR: Literal['sample_rate'] = 'sample_rate'
     SPEAKER_ID: Literal['speaker_id'] = 'speaker_id'
+    CLASS_ID: Literal['class_id'] = 'class_id'
+    SPEAKER_NAME: Literal['speaker_name'] = 'speaker_name'
     GENDER: Literal['gender'] = 'gender'
     SPLIT: Literal['split'] = 'split'
     REC_DURATION: Literal['recording_duration'] = 'recording_duration'
@@ -29,10 +30,11 @@ class DatasetItem:
     audio: torch.Tensor
     audio_length: int
     audio_path: str
-    speaker_id: int
+    speaker_id: str
     recording_duration: float
     gender: str
     sample_rate: int
+    class_id: int = None
     country: str = None
     text: str = ''
 
@@ -40,7 +42,6 @@ class DatasetItem:
 
 @dataclass(frozen=True)
 class Voxceleb(BaseDatasetCols):
-    SPEAKER_NAME: Literal['speaker_name'] = 'speaker_name'
     SOURCE: Literal['source'] = 'source'
 
 @dataclass(frozen=True)
@@ -63,7 +64,7 @@ class VoxcelebDefaults(NamedTuple):
 
 @dataclass(frozen=True)
 class Librispeech(BaseDatasetCols):
-    SPEAKER_NAME: Literal['speaker_name'] = 'speaker_name'
+    pass
 
 @dataclass(frozen=True)
 class LibrispeechSpeaker:
