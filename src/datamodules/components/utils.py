@@ -63,8 +63,7 @@ class CsvProcessor:
         # Read all CSVs and store their DataFrames
         dfs = []
         for path in csv_paths:
-            df = self.read_csv(path, sep=sep)
-            dfs.append(df)
+            dfs.append(self.read_csv(path, sep=sep))
         
         combined_df = pd.concat(dfs, ignore_index=True)        
         # Ensure speaker IDs are unique by adding prefix if needed
@@ -79,9 +78,8 @@ class CsvProcessor:
                     if i > 0:  # Skip first occurrence
                         combined_df.loc[idx, speaker_id_col] = f"{speaker}_v{i}"
                     
-        combined_df = combined_df.fillna(fill_value)
-        
-        return combined_df
+
+        return combined_df.fillna(fill_value)
 
 
     @staticmethod
@@ -461,10 +459,10 @@ class BaseCollate:
     def __call__(self, batch: list[DatasetItem]) -> DatasetItem:
         """
         Collate a batch of DatasetItems into a single batched DatasetItem.
-        
+
         Args:
             batch: List of DatasetItem instances to be collated
-            
+
         Returns:
             DatasetItem: Batched data with padded sequences and processed labels
         """
@@ -525,6 +523,8 @@ class BaseDataset(Dataset):
     @staticmethod
     def _load_dataset(data_filepath: Union[str, Path], sep: str = "|") -> pd.DataFrame:
         """Load and validate dataset from CSV file."""
+        assert isinstance(data_filepath, (str, Path)), "data_filepath must be a string or Path"
+
         try:
             df = pd.read_csv(data_filepath, sep=sep)
             # append class_id columns if it does not exist
@@ -533,7 +533,7 @@ class BaseDataset(Dataset):
             return df
         except Exception as e:
             raise RuntimeError(f"Failed to load dataset from {data_filepath}: {str(e)}")
-    
+        
     def __init__(
         self,
         data_dir: Union[str, Path],
@@ -556,11 +556,11 @@ class BaseDataset(Dataset):
         self.dataset = self._load_dataset(data_filepath, sep)
         self.audio_processor = AudioProcessor(sample_rate)
         self.max_samples = self._calculate_max_samples(max_duration, sample_rate)
-    
+
     def __len__(self) -> int:
         """Return the number of items in the dataset."""
         return len(self.dataset)
-    
+
     def __getitem__(self, idx: int) -> DatasetItem:
         """
         Get a single item from the dataset.
@@ -574,11 +574,12 @@ class BaseDataset(Dataset):
         row = self.dataset.iloc[idx]
         audio_path = self.data_dir / row[BaseDataset.DATASET_CLS.REL_FILEPATH]
         waveform = self._process_audio(audio_path, self.audio_processor, self.max_samples)
-        
+        non_class_id = row[BaseDataset.DATASET_CLS.CLASS_ID] is None
+
         return DatasetItem(
             audio=waveform,
             speaker_id=row[BaseDataset.DATASET_CLS.SPEAKER_ID],
-            class_id=row[BaseDataset.DATASET_CLS.CLASS_ID].item(),
+            class_id=row[BaseDataset.DATASET_CLS.CLASS_ID] if non_class_id else row[BaseDataset.DATASET_CLS.CLASS_ID].item(),
             audio_length=waveform.shape[0],
             audio_path=str(audio_path),
             country=row[BaseDataset.DATASET_CLS.NATIONALITY],

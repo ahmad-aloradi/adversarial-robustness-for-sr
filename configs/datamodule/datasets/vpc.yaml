@@ -1,18 +1,58 @@
-_target_: src.datamodules.vpc_datamodule.AnonymizedLibriSpeechDataModule
-
-root_dir: ${paths.data_dir}/vpc2025_official
+_target_: src.datamodules.vpc_datamodule.AnonLibriDataModule
 
 num_classes: 921
+root_dir: ${paths.data_dir}/vpc2025_official    
 
-splits:
-  train: train-clean-360
-  valid: libri_dev_enrolls
-  test: libri_test_trials_f
+dataset:
+  artifacts_dir: ${paths.output_dir}/vpc2025_artifacts
+  speakers_file: ${paths.data_dir}/librispeech/metadata/SPEAKERS.csv
+  speaker_lookup: ${datamodule.dataset.artifacts_dir}/speaker_lookup.csv
+  seed: ${seed}
+  sep: "|"
+  verbose: true
+  save_csv: true
+  sample_rate: 16000
+  min_duration: 0.5
+  max_duration: 10.0
 
-subset_dirs: 
-  - ${datamodule.root_dir}/B3
-  # - ${datamodule.root_dir}/B5
-  # - ${datamodule.root_dir}/T12-5
+artifacts_paths:
+  train: ${datamodule.dataset.artifacts_dir}/train.csv
+  dev: ${datamodule.dataset.artifacts_dir}/dev.csv
+  test: ${datamodule.dataset.artifacts_dir}/test.csv
+  
+  dev_enrolls: ${datamodule.dataset.artifacts_dir}/dev_enrolls.csv
+  test_enrolls: ${datamodule.dataset.artifacts_dir}/test_enrolls.csv
+  dev_trials: ${datamodule.dataset.artifacts_dir}/dev_trials.csv
+  test_trials: ${datamodule.dataset.artifacts_dir}/test_trials.csv
+  
+  spks_train: ${datamodule.dataset.artifacts_dir}/speakers_train.csv
+  spks_dev: ${datamodule.dataset.artifacts_dir}/speakers_dev.csv
+  spks_test: ${datamodule.dataset.artifacts_dir}/speakers_test.csv
+
+
+models:
+  B3:
+    data_dir: ${datamodule.root_dir}/B3/data   
+    metadata: ${datamodule.models.B3.data_dir}/metadata
+    train: ${datamodule.models.B3.metadata}/train.csv
+    dev: ${datamodule.models.B3.metadata}/dev.csv
+    test: ${datamodule.models.B3.metadata}/test.csv
+    dev_enrolls: ${datamodule.models.B3.metadata}/dev_enrolls.csv
+    test_enrolls: ${datamodule.models.B3.metadata}/test_enrolls.csv
+    dev_trials: ${datamodule.models.B3.metadata}/dev_trials.csv
+    test_trials: ${datamodule.models.B3.metadata}/test_trials.csv
+
+  B5:
+    data_dir: ${datamodule.root_dir}/B5/data
+    metadata: ${datamodule.models.B5.data_dir}/metadata
+    train: ${datamodule.models.B5.metadata}/train.csv
+    dev: ${datamodule.models.B5.metadata}/dev.csv
+    test: ${datamodule.models.B5.metadata}/test.csv
+    dev_enrolls: ${datamodule.models.B5.metadata}/dev_enrolls.csv
+    test_enrolls: ${datamodule.models.B5.metadata}/test_enrolls.csv
+    dev_trials: ${datamodule.models.B5.metadata}/dev_trials.csv
+    test_trials: ${datamodule.models.B5.metadata}/test_trials.csv
+
 
 transform: null
 
