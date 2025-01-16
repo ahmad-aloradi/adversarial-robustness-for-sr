@@ -17,3 +17,6 @@ check_val_every_n_epoch: 1
 # set True to ensure deterministic results
 # makes training slower but gives more reproducibility than just setting seeds
 deterministic: False
+
+# gradient clipping
+gradient_clip_val: ${module.gradient_clip_val}

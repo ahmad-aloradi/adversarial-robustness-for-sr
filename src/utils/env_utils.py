@@ -23,11 +23,13 @@ def log_gpu_memory_metadata() -> None:
         return
     nvmlInit()
     cards = (nvmlDeviceGetHandleByIndex(num) for num in range(gpus_num))
+    to_mib = lambda x: round(x / (1024**2), 2)
+
     for i, card in enumerate(cards):
         info = nvmlDeviceGetMemoryInfo(card)
-        log.info(f"GPU memory info: card {i} : total : {info.total}")
-        log.info(f"GPU memory info: card {i} : free  : {info.free}")
-        log.info(f"GPU memory info: card {i} : used  : {info.used}")
+        log.info(f"GPU memory info: card {i} : total : {to_mib(info.total)} MiB")
+        log.info(f"GPU memory info: card {i} : free  : {to_mib(info.free)} MiB")
+        log.info(f"GPU memory info: card {i} : used  : {to_mib(info.used)} MiB")
 
 
 def set_seed(

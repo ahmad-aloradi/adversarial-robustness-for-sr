@@ -6,7 +6,7 @@ dataset:
   voxceleb_metadata: ${datamodule.dataset.data_dir}/voxceleb_metadata
   # For copying the metadata files to the preprocessed directory
   veri_test_path: ${datamodule.dataset.voxceleb_metadata}/downloaded/veri_test.txt
-  base_search_dir: ${datamodule.dataset.voxceleb_metadata}/preprocessed
+  base_search_dir: ${datamodule.dataset.voxceleb_metadata}/metadata
 
   voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
   veri_test_output_path: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test.csv
@@ -28,6 +28,8 @@ dataset:
   train_ratio: 0.98
 
 transforms: null
+
+num_classes: 7205
 
 loaders:
   train:

@@ -1,14 +1,14 @@
 _target_: src.modules.multimodal_vpc.MultiModalVPCModel
 
 defaults:
+  # - network: classification.yaml
   - _self_
-  - network: classification.yaml
 
 model:
-
   text_encoder:
     _target_: transformers.Wav2Vec2ForCTC.from_pretrained
     pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
+    num_labels: ${module.model.classifiers.classifiers_config.num_classes}
 
   processor:
     _target_: transformers.Wav2Vec2Processor.from_pretrained
@@ -18,18 +18,37 @@ model:
     _target_: speechbrain.inference.EncoderClassifier.from_hparams
     source: "speechbrain/spkrec-xvect-voxceleb"
     savedir: "local/.pretrained_models/spkrec-xvect-voxceleb"
-    run_opts: {"device":"cuda:0"}
+    run_opts: {"device":"cuda"}
 
-  gender_classifier:
-    hidden_size: 256
-    num_classes: 1
+  classifiers:
+    text_classifier: 
+      _target_: torch.nn.Linear
+      in_features: ${module.model.classifiers.classifiers_config.text_encoder_output_dim}
+      out_features: ${module.model.classifiers.classifiers_config.num_classes}
 
+    audio_classifier: 
+      _target_: torch.nn.Linear
+      in_features: ${module.model.classifiers.classifiers_config.audio_encoder_output_dim}
+      out_features: ${module.model.classifiers.classifiers_config.num_classes}
 
-  # _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
-  # loss_fn:
-  #   _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-  #   margin: 0.2
-  #   scale: 30
+    gender_classifier:
+      _target_: torch.nn.Sequential
+      _args_:
+        - _target_: torch.nn.Linear
+          in_features: ${module.model.classifiers.classifiers_config.audio_encoder_output_dim}
+          out_features: ${module.model.classifiers.classifiers_config.gender_out_features}
+        - _target_: torch.nn.ReLU
+        - _target_: torch.nn.Dropout
+          p: 0.2
+        - _target_: torch.nn.Linear
+          in_features: ${module.model.classifiers.classifiers_config.gender_out_features}
+          out_features: 1
+
+    classifiers_config:
+      num_classes: ${datamodule.num_classes}
+      text_encoder_output_dim: 32
+      audio_encoder_output_dim: 512
+      gender_out_features: 256
 
 criterion:
 
@@ -58,6 +77,15 @@ criterion:
     audio_criterion: ${module.criterion._base_audio_criterion}
     gender_criterion: ${module.criterion._base_gender_criterion}
 
+  loss_weights:
+    text: 0.15
+    audio: 0.8
+    gender: 0.05
+    
+  loss: ${module.criterion._base_audio_criterion} # for callbacks
+
+gradient_clip_val: 5.0
+
 optimizer:
   _target_: torch.optim.AdamW
   _partial_: True
@@ -65,9 +93,37 @@ optimizer:
   weight_decay: 1.0e-5
 
 lr_scheduler:
-  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-  _partial_: True
-  mode: 'min'
-  factor: 0.5
-  patience: 1
-  min_lr: 0.000001
+  scheduler:
+    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+    mode: "max"
+    factor: 0.3
+    min_lr: 1.0e-9
+    patience: 4
+    verbose: True
+  extras:
+    monitor: ${replace:"__metric__/valid"}
+    interval: "epoch"
+    frequency: 1
+
+metrics:
+  main:
+    _target_: "torchmetrics.Accuracy"
+    task: "multiclass"
+    num_classes: ${module.model.classifiers.classifiers_config.num_classes}
+  valid_best:
+    _target_: "torchmetrics.MaxMetric"
+  # additional:
+  #   AUROC:
+  #     _target_: "torchmetrics.AUROC"
+  #     task: "binary"
+
+logging_params:
+  on_step: False
+  on_epoch: True
+  sync_dist: True
+  prog_bar: True
+
+batch_sizes:
+  train: ${datamodule.loaders.train.batch_size}
+  valid: ${datamodule.loaders.valid.batch_size}
+  test: ${datamodule.loaders.test.batch_size}

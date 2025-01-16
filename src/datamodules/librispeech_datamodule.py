@@ -1,22 +1,20 @@
 from typing import Dict, List, Optional
+import os
 
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 import pandas as pd
 import hydra
 
-from src.datamodules.components.voxceleb.voxceleb_dataset import (
-    VoxCelebDataset, 
-    VoxCelebVerificationDataset, 
-    TrainCollate, 
-    VerificationCollate)
-from src.datamodules.components.voxceleb.voxceleb_prep import VoxCelebProcessor
 from src import utils
+from src.datamodules.components.librispeech.librispeech_dataset import LibrispeechDataset, Collate
+from src.datamodules.components.librispeech.librispeech_prep import generate_csvs, write_dataset_csv
 from src.datamodules.components.utils import CsvProcessor
 
 log = utils.get_pylogger(__name__)
 
-class VoxCelebDataModule(LightningDataModule):
+
+class LibrispeechDataModule(LightningDataModule):
     def __init__(self,
                  dataset: Dict[str, Dict[str, int]],
                  transforms: Optional[List[Dict]],
@@ -32,69 +30,50 @@ class VoxCelebDataModule(LightningDataModule):
         self.csv_processor = CsvProcessor(verbose=self.dataset.verbose, fill_value='N/A')
 
     def prepare_data(self):
-        voxceleb_processor = VoxCelebProcessor(root_dir=self.dataset.data_dir,
-                                               verbose=self.dataset.verbose,
-                                               artifcats_dir=self.dataset.voxceleb_artifacts_dir,
-                                               sep=self.dataset.sep)
-        
-        _, _ = voxceleb_processor.generate_metadata(
-            base_search_dir=self.dataset.base_search_dir,
-            min_duration=self.dataset.min_duration,
-            save_df=self.dataset.save_csv
-            )
+        dfs_data, df_speaker = generate_csvs(self.dataset, 
+                                             delimiter=self.dataset.sep, 
+                                             save_csv=self.dataset.save_csv)
+
+        # save the updated csv
+        os.makedirs(self.dataset.artifacts_dir, exist_ok=True)
+        write_dataset_csv(df_speaker, self.dataset.speaker_csv_exp_filepath, sep=self.dataset.sep)
+        for df_path, df in dfs_data.items():
+            write_dataset_csv(df, df_path, sep=self.dataset.sep)
 
         # Get class id and speaker stats
         updated_dev_csv, speaker_lookup_csv = self.csv_processor.process(
-            dataset_files=[self.dataset.dev_csv_file],
-            spks_metadata_paths=[self.dataset.metadata_csv_file],
+            dataset_files=list(dfs_data.keys()),
+            spks_metadata_paths=[self.dataset.speaker_csv_path],
             verbose=self.dataset.verbose)
         
         # save the updated csv
-        VoxCelebProcessor.save_csv(updated_dev_csv, self.dataset.dev_csv_file)
-        VoxCelebProcessor.save_csv(speaker_lookup_csv, self.dataset.speaker_lookup)
-        
-        # split the dataset into train and validation
-        CsvProcessor.split_dataset(
-            df=updated_dev_csv,
-            train_ratio = self.dataset.train_ratio,
-            save_csv=self.dataset.save_csv,
-            speaker_overlap=self.dataset.speaker_overlap,
-            speaker_id_col='speaker_id',
-            train_csv=self.dataset.train_csv_file,
-            val_csv=self.dataset.val_csv_file,
-            sep=self.dataset.sep,
-            seed=self.dataset.seed
-            )
-        
-        # enrich the verification file
-        _ = voxceleb_processor.enrich_verification_file(
-            veri_test_path=self.dataset.veri_test_path,
-            metadata_path=self.dataset.metadata_csv_file,
-            output_path=self.dataset.veri_test_output_path,
-            sep=self.dataset.sep,
-            )
-        
+        write_dataset_csv(speaker_lookup_csv, self.dataset.speaker_csv_exp_filepath, sep=self.dataset.sep)
+        for path in [
+            self.dataset.train_csv_exp_filepath, self.dataset.dev_csv_exp_filepath,
+            self.dataset.test_csv_exp_filepath]:
+            write_dataset_csv(updated_dev_csv[updated_dev_csv.split == os.path.splitext(os.path.basename(path))[0]], 
+                              path, sep=self.dataset.sep)
 
     def setup(self, stage: Optional[str] = None):
         if stage == 'fit' or stage is None:
-            self.train_data = VoxCelebDataset(
-                self.dataset.wav_dir,
-                self.dataset.train_csv_file,
+            self.train_data = LibrispeechDataset(
+                self.dataset.dataset_dir,
+                self.dataset.train_csv_exp_filepath,
                 self.dataset.sample_rate,
                 self.dataset.max_duration
             )
-            self.val_data = VoxCelebDataset(
-                self.dataset.wav_dir,
-                self.dataset.val_csv_file,
+            self.val_data = LibrispeechDataset(
+                self.dataset.dataset_dir,
+                self.dataset.dev_csv_exp_filepath,
                 self.dataset.sample_rate,
                 self.dataset.max_duration
             )
-        
         if stage == 'test' or stage is None:
-            self.test_data = VoxCelebVerificationDataset(
-                self.dataset.wav_dir,
-                self.dataset.veri_test_path,
+            self.test_data = LibrispeechDataset(
+                self.dataset.dataset_dir,
+                self.dataset.test_csv_exp_filepath,
                 self.dataset.sample_rate,
+                self.dataset.max_duration
             )
 
     def train_dataloader(self):
@@ -105,7 +84,7 @@ class VoxCelebDataModule(LightningDataModule):
             shuffle=self.loaders.train.shuffle,
             drop_last=self.loaders.train.drop_last,
             pin_memory=self.loaders.train.pin_memory,
-            collate_fn=TrainCollate()
+            collate_fn=Collate(pad_value=0.0)
         )
 
     def val_dataloader(self):
@@ -116,7 +95,7 @@ class VoxCelebDataModule(LightningDataModule):
             shuffle=self.loaders.valid.shuffle,
             drop_last=self.loaders.valid.drop_last,
             pin_memory=self.loaders.valid.pin_memory,
-            collate_fn=TrainCollate()
+            collate_fn=Collate(pad_value=0.0)
         )
 
     def test_dataloader(self):
@@ -127,7 +106,7 @@ class VoxCelebDataModule(LightningDataModule):
             shuffle=self.loaders.test.shuffle,
             pin_memory=self.loaders.test.pin_memory,
             drop_last=self.loaders.test.drop_last,
-            collate_fn=VerificationCollate()
+            collate_fn=Collate(pad_value=0.0)
         )
 
 
@@ -139,10 +118,8 @@ if __name__ == "__main__":
     @hydra.main(**_HYDRA_PARAMS)
     def test_datamodule(cfg):
 
-        print("Starting VoxCeleb DataModule test...")
-
-        datamodule: VoxCelebDataModule = hydra.utils.instantiate(cfg.datamodule, _recursive_=False)
-
+        print("Starting Librispeech DataModule test...")
+        datamodule: LibrispeechDataModule = hydra.utils.instantiate(cfg.datamodule, _recursive_=False)
         datamodule.prepare_data()
 
         assert not datamodule.train_data
@@ -161,5 +138,5 @@ if __name__ == "__main__":
 
         batch = next(iter(datamodule.train_dataloader()))
         print(batch)
-    
+
     test_datamodule()

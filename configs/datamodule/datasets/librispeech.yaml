@@ -1,0 +1,62 @@
+_target_: src.datamodules.librispeech_datamodule.LibrispeechDataModule
+
+dataset:
+  dataset_dir: ${paths.data_dir}/librispeech # Replace data_dir with PROJECTROOT when testing
+  artifacts_dir: ${hydra:runtime.output_dir}/librispeech_artifacts
+  metdata_path: ${datamodule.dataset.dataset_dir}/metadata
+  train_dir: ${datamodule.dataset.dataset_dir}/train-clean-360
+  test_dir: ${datamodule.dataset.dataset_dir}/test-clean
+  dev_dir: ${datamodule.dataset.dataset_dir}/dev-clean
+
+  train_csv: ${datamodule.dataset.metdata_path}/train-clean-360.csv
+  dev_csv: ${datamodule.dataset.metdata_path}/dev-clean.csv
+  test_csv: ${datamodule.dataset.metdata_path}/test-clean.csv
+
+  speaker_csv_path: ${datamodule.dataset.metdata_path}/SPEAKERS.csv
+
+  train_csv_exp_filepath: ${datamodule.dataset.artifacts_dir}/train-clean-360.csv
+  dev_csv_exp_filepath: ${datamodule.dataset.artifacts_dir}/dev-clean.csv
+  test_csv_exp_filepath: ${datamodule.dataset.artifacts_dir}/test-clean.csv
+  speaker_csv_exp_filepath: ${datamodule.dataset.artifacts_dir}/SPEAKERS.csv
+
+  audio_file_type: flac
+  annotation_format: .trans.txt
+  sep: '|'
+  speaker_filepath: ${datamodule.dataset.train_dir}/LibriSpeech/SPEAKERS.TXT
+  save_csv: False
+  verbose: True
+  sample_rate: 16000
+  max_duration: 10
+
+transforms: null
+
+num_classes: 921
+
+loaders:
+  train:
+    batch_size: 8
+    shuffle: True
+    num_workers: 4
+    drop_last: True
+    pin_memory: False
+
+  valid:
+    batch_size: 8
+    shuffle: False
+    num_workers: 4
+    drop_last: False
+    pin_memory: False
+
+  test:
+    batch_size: 8
+    shuffle: False
+    num_workers: 0
+    drop_last: False
+    pin_memory: False
+
+  predict:
+    batch_size: 8
+    shuffle: False
+    num_workers: 0
+    drop_last: False
+    pin_memory: False
