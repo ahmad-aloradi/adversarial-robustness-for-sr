@@ -9,14 +9,13 @@ from src.datamodules.components.common import LibriSpeechDefaults, get_dataset_c
 from src.datamodules.components.vpc25.vpc_dataset import (VPC25Dataset, VPC25TestDataset, VPC25ClassCollate,
                                                           VPCTestCoallate,VPC25EnrollCollate, VPC25EnrollDataset)
 from src.datamodules.components.librispeech.librispeech_prep import write_dataset_csv
-from src.datamodules.components.utils import CsvProcessor
+from src.datamodules.components.utils import CsvProcessor #,  SpeakerBatchSampler
 from src import utils
 
 log = utils.get_pylogger(__name__)
 
 DATASET_DEFAULTS = LibriSpeechDefaults()
 DATASET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
-
 
 class AnonLibriDataModule(pl.LightningDataModule):
     """PyTorch Lightning DataModule for anonymized LibriSpeech-like data."""
@@ -28,6 +27,7 @@ class AnonLibriDataModule(pl.LightningDataModule):
         loaders: Dict[str, Dict[str, int]],
         models: Dict[str, Dict[str, str]],
         transform=None,
+        trainer_config: Optional[str] = None,
         *args, **kwargs
     ):
         """
@@ -45,6 +45,9 @@ class AnonLibriDataModule(pl.LightningDataModule):
         self.eval_data = None
         self.test_data = None
         verbose = True
+        
+        # Check if using DDP trainer
+        self.is_ddp = trainer_config is not None and ("ddp" in trainer_config or "ddp_find_unused_parameters_true" in trainer_config)
 
         self.root_dir = Path(root_dir)
         self.dataset = dataset
@@ -56,31 +59,68 @@ class AnonLibriDataModule(pl.LightningDataModule):
         self.csv_processor = CsvProcessor(verbose=verbose, fill_value='N/A')
 
     def prepare_data(self):
-        df_train, df_speakers_train  = self.csv_processor.process(
-            [self.models[dire].train for dire in self.models.keys()], [self.dataset.speakers_file])
-        df_dev, df_speakers_dev  = self.csv_processor.process(
-            [self.models[dire].dev for dire in self.models.keys()], [self.dataset.speakers_file])
-        df_test, df_speakers_test  = self.csv_processor.process(
-            [self.models[dire].test for dire in self.models.keys()], [self.dataset.speakers_file])
+        if self.train_data is None:
+            df_train, df_speakers_train  = self.csv_processor.process(
+                [self.models[dire].train for dire in self.models.keys()], [self.dataset.speakers_file])
+            df_dev, df_speakers_dev  = self.csv_processor.process(
+                [self.models[dire].dev for dire in self.models.keys()], [self.dataset.speakers_file])
+            df_test, df_speakers_test  = self.csv_processor.process(
+                [self.models[dire].test for dire in self.models.keys()], [self.dataset.speakers_file])
 
-        # Handle enrolls and trials seprately
-        df_dev_enrolls = AnonLibriDataModule.concatenate_dfs([self.models[dire].dev_enrolls for dire in self.models.keys()])
-        df_dev_trials = AnonLibriDataModule.concatenate_dfs([self.models[dire].dev_trials for dire in self.models.keys()])
-        test_enrolls = AnonLibriDataModule.concatenate_dfs([self.models[dire].test_enrolls for dire in self.models.keys()])
-        df_test_trials = AnonLibriDataModule.concatenate_dfs([self.models[dire].test_trials for dire in self.models.keys()])
+            # Handle enrolls and trials seprately
+            df_dev_enrolls = AnonLibriDataModule.concatenate_dfs([self.models[dire].dev_enrolls for dire in self.models.keys()])
+            df_dev_trials = AnonLibriDataModule.concatenate_dfs([self.models[dire].dev_trials for dire in self.models.keys()])
+            test_enrolls = AnonLibriDataModule.concatenate_dfs([self.models[dire].test_enrolls for dire in self.models.keys()])
+            df_test_trials = AnonLibriDataModule.concatenate_dfs([self.models[dire].test_trials for dire in self.models.keys()])
+            
+            # Post-process the dfs
+            df_dev_trials.enrollment_id = df_dev_trials.enrollment_id.apply(lambda x: DATASET_DEFAULTS.dataset_name + '_' + str(x))
+            df_test_trials.enrollment_id = df_test_trials.enrollment_id.apply(lambda x: DATASET_DEFAULTS.dataset_name + '_' + str(x))
+            df_dev_enrolls = df_dev_enrolls.rename(columns={'enrollment_path': 'rel_filepath'})
+            test_enrolls = test_enrolls.rename(columns={'enrollment_path': 'rel_filepath'})
 
-        # save the updated csv
-        os.makedirs(self.dataset.artifacts_dir, exist_ok=True)
+            df_dev_enrolls = df_dev_enrolls.merge(
+                df_dev[[col for col in df_dev.columns if col not in ['speaker_id', 'split']]], 
+                on='rel_filepath', 
+                how='left'
+                )
+            test_enrolls = test_enrolls.merge(
+                df_test[[col for col in df_test.columns if col not in ['speaker_id', 'split']]], 
+                on='rel_filepath', 
+                how='left'
+                )
 
-        for df, path in zip(
-            [df_train, df_dev, df_test,
-            df_dev_enrolls, test_enrolls, df_dev_trials, df_test_trials,
-            df_speakers_train, df_speakers_dev, df_speakers_test],
-            [self.save_paths.train, self.save_paths.dev, self.save_paths.test, 
-             self.save_paths.dev_enrolls, self.save_paths.test_enrolls, self.save_paths.dev_trials, self.save_paths.test_trials, 
-             self.save_paths.spks_train, self.save_paths.spks_dev, self.save_paths.spks_test]
-        ):
-            write_dataset_csv(df, path, sep=self.dataset.sep)
+            df_dev_trials = df_dev_trials.merge(
+                df_dev[[col for col in df_dev.columns if col not in ['model',  'gender',  'class_id']]], 
+                left_on='test_path',
+                right_on='rel_filepath',
+                how='left'
+                ).drop('test_path', axis=1)
+
+            df_test_trials = df_test_trials.merge(
+                df_test[[col for col in df_test.columns if col not in ['model',  'gender',  'class_id']]],
+                left_on='test_path', 
+                right_on='rel_filepath',
+                how='left'
+                ).drop('test_path', axis=1)
+
+            # exlcude df_test_enrolls from df_test
+            df_test_unique = df_test[~df_test.rel_filepath.isin(test_enrolls.rel_filepath)]
+
+            # save the updated csv
+            os.makedirs(self.dataset.artifacts_dir, exist_ok=True)
+
+            for df, path in zip(
+                [df_train, df_dev, df_test, df_test_unique,
+                df_dev_enrolls, test_enrolls,
+                df_dev_trials, df_test_trials,
+                df_speakers_train, df_speakers_dev, df_speakers_test],
+                [self.save_paths.train, self.save_paths.dev, self.save_paths.test, self.save_paths.test_unique,
+                self.save_paths.dev_enrolls, self.save_paths.test_enrolls, 
+                self.save_paths.dev_trials, self.save_paths.test_trials, 
+                self.save_paths.spks_train, self.save_paths.spks_dev, self.save_paths.spks_test]
+            ):
+                write_dataset_csv(df, path, sep=self.dataset.sep)
 
     @staticmethod
     def concatenate_dfs(csv_paths, fill_value='N/A', sep='|') -> pd.DataFrame:
@@ -110,9 +150,14 @@ class AnonLibriDataModule(pl.LightningDataModule):
                                               test_trials_path=self.save_paths.test_trials,
                                               sample_rate=self.sample_rate,
                                               max_duration=self.dataset.max_duration)
-            
+
+            self.test_unique = VPC25Dataset(data_dir=self.root_dir,
+                                            data_filepath=self.save_paths.test_unique,
+                                            sample_rate=self.sample_rate,
+                                            max_duration=self.dataset.max_duration)
+
             self.enroll_data = VPC25EnrollDataset(data_dir=self.root_dir,
-                                                  enrollment_path=self.save_paths.test_enrolls,
+                                                  data_filepath=self.save_paths.test_enrolls,
                                                   sample_rate=self.sample_rate,
                                                   max_duration=None)
     
@@ -145,15 +190,25 @@ class AnonLibriDataModule(pl.LightningDataModule):
             pin_memory=self.loaders.test.pin_memory,
             collate_fn=VPCTestCoallate()
         )
-        enroll_loader = DataLoader(
-            self.enroll_data,
+
+        trial_unique = DataLoader(
+            self.test_unique,
             batch_size=self.loaders.test.batch_size,
             shuffle=self.loaders.test.shuffle,
             num_workers=self.loaders.test.num_workers,
             pin_memory=self.loaders.test.pin_memory,
+            collate_fn=VPC25ClassCollate()
+            )
+
+        enroll_loader = DataLoader(
+            self.enroll_data,
+            batch_size=self.loaders.enrollment.batch_size,
+            shuffle=self.loaders.enrollment.shuffle,
+            num_workers=self.loaders.enrollment.num_workers,
+            pin_memory=self.loaders.enrollment.pin_memory,
             collate_fn=VPC25EnrollCollate()
-        )
-        return trial_loader, enroll_loader
+            )
+        return trial_loader, enroll_loader, trial_unique
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ artifacts_paths:
   train: ${datamodule.dataset.artifacts_dir}/train.csv
   dev: ${datamodule.dataset.artifacts_dir}/dev.csv
   test: ${datamodule.dataset.artifacts_dir}/test.csv
+  test_unique: ${datamodule.dataset.artifacts_dir}/test_unique.csv
   
   dev_enrolls: ${datamodule.dataset.artifacts_dir}/dev_enrolls.csv
   test_enrolls: ${datamodule.dataset.artifacts_dir}/test_enrolls.csv
@@ -53,7 +54,6 @@ models:
     dev_trials: ${datamodule.models.B5.metadata}/dev_trials.csv
     test_trials: ${datamodule.models.B5.metadata}/test_trials.csv
 
-
 transform: null
 
 loaders:
@@ -72,14 +72,14 @@ loaders:
     pin_memory: False
 
   test:
-    batch_size: 8
+    batch_size: 64
     shuffle: False
-    num_workers: 0
+    num_workers: 4
     drop_last: False
     pin_memory: False
 
-  predict:
-    batch_size: 8
+  enrollment:
+    batch_size: 1 # 1 for enrollment
     shuffle: False
     num_workers: 0
     drop_last: False

@@ -479,12 +479,12 @@ class BaseCollate:
         padded_waveforms = pad_sequence(waveforms, batch_first=True, padding_value=self.pad_value)
         
         # Convert gender labels to numerical values
-        gender_labels = torch.tensor([0 if gender == 'male' else 1 for gender in genders])
+        gender_labels = torch.tensor([0.0 if gender == 'male' else 1.0 for gender in genders])
         
         return DatasetItem(
             audio=padded_waveforms,
             speaker_id=speaker_ids,
-            class_id=class_id,
+            class_id=torch.tensor(class_id),
             audio_length=lengths,
             audio_path=audio_paths,
             country=nationalities,
