@@ -117,16 +117,6 @@ class KaldiDataProcessor:
             
         return pd.DataFrame(combined_data) if combined_data else None
 
-    def cleanup_combined_data_files(self):
-        """Delete all combined_data.csv files in the directory structure."""
-        for base_dir in self.base_dirs:
-            for csv_file in base_dir.rglob('combined_data.csv'):
-                try:
-                    csv_file.unlink()
-                    print(f"Deleted: {csv_file}")
-                except Exception as e:
-                    print(f"Error deleting {csv_file}: {e}")
-
     def validate_directory_structure(self, subdirs: List[Path]) -> bool:
         """
         Validate if directory structure follows expected pattern.
@@ -146,78 +136,6 @@ class KaldiDataProcessor:
                       "libri_test_enrolls_MODEL, libri_test_trials_[mf]_MODEL, or train-clean-360_MODEL")
                 return False
         return True
-
-    # def collect_enrollment_data(self, base_dir: Path, split: str) -> Optional[pd.DataFrame]:
-    #     """Collect enrollment data from enrolls subdirectory.
-        
-    #     Args:
-    #         base_dir: Base directory path
-    #         split: Either 'dev' or 'test'
-            
-    #     Returns:
-    #         DataFrame with enrollment data or None
-    #     """
-    #     enroll_pattern = f"libri_{split}_enrolls_*/enrolls"
-    #     enroll_files = list(base_dir.glob(enroll_pattern))
-    #     assert len(enroll_files) == 1, f"Multiple enrollment directories found in {base_dir}"
-    #     enroll_file = enroll_files[0]
-        
-    #     if not enroll_files:
-    #         print(f"WARNING: No enrollment data found in {base_dir}")
-    #         return None
-            
-    #     enrollment_data = []
-    #     model = str(enroll_file).split(os.sep)[-2].split('_')[-1]
-
-    #     try:
-    #         with open(enroll_file, 'r') as f:
-    #             enrolls = f.read().splitlines()
-
-    #         for enroll_line in enrolls:
-    #             speaker_id = f"{PREIX_ID}_{enroll_line.split('-')[0]}"
-    #             source = os.path.dirname(str(enroll_files[0])).split(os.sep)[-1]
-    #             enrollment_data.append({'model': model, 'source': source, 
-    #                                     'speaker_id': speaker_id, 'enrollments': enroll_line})    
-
-    #     except Exception as e:
-    #         print(f"Error reading {enroll_file}: {e}")
-
-    #     return pd.DataFrame(enrollment_data) if enrollment_data else None
-           
-    # def collect_trials_data(self, base_dir: Path, split: str) -> Optional[pd.DataFrame]:
-    #     """Collect trials data from trials file."""
-    #     trial_pattern = f"libri_{split}_trials_[mf]_*"
-    #     trial_dirs = [d for d in base_dir.glob(trial_pattern) 
-    #                  if d.is_dir() and d.name != 'metadata']
-        
-    #     if not trial_dirs:
-    #         return None
-            
-    #     trials_data = []
-    #     for trial_dir in trial_dirs:
-    #         model = trial_dir.name.split('_')[-1]
-    #         gender = trial_dir.name.split('_')[-2]  # Extract 'm' or 'f'
-    #         trials_file = trial_dir / 'trials'
-            
-    #         if not trials_file.exists() or not trials_file.is_file():
-    #             print(f"Warning: Trials file not found at {trials_file}")
-    #             continue
-                
-    #         try:
-    #             with open(trials_file, 'r') as f:
-    #                 for line in f:
-    #                     enrollment_id, test_utt, label = line.strip().split()
-    #                     trials_data.append({
-    #                         'enrollment_id': enrollment_id,
-    #                         'test_utt': test_utt,
-    #                         'label': 1 if label == 'target' else 0,
-    #                         'model': model,
-    #                         'gender': 'male' if gender == 'm' else 'female'
-    #                     })
-    #         except Exception as e:
-    #             print(f"Error processing trials file {trials_file}: {e}")
-                    
-    #     return pd.DataFrame(trials_data) if trials_data else None
 
     def collect_enrollment_data(self, base_dir: Path, split: str) -> Optional[pd.DataFrame]:
         """Collect enrollment data from enrolls subdirectory.
