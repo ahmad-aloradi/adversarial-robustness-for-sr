@@ -1,11 +1,16 @@
-from typing import Any, Dict, Optional, Union
+import os
+from typing import Any, Dict, Optional
+from collections import defaultdict
+
 import torch
-import torch.nn as nn
 import pytorch_lightning as pl
 from hydra.utils import instantiate
 from omegaconf import DictConfig
+from tqdm import tqdm
+import pandas as pd
+import speechbrain as sb
 
-from src.datamodules.components.vpc25.vpc_dataset import VPCBatch
+from src.datamodules.components.vpc25.vpc_dataset import VPC25Item, VPC25VerificationItem
 from src import utils
 from src.modules.metrics import load_metrics
 
@@ -23,6 +28,7 @@ LOSS_TYPES = {
     "TEXT": "text",
     "AUDIO": "audio",
     "GENDER": "gender",
+    "FUSION": "fusion",
     "TOTAL": "total"
 }
 
@@ -30,7 +36,6 @@ class MultiModalVPCModel(pl.LightningModule):
     """Multi-modal Voice Print Classification Model.
     
     This model combines text and audio processing for speaker identification and gender classification.
-    It uses wav2vec2 for text encoding and speechbrain for audio encoding.
     """
     
     def __init__(
@@ -47,8 +52,8 @@ class MultiModalVPCModel(pl.LightningModule):
         """Initialize the model with configurations for all components."""
         super().__init__()
         self.save_hyperparameters(logger=False)
-        self.batch_sizes = kwargs.get("batch_sizes")
         self.logging_params = logging_params
+        self.batch_sizes = kwargs.get("batch_sizes")
         
         # Initialize metrics
         self._setup_metrics(metrics)
@@ -73,18 +78,20 @@ class MultiModalVPCModel(pl.LightningModule):
 
     def _setup_model_components(self, model: DictConfig) -> None:
         """Initialize encoders and classifiers."""
-        # Text processing components
+        # Text processing
+        self.text_processor = instantiate(model.text_processor)
         self.text_encoder = instantiate(model.text_encoder)
-        self.processor = instantiate(model.processor)
-        self.text_classifier = instantiate(model.classifiers.text_classifier)
+        self.text_projection = instantiate(model.classifiers.text_classifier)
+        self.text_processor_kwargs = model.text_processor_kwargs
         
-        # Audio processing components
+        # Audio processing
         self.audio_encoder = instantiate(model.audio_encoder)
-        self.audio_classifier = instantiate(model.classifiers.audio_classifier)
+        self.audio_projection = instantiate(model.classifiers.audio_classifier)
+        self.audio_embeds_projection = instantiate(model.classifiers.audio_embeds_classifier)
         
-        # Gender classification
-        self.gender_classifier = instantiate(model.classifiers.gender_classifier)
-
+        # Fusion and classification
+        self.fusion_classifier = instantiate(model.classifiers.fusion_classifier)
+        
     def _setup_training_components(
         self, 
         criterion: DictConfig, 
@@ -95,46 +102,56 @@ class MultiModalVPCModel(pl.LightningModule):
         self.criterion_train = instantiate(criterion.criterion_train)
         self.criterion_val = instantiate(criterion.criterion_val)
         self.criterion_test = instantiate(criterion.criterion_test)
-        self.weights = instantiate(criterion.loss_weights)
         self.optimizer = optimizer
         self.slr_params = lr_scheduler
 
-    def _freeze_pretrained_components(self) -> None:
+    def _freeze_pretrained_components(self, finetune_audioenc: bool = True) -> None:
         """Freeze pretrained components and enable training for others."""
         for param in self.text_encoder.parameters():
             param.requires_grad = False
         for param in self.audio_encoder.parameters():
-            param.requires_grad = True
+            param.requires_grad = finetune_audioenc
 
-    def forward(self, batch: VPCBatch) -> Dict[str, torch.Tensor]:
-        """Forward pass through the model."""
-        if len(set(batch.sample_rate)) != 1:
-            raise ValueError("Wav2Vec2Processor expects sampling_rate of type: int, but found multiple sampling rates.")
+    def forward(self, batch: VPC25Item) -> Dict[str, torch.Tensor]:
+        assert len(set(batch.sample_rate)) == 1, (
+            "Wav2Vec2Processor expects sampling_rate of type: int, but found multiple sampling rates."
+        )
+
+        # Process audio for text input
+        encoded_text = self.text_processor(batch.audio, **self.text_processor_kwargs).input_values
+        encoded_text = encoded_text.squeeze(0).to(batch.audio.device)
+        # Process text input
+        text_embeddings = self.text_encoder(encoded_text).logits
+        text_speaker_logits = self._agg_text_pred(text_embeddings, method='mean', keepdim=False)
+        text_features = self.text_projection(text_speaker_logits)
 
         # Process audio input
-        encoded = self.processor(
-            batch.audio, 
-            sampling_rate=batch.sample_rate[0], 
-            return_tensors="pt"
-        ).input_values.squeeze(0).to(batch.audio.device)
+        audio_embeddings = self.audio_encoder.encode_batch(batch.audio).squeeze(1)
+        audio_features = self.audio_projection(audio_embeddings)
+        audio_embeddings = self.audio_embeds_projection(audio_embeddings)
 
-        # Get embeddings and logits
-        text_embeddings = self.text_encoder(encoded).logits
-        text_logits = self._agg_text_pred(text_embeddings, method='mean', keepdim=False)
-        text_logits = self.text_classifier(text_logits)
-        
-        audio_embeddings = self.audio_encoder.encode_batch(batch.audio.squeeze(0)).squeeze(1)
-        audio_logits = self.audio_classifier(audio_embeddings)
-        gender_logits = self.gender_classifier(audio_embeddings)
-        
+        # Combine features and get predictions
+        combined_features = torch.cat((audio_features, text_features), dim=-1)
+        fusion_logits = self.fusion_classifier(combined_features)
+
         return {
-            "text_logits": text_logits, 
-            "audio_logits": audio_logits, 
-            "gender_logits": gender_logits
+            "text_features": text_features,
+            "audio_features": audio_embeddings,
+            "fusion_logits": fusion_logits,
         }
 
-    def _agg_text_pred(self, text_preds: torch.Tensor, method: str ='mean', keepdim: bool = True
-                       ) -> torch.Tensor:
+    def model_step(self, batch: VPC25Item, criterion: Optional[Any] = None) -> Dict[str, Any]:
+        """Perform a single model step."""
+        outputs = self(batch)
+
+        # Compute loss
+        audio_criterion = criterion.audio_criterion(outputs["audio_features"], batch.class_id)
+        fusion_loss = criterion.fusion_criterion(outputs["fusion_logits"], batch.class_id)
+        loss = fusion_loss + audio_criterion
+        
+        return {"loss": loss, "outputs": outputs}
+
+    def _agg_text_pred(self, text_preds: torch.Tensor, method = 'mean', keepdim=True) -> torch.Tensor:
         if method == 'mean':
             text_pred = text_preds.mean(1, keepdim=keepdim)
         elif method == 'max':
@@ -143,88 +160,131 @@ class MultiModalVPCModel(pl.LightningModule):
             raise NotImplementedError(f"aggregation method: {method} Not implemented")
         return text_pred
 
-    def model_step(
-        self, 
-        batch: VPCBatch, 
-        criterion: Optional[Any] = None
-    ) -> Dict[str, Any]:
-        """Perform a single model step."""
-        outputs = self(batch)
-        
-        # Compute losses
-        text_loss = criterion.text_criterion(outputs["text_logits"], batch.speaker_id)
-        audio_loss = criterion.audio_criterion(outputs["audio_logits"], batch.speaker_id)
-        gender_loss = criterion.gender_criterion(
-            outputs["gender_logits"].squeeze(-1), 
-            batch.gender
-        )
-        
-        total_loss = (
-            self.weights["text"] * text_loss + 
-            self.weights["audio"] * audio_loss + 
-            self.weights["gender"] * gender_loss
-        )
-        
-        losses = {
-            LOSS_TYPES["TEXT"]: text_loss,
-            LOSS_TYPES["AUDIO"]: audio_loss,
-            LOSS_TYPES["GENDER"]: gender_loss,
-            LOSS_TYPES["TOTAL"]: total_loss
-        }
-        
-        return {"losses": losses, "outputs": outputs}
-
-    def _log_step_metrics(
-        self, 
-        results: Dict[str, Any], 
-        batch: VPCBatch, 
-        criterion: Any,
-        stage: str
-    ) -> None:
+    def _log_step_metrics(self, results: Dict[str, Any], batch: VPC25Item, criterion: Any, stage: str) -> None:
         """Log metrics for a single step."""
-        # Log losses
-        self.log_dict({
-            f"text_{criterion.text_criterion.__class__.__name__}/{stage}": results["losses"]["text"],
-            f"audio_{criterion.audio_criterion.__class__.__name__}/{stage}": results["losses"]["audio"],
-            f"gender_{criterion.gender_criterion.__class__.__name__}/{stage}": results["losses"]["gender"],
-            f"total_loss/{stage}": results["losses"]["total"]
-        }, **self.logging_params)
+        # Log loss
+        self.log_dict({f"fusion_{criterion.fusion_criterion.__class__.__name__}/{stage}": results["loss"]},
+                      batch_size=getattr(self.batch_sizes, stage), **self.logging_params)
         
         # Log metrics
         metric = getattr(self, f"{stage}_metric")
-        metric(results["outputs"]["audio_logits"], batch.speaker_id)
-        self.log(
-            f"{metric.__class__.__name__}/{stage}",
-            metric,
-            batch_size=getattr(self.batch_sizes, stage),
-            **self.logging_params
-        )
+        metric(results["outputs"]["fusion_logits"], batch.class_id)
+        self.log(f"{metric.__class__.__name__}/{stage}", metric, batch_size=getattr(self.batch_sizes, stage),
+                 **self.logging_params)
 
-    def training_step(self, batch: VPCBatch, batch_idx: int) -> Dict[str, torch.Tensor]:
+    def training_step(self, batch: VPC25Item, batch_idx: int) -> Dict[str, torch.Tensor]:
         """Training step."""
         results = self.model_step(batch, self.criterion_train)
         self._log_step_metrics(results, batch, self.criterion_train, METRIC_NAMES["TRAIN"])
-        return {"loss": results["losses"]["total"]}
+        return {"loss": results["loss"]}
 
-    def validation_step(self, batch: VPCBatch, batch_idx: int) -> Dict[str, torch.Tensor]:
+    def validation_step(self, batch: VPC25Item, batch_idx: int) -> Dict[str, torch.Tensor]:
         """Validation step."""
         results = self.model_step(batch, self.criterion_val)
         self._log_step_metrics(results, batch, self.criterion_val, METRIC_NAMES["VALID"])
-        return {"loss": results["losses"]["total"]}
+        return {"loss": results["loss"]}
 
-    def test_step(self, batch: VPCBatch, batch_idx: int) -> Dict[str, torch.Tensor]:
-        """Test step."""
-        results = self.model_step(batch, self.criterion_test)
-        self._log_step_metrics(results, batch, self.criterion_test, METRIC_NAMES["TEST"])
+    def _compute_enrollment_embeddings(self, dataloader) -> dict:
+        embeddings_dict = defaultdict(lambda: defaultdict(list))
+
+        for batch in tqdm(dataloader, desc="Computing enrollment embeddings"):
+            outputs = self(batch)
+            enroll = outputs['audio_features']
+            # Handle frame-level embeddings (if applicable)
+            if len(enroll.shape) == 3:  # [1, num_frames, embedding_dim]
+                enroll = enroll.mean(dim=1)  # [1, embedding_dim]
+
+            embeddings_dict[batch.model][batch.speaker_id].append(enroll)
+        return embeddings_dict
+
+    def _compute_test_embeddings(self, dataloader) -> dict:
+        embeddings_dict = defaultdict(dict)
+
+        for batch in tqdm(dataloader, desc="Computing test embeddings"):
+            outputs = self(batch)
+            test = outputs['audio_features']
+            # Handle frame-level embeddings (if applicable)
+            if len(test.shape) == 3:  # [1, num_frames, embedding_dim]
+                test = test.mean(dim=1)  # [num_frames, embedding_dim]
+
+            embeddings_dict.update({path: emb for path, emb in zip(batch.audio_path, test)})
         
-        # Log additional test metrics
-        self.test_add_metrics(results["outputs"]["audio_logits"], batch.speaker_id)
-        self.log_dict(self.test_add_metrics, **self.logging_params)
+        return embeddings_dict
+
+    def on_test_start(self) -> None:
+        """Compute embeddings for test trials."""
+
+        # TODO: correct(?)
+        self.test_metric.reset()
+        self.test_add_metrics.reset()
+
+        _, enroll_loader, unique_test_loader = self.trainer.test_dataloaders
+        self.enrol_embeds = defaultdict(dict)
+        self.scores = pd.DataFrame(columns=['enrollment_id', 'audio_path', 'label', 'score', 'model'])
+
+        # Compute and aggregate the enrollment embeddings
+        enrollment_embeddings = self._compute_enrollment_embeddings(enroll_loader)
+        for model_id, class_embeddings in enrollment_embeddings.items():
+            for speaker_id, embeddings in class_embeddings.items():
+                stacked_embeddings = torch.cat(embeddings, dim=0)
+                self.enrol_embeds[model_id][speaker_id] = stacked_embeddings.mean(dim=0)
+
+        self.test_embeddings = self._compute_test_embeddings(unique_test_loader)
+
+    def test_step(self, batch: VPC25VerificationItem, batch_idx: int, dataloader_idx: int = 0) -> Dict[str, torch.Tensor]:
+        """Compute EER and minCDF on teh test trials"""
+        test_embeddings = torch.stack([self.test_embeddings[path] for path in batch.audio_path])
+        enroll_embeddings = torch.stack([self.enrol_embeds[model][enroll_id]
+                                         for model, enroll_id in zip(batch.model, batch.enroll_id)])
+
+        scores = torch.nn.functional.cosine_similarity(enroll_embeddings, test_embeddings)
         
-        return {"loss": results["losses"]["total"]}
+        # Extend the dataframe with batch data
+        batch_dict = {
+            'score': scores.tolist(),
+            'label': batch.trial_label,
+            'model': batch.model,
+            'enrollment_id': batch.enroll_id,
+            'audio_path': batch.audio_path
+        }
+
+        # Append batch data to scores dataframe
+        self.scores = pd.concat([self.scores, pd.DataFrame(batch_dict)], ignore_index=True)
+
+    def on_test_end(self) -> None:
+        """compute EER and minDCF"""
+        min_dcf, dcf_thresh = sb.utils.metric_stats.minDCF(
+                torch.Tensor(self.scores.score[self.scores.label == 1].tolist()), 
+                torch.Tensor(self.scores.score[self.scores.label == 0].tolist())
+                )
+        eer, eer_thresh = sb.utils.metric_stats.EER(
+                torch.Tensor(self.scores.score[self.scores.label == 1].tolist()), 
+                torch.Tensor(self.scores.score[self.scores.label == 0].tolist())
+                )
+
+        # Log metrics
+        metrics = {
+            'EER': eer,
+            'EER_threshold': eer_thresh,
+            'minDCF': min_dcf,
+            'minDCF_threshold': dcf_thresh
+        }
+        
+        # Log all metrics at once
+        self.log_dict(metrics, **self.logging_params)
+
+        # Update scores dataframe with metrics
+        self.scores.loc[:, metrics.keys()] = metrics.values()
+        
+        # Save scores to CSV
+        save_path = os.path.join(self.trainer.log_dir, 'test_scores.csv')
+        self.scores.to_csv(save_path, index=False)
+        torch.save(self.enrol_embeds, os.path.join(self.trainer.log_dir, 'enrol_embeds.pt'))
+        torch.save(self.test_embeddings, os.path.join(self.trainer.log_dir, 'test_embeds.pt'))
 
     def on_train_start(self) -> None:
         """Reset metrics at start of training."""
+        # TODO: Is this correct here?
         self.valid_metric_best.reset()
 
     def on_train_epoch_end(self) -> None:
@@ -242,7 +302,8 @@ class MultiModalVPCModel(pl.LightningModule):
         )
 
     def configure_optimizers(self) -> Dict:
-        optimizer: torch.optim  = instantiate(self.optimizer)(params=self.parameters())
+        """Configure optimizers and learning rate schedulers."""
+        optimizer: torch.optim = instantiate(self.optimizer)(params=self.parameters())
         
         if self.slr_params.get("scheduler"):
             scheduler: torch.optim.lr_scheduler = instantiate(

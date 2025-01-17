@@ -5,84 +5,100 @@ defaults:
   - _self_
 
 model:
+  # text_encoder:
+  #   _target_: transformers.RobertaModel.from_pretrained
+  #   pretrained_model_name_or_path: roberta-base
+  
+  # text_tokenizer:
+  #   _target_: transformers.RobertaTokenizer.from_pretrained
+  #   pretrained_model_name_or_path: roberta-base
+
+  # audio_processor:
+    # _target_: transformers.Wav2Vec2FeatureExtractor.from_pretrained
+    # pretrained_model_name_or_path: superb/wav2vec2-base-superb-sid
+
+  # audio_encoder:
+    # _target_: transformers.Wav2Vec2Model.from_pretrained
+    # pretrained_model_name_or_path: superb/wav2vec2-base-superb-sid
+
+  text_processor:
+    _target_: transformers.Wav2Vec2Processor.from_pretrained
+    pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
+
+  text_processor_kwargs:
+    return_tensors: "pt"
+    sampling_rate: 16000
+
   text_encoder:
     _target_: transformers.Wav2Vec2ForCTC.from_pretrained
     pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
     num_labels: ${module.model.classifiers.classifiers_config.num_classes}
 
-  processor:
-    _target_: transformers.Wav2Vec2Processor.from_pretrained
-    pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
-
   audio_encoder:
     _target_: speechbrain.inference.EncoderClassifier.from_hparams
-    source: "speechbrain/spkrec-xvect-voxceleb"
-    savedir: "local/.pretrained_models/spkrec-xvect-voxceleb"
-    run_opts: {"device":"cuda"}
+    source: "speechbrain/spkrec-ecapa-voxceleb"
+    savedir: "local/.pretrained_models/spkrec-ecapa-voxceleb"
+    run_opts:
+      device: "cuda"
 
   classifiers:
     text_classifier: 
       _target_: torch.nn.Linear
-      in_features: ${module.model.classifiers.classifiers_config.text_encoder_output_dim}
-      out_features: ${module.model.classifiers.classifiers_config.num_classes}
+      in_features: ${module.model.classifiers.classifiers_config.linear_in_dim}
+      out_features: ${module.model.classifiers.classifiers_config.linear_out_dim}
 
     audio_classifier: 
       _target_: torch.nn.Linear
-      in_features: ${module.model.classifiers.classifiers_config.audio_encoder_output_dim}
+      in_features: ${module.model.classifiers.classifiers_config.audio_embedding_dim}
+      out_features: ${module.model.classifiers.classifiers_config.linear_out_dim}
+
+    audio_embeds_classifier: 
+      _target_: torch.nn.Linear
+      in_features: ${module.model.classifiers.classifiers_config.audio_embedding_dim}
       out_features: ${module.model.classifiers.classifiers_config.num_classes}
 
-    gender_classifier:
+    fusion_classifier:
       _target_: torch.nn.Sequential
       _args_:
         - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.audio_encoder_output_dim}
-          out_features: ${module.model.classifiers.classifiers_config.gender_out_features}
+          in_features: ${module.model.classifiers.classifiers_config.fusion_in_dim}
+          out_features: ${module.model.classifiers.classifiers_config.fusion_out_dim}
         - _target_: torch.nn.ReLU
+          inplace: True
         - _target_: torch.nn.Dropout
-          p: 0.2
+          p: 0.1
         - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.gender_out_features}
-          out_features: 1
+          in_features: ${module.model.classifiers.classifiers_config.fusion_out_dim}
+          out_features: ${module.model.classifiers.classifiers_config.num_classes} 
 
     classifiers_config:
       num_classes: ${datamodule.num_classes}
-      text_encoder_output_dim: 32
-      audio_encoder_output_dim: 512
-      gender_out_features: 256
+      linear_in_dim: 32 #768
+      audio_embedding_dim: 192 #512
+      linear_out_dim: 64
+      fusion_in_dim: 128
+      fusion_out_dim: 128
 
 criterion:
-
-  _base_text_criterion:
-    _target_: torch.nn.CrossEntropyLoss
-
-  _base_audio_criterion:
-    _target_: torch.nn.CrossEntropyLoss
-    label_smoothing: 0.1
-
-  _base_gender_criterion:
-    _target_: torch.nn.BCEWithLogitsLoss
-
   criterion_train:
-    text_criterion: ${module.criterion._base_text_criterion}
-    audio_criterion: ${module.criterion._base_audio_criterion}
-    gender_criterion: ${module.criterion._base_gender_criterion}
+    fusion_criterion:
+      _target_: torch.nn.CrossEntropyLoss
+    audio_criterion:
+      _target_: torch.nn.CrossEntropyLoss
 
   criterion_val:
-    text_criterion: ${module.criterion._base_text_criterion}
-    audio_criterion: ${module.criterion._base_audio_criterion}
-    gender_criterion: ${module.criterion._base_gender_criterion}
+    fusion_criterion:
+      _target_: torch.nn.CrossEntropyLoss
+    audio_criterion:
+      _target_: torch.nn.CrossEntropyLoss
 
   criterion_test:
-    text_criterion: ${module.criterion._base_text_criterion}
-    audio_criterion: ${module.criterion._base_audio_criterion}
-    gender_criterion: ${module.criterion._base_gender_criterion}
-
-  loss_weights:
-    text: 0.15
-    audio: 0.8
-    gender: 0.05
-    
-  loss: ${module.criterion._base_audio_criterion} # for callbacks
+    fusion_criterion:
+      _target_: torch.nn.CrossEntropyLoss
+    audio_criterion:
+      _target_: torch.nn.CrossEntropyLoss
+  
+  loss: ${module.criterion.criterion_train.fusion_criterion} # for callbacks
 
 gradient_clip_val: 5.0
 
