@@ -5,34 +5,8 @@ defaults:
   - _self_
 
 model:
-  # text_encoder:
-  #   _target_: transformers.RobertaModel.from_pretrained
-  #   pretrained_model_name_or_path: roberta-base
-  
-  # text_tokenizer:
-  #   _target_: transformers.RobertaTokenizer.from_pretrained
-  #   pretrained_model_name_or_path: roberta-base
-
-  # audio_processor:
-    # _target_: transformers.Wav2Vec2FeatureExtractor.from_pretrained
-    # pretrained_model_name_or_path: superb/wav2vec2-base-superb-sid
-
-  # audio_encoder:
-    # _target_: transformers.Wav2Vec2Model.from_pretrained
-    # pretrained_model_name_or_path: superb/wav2vec2-base-superb-sid
-
-  text_processor:
-    _target_: transformers.Wav2Vec2Processor.from_pretrained
-    pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
-
-  text_processor_kwargs:
-    return_tensors: "pt"
-    sampling_rate: 16000
-
-  text_encoder:
-    _target_: transformers.Wav2Vec2ForCTC.from_pretrained
-    pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
-    num_labels: ${module.model.classifiers.classifiers_config.num_classes}
+  audio_processor:
+    _target_: torch.nn.Identity
 
   audio_encoder:
     _target_: speechbrain.inference.EncoderClassifier.from_hparams
@@ -40,44 +14,60 @@ model:
     savedir: "local/.pretrained_models/spkrec-ecapa-voxceleb"
     run_opts:
       device: "cuda"
+      # device: "cpu"
+
+  # audio_processor:
+  #   _target_: transformers.Wav2Vec2Processor.from_pretrained
+  #   pretrained_model_name_or_path: "facebook/wav2vec2-base"
+  
+  # audio_encoder:
+  #   _target_: transformers.Wav2Vec2ForSequenceClassification.from_pretrained
+  #   pretrained_model_name_or_path: "facebook/wav2vec2-base"
+  #   num_labels: ${datamodule.num_classes}
+
+  audio_processor_kwargs:
+    return_tensors: "pt"
+    sampling_rate: 16000
+
+  text_processor:
+    _target_: transformers.BertTokenizer.from_pretrained
+    pretrained_model_name_or_path: "bert-base-uncased"
+
+  text_encoder:
+    _target_: transformers.BertModel.from_pretrained
+    pretrained_model_name_or_path: ${module.model.text_processor.pretrained_model_name_or_path}
+    num_labels: ${module.model.classifiers.classifiers_config.num_classes}
+
+  text_processor_kwargs:
+    return_tensors: "pt"
+    padding: "max_length"
+    truncation: True
+    max_length: 512
 
   classifiers:
-    text_classifier: 
-      _target_: torch.nn.Linear
-      in_features: ${module.model.classifiers.classifiers_config.linear_in_dim}
-      out_features: ${module.model.classifiers.classifiers_config.linear_out_dim}
-
-    audio_classifier: 
-      _target_: torch.nn.Linear
-      in_features: ${module.model.classifiers.classifiers_config.audio_embedding_dim}
-      out_features: ${module.model.classifiers.classifiers_config.linear_out_dim}
-
-    audio_embeds_classifier: 
-      _target_: torch.nn.Linear
-      in_features: ${module.model.classifiers.classifiers_config.audio_embedding_dim}
-      out_features: ${module.model.classifiers.classifiers_config.num_classes}
-
+    fuser:
+      _target_: src.modules.multimodal_vpc.NormalizedWeightedSum
+      audio_embedding_size: 192
+      text_embedding_size: 768
+      hidden_size: ${module.model.classifiers.classifiers_config.num_classes}
+  
     fusion_classifier:
       _target_: torch.nn.Sequential
       _args_:
         - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.fusion_in_dim}
-          out_features: ${module.model.classifiers.classifiers_config.fusion_out_dim}
+          in_features: ${module.model.classifiers.classifiers_config.num_classes}
+          out_features: ${module.model.classifiers.classifiers_config.hidden_size} 
         - _target_: torch.nn.ReLU
           inplace: True
         - _target_: torch.nn.Dropout
-          p: 0.1
+          p: 0.15
         - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.fusion_out_dim}
+          in_features: ${module.model.classifiers.classifiers_config.hidden_size} 
           out_features: ${module.model.classifiers.classifiers_config.num_classes} 
 
     classifiers_config:
       num_classes: ${datamodule.num_classes}
-      linear_in_dim: 32 #768
-      audio_embedding_dim: 192 #512
-      linear_out_dim: 64
-      fusion_in_dim: 128
-      fusion_out_dim: 128
+      hidden_size: 256
 
 criterion:
   criterion_train:

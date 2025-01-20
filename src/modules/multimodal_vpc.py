@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 from collections import defaultdict
 
 import torch
+import torch.nn as nn
 import pytorch_lightning as pl
 from hydra.utils import instantiate
 from omegaconf import DictConfig
@@ -31,6 +32,76 @@ LOSS_TYPES = {
     "FUSION": "fusion",
     "TOTAL": "total"
 }
+
+
+###################################
+""""Custom Fusion Models"""
+class NormalizedWeightedSum(nn.Module):
+    def __init__(self, audio_embedding_size, text_embedding_size, hidden_size, *args, **kwargs):
+        super().__init__()
+        # Peojection layers
+        self.audio_proj = nn.Sequential(
+            nn.LayerNorm(audio_embedding_size),
+            nn.Linear(audio_embedding_size, hidden_size)
+        )
+        self.text_proj = nn.Sequential(
+            nn.LayerNorm(text_embedding_size),
+            nn.Linear(text_embedding_size, hidden_size)
+        )
+        # Learnable weights for weighted sum
+        self.audio_weight = nn.Parameter(torch.tensor(1.0))
+        self.text_weight = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, emebds):
+        assert len(emebds) == 2, "Expected 2 embeddings, but found: {len(emebds)}"
+        assert type(emebds) == tuple, "Expected tuple of embeddings, but found: {type(emebds)}"
+        audio_emb = emebds[0]
+        text_emb = emebds[1]
+
+        audio_emb = self.audio_proj(audio_emb)
+        text_emb = self.text_proj(text_emb)
+    
+        return {"fusion": self.audio_weight * audio_emb + self.text_weight * text_emb, 
+                "audio_emb": audio_emb,
+                "text_emb": text_emb}  
+
+
+class CrossAttentionFusion(torch.nn.Module):
+    def __init__(self, audio_embedding_size, text_embedding_size, hidden_size, *args, **kwargs):
+        super().__init__()
+        self.audio_proj = torch.nn.Linear(audio_embedding_size, hidden_size)
+        self.text_proj = torch.nn.Linear(text_embedding_size, hidden_size)
+        self.transformer = torch.nn.TransformerEncoderLayer(d_model=hidden_size, nhead=8)
+
+    def forward(self, emebds):
+        assert len(emebds) == 2, "Expected 2 embeddings, but found: {len(emebds)}"
+        assert type(emebds) == tuple, "Expected tuple of embeddings, but found: {type(emebds)}"
+        audio_emb = emebds[0]
+        text_emb = emebds[1]
+
+        audio_emb = self.audio_proj(audio_emb)
+        text_emb = self.text_proj(text_emb)
+        combined = torch.cat((audio_emb.unsqueeze(1), text_emb.unsqueeze(1)), dim=1)
+        fused = self.transformer(combined)
+
+        return {"fusion": fused.mean(dim=1),    # Mean pooling over the sequence dimension
+                "audio_emb": audio_emb,
+                "text_emb": text_emb}
+
+
+class ConcatFusion(torch.nn.Module):
+    def __init__(self, dim=1, *args, **kwargs):
+        super(ConcatFusion, self).__init__()
+        self.dim = dim
+
+    def forward(self, emebds):
+        assert len(emebds) == 2, "Expected 2 embeddings, but found: {len(emebds)}"
+        assert type(emebds) == tuple, "Expected tuple of embeddings, but found: {type(emebds)}"
+        return {"fusion": torch.cat(emebds, dim=self.dim),
+                "audio_emb": emebds[0],
+                "text_emb": emebds[1]}
+
+###################################
 
 class MultiModalVPCModel(pl.LightningModule):
     """Multi-modal Voice Print Classification Model.
@@ -81,15 +152,15 @@ class MultiModalVPCModel(pl.LightningModule):
         # Text processing
         self.text_processor = instantiate(model.text_processor)
         self.text_encoder = instantiate(model.text_encoder)
-        self.text_projection = instantiate(model.classifiers.text_classifier)
         self.text_processor_kwargs = model.text_processor_kwargs
-        
+
         # Audio processing
+        self.audio_processor = instantiate(model.audio_processor)
         self.audio_encoder = instantiate(model.audio_encoder)
-        self.audio_projection = instantiate(model.classifiers.audio_classifier)
-        self.audio_embeds_projection = instantiate(model.classifiers.audio_embeds_classifier)
+        self.audio_processor_kwargs = model.text_processor_kwargs
         
         # Fusion and classification
+        self.fuser = instantiate(model.classifiers.fuser)
         self.fusion_classifier = instantiate(model.classifiers.fusion_classifier)
         
     def _setup_training_components(
@@ -105,8 +176,10 @@ class MultiModalVPCModel(pl.LightningModule):
         self.optimizer = optimizer
         self.slr_params = lr_scheduler
 
-    def _freeze_pretrained_components(self, finetune_audioenc: bool = True) -> None:
+    def _freeze_pretrained_components(self, finetune_audioenc: bool = False) -> None:
         """Freeze pretrained components and enable training for others."""
+        if hasattr(self.audio_encoder, 'encode_batch'):
+                finetune_audioenc = True    # Finetune for speechbrain encoders (e.g., x-vector)
         for param in self.text_encoder.parameters():
             param.requires_grad = False
         for param in self.audio_encoder.parameters():
@@ -117,26 +190,29 @@ class MultiModalVPCModel(pl.LightningModule):
             "Wav2Vec2Processor expects sampling_rate of type: int, but found multiple sampling rates."
         )
 
-        # Process audio for text input
-        encoded_text = self.text_processor(batch.audio, **self.text_processor_kwargs).input_values
-        encoded_text = encoded_text.squeeze(0).to(batch.audio.device)
-        # Process text input
-        text_embeddings = self.text_encoder(encoded_text).logits
-        text_speaker_logits = self._agg_text_pred(text_embeddings, method='mean', keepdim=False)
-        text_features = self.text_projection(text_speaker_logits)
+        # Process audio for text input (assumming BERT-like model)
+        inputs_text = self.text_processor(batch.text, **self.text_processor_kwargs).to(self.device)
+        text_outputs = self.text_encoder(inputs_text.input_ids, attention_mask=inputs_text.attention_mask)
+        text_emb = text_outputs.pooler_output
 
         # Process audio input
-        audio_embeddings = self.audio_encoder.encode_batch(batch.audio).squeeze(1)
-        audio_features = self.audio_projection(audio_embeddings)
-        audio_embeddings = self.audio_embeds_projection(audio_embeddings)
+        if hasattr(self.audio_encoder, 'encode_batch'):
+            # For speechbrain encoders (e.g., x-vector)
+            audio_emb = self.audio_encoder.encode_batch(batch.audio).squeeze(1)
+        else:
+            # For transformers-based encoders (e.g., wav2vec)
+            input_values = self.audio_processor(batch.audio, **self.audio_processor_kwargs).input_values.squeeze(0).to(self.device)
+            audio_outputs = self.audio_encoder(input_values)
+            audio_emb = audio_outputs.last_hidden_state.mean(dim=1)
 
         # Combine features and get predictions
-        combined_features = torch.cat((audio_features, text_features), dim=-1)
-        fusion_logits = self.fusion_classifier(combined_features)
+        fused_feats = self.fuser((audio_emb, text_emb))
+        fusion_logits = self.fusion_classifier(fused_feats["fusion"])
 
         return {
-            "text_features": text_features,
-            "audio_features": audio_embeddings,
+            "text_embed": text_emb,
+            "audio_embed": audio_emb,
+            "audio_classes": fused_feats["audio_emb"],
             "fusion_logits": fusion_logits,
         }
 
@@ -145,11 +221,15 @@ class MultiModalVPCModel(pl.LightningModule):
         outputs = self(batch)
 
         # Compute loss
-        audio_criterion = criterion.audio_criterion(outputs["audio_features"], batch.class_id)
         fusion_loss = criterion.fusion_criterion(outputs["fusion_logits"], batch.class_id)
-        loss = fusion_loss + audio_criterion
+
+        if outputs.get("audio_classes") is not None:
+            audio_loss = criterion.audio_criterion(outputs["audio_classes"], batch.class_id)
+            total_loss = fusion_loss + audio_loss
+        else:
+            total_loss = fusion_loss
         
-        return {"loss": loss, "outputs": outputs}
+        return {"loss": total_loss, "fusion": fusion_loss, "audio": audio_loss , "outputs": outputs}
 
     def _agg_text_pred(self, text_preds: torch.Tensor, method = 'mean', keepdim=True) -> torch.Tensor:
         if method == 'mean':
@@ -176,20 +256,20 @@ class MultiModalVPCModel(pl.LightningModule):
         """Training step."""
         results = self.model_step(batch, self.criterion_train)
         self._log_step_metrics(results, batch, self.criterion_train, METRIC_NAMES["TRAIN"])
-        return {"loss": results["loss"]}
+        return {k: v for k, v in results.items() if k != "outputs"}
 
     def validation_step(self, batch: VPC25Item, batch_idx: int) -> Dict[str, torch.Tensor]:
         """Validation step."""
         results = self.model_step(batch, self.criterion_val)
         self._log_step_metrics(results, batch, self.criterion_val, METRIC_NAMES["VALID"])
-        return {"loss": results["loss"]}
+        return {k: v for k, v in results.items() if k != "outputs"}
 
     def _compute_enrollment_embeddings(self, dataloader) -> dict:
         embeddings_dict = defaultdict(lambda: defaultdict(list))
 
         for batch in tqdm(dataloader, desc="Computing enrollment embeddings"):
             outputs = self(batch)
-            enroll = outputs['audio_features']
+            enroll = outputs['audio_embed']
             # Handle frame-level embeddings (if applicable)
             if len(enroll.shape) == 3:  # [1, num_frames, embedding_dim]
                 enroll = enroll.mean(dim=1)  # [1, embedding_dim]
@@ -202,7 +282,7 @@ class MultiModalVPCModel(pl.LightningModule):
 
         for batch in tqdm(dataloader, desc="Computing test embeddings"):
             outputs = self(batch)
-            test = outputs['audio_features']
+            test = outputs['audio_embed']
             # Handle frame-level embeddings (if applicable)
             if len(test.shape) == 3:  # [1, num_frames, embedding_dim]
                 test = test.mean(dim=1)  # [num_frames, embedding_dim]
