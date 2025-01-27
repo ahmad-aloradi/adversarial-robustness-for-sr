@@ -1,13 +1,12 @@
 _target_: src.datamodules.vpc_datamodule.AnonLibriDataModule
 
-num_classes: 921
+num_classes: 1001 # Number of classes in train-360-clean, dev-clean and test-clean
 root_dir: ${paths.data_dir}/vpc2025_official    
 
 dataset:
   artifacts_dir: ${paths.output_dir}/vpc2025_artifacts
   speakers_file: ${paths.data_dir}/librispeech/metadata/SPEAKERS.csv
   speaker_lookup: ${datamodule.dataset.artifacts_dir}/speaker_lookup.csv
-  seed: ${seed}
   sep: "|"
   verbose: true
   save_csv: true
@@ -58,14 +57,14 @@ transform: null
 
 loaders:
   train:
-    batch_size: 24
+    batch_size: 28
     shuffle: True
     num_workers: 4
     drop_last: True
     pin_memory: False
 
   valid:
-    batch_size: 24
+    batch_size: 28
     shuffle: False
     num_workers: 4
     drop_last: False

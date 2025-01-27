@@ -370,14 +370,14 @@ def register_custom_resolvers(
             )
         cfg_tmp = cfg.copy()
         loss = load_loss(cfg_tmp.module.criterion.loss)
-        metric, _, _ = load_metrics(cfg_tmp.module.metrics)
+        metric, metric_best, _ = load_metrics(cfg_tmp.module.metrics)
         GlobalHydra.instance().clear()
 
         OmegaConf.register_new_resolver(
             "replace",
-            lambda item: item.replace(
-                "__loss__", loss.__class__.__name__
-            ).replace("__metric__", metric.__class__.__name__),
+            lambda item: item.replace("__loss__", loss.__class__.__name__
+                                      ).replace("__metric__", metric.__class__.__name__
+                                                ).replace("__metric_best__", metric_best.__class__.__name__),
         )
 
     def decorator(function: Callable) -> Callable:

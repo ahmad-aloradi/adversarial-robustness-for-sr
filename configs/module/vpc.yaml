@@ -14,16 +14,6 @@ model:
     savedir: "local/.pretrained_models/spkrec-ecapa-voxceleb"
     run_opts:
       device: "cuda"
-      # device: "cpu"
-
-  # audio_processor:
-  #   _target_: transformers.Wav2Vec2Processor.from_pretrained
-  #   pretrained_model_name_or_path: "facebook/wav2vec2-base"
-  
-  # audio_encoder:
-  #   _target_: transformers.Wav2Vec2ForSequenceClassification.from_pretrained
-  #   pretrained_model_name_or_path: "facebook/wav2vec2-base"
-  #   num_labels: ${datamodule.num_classes}
 
   audio_processor_kwargs:
     return_tensors: "pt"
@@ -46,56 +36,67 @@ model:
 
   classifiers:
     fuser:
-      _target_: src.modules.multimodal_vpc.NormalizedWeightedSum
-      audio_embedding_size: 192
-      text_embedding_size: 768
-      hidden_size: ${module.model.classifiers.classifiers_config.num_classes}
-  
+      _target_: src.modules.multimodal_vpc.AttentionFusion
+      audio_embedding_size: ${module.model.classifiers.classifiers_config.audio_embedding_size}
+      text_embedding_size: ${module.model.classifiers.classifiers_config.text_embedding_size}
+      bottleneck_size: ${module.model.classifiers.classifiers_config.bottleneck_size}
+
+    audio_classifier:
+      _target_: torch.nn.Sequential
+      _args_:
+        - _target_: torch.nn.Linear
+          in_features: ${module.model.classifiers.classifiers_config.bottleneck_size}
+          out_features: ${module.model.classifiers.classifiers_config.num_classes}
+
     fusion_classifier:
       _target_: torch.nn.Sequential
       _args_:
         - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.num_classes}
-          out_features: ${module.model.classifiers.classifiers_config.hidden_size} 
+          in_features: ${module.model.classifiers.classifiers_config.fusion_classifier_input_size}
+          out_features: ${module.model.classifiers.classifiers_config.fusion_classifier_hidden_size}
         - _target_: torch.nn.ReLU
           inplace: True
         - _target_: torch.nn.Dropout
           p: 0.15
         - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.hidden_size} 
+          in_features: ${module.model.classifiers.classifiers_config.fusion_classifier_hidden_size}
           out_features: ${module.model.classifiers.classifiers_config.num_classes} 
 
     classifiers_config:
       num_classes: ${datamodule.num_classes}
-      hidden_size: 256
+      bottleneck_size: 512 # Size of the bottleneck layer (embedding size)
+      fusion_classifier_input_size: 512 # Depends on the fuser type
+      fusion_classifier_hidden_size: 256 # Hidden size of the fusion classifier
+      audio_embedding_size: 192 # ECAPA embedding size
+      text_embedding_size: 768  # BERT embedding size
 
 criterion:
-  criterion_train:
-    fusion_criterion:
+  train_criterion:
+    main_criterion:
       _target_: torch.nn.CrossEntropyLoss
-    audio_criterion:
-      _target_: torch.nn.CrossEntropyLoss
-
-  criterion_val:
-    fusion_criterion:
-      _target_: torch.nn.CrossEntropyLoss
-    audio_criterion:
+    aux_criterion:
       _target_: torch.nn.CrossEntropyLoss
 
-  criterion_test:
-    fusion_criterion:
+  valid_criterion:
+    main_criterion:
       _target_: torch.nn.CrossEntropyLoss
-    audio_criterion:
+    aux_criterion:
+      _target_: torch.nn.CrossEntropyLoss
+
+  test_criterion:
+    main_criterion:
+      _target_: torch.nn.CrossEntropyLoss
+    aux_criterion:
       _target_: torch.nn.CrossEntropyLoss
   
-  loss: ${module.criterion.criterion_train.fusion_criterion} # for callbacks
+  loss: ${module.criterion.train_criterion.main_criterion} # for callbacks
 
 gradient_clip_val: 5.0
 
 optimizer:
   _target_: torch.optim.AdamW
   _partial_: True
-  lr: 3.0e-4
+  lr: 1.0e-4
   weight_decay: 1.0e-5
 
 lr_scheduler:
@@ -112,16 +113,21 @@ lr_scheduler:
     frequency: 1
 
 metrics:
-  main:
+  train:
     _target_: "torchmetrics.Accuracy"
     task: "multiclass"
     num_classes: ${module.model.classifiers.classifiers_config.num_classes}
+  valid:
+    _target_: "torchmetrics.Accuracy"
+    task: "multiclass"
+    num_classes: ${module.model.classifiers.classifiers_config.num_classes}
+  test:
+    _target_: src.modules.metrics.metrics.SpeakerVerificationMetrics
+    Cfa: 1.0
+    Cmiss: 1.0
+    P_target: 0.01
   valid_best:
     _target_: "torchmetrics.MaxMetric"
-  # additional:
-  #   AUROC:
-  #     _target_: "torchmetrics.AUROC"
-  #     task: "binary"
 
 logging_params:
   on_step: False

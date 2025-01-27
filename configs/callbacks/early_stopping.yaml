@@ -12,7 +12,7 @@
 
 early_stopping:
   _target_: pytorch_lightning.callbacks.EarlyStopping
-  monitor: ${replace:"__metric__/valid_best"} # quantity to be monitored, must be specified !!!
+  monitor: ${replace:"__metric_best__/valid_best"} # quantity to be monitored, must be specified !!!
   min_delta: 5.0e-5 # minimum change in the monitored quantity to qualify as an improvement
   patience: 15 # number of checks with no improvement after which training will be stopped
   verbose: False # verbosity mode
