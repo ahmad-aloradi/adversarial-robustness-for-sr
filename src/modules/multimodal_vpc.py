@@ -12,6 +12,8 @@ import pandas as pd
 
 from src.datamodules.components.vpc25.vpc_dataset import VPC25Item, VPC25VerificationItem
 from src import utils
+from src.modules.components.utils import EmbeddingCache
+from src.modules.losses.components.focal_loss import FocalLoss
 
 log = utils.get_pylogger(__name__)
 
@@ -78,59 +80,6 @@ class NormalizedWeightedSum(nn.Module):
                 "audio_emb": audio_emb,
                 "text_emb": text_emb}  
 
-
-class CrossAttentionFusion(torch.nn.Module):
-    def __init__(self, audio_embedding_size, text_embedding_size, bottleneck_size, *args, **kwargs):
-        super().__init__()
-        self.audio_proj = torch.nn.Linear(audio_embedding_size, bottleneck_size)
-        self.text_proj = torch.nn.Linear(text_embedding_size, bottleneck_size)
-        self.transformer = torch.nn.TransformerEncoderLayer(d_model=bottleneck_size, nhead=8)
-
-    def forward(self, emebds):
-        assert len(emebds) == 2, f"Expected 2 embeddings, but found: {len(emebds)}"
-        assert type(emebds) == tuple, f"Expected tuple of embeddings, but found: {type(emebds)}"
-        audio_emb = emebds[0]
-        text_emb = emebds[1]
-
-        audio_emb = self.audio_proj(audio_emb)
-        text_emb = self.text_proj(text_emb)
-        combined = torch.cat((audio_emb.unsqueeze(1), text_emb.unsqueeze(1)), dim=1)
-        fused = self.transformer(combined)
-
-        return {"fusion_emb": fused.mean(dim=1),    # Mean pooling over the sequence dimension
-                "audio_emb": audio_emb,
-                "text_emb": text_emb}
-
-
-class AttentionFusion(nn.Module):
-    def __init__(self, audio_embedding_size, text_embedding_size, bottleneck_size, *args, **kwargs):
-        super().__init__()
-        num_heads = kwargs.get("num_heads", 4)
-        self.attention = nn.MultiheadAttention(embed_dim=bottleneck_size, num_heads=num_heads)
-        self.audio_proj = nn.Linear(audio_embedding_size, bottleneck_size)
-        self.text_proj = nn.Linear(text_embedding_size, bottleneck_size)
-        self.temperature = nn.Parameter(torch.ones(1))
-        
-    def forward(self, emebds):
-        assert len(emebds) == 2, f"Expected 2 embeddings, but found: {len(emebds)}"
-        assert type(emebds) == tuple, f"Expected tuple of embeddings, but found: {type(emebds)}"
-        audio_emb = emebds[0]
-        text_emb = emebds[1]
-
-        audio_proj = self.audio_proj(audio_emb)
-        text_proj = self.text_proj(text_emb)
-        
-        # Scale embeddings by learnable temperature
-        audio_proj = audio_proj * self.temperature
-        text_proj = text_proj * self.temperature
-        
-        # Cross-attention between modalities
-        fused_emb, _ = self.attention(audio_proj, text_proj, text_proj)
-        return {"fusion_emb": fused_emb,
-                "audio_emb": audio_proj,
-                "text_emb": text_proj}
-
-
 class ConcatFusion(torch.nn.Module):
     def __init__(self, dim=1, *args, **kwargs):
         super(ConcatFusion, self).__init__()
@@ -144,7 +93,136 @@ class ConcatFusion(torch.nn.Module):
                 "text_emb": emebds[1]}
 
 ###################################
+class EnhancedCriterion(nn.Module):
+    def __init__(self, temperature: float = 0.07):
+        super().__init__()
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.temperature = temperature
+        self.focal_loss = FocalLoss(gamma=2.0)
+        self.eps = 1e-8
+        
+    def get_contrastive_pairs(self, embeddings: torch.Tensor, targets: torch.Tensor):
+        """Create positive and negative pairs from embeddings within the batch."""
+        batch_size = embeddings.size(0)
+        # Create a mask for positive pairs (same class)
+        labels_matrix = targets.expand(batch_size, batch_size)
+        positive_mask = labels_matrix == labels_matrix.T
+        # Remove self-pairs from positive mask
+        positive_mask.fill_diagonal_(False)
+        
+        # Mask for negative pairs (different class)
+        negative_mask = ~positive_mask
+        negative_mask.fill_diagonal_(False)
+        
+        return positive_mask, negative_mask
+    
+    def contrastive_loss(self, embeddings: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute contrastive loss using cosine similarity with improved numerical stability."""
+        # Check for valid input
+        if embeddings.size(0) < 2:
+            return torch.tensor(0.0, device=embeddings.device)
+            
+        # Normalize embeddings and clamp for stability
+        embeddings_norm = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        embeddings_norm = torch.clamp(embeddings_norm, min=-1.0 + self.eps, max=1.0 - self.eps)
+        
+        # Compute similarity matrix with temperature scaling
+        similarity_matrix = torch.matmul(embeddings_norm, embeddings_norm.T)
+        similarity_matrix = similarity_matrix / self.temperature
+        
+        # Get positive and negative masks
+        positive_mask, negative_mask = self.get_contrastive_pairs(embeddings, targets)
+        
+        # Count valid pairs per sample
+        n_positives = positive_mask.sum(dim=1)
+        n_negatives = negative_mask.sum(dim=1)
+        
+        # Skip samples with no positive or negative pairs
+        valid_samples = (n_positives > 0) & (n_negatives > 0)
+        if not valid_samples.any():
+            return torch.tensor(0.0, device=embeddings.device)
+            
+        # Apply log-sum-exp trick for numerical stability
+        max_sim = torch.max(similarity_matrix, dim=1, keepdim=True)[0].detach()
+        exp_sim = torch.exp(similarity_matrix - max_sim)
+        
+        # Compute log probability ratio for valid samples
+        pos_exp_sum = torch.sum(exp_sim * positive_mask, dim=1)
+        neg_exp_sum = torch.sum(exp_sim * negative_mask, dim=1)
+        
+        # Compute per-sample loss with careful handling of denominators
+        denominator = pos_exp_sum + neg_exp_sum + self.eps
+        per_sample_loss = -torch.log(pos_exp_sum / denominator + self.eps)
+        
+        # Only consider loss for valid samples
+        per_sample_loss = per_sample_loss * valid_samples.float()
+        
+        # Average loss over valid samples
+        n_valid_samples = valid_samples.sum()
+        loss = per_sample_loss.sum() / (n_valid_samples + self.eps)
+        
+        # Check for NaN and return zero if found
+        if torch.isnan(loss):
+            log.warning("NaN detected in contrastive loss! Returning zero.")
+            return torch.tensor(0.0, device=embeddings.device)
+            
+        return loss
 
+    def forward(self, outputs: Dict[str, torch.Tensor], targets: torch.Tensor) -> torch.Tensor:
+        ce_loss = self.ce_loss(outputs[f"{LOSS_TYPES['MAIN']}_logits"], targets)
+        contr_loss = self.contrastive_loss(outputs[EMBEDS["FUSION"]], targets)
+        focal_loss = self.focal_loss(outputs[f"{LOSS_TYPES['MAIN']}_logits"], targets)
+        
+        # Log component losses for debugging
+        if torch.isnan(ce_loss) or torch.isnan(contr_loss) or torch.isnan(focal_loss):
+            log.warning(f"NaN detected in losses - CE: {ce_loss.item()}, Contrastive: {contr_loss.item()}, Focal: {focal_loss.item()}")
+        
+        # Increase CE loss weight and reduce contrastive loss weight
+        return 1.0 * ce_loss + 0.05 * contr_loss + 0.1 * focal_loss
+
+class ResidualBlock(nn.Module):
+    """A residual block with batch normalization and dropout."""
+    def __init__(self, in_features: int, hidden_features: int, dropout: float = 0.3):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Linear(in_features, hidden_features),
+            nn.BatchNorm1d(hidden_features),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(hidden_features, in_features),
+            nn.BatchNorm1d(in_features)
+        )
+        
+        # Initialize weights
+        for m in self.block.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.relu(x + self.block(x))
+
+class FusionClassifier(nn.Module):
+    """Fusion classifier with residual connections."""
+    def __init__(self, input_size: int, hidden_size: int, num_classes: int, dropout: float = 0.3):
+        super().__init__()
+        self.input_norm = nn.BatchNorm1d(input_size)
+        self.residual1 = ResidualBlock(input_size, hidden_size, dropout)
+        self.residual2 = ResidualBlock(input_size, hidden_size, dropout)
+        self.classifier = nn.Linear(input_size, num_classes)
+        
+        # Initialize classifier weights
+        nn.init.xavier_uniform_(self.classifier.weight)
+        nn.init.zeros_(self.classifier.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.input_norm(x)
+        x = self.residual1(x)
+        x = self.residual2(x)
+        return self.classifier(x)
+
+###################################
 class MultiModalVPCModel(pl.LightningModule):
     """Multi-modal Voice Print Classification Model.
     
@@ -180,6 +258,9 @@ class MultiModalVPCModel(pl.LightningModule):
         # Freeze pretrained components
         self._freeze_pretrained_components()
 
+        # Initialize embedding cache
+        self._embedding_cache = EmbeddingCache(max_size=60000)
+
     def _setup_metrics(self, metrics: DictConfig) -> None:
         """Initialize all metrics for training, validation and testing."""
         self.train_metric = instantiate(metrics.train)
@@ -204,17 +285,16 @@ class MultiModalVPCModel(pl.LightningModule):
         self.fuser = instantiate(model.classifiers.fuser)
         self.fusion_classifier = instantiate(model.classifiers.fusion_classifier)
 
-    def _setup_training_components(self, criterion: DictConfig, optimizer: DictConfig, lr_scheduler: DictConfig
-                                   ) -> None:
+    def _setup_training_components(self, criterion: DictConfig, optimizer: DictConfig, lr_scheduler: DictConfig) -> None:
         """Initialize loss functions, optimizer and learning rate scheduler."""
         self.train_criterion = instantiate(criterion.train_criterion)
         self.valid_criterion = instantiate(criterion.valid_criterion)
         self.test_criterion = instantiate(criterion.test_criterion)
         if len(self.train_criterion) > 1:
             assert len(self.valid_criterion) == len(self.train_criterion), "Mismatch in number of losses"
-            self._multitask_loss = True
+            self._audio_embed_train = True
         else:
-            self._multitask_loss = False
+            self._audio_embed_train = False
 
         self.optimizer = optimizer
         self.slr_params = lr_scheduler
@@ -234,7 +314,7 @@ class MultiModalVPCModel(pl.LightningModule):
         criterion = getattr(self, f"{stage}_criterion")
         main_loss = criterion.main_criterion.__class__.__name__
         
-        if not self._multitask_loss:
+        if not self._audio_embed_train:
             logged_dict = {
                 f"{LOSS_TYPES['MAIN']}_{main_loss}/{stage}": results[LOSS_TYPES['MAIN']].item()
             }
@@ -253,9 +333,9 @@ class MultiModalVPCModel(pl.LightningModule):
             **self.logging_params
         )
 
-        # Log metrics
+        # Log metrics - use logits instead of class predictions for better accuracy computation
         metric = getattr(self, f"{stage}_metric")
-        computed_metric = metric(results["outputs"][EMBEDS["CLASS"]], batch.class_id)
+        computed_metric = metric(results["outputs"][f"{LOSS_TYPES['MAIN']}_logits"], batch.class_id)
 
         self.log(
             f"{metric.__class__.__name__}/{stage}",
@@ -310,32 +390,59 @@ class MultiModalVPCModel(pl.LightningModule):
         return embeddings_dict
 
     def forward(self, batch: VPC25Item) -> Dict[str, torch.Tensor]:
-        assert len(set(batch.sample_rate)) == 1, (
-            "Wav2Vec2Processor expects sampling_rate of type: int, but found multiple sampling rates."
-        )
-
-        # Process audio for text input (assumming BERT-like model)
-        inputs_text = self.text_processor(batch.text, **self.text_processor_kwargs).to(self.device)
-        text_outputs = self.text_encoder(inputs_text.input_ids, attention_mask=inputs_text.attention_mask)
-        text_emb = text_outputs.pooler_output
-
-        # Process audio input
+        """Forward pass with optimized text embedding caching."""
+        batch_texts = batch.text
+        text_embeddings = []
+        uncached_texts = []
+        uncached_indices = []
+        
+        # Pre-allocate list for embeddings
+        text_embeddings = [None] * len(batch_texts)
+        
+        # Check cache for each text
+        for idx, text in enumerate(batch_texts):
+            cached_embedding = self._embedding_cache.get(text)
+            if cached_embedding is not None:
+                # Move cached embedding to current device
+                text_embeddings[idx] = cached_embedding.to(self.device)
+            else:
+                uncached_texts.append(text)
+                uncached_indices.append(idx)
+        
+        # Process uncached texts in a single batch
+        if uncached_texts:
+            # Process all uncached texts in a single batch
+            inputs_text = self.text_processor(uncached_texts, **self.text_processor_kwargs).to(self.device)
+            
+            with torch.no_grad():
+                text_outputs = self.text_encoder(inputs_text.input_ids, attention_mask=inputs_text.attention_mask)
+                new_embeddings = text_outputs.pooler_output
+            
+            # Update cache and embeddings list
+            for idx, (text, embedding) in enumerate(zip(uncached_texts, new_embeddings)):
+                # Store embedding in cache (detached and on CPU)
+                self._embedding_cache.update(text, embedding.detach().cpu())
+                # Use the embedding directly from GPU for current forward pass
+                text_embeddings[uncached_indices[idx]] = embedding
+        
+        # Stack all embeddings
+        text_emb = torch.stack(text_embeddings)
+        
+        # Process audio
         if hasattr(self.audio_encoder, "encode_batch"):
             # For speechbrain encoders (e.g., x-vector)
             audio_emb = self.audio_encoder.encode_batch(batch.audio).squeeze(1)
         else:
-            # For transformers-based encoders (e.g., wav2vec)
+            # For transformers-based encoders (e.g., wav2vec) 
             input_values = self.audio_processor(batch.audio, **self.audio_processor_kwargs).input_values.squeeze(0).to(self.device)
             audio_outputs = self.audio_encoder(input_values)
             audio_emb = audio_outputs.last_hidden_state.mean(dim=1)
 
-        # Combine features and get predictions
+        # Fusion and classification
         fused_feats = self.fuser((audio_emb, text_emb))
         fusion_logits = self.fusion_classifier(fused_feats["fusion_emb"])
         class_prob = torch.nn.functional.softmax(fusion_logits, dim=1)
         class_preds = torch.argmax(class_prob, dim=-1)
-
-        # auxillary audio classification
         audio_logits = self.audio_classifier(fused_feats["audio_emb"])
 
         return {
@@ -352,8 +459,13 @@ class MultiModalVPCModel(pl.LightningModule):
         outputs = self(batch)
 
         # Compute loss
-        main_loss = criterion.main_criterion(outputs[f"{LOSS_TYPES['MAIN']}_logits"], batch.class_id)
-        if self._multitask_loss:
+        if criterion.main_criterion.__class__.__name__ == "EnhancedCriterion":
+            main_loss = criterion.main_criterion(outputs, batch.class_id)
+        else:
+            main_loss = criterion.main_criterion(outputs[f"{LOSS_TYPES['MAIN']}_logits"], batch.class_id)
+
+        aux_loss = torch.tensor(0.0, device=main_loss.device)
+        if self._audio_embed_train:
             aux_loss = criterion.aux_criterion(outputs[f"{LOSS_TYPES['AUX']}_logits"], batch.class_id)
             total_loss = main_loss + aux_loss
         else:
@@ -378,6 +490,11 @@ class MultiModalVPCModel(pl.LightningModule):
         self._log_step_metrics(results, batch, METRIC_NAMES["TRAIN"])
         return results
 
+    def on_validation_start(self) -> None:
+        self.audio_encoder.eval()
+        self.text_encoder.eval()
+
+    @torch.no_grad()
     def validation_step(self, batch: VPC25Item, batch_idx: int) -> Dict[str, torch.Tensor]:
         results = self.model_step(batch, self.valid_criterion)
         self._log_step_metrics(results, batch, METRIC_NAMES["VALID"])
@@ -395,6 +512,7 @@ class MultiModalVPCModel(pl.LightningModule):
             **self.logging_params,
         )
 
+    @torch.no_grad()
     def on_test_start(self) -> None:
         """Compute embeddings for test trials."""
         enroll_loader, unique_test_loader = self.trainer.datamodule.enrollment_dataloader()
@@ -403,6 +521,7 @@ class MultiModalVPCModel(pl.LightningModule):
 
         self.scores = pd.DataFrame(columns=["enrollment_id", "audio_path", "label", "score", "model"])
 
+    @torch.no_grad()
     def test_step(self, batch: VPC25VerificationItem, batch_idx: int) -> Dict[str, torch.Tensor]:
         """Compute EER and minDCF on these test trials"""        
         test_embeddings = torch.stack([self.test_embeds[path] for path in batch.audio_path])
@@ -462,4 +581,3 @@ class MultiModalVPCModel(pl.LightningModule):
             return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_dict}
         
         return {"optimizer": optimizer}
-    

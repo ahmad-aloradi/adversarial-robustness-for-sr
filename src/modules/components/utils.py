@@ -1,10 +1,57 @@
-import torch
-from speechbrain.pretrained import EncoderClassifier
-import pandas as pd
-from src.datamodules.components.utils import SimpleAudioDataset
-from torch.utils.data import DataLoader
+from typing import Dict, Optional
+from collections import OrderedDict
+
 from tqdm import tqdm
-from typing import Dict
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader
+from speechbrain.pretrained import EncoderClassifier
+
+from src.datamodules.components.utils import SimpleAudioDataset
+
+
+class EmbeddingCache:
+    """Manages caching of text embeddings with a size limit."""
+    def __init__(self, max_size: int = 10000):
+        self.max_size = max_size
+        self._cache = OrderedDict()
+
+    def get(self, key: str) -> Optional[torch.Tensor]:
+        """Get embedding from cache and move it to most recently used."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return None
+    
+    def update(self, key: str, value: torch.Tensor) -> None:
+        """Add or update cache entry."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        elif len(self._cache) >= self.max_size:
+            self._cache.popitem(last=False)
+
+        # Ensure the tensor is detached and on CPU
+        if value.requires_grad:
+            value = value.detach()
+        if value.device.type != 'cpu':
+            value = value.cpu()
+        self._cache[key] = value
+
+    def clear(self) -> None:
+        """Clear the cache."""
+        self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+    
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+    
+    def __getitem__(self, key: str) -> torch.Tensor:
+        return self.get(key)
+    
+    def __setitem__(self, key: str, value: torch.Tensor) -> None:
+        self.update(key, value)
 
 
 class LanguagePredictionModel():

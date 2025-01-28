@@ -36,37 +36,26 @@ model:
 
   classifiers:
     fuser:
-      _target_: src.modules.multimodal_vpc.AttentionFusion
+      _target_: src.modules.multimodal_vpc.NormalizedWeightedSum
       audio_embedding_size: ${module.model.classifiers.classifiers_config.audio_embedding_size}
       text_embedding_size: ${module.model.classifiers.classifiers_config.text_embedding_size}
       bottleneck_size: ${module.model.classifiers.classifiers_config.bottleneck_size}
 
     audio_classifier:
-      _target_: torch.nn.Sequential
-      _args_:
-        - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.bottleneck_size}
-          out_features: ${module.model.classifiers.classifiers_config.num_classes}
+      _target_: torch.nn.Identity
 
     fusion_classifier:
-      _target_: torch.nn.Sequential
-      _args_:
-        - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.fusion_classifier_input_size}
-          out_features: ${module.model.classifiers.classifiers_config.fusion_classifier_hidden_size}
-        - _target_: torch.nn.ReLU
-          inplace: True
-        - _target_: torch.nn.Dropout
-          p: 0.15
-        - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.fusion_classifier_hidden_size}
-          out_features: ${module.model.classifiers.classifiers_config.num_classes} 
+      _target_: src.modules.multimodal_vpc.FusionClassifier
+      input_size: ${module.model.classifiers.classifiers_config.fusion_classifier_input_size}
+      hidden_size: ${module.model.classifiers.classifiers_config.fusion_classifier_hidden_size}
+      num_classes: ${module.model.classifiers.classifiers_config.num_classes}
+      dropout: 0.3
 
     classifiers_config:
       num_classes: ${datamodule.num_classes}
       bottleneck_size: 512 # Size of the bottleneck layer (embedding size)
       fusion_classifier_input_size: 512 # Depends on the fuser type
-      fusion_classifier_hidden_size: 256 # Hidden size of the fusion classifier
+      fusion_classifier_hidden_size: 1024 # Increased hidden size for better representation
       audio_embedding_size: 192 # ECAPA embedding size
       text_embedding_size: 768  # BERT embedding size
 
@@ -74,21 +63,21 @@ criterion:
   train_criterion:
     main_criterion:
       _target_: torch.nn.CrossEntropyLoss
-    aux_criterion:
-      _target_: torch.nn.CrossEntropyLoss
+      # _target_: src.modules.multimodal_vpc.EnhancedCriterion
+      # temperature: 0.1  # Increased temperature for more stable gradients
 
   valid_criterion:
     main_criterion:
       _target_: torch.nn.CrossEntropyLoss
-    aux_criterion:
-      _target_: torch.nn.CrossEntropyLoss
+      # _target_: src.modules.multimodal_vpc.EnhancedCriterion
+      # temperature: 0.1
 
   test_criterion:
     main_criterion:
       _target_: torch.nn.CrossEntropyLoss
-    aux_criterion:
-      _target_: torch.nn.CrossEntropyLoss
-  
+      # _target_: src.modules.multimodal_vpc.EnhancedCriterion
+      # temperature: 0.1
+
   loss: ${module.criterion.train_criterion.main_criterion} # for callbacks
 
 gradient_clip_val: 5.0

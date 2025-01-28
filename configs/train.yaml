@@ -53,3 +53,6 @@ seed: 42
 
 # name of the run, accessed by loggers
 name: "lightning-template-0.1.0"
+
+# gradient clipping
+gradient_clip_val: ${module.gradient_clip_val}
