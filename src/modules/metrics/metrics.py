@@ -1,9 +1,9 @@
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 
 import hydra
 import torch
 from omegaconf import DictConfig
-from torchmetrics import Metric, MetricCollection
+from torchmetrics import Metric, MetricCollection, MinMetric
 from torchmetrics.utilities.data import dim_zero_cat
 
 class SpeakerVerificationMetrics(Metric):
@@ -14,15 +14,10 @@ class SpeakerVerificationMetrics(Metric):
         self.Cmiss = Cmiss
         self.P_target = P_target
         self.eps = 1e-8
-        self.prefix = kwargs.get("prefix", "")
-        self.postfix = kwargs.get("postfix", "")
-        if self.postfix != "" and self.prefix != "":
-            raise ValueError("Cannot have both prefix and postfix")
 
         # States to accumulate scores and targets
         self.add_state("scores", default=[], dist_reduce_fx="cat")
         self.add_state("targets", default=[], dist_reduce_fx="cat")
-
 
     def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
         """Update metric states with predictions and targets.
@@ -75,10 +70,10 @@ class SpeakerVerificationMetrics(Metric):
         min_dcf, min_dcf_threshold = self._compute_min_dcf(far, frr, thresholds)
 
         return {
-            f"{self.prefix}EER{self.postfix}": eer.item(),
-            f"{self.prefix}EER_threshold{self.postfix}": eer_threshold.item(),
-            f"{self.prefix}minDCF{self.postfix}": min_dcf.item(),
-            f"{self.prefix}minDCF_threshold{self.postfix}": min_dcf_threshold.item()
+            f"EER": eer,
+            f"EER_threshold": eer_threshold,
+            f"minDCF": min_dcf,
+            f"minDCF_threshold": min_dcf_threshold
         }
             
     def _compute_eer(self, far: torch.Tensor, frr: torch.Tensor, thresholds: torch.Tensor
@@ -163,6 +158,69 @@ class SpeakerVerificationMetrics(Metric):
         normalized_scores = (scores - means) / stds
         
         return normalized_scores
+
+class AutoSyncDictMinMetric(Metric):
+    """Automatically configures dist_sync_on_step based on execution context."""
+    
+    def __init__(self, target_key: str, compute_on_step=False):
+        super().__init__(compute_on_step=compute_on_step)
+        
+        self.target_key = target_key
+        self._min_metric: Optional[MinMetric] = None
+        self._best_values = {}
+        self._current_min = torch.tensor(float('inf'))
+        
+        # Deferred initialization
+        self.add_state("_initialized", default=torch.tensor(0), dist_reduce_fx="mean")
+
+    def _lazy_init(self):
+        """Initialize MinMetric after device placement is known."""
+        if self._min_metric is None:
+            # Auto-determine dist_sync_on_step based on Lightning context
+            dist_sync = self._should_sync_on_step()
+            self._min_metric = MinMetric(dist_sync_on_step=dist_sync).to(self.device)
+
+    def _should_sync_on_step(self) -> bool:
+        """Determine if synchronization should happen on step."""
+        try:
+            # Check if we're in a distributed environment
+            if self.trainer and self.trainer.num_devices > 1:
+                # Only sync on step during training, not validation/test
+                return self.trainer.training
+            return False
+        except AttributeError:
+            # Fallback if not used with Lightning
+            return False
+
+    def update(self, metric_dict: dict):
+        self._lazy_init()
+        current_target = metric_dict[self.target_key].detach()
+        
+        # Update min metric
+        self._min_metric.update(current_target)
+        
+        # Track best values
+        if current_target < self._current_min:
+            self._current_min = current_target.clone()
+            self._best_values = {
+                k: v.detach().clone() 
+                for k, v in metric_dict.items() 
+                if k != self.target_key
+            }
+
+    def compute(self) -> dict:
+        self._lazy_init()
+        return {
+            self.target_key: self._min_metric.compute(),
+            **self._best_values
+        }
+
+    def reset(self):
+        if self._min_metric:
+            self._min_metric.reset()
+        self._current_min = torch.tensor(float('inf'))
+        self._best_values = {}
+
 
 def load_metrics(
     metrics_cfg: DictConfig,

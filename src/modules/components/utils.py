@@ -1,5 +1,6 @@
-from typing import Dict, Optional
+from typing import Optional, Dict
 from collections import OrderedDict
+import threading
 
 from tqdm import tqdm
 import pandas as pd
@@ -8,51 +9,138 @@ from torch.utils.data import DataLoader
 from speechbrain.pretrained import EncoderClassifier
 
 from src.datamodules.components.utils import SimpleAudioDataset
+from src import utils
+
+logger = utils.get_pylogger(__name__)
 
 
 class EmbeddingCache:
-    """Manages caching of text embeddings with a size limit."""
+    """Manages caching of text embeddings with LRU eviction policy and usage statistics.
+
+    Attributes:
+        max_size (int): Maximum number of embeddings the cache can hold.
+    """
+
     def __init__(self, max_size: int = 10000):
+        """Initializes the cache with a specified maximum size.
+
+        Args:
+            max_size (int): Positive integer indicating the maximum cache capacity.
+        
+        Raises:
+            ValueError: If `max_size` is not a positive integer.
+        """
+        if max_size <= 0:
+            raise ValueError("max_size must be a positive integer")
         self.max_size = max_size
         self._cache = OrderedDict()
+        self._lock = threading.RLock()
+        self.hits = 0
+        self.misses = 0
 
     def get(self, key: str) -> Optional[torch.Tensor]:
-        """Get embedding from cache and move it to most recently used."""
-        if key in self._cache:
-            self._cache.move_to_end(key)
-            return self._cache[key]
-        return None
-    
-    def update(self, key: str, value: torch.Tensor) -> None:
-        """Add or update cache entry."""
-        if key in self._cache:
-            self._cache.move_to_end(key)
-        elif len(self._cache) >= self.max_size:
-            self._cache.popitem(last=False)
+        """Retrieves the embedding for a key, updating usage statistics.
 
-        # Ensure the tensor is detached and on CPU
-        if value.requires_grad:
-            value = value.detach()
-        if value.device.type != 'cpu':
-            value = value.cpu()
-        self._cache[key] = value
+        Args:
+            key (str): The identifier for the embedding.
+
+        Returns:
+            Optional[torch.Tensor]: The cached tensor if exists, otherwise None.
+        """
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                self.hits += 1
+                return self._cache[key]
+            
+            self.misses += 1
+            return None
+
+    def update(self, key: str, value: torch.Tensor) -> None:
+        """Adds or updates an embedding in the cache.
+
+        Args:
+            key (str): The identifier for the embedding.
+            value (torch.Tensor): The tensor to cache. Detached and moved to CPU.
+
+        Raises:
+            TypeError: If `value` is not a `torch.Tensor`.
+        """
+        with self._lock:
+            if not isinstance(value, torch.Tensor):
+                raise TypeError("Value must be a torch.Tensor")
+
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            else:
+                if len(self._cache) >= self.max_size:
+                    self._cache.popitem(last=False)
+
+            value = value.detach().cpu()
+            self._cache[key] = value
+
+    def stats(self) -> Dict[str, float]:
+        """Get cache performance statistics.
+
+        Returns:
+            Dictionary containing:
+            - hits: Number of successful cache retrievals
+            - misses: Number of failed cache lookups
+            - hit_rate: Ratio of hits to total lookups (0.0-1.0)
+        """
+        with self._lock:
+            total = self.hits + self.misses
+            return {
+                "hits": self.hits,
+                "misses": self.misses,
+                "hit_rate": self.hits / total if total > 0 else 0.0
+            }
+
+    def reset_stats(self) -> None:
+        """Reset performance statistics counters."""
+        with self._lock:
+            self.hits = 0
+            self.misses = 0
 
     def clear(self) -> None:
-        """Clear the cache."""
-        self._cache.clear()
+        """Removes all entries from the cache while preserving statistics."""
+        with self._lock:
+            self._cache.clear()
+
+    def resize(self, new_max_size: int) -> None:
+        """Adjusts the cache capacity, evicting LRU entries if necessary."""
+        with self._lock:
+            if new_max_size <= 0:
+                raise ValueError("new_max_size must be a positive integer")
+            self.max_size = new_max_size
+            while len(self._cache) > self.max_size:
+                self._cache.popitem(last=False)
 
     def __len__(self) -> int:
-        return len(self._cache)
-    
+        with self._lock:
+            return len(self._cache)
+
     def __contains__(self, key: str) -> bool:
-        return key in self._cache
-    
+        with self._lock:
+            return key in self._cache
+
     def __getitem__(self, key: str) -> torch.Tensor:
-        return self.get(key)
-    
+        with self._lock:
+            value = self.get(key)
+            if value is None:
+                raise KeyError(f"Key '{key}' not found in cache")
+            return value
+
     def __setitem__(self, key: str, value: torch.Tensor) -> None:
         self.update(key, value)
 
+    def __repr__(self) -> str:
+        with self._lock:
+            stats = self.stats()
+            return (
+                f"EmbeddingCache(max_size={self.max_size}, current_size={len(self)}, "
+                f"hit_rate={stats['hit_rate']:.2f})"
+            )
 
 class LanguagePredictionModel():
     """

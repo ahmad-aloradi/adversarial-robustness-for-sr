@@ -18,6 +18,7 @@ artifacts_paths:
   train: ${datamodule.dataset.artifacts_dir}/train.csv
   dev: ${datamodule.dataset.artifacts_dir}/dev.csv
   test: ${datamodule.dataset.artifacts_dir}/test.csv
+  dev_unique: ${datamodule.dataset.artifacts_dir}/dev_unique.csv
   test_unique: ${datamodule.dataset.artifacts_dir}/test_unique.csv
   
   dev_enrolls: ${datamodule.dataset.artifacts_dir}/dev_enrolls.csv
@@ -57,21 +58,21 @@ transform: null
 
 loaders:
   train:
-    batch_size: 28
+    batch_size: 24
     shuffle: True
     num_workers: 4
     drop_last: True
     pin_memory: False
 
   valid:
-    batch_size: 28
+    batch_size: 24
     shuffle: False
     num_workers: 4
     drop_last: False
     pin_memory: False
 
   test:
-    batch_size: 64
+    batch_size: 8
     shuffle: False
     num_workers: 4
     drop_last: False

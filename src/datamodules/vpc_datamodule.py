@@ -131,16 +131,17 @@ class AnonLibriDataModule(pl.LightningDataModule):
 
             # exlcude df_test_enrolls from df_test
             df_test_unique = df_test[~df_test.split.isin(test_enrolls.source)].reset_index(drop=True)
+            df_dev_unique = df_dev[~df_dev.split.isin(df_dev_enrolls.source)].reset_index(drop=True)
 
             # save the updated csv
             os.makedirs(self.dataset.artifacts_dir, exist_ok=True)
 
             for df, path in zip(
-                [df_train, df_dev, df_test, df_test_unique,
+                [df_train, df_dev, df_test, df_dev_unique, df_test_unique,
                 df_dev_enrolls, test_enrolls,
                 df_dev_trials, df_test_trials,
                 df_speakers_train, df_speakers_dev, df_speakers_test],
-                [self.save_paths.train, self.save_paths.dev, self.save_paths.test, self.save_paths.test_unique,
+                [self.save_paths.train, self.save_paths.dev, self.save_paths.test, self.save_paths.dev_unique, self.save_paths.test_unique,
                 self.save_paths.dev_enrolls, self.save_paths.test_enrolls, 
                 self.save_paths.dev_trials, self.save_paths.test_trials, 
                 self.save_paths.spks_train, self.save_paths.spks_dev, self.save_paths.spks_test]
@@ -164,12 +165,21 @@ class AnonLibriDataModule(pl.LightningDataModule):
                 sample_rate=self.sample_rate,
                 max_duration=self.dataset.max_duration
             )
-            self.eval_data = VPC25Dataset(
-                data_dir=self.root_dir,
-                data_filepath=self.save_paths.dev,
-                sample_rate=self.sample_rate,
-                max_duration=self.dataset.max_duration
-            )
+            self.eval_data = VPC25TestDataset(data_dir=self.root_dir,
+                                             test_trials_path=self.save_paths.dev_trials,
+                                             sample_rate=self.sample_rate,
+                                             max_duration=None)
+            
+            self.dev_unique = VPC25Dataset(data_dir=self.root_dir,
+                                           data_filepath=self.save_paths.dev_unique,
+                                           sample_rate=self.sample_rate,
+                                           max_duration=None)
+            
+            self.dev_enroll_data = VPC25EnrollDataset(data_dir=self.root_dir,
+                                                      data_filepath=self.save_paths.dev_enrolls,
+                                                      sample_rate=self.sample_rate,
+                                                      max_duration=None)
+            
         if stage == 'test' or stage is None:
             self.test_data = VPC25TestDataset(data_dir=self.root_dir,
                                               test_trials_path=self.save_paths.test_trials,
@@ -201,7 +211,8 @@ class AnonLibriDataModule(pl.LightningDataModule):
             shuffle=self.loaders.valid.shuffle,
             num_workers=self.loaders.valid.num_workers,
             pin_memory=self.loaders.valid.pin_memory,
-            collate_fn=VPC25ClassCollate()
+            # collate_fn=VPC25ClassCollate()
+            collate_fn=VPCTestCoallate()
         )
     
     def test_dataloader(self) -> DataLoader:
@@ -215,7 +226,27 @@ class AnonLibriDataModule(pl.LightningDataModule):
         )
         return trial_loader
 
-    def enrollment_dataloader(self) -> DataLoader:
+    def dev_enrollment_dataloader(self) -> DataLoader:
+        trial_unique = DataLoader(
+            self.dev_unique,
+            batch_size=self.loaders.valid.batch_size,
+            shuffle=self.loaders.valid.shuffle,
+            num_workers=self.loaders.valid.num_workers,
+            pin_memory=self.loaders.valid.pin_memory,
+            collate_fn=VPC25ClassCollate()
+            )
+
+        enroll_loader = DataLoader(
+            self.dev_enroll_data,
+            batch_size=self.loaders.enrollment.batch_size,
+            shuffle=self.loaders.enrollment.shuffle,
+            num_workers=self.loaders.enrollment.num_workers,
+            pin_memory=self.loaders.enrollment.pin_memory,
+            collate_fn=VPC25EnrollCollate()
+            )
+        return enroll_loader, trial_unique
+
+    def test_enrollment_dataloader(self) -> DataLoader:
         trial_unique = DataLoader(
             self.test_unique,
             batch_size=self.loaders.test.batch_size,
