@@ -585,7 +585,6 @@ class MultiModalVPCModel(pl.LightningModule):
 
     ############ Dev and eval utils ############
     def _compute_enrollment_embeddings(self, dataloader) -> dict:
-        return None
         embeddings_dict = {}
         enrol_embeds = defaultdict(dict)
 
@@ -618,7 +617,6 @@ class MultiModalVPCModel(pl.LightningModule):
         return enrol_embeds
 
     def _compute_test_embeddings(self, dataloader) -> dict:
-        return None
         embeddings_dict = {}
 
         with tqdm(dataloader, desc="Computing test/dev embeddings") as pbar:        
@@ -639,11 +637,9 @@ class MultiModalVPCModel(pl.LightningModule):
         enrol = self.enrol_embeds if is_test else self.enrol_dev_embeds
         metric = self.test_metric if is_test else self.valid_metric
 
-        trial_embeddings = torch.randn(len(batch.audio), 512, device=self.device)
-        enroll_embeddings = torch.randn(len(batch.audio), 512, device=self.device)
-        # trial_embeddings = torch.stack([embeds[path] for path in batch.audio_path])
-        # enroll_embeddings = torch.stack([enrol[model][enroll_id]
-        #                                 for model, enroll_id in zip(batch.model, batch.enroll_id)])
+        trial_embeddings = torch.stack([embeds[path] for path in batch.audio_path])
+        enroll_embeddings = torch.stack([enrol[model][enroll_id]
+                                        for model, enroll_id in zip(batch.model, batch.enroll_id)])
         scores = torch.nn.functional.cosine_similarity(enroll_embeddings, trial_embeddings)
         
         batch_dict = {
@@ -700,6 +696,11 @@ class MultiModalVPCModel(pl.LightningModule):
             for key, value in metrics.items()
         }
         self.log_dict(prefixed_metrics, **self.logging_params)
+
+        # log self.fuser.audio_weight and self.fuser.text_weight if they exist (NormalizedWeightedSum)
+        if hasattr(self.fuser, "audio_weight") and hasattr(self.fuser, "text_weight"):
+            self.log("audio_weight", self.fuser.audio_weight, **self.logging_params)
+            self.log("text_weight", self.fuser.text_weight, **self.logging_params)
 
         # Update scores dataframe with metrics
         scores.loc[:, metrics.keys()] = [v.item() if torch.is_tensor(v) else v for v in metrics.values()]

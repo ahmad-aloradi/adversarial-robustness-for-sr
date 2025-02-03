@@ -71,9 +71,9 @@ model:
 criterion:
   train_criterion:
     main_criterion:
-      _target_: torch.nn.CrossEntropyLoss
-      # _target_: src.modules.multimodal_vpc.EnhancedCriterion
-      # temperature: 0.1  # Increased temperature for more stable gradients
+      # _target_: torch.nn.CrossEntropyLoss
+      _target_: src.modules.multimodal_vpc.EnhancedCriterion
+      temperature: 0.1  # Increased temperature for more stable gradients
 
   loss: ${module.criterion.train_criterion.main_criterion} # for callbacks
 
