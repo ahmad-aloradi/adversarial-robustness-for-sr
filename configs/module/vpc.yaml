@@ -105,18 +105,12 @@ metrics:
     task: "multiclass"
     num_classes: ${module.model.classifiers.classifiers_config.num_classes}
   valid:
-    _target_: src.modules.metrics.metrics.SpeakerVerificationMetrics
-    Cfa: 1.0
-    Cmiss: 1.0
-    P_target: 0.01
+    _target_: src.modules.metrics.metrics.VerificationMetrics
   test:
-    _target_: src.modules.metrics.metrics.SpeakerVerificationMetrics
-    Cfa: 1.0
-    Cmiss: 1.0
-    P_target: 0.01
+    _target_: src.modules.metrics.metrics.VerificationMetrics
   valid_best:
     _target_: src.modules.metrics.metrics.AutoSyncDictMinMetric
-    target_key: "EER"
+    target_key: "eer"
 
 
 logging_params:

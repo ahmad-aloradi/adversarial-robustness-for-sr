@@ -7,9 +7,9 @@ import torch.nn as nn
 import pytorch_lightning as pl
 from hydra.utils import instantiate
 from omegaconf import DictConfig
-# from tqdm import tqdm_notebook as tqdm
 from tqdm import tqdm
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from src.datamodules.components.vpc25.vpc_dataset import VPC25Item, VPC25VerificationItem
 from src import utils
@@ -711,6 +711,15 @@ class MultiModalVPCModel(pl.LightningModule):
         scores.to_csv(save_path, index=False)
         torch.save(enrol_embeds, os.path.join(self.trainer.log_dir, "enrol_embeds.pt"))
         torch.save(trials_embeds, os.path.join(self.trainer.log_dir, f"{stage}_embeds.pt"))
+
+        figures = metric.plot_curves() or {}
+        for name, fig in figures.items():
+            self.log_figure_with_fallback(f"{stage}_{name}_scores", fig, step=self.current_epoch)
+
+    def log_figure_with_fallback(self, name: str, fig: plt.Figure, step: int) -> None:
+        """Log figure with fallback for loggers that don't support figure logging."""
+        if hasattr(self.logger, 'experiment'):
+            self.logger.experiment[f'metrics/{name}'].upload(fig)
 
     ############ Load and save ############
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
