@@ -60,12 +60,39 @@ class AnonLibriDataModule(pl.LightningDataModule):
 
     def prepare_data(self):
         if self.train_data is None:
-            df_train, df_speakers_train  = self.csv_processor.process(
-                [self.models[dire].train for dire in self.models.keys()], [self.dataset.speakers_file])
-            df_dev, df_speakers_dev  = self.csv_processor.process(
-                [self.models[dire].dev for dire in self.models.keys()], [self.dataset.speakers_file])
-            df_test, df_speakers_test  = self.csv_processor.process(
-                [self.models[dire].test for dire in self.models.keys()], [self.dataset.speakers_file])
+            # Concatenate all CSVs
+            df_train = self.csv_processor.concatenate_csvs([self.models[dire].train for dire in self.models.keys()])
+            df_dev = self.csv_processor.concatenate_csvs([self.models[dire].dev for dire in self.models.keys()])
+            df_test = self.csv_processor.concatenate_csvs([self.models[dire].test for dire in self.models.keys()])
+
+            # generate training ids
+            total_dataset_df = pd.concat([df_train, df_dev, df_test], ignore_index=True)
+            speaker_to_id = self.csv_processor.generate_training_ids(total_dataset_df)
+
+            # Process datasets directly
+            for i, dataset_df in enumerate([df_train, df_dev, df_test]):
+                # Update metadata with training IDs
+                dataset_df = self.csv_processor.update_metadata_with_training_ids(df=dataset_df,
+                                                                                  speaker_to_id=speaker_to_id)
+                # Get speaker stats
+                speaker_stats = self.csv_processor.get_speakers_stats(df=dataset_df)
+                speaker_to_id_df = pd.DataFrame({DATASET_CLS.SPEAKER_ID: speaker_to_id.keys(),
+                                                 DATASET_CLS.CLASS_ID: speaker_to_id.values()})
+                if i == 0:
+                    df_train = self.csv_processor.append_speaker_stats(df=dataset_df, speaker_stats=speaker_stats)
+                    df_speakers_train = speaker_to_id_df.merge(speaker_stats, on=DATASET_CLS.SPEAKER_ID, how='right')
+                    df_speakers_train = df_speakers_train.sort_values('total_dur/spk', ascending=False)
+                    df_speakers_train = df_speakers_train.reset_index(drop=True)
+                elif i == 1:
+                    df_dev = self.csv_processor.append_speaker_stats(df=dataset_df, speaker_stats=speaker_stats)
+                    df_speakers_dev = speaker_to_id_df.merge(speaker_stats, on=DATASET_CLS.SPEAKER_ID, how='right')
+                    df_speakers_dev = df_speakers_dev.sort_values('total_dur/spk', ascending=False)
+                    df_speakers_dev = df_speakers_dev.reset_index(drop=True)
+                else:
+                    df_test = self.csv_processor.append_speaker_stats(df=dataset_df, speaker_stats=speaker_stats)
+                    df_speakers_test = speaker_to_id_df.merge(speaker_stats, on=DATASET_CLS.SPEAKER_ID, how='right')
+                    df_speakers_test = df_speakers_test.sort_values('total_dur/spk', ascending=False)
+                    df_speakers_test = df_speakers_test.reset_index(drop=True)
 
             # Handle enrolls and trials seprately
             df_dev_enrolls = AnonLibriDataModule.concatenate_dfs([self.models[dire].dev_enrolls for dire in self.models.keys()])
@@ -89,14 +116,12 @@ class AnonLibriDataModule(pl.LightningDataModule):
                 on='rel_filepath', 
                 how='left'
                 )
-
             df_dev_trials = df_dev_trials.merge(
                 df_dev[[col for col in df_dev.columns if col not in ['model',  'gender',  'class_id']]], 
                 left_on='test_path',
                 right_on='rel_filepath',
                 how='left'
                 ).drop('test_path', axis=1)
-
             df_test_trials = df_test_trials.merge(
                 df_test[[col for col in df_test.columns if col not in ['model',  'gender',  'class_id']]],
                 left_on='test_path', 
@@ -105,17 +130,18 @@ class AnonLibriDataModule(pl.LightningDataModule):
                 ).drop('test_path', axis=1)
 
             # exlcude df_test_enrolls from df_test
-            df_test_unique = df_test[~df_test.rel_filepath.isin(test_enrolls.rel_filepath)]
+            df_test_unique = df_test[~df_test.split.isin(test_enrolls.source)].reset_index(drop=True)
+            df_dev_unique = df_dev[~df_dev.split.isin(df_dev_enrolls.source)].reset_index(drop=True)
 
             # save the updated csv
             os.makedirs(self.dataset.artifacts_dir, exist_ok=True)
 
             for df, path in zip(
-                [df_train, df_dev, df_test, df_test_unique,
+                [df_train, df_dev, df_test, df_dev_unique, df_test_unique,
                 df_dev_enrolls, test_enrolls,
                 df_dev_trials, df_test_trials,
                 df_speakers_train, df_speakers_dev, df_speakers_test],
-                [self.save_paths.train, self.save_paths.dev, self.save_paths.test, self.save_paths.test_unique,
+                [self.save_paths.train, self.save_paths.dev, self.save_paths.test, self.save_paths.dev_unique, self.save_paths.test_unique,
                 self.save_paths.dev_enrolls, self.save_paths.test_enrolls, 
                 self.save_paths.dev_trials, self.save_paths.test_trials, 
                 self.save_paths.spks_train, self.save_paths.spks_dev, self.save_paths.spks_test]
@@ -139,23 +165,30 @@ class AnonLibriDataModule(pl.LightningDataModule):
                 sample_rate=self.sample_rate,
                 max_duration=self.dataset.max_duration
             )
-            self.eval_data = VPC25Dataset(
-                data_dir=self.root_dir,
-                data_filepath=self.save_paths.dev,
-                sample_rate=self.sample_rate,
-                max_duration=self.dataset.max_duration
-            )
+            self.eval_data = VPC25TestDataset(data_dir=self.root_dir,
+                                             test_trials_path=self.save_paths.dev_trials,
+                                             sample_rate=self.sample_rate,
+                                             max_duration=None)
+            
+            self.dev_unique = VPC25Dataset(data_dir=self.root_dir,
+                                           data_filepath=self.save_paths.dev_unique,
+                                           sample_rate=self.sample_rate,
+                                           max_duration=None)
+            
+            self.dev_enroll_data = VPC25EnrollDataset(data_dir=self.root_dir,
+                                                      data_filepath=self.save_paths.dev_enrolls,
+                                                      sample_rate=self.sample_rate,
+                                                      max_duration=None)
+            
         if stage == 'test' or stage is None:
             self.test_data = VPC25TestDataset(data_dir=self.root_dir,
                                               test_trials_path=self.save_paths.test_trials,
                                               sample_rate=self.sample_rate,
-                                              max_duration=self.dataset.max_duration)
-
+                                              max_duration=None)
             self.test_unique = VPC25Dataset(data_dir=self.root_dir,
                                             data_filepath=self.save_paths.test_unique,
                                             sample_rate=self.sample_rate,
-                                            max_duration=self.dataset.max_duration)
-
+                                            max_duration=None)
             self.enroll_data = VPC25EnrollDataset(data_dir=self.root_dir,
                                                   data_filepath=self.save_paths.test_enrolls,
                                                   sample_rate=self.sample_rate,
@@ -178,7 +211,8 @@ class AnonLibriDataModule(pl.LightningDataModule):
             shuffle=self.loaders.valid.shuffle,
             num_workers=self.loaders.valid.num_workers,
             pin_memory=self.loaders.valid.pin_memory,
-            collate_fn=VPC25ClassCollate()
+            # collate_fn=VPC25ClassCollate()
+            collate_fn=VPCTestCoallate()
         )
     
     def test_dataloader(self) -> DataLoader:
@@ -190,7 +224,29 @@ class AnonLibriDataModule(pl.LightningDataModule):
             pin_memory=self.loaders.test.pin_memory,
             collate_fn=VPCTestCoallate()
         )
+        return trial_loader
 
+    def dev_enrollment_dataloader(self) -> DataLoader:
+        trial_unique = DataLoader(
+            self.dev_unique,
+            batch_size=self.loaders.valid.batch_size,
+            shuffle=self.loaders.valid.shuffle,
+            num_workers=self.loaders.valid.num_workers,
+            pin_memory=self.loaders.valid.pin_memory,
+            collate_fn=VPC25ClassCollate()
+            )
+
+        enroll_loader = DataLoader(
+            self.dev_enroll_data,
+            batch_size=self.loaders.enrollment.batch_size,
+            shuffle=self.loaders.enrollment.shuffle,
+            num_workers=self.loaders.enrollment.num_workers,
+            pin_memory=self.loaders.enrollment.pin_memory,
+            collate_fn=VPC25EnrollCollate()
+            )
+        return enroll_loader, trial_unique
+
+    def test_enrollment_dataloader(self) -> DataLoader:
         trial_unique = DataLoader(
             self.test_unique,
             batch_size=self.loaders.test.batch_size,
@@ -208,7 +264,7 @@ class AnonLibriDataModule(pl.LightningDataModule):
             pin_memory=self.loaders.enrollment.pin_memory,
             collate_fn=VPC25EnrollCollate()
             )
-        return trial_loader, enroll_loader, trial_unique
+        return enroll_loader, trial_unique
 
 
 if __name__ == "__main__":

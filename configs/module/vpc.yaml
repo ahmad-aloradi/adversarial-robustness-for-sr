@@ -5,34 +5,8 @@ defaults:
   - _self_
 
 model:
-  # text_encoder:
-  #   _target_: transformers.RobertaModel.from_pretrained
-  #   pretrained_model_name_or_path: roberta-base
-  
-  # text_tokenizer:
-  #   _target_: transformers.RobertaTokenizer.from_pretrained
-  #   pretrained_model_name_or_path: roberta-base
-
-  # audio_processor:
-    # _target_: transformers.Wav2Vec2FeatureExtractor.from_pretrained
-    # pretrained_model_name_or_path: superb/wav2vec2-base-superb-sid
-
-  # audio_encoder:
-    # _target_: transformers.Wav2Vec2Model.from_pretrained
-    # pretrained_model_name_or_path: superb/wav2vec2-base-superb-sid
-
-  text_processor:
-    _target_: transformers.Wav2Vec2Processor.from_pretrained
-    pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
-
-  text_processor_kwargs:
-    return_tensors: "pt"
-    sampling_rate: 16000
-
-  text_encoder:
-    _target_: transformers.Wav2Vec2ForCTC.from_pretrained
-    pretrained_model_name_or_path: "facebook/wav2vec2-base-960h"
-    num_labels: ${module.model.classifiers.classifiers_config.num_classes}
+  audio_processor:
+    _target_: torch.nn.Identity
 
   audio_encoder:
     _target_: speechbrain.inference.EncoderClassifier.from_hparams
@@ -41,97 +15,103 @@ model:
     run_opts:
       device: "cuda"
 
+  audio_processor_kwargs:
+    return_tensors: "pt"
+    sampling_rate: 16000
+
+  text_processor:
+    _target_: transformers.BertTokenizer.from_pretrained
+    pretrained_model_name_or_path: "bert-base-uncased"
+
+  text_encoder:
+    _target_: transformers.BertModel.from_pretrained
+    pretrained_model_name_or_path: ${module.model.text_processor.pretrained_model_name_or_path}
+    num_labels: ${module.model.classifiers.classifiers_config.num_classes}
+
+  text_processor_kwargs:
+    return_tensors: "pt"
+    padding: "max_length"
+    truncation: True
+    max_length: 512
+
   classifiers:
-    text_classifier: 
-      _target_: torch.nn.Linear
-      in_features: ${module.model.classifiers.classifiers_config.linear_in_dim}
-      out_features: ${module.model.classifiers.classifiers_config.linear_out_dim}
+    fuser:
+      _target_: src.modules.multimodal_vpc.NormalizedWeightedSum
+      audio_embedding_size: ${module.model.classifiers.classifiers_config.audio_embedding_size}
+      text_embedding_size: ${module.model.classifiers.classifiers_config.text_embedding_size}
+      bottleneck_size: ${module.model.classifiers.classifiers_config.bottleneck_size}
 
-    audio_classifier: 
-      _target_: torch.nn.Linear
-      in_features: ${module.model.classifiers.classifiers_config.audio_embedding_dim}
-      out_features: ${module.model.classifiers.classifiers_config.linear_out_dim}
-
-    audio_embeds_classifier: 
-      _target_: torch.nn.Linear
-      in_features: ${module.model.classifiers.classifiers_config.audio_embedding_dim}
-      out_features: ${module.model.classifiers.classifiers_config.num_classes}
+    audio_classifier:
+      _target_: torch.nn.Identity
+      # _target_: torch.nn.Sequential
+      # _args_:
+      #   - _target_: torch.nn.Linear
+      #     in_features: ${module.model.classifiers.classifiers_config.bottleneck_size}
+      #     out_features: ${module.model.classifiers.classifiers_config.num_classes}
 
     fusion_classifier:
-      _target_: torch.nn.Sequential
-      _args_:
-        - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.fusion_in_dim}
-          out_features: ${module.model.classifiers.classifiers_config.fusion_out_dim}
-        - _target_: torch.nn.ReLU
-          inplace: True
-        - _target_: torch.nn.Dropout
-          p: 0.1
-        - _target_: torch.nn.Linear
-          in_features: ${module.model.classifiers.classifiers_config.fusion_out_dim}
-          out_features: ${module.model.classifiers.classifiers_config.num_classes} 
+      _target_: src.modules.multimodal_vpc.FusionClassifier
+      input_size: ${module.model.classifiers.classifiers_config.fusion_classifier_input_size}
+      hidden_size: ${module.model.classifiers.classifiers_config.fusion_classifier_hidden_size}
+      num_classes: ${module.model.classifiers.classifiers_config.num_classes}
+      dropout: 0.3
 
     classifiers_config:
       num_classes: ${datamodule.num_classes}
-      linear_in_dim: 32 #768
-      audio_embedding_dim: 192 #512
-      linear_out_dim: 64
-      fusion_in_dim: 128
-      fusion_out_dim: 128
+      bottleneck_size: 512 # Size of the bottleneck layer (embedding size)
+      fusion_classifier_input_size: 512 # Depends on the fuser type
+      fusion_classifier_hidden_size: 1024 # Increased hidden size for better representation
+      audio_embedding_size: 192 # ECAPA embedding size
+      text_embedding_size: 768  # BERT embedding size
+
+  embedding_cache:
+    max_size: 500000      # Maximum number of cached entries
+    bypass_warmup: True  # Bypass warmup phase
 
 criterion:
-  criterion_train:
-    fusion_criterion:
-      _target_: torch.nn.CrossEntropyLoss
-    audio_criterion:
-      _target_: torch.nn.CrossEntropyLoss
+  train_criterion:
+    main_criterion:
+      # _target_: torch.nn.CrossEntropyLoss
+      _target_: src.modules.multimodal_vpc.EnhancedCriterion
+      temperature: 0.1  # Increased temperature for more stable gradients
 
-  criterion_val:
-    fusion_criterion:
-      _target_: torch.nn.CrossEntropyLoss
-    audio_criterion:
-      _target_: torch.nn.CrossEntropyLoss
-
-  criterion_test:
-    fusion_criterion:
-      _target_: torch.nn.CrossEntropyLoss
-    audio_criterion:
-      _target_: torch.nn.CrossEntropyLoss
-  
-  loss: ${module.criterion.criterion_train.fusion_criterion} # for callbacks
+  loss: ${module.criterion.train_criterion.main_criterion} # for callbacks
 
 gradient_clip_val: 5.0
 
 optimizer:
   _target_: torch.optim.AdamW
   _partial_: True
-  lr: 3.0e-4
+  lr: 1.0e-4
   weight_decay: 1.0e-5
+
 
 lr_scheduler:
   scheduler:
     _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-    mode: "max"
+    mode: "min"
     factor: 0.3
     min_lr: 1.0e-9
-    patience: 4
+    patience: 2
     verbose: True
   extras:
-    monitor: ${replace:"__metric__/valid"}
+    monitor: ${replace:"__metric__/valid"}/${module.metrics.valid_best.target_key}
     interval: "epoch"
     frequency: 1
 
 metrics:
-  main:
+  train:
     _target_: "torchmetrics.Accuracy"
     task: "multiclass"
     num_classes: ${module.model.classifiers.classifiers_config.num_classes}
+  valid:
+    _target_: src.modules.metrics.metrics.VerificationMetrics
+  test:
+    _target_: src.modules.metrics.metrics.VerificationMetrics
   valid_best:
-    _target_: "torchmetrics.MaxMetric"
-  # additional:
-  #   AUROC:
-  #     _target_: "torchmetrics.AUROC"
-  #     task: "binary"
+    _target_: src.modules.metrics.metrics.AutoSyncDictMinMetric
+    target_key: "eer"
+
 
 logging_params:
   on_step: False

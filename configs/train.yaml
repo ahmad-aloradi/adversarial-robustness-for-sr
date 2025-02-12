@@ -7,7 +7,7 @@ defaults:
   - datamodule: datasets/vpc.yaml
   - module: vpc.yaml
   - callbacks: default.yaml
-  - logger: tensorboard # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
+  - logger: neptune # set logger here or use command line (e.g. `python train.py logger=tensorboard`)
   - trainer: default.yaml
   - paths: default.yaml
   - extras: default.yaml
@@ -53,3 +53,6 @@ seed: 42
 
 # name of the run, accessed by loggers
 name: "lightning-template-0.1.0"
+
+# gradient clipping
+gradient_clip_val: ${module.gradient_clip_val}

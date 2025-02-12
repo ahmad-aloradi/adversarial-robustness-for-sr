@@ -9,7 +9,7 @@ from pytorch_lightning import (
     Trainer,
     seed_everything,
 )
-from pytorch_lightning.loggers import LightningLoggerBase
+from pytorch_lightning.loggers import logger as LightningLoggerBase
 
 # --------------------------------------------------------------------------- #
 # `pyrootutils.setup_root(...)` above is optional line to make environment more

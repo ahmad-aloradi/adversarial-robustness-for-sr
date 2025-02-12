@@ -83,7 +83,7 @@ class CsvProcessor:
 
 
     @staticmethod
-    def concatenate_csvs(csv_paths, 
+    def concatenate_csvs(csv_paths: Union[str, List[str]],
                          fill_value='N/A',
                          rel_path_col=DATESET_CLS.REL_FILEPATH,
                          sep='|') -> pd.DataFrame:
@@ -99,6 +99,9 @@ class CsvProcessor:
             pd.DataFrame: Concatenated DataFrame with unique IDs
         """
         # Read all CSVs and store their DataFrames
+        if isinstance(csv_paths, str):
+            csv_paths = [csv_paths]
+        
         dfs = []
         for path in csv_paths:
             df = pd.read_csv(path, sep=sep)                
@@ -136,8 +139,8 @@ class CsvProcessor:
 
     @staticmethod
     def get_speakers_stats(df: pd.DataFrame,
-                           col_id: str,
-                           duration_col: str,
+                           col_id: str = DATESET_CLS.SPEAKER_ID,
+                           duration_col: str = DATESET_CLS.REC_DURATION,
                            rounding: int = 4) -> pd.DataFrame:
         speaker_stats = df.groupby(col_id).agg(
             {duration_col: ['sum', 'mean', 'count']}).round(rounding)
@@ -196,19 +199,18 @@ class CsvProcessor:
             backup: Whether to create backup of original file
         """                        
         # Add class_id column
-        df[class_id_col] = df[id_col].map(speaker_to_id).astype(int)
+        df_copy = df.copy()
+        df_copy[class_id_col] = df_copy[id_col].map(speaker_to_id).astype(int)
         
         # Verify no missing mappings
-        missing_ids = df[df[class_id_col].isna()][id_col].unique()
+        missing_ids = df_copy[df_copy[class_id_col].isna()][id_col].unique()
         if len(missing_ids) > 0:
             raise RuntimeWarning(f"Warning: No training ID mapping for speakers: {missing_ids}")
         
         if verbose:
-            log.info(f"Total speakers: {len(df[id_col].unique())}")
-            log.info(f"Training ID range: {df[class_id_col].min()} - {df[class_id_col].max()}")
+            log.info(f"Total speakers: {len(df_copy[id_col].unique())}")
         
-        return df
-
+        return df_copy
 
     def process(self,
                 dataset_files: List[str],

@@ -30,7 +30,7 @@ dataset:
 
 transforms: null
 
-num_classes: 921
+num_classes: 1001  # Number of speakers in train-clean-360, dev-clean, and test-clean
 
 loaders:
   train:

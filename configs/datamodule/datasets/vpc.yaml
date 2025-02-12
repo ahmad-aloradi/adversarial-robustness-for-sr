@@ -1,13 +1,12 @@
 _target_: src.datamodules.vpc_datamodule.AnonLibriDataModule
 
-num_classes: 921
+num_classes: 1001 # Number of classes in train-360-clean, dev-clean and test-clean
 root_dir: ${paths.data_dir}/vpc2025_official    
 
 dataset:
   artifacts_dir: ${paths.output_dir}/vpc2025_artifacts
   speakers_file: ${paths.data_dir}/librispeech/metadata/SPEAKERS.csv
   speaker_lookup: ${datamodule.dataset.artifacts_dir}/speaker_lookup.csv
-  seed: ${seed}
   sep: "|"
   verbose: true
   save_csv: true
@@ -19,6 +18,7 @@ artifacts_paths:
   train: ${datamodule.dataset.artifacts_dir}/train.csv
   dev: ${datamodule.dataset.artifacts_dir}/dev.csv
   test: ${datamodule.dataset.artifacts_dir}/test.csv
+  dev_unique: ${datamodule.dataset.artifacts_dir}/dev_unique.csv
   test_unique: ${datamodule.dataset.artifacts_dir}/test_unique.csv
   
   dev_enrolls: ${datamodule.dataset.artifacts_dir}/dev_enrolls.csv
@@ -43,36 +43,36 @@ models:
     dev_trials: ${datamodule.models.B3.metadata}/dev_trials.csv
     test_trials: ${datamodule.models.B3.metadata}/test_trials.csv
 
-  B5:
-    data_dir: ${datamodule.root_dir}/B5/data
-    metadata: ${datamodule.models.B5.data_dir}/metadata
-    train: ${datamodule.models.B5.metadata}/train.csv
-    dev: ${datamodule.models.B5.metadata}/dev.csv
-    test: ${datamodule.models.B5.metadata}/test.csv
-    dev_enrolls: ${datamodule.models.B5.metadata}/dev_enrolls.csv
-    test_enrolls: ${datamodule.models.B5.metadata}/test_enrolls.csv
-    dev_trials: ${datamodule.models.B5.metadata}/dev_trials.csv
-    test_trials: ${datamodule.models.B5.metadata}/test_trials.csv
+  # B5:
+  #   data_dir: ${datamodule.root_dir}/B5/data
+  #   metadata: ${datamodule.models.B5.data_dir}/metadata
+  #   train: ${datamodule.models.B5.metadata}/train.csv
+  #   dev: ${datamodule.models.B5.metadata}/dev.csv
+  #   test: ${datamodule.models.B5.metadata}/test.csv
+  #   dev_enrolls: ${datamodule.models.B5.metadata}/dev_enrolls.csv
+  #   test_enrolls: ${datamodule.models.B5.metadata}/test_enrolls.csv
+  #   dev_trials: ${datamodule.models.B5.metadata}/dev_trials.csv
+  #   test_trials: ${datamodule.models.B5.metadata}/test_trials.csv
 
 transform: null
 
 loaders:
   train:
-    batch_size: 16
+    batch_size: 24
     shuffle: True
     num_workers: 4
     drop_last: True
     pin_memory: False
 
   valid:
-    batch_size: 16
+    batch_size: 24
     shuffle: False
     num_workers: 4
     drop_last: False
     pin_memory: False
 
   test:
-    batch_size: 64
+    batch_size: 8
     shuffle: False
     num_workers: 4
     drop_last: False

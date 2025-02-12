@@ -2,8 +2,8 @@
 
 defaults:
   - _self_
-  - datamodule: mnist.yaml # choose datamodule with `test_dataloader()` for evaluation
-  - module: single.yaml
+  - datamodule: datasets/vpc.yaml # choose datamodule with `test_dataloader()` for evaluation
+  - module: vpc.yaml
   - logger: null
   - trainer: default.yaml
   - paths: default.yaml
