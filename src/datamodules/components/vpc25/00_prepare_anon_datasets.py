@@ -127,13 +127,16 @@ class KaldiDataProcessor:
         Returns:
             bool: True if valid, False otherwise
         """
-        expected_pattern = re.compile(r'(libri_(dev|test)_(enrolls|trials_[mf])|train-clean-360)_[A-Z0-9\-]+|metadata')
+        expected_pattern = re.compile(
+            r'(libri_(dev|test)_(enrolls|trials_[mf])|train-clean-360|libri360_anon)_[A-Z0-9\-]+|metadata'
+            )
+
         
         for subdir in subdirs:
             if not expected_pattern.match(subdir.name):
                 print(f"Warning: Directory structure does not match expected pattern: {subdir.name}")
                 print("Expected patterns: libri_dev_enrolls_MODEL, libri_dev_trials_[mf]_MODEL, " 
-                      "libri_test_enrolls_MODEL, libri_test_trials_[mf]_MODEL, or train-clean-360_MODEL")
+                      "libri_test_enrolls_MODEL, libri_test_trials_[mf]_MODEL, or train-clean-360_MODEL (or libri360_anon for B4)")
                 return False
         return True
 
@@ -158,7 +161,6 @@ class KaldiDataProcessor:
             
         enrollment_data = []
         model = str(enroll_file).split(os.sep)[-2].split('_')[-1]
-        enroll_dir = os.path.dirname(str(enroll_file))
 
         try:
             with open(enroll_file, 'r') as f:
@@ -219,19 +221,61 @@ class KaldiDataProcessor:
                     
         return pd.DataFrame(trials_data) if trials_data else None
 
+    def _handle_b4(self, base_dir, subdirs, metadata_dir):
+        """Handle B4-specific processing."""
+        # Process enrollment and trials data
+        base_dir_tmp = Path(str(base_dir).replace('B4', 'B3'))
+        assert base_dir_tmp.exists(), f"B3 metadata needs to be generated first: {base_dir_tmp}"
+
+        dev_enrolls = self.collect_enrollment_data(base_dir_tmp, 'dev')
+        test_enrolls = self.collect_enrollment_data(base_dir_tmp, 'test')
+        dev_trials = self.collect_trials_data(base_dir_tmp, 'dev')
+        test_trials = self.collect_trials_data(base_dir_tmp, 'test')
+
+        for df_name, df in [
+            ('dev_enrolls', dev_enrolls),
+            ('test_enrolls', test_enrolls),
+            ('dev_trials', dev_trials),
+            ('test_trials', test_trials)
+        ]:
+            for col in ['enrollment_path', 'source', 'model', 'test_path']:
+                if col in df.columns:
+                    df[col] = df[col].str.replace('B3', 'B4')
+                df.to_csv(metadata_dir / f'{df_name}.csv', index=False, sep='|')
+                print(f"Created {metadata_dir}/{df_name}.csv")
+        
+
+        subdirs_tmp = [subdir for subdir in base_dir_tmp.glob("metadata/*.csv") if subdir.name in ['test.csv', 'dev.csv', 'train.csv']]
+        for df_file in subdirs_tmp:
+            df = pd.read_csv(df_file, sep='|')
+            df_file_b4 = str(df_file).replace('B3', 'B4')
+
+            # replace B3 with B4 in the following cols
+            for col in ['rel_filepath', 'split']:
+                if col in df.columns:
+                    df[col] = df[col].str.replace('B3', 'B4')
+                    if df_file.name == 'train.csv':
+                        df[col] = df[col].str.replace('train-clean-360', 'libri360_anon')
+                    df.to_csv(df_file_b4, index=False, sep='|')
+                    print(f"Created {df_file_b4}")
+
     def process_all(self):
         """Process all directories and save combined CSV files in train/dev/test splits."""
         for base_dir in self.base_dirs:
             if not base_dir.exists():
                 continue
-
+            
             subdirs = [d for d in base_dir.glob("*") if d.is_dir()]
             if not self.validate_directory_structure(subdirs):
                 continue
-
+            
             # Create metadata directory
             metadata_dir = base_dir / 'metadata'
             metadata_dir.mkdir(exist_ok=True)
+            
+            if 'B4' in base_dir.parts:
+                self._handle_b4(base_dir, subdirs, metadata_dir)
+                continue
 
             # Process enrollment and trials data
             dev_enrolls = self.collect_enrollment_data(base_dir, 'dev')

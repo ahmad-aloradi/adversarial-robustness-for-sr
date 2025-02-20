@@ -64,9 +64,10 @@ class VerificationMetrics(Metric):
         """
         scores = scores.detach().to(self.scores.device)
         labels = labels.detach().to(self.labels.device)
-        
+
         assert scores.shape == labels.shape, "Scores and labels must have the same shape"
         assert len(scores.shape) == 1, "Scores and labels must be 1D tensors"
+
         self.scores = torch.cat([self.scores, scores])
         self.labels = torch.cat([self.labels, labels])
 
@@ -505,6 +506,86 @@ class AutoSyncDictMinMetric(Metric):
             self._min_metric.reset()
         self._current_min = torch.tensor(float('inf'))
         self._best_values = {}
+
+
+def AS_norm(score: float, 
+            enroll_embedding: torch.Tensor, 
+            test_embedding: torch.Tensor, 
+            cohort_embeddings: torch.Tensor, 
+            topk: int = 300,
+            eps: float = 1e-10,
+            min_cohort_size: int = 200) -> float:
+    """
+    Adaptive Symmetric Normalization (AS-Norm) for speaker verification
+    
+    Args:
+        score: Raw cosine similarity score between enrollment and test embeddings
+        enroll_embedding: Enrollment utterance embedding (1D tensor)
+        test_embedding: Test utterance embedding (1D tensor)
+        cohort_embeddings: Impostor cohort embeddings (2D tensor: [num_cohorts, embedding_dim])
+        topk: Number of top scores to consider for normalization
+        eps: Small constant to prevent division by zero
+        min_cohort_size: Minimum number of cohort speakers required for reliable normalization
+    
+    Returns:
+        Normalized score
+    """
+    # Cohort size validation
+    if cohort_embeddings.shape[0] < min_cohort_size:
+        raise ValueError(f"Cohort size ({cohort_embeddings.shape[0]}) is smaller than recommended minimum ({min_cohort_size}). "
+                        f"This may lead to unreliable normalization. Consider using a larger cohort.")
+    
+    # Input validation and shape checking
+    assert isinstance(score, (float, int)) or (isinstance(score, torch.Tensor) and score.numel() == 1), \
+        "Score must be a scalar value"
+    assert len(enroll_embedding.shape) == 1, "Enrollment embedding must be 1D"
+    assert len(test_embedding.shape) == 1, "Test embedding must be 1D"
+    assert len(cohort_embeddings.shape) == 2, "Cohort embeddings must be 2D"
+    assert enroll_embedding.shape[0] == test_embedding.shape[0] == cohort_embeddings.shape[1], \
+        "Embedding dimensions must match"
+
+    # Convert score to tensor if it's not already
+    if not isinstance(score, torch.Tensor):
+        score = torch.tensor(score, dtype=torch.float32)
+
+    # Ensure all tensors are on the same device
+    device = enroll_embedding.device
+    score = score.to(device)
+    
+    if topk > cohort_embeddings.shape[0]:
+        print(f"WARNING: topk ({topk}) is larger than number of cohort embeddings ({cohort_embeddings.size(0)}). "
+              f"Setting topk to maximum available: {cohort_embeddings.size(0)}")
+        topk = cohort_embeddings.shape[0]
+
+    # Compute enrollment vs cohort scores
+    with torch.no_grad():  # Add no_grad for efficiency
+        enroll_scores = torch.matmul(cohort_embeddings, enroll_embedding)
+        enroll_top_scores, _ = torch.topk(enroll_scores, topk, dim=0)
+        enroll_mean = enroll_top_scores.mean()
+        enroll_std = enroll_top_scores.std(unbiased=True)  # Use unbiased standard deviation
+        
+        # Handle numerical stability
+        enroll_std = torch.clamp(enroll_std, min=eps)
+
+        # Compute test vs cohort scores
+        test_scores = torch.matmul(cohort_embeddings, test_embedding)
+        test_top_scores, _ = torch.topk(test_scores, topk, dim=0)
+        test_mean = test_top_scores.mean()
+        test_std = test_top_scores.std(unbiased=True)  # Use unbiased standard deviation
+        
+        # Handle numerical stability
+        test_std = torch.clamp(test_std, min=eps)
+
+        # Symmetric normalization
+        normalized_score = 0.5 * ((score - enroll_mean) / enroll_std + 
+                                (score - test_mean) / test_std)
+        
+        # Final numerical stability check
+        if torch.isnan(normalized_score) or torch.isinf(normalized_score):
+            print("WARNING: Invalid value detected in final normalized score. Returning original score.")
+            return score.item() if isinstance(score, torch.Tensor) else score
+            
+        return normalized_score.item()
 
 
 def load_metrics(

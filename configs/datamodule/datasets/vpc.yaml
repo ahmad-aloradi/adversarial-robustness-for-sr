@@ -43,29 +43,51 @@ models:
     dev_trials: ${datamodule.models.B3.metadata}/dev_trials.csv
     test_trials: ${datamodule.models.B3.metadata}/test_trials.csv
 
-  # B5:
-  #   data_dir: ${datamodule.root_dir}/B5/data
-  #   metadata: ${datamodule.models.B5.data_dir}/metadata
-  #   train: ${datamodule.models.B5.metadata}/train.csv
-  #   dev: ${datamodule.models.B5.metadata}/dev.csv
-  #   test: ${datamodule.models.B5.metadata}/test.csv
-  #   dev_enrolls: ${datamodule.models.B5.metadata}/dev_enrolls.csv
-  #   test_enrolls: ${datamodule.models.B5.metadata}/test_enrolls.csv
-  #   dev_trials: ${datamodule.models.B5.metadata}/dev_trials.csv
-  #   test_trials: ${datamodule.models.B5.metadata}/test_trials.csv
+  B4:
+    data_dir: ${datamodule.root_dir}/B4/data
+    metadata: ${datamodule.models.B4.data_dir}/metadata
+    train: ${datamodule.models.B4.metadata}/train.csv
+    dev: ${datamodule.models.B4.metadata}/dev.csv
+    test: ${datamodule.models.B4.metadata}/test.csv
+    dev_enrolls: ${datamodule.models.B4.metadata}/dev_enrolls.csv
+    test_enrolls: ${datamodule.models.B4.metadata}/test_enrolls.csv
+    dev_trials: ${datamodule.models.B4.metadata}/dev_trials.csv
+    test_trials: ${datamodule.models.B4.metadata}/test_trials.csv
+
+  B5:
+    data_dir: ${datamodule.root_dir}/B5/data
+    metadata: ${datamodule.models.B5.data_dir}/metadata
+    train: ${datamodule.models.B5.metadata}/train.csv
+    dev: ${datamodule.models.B5.metadata}/dev.csv
+    test: ${datamodule.models.B5.metadata}/test.csv
+    dev_enrolls: ${datamodule.models.B5.metadata}/dev_enrolls.csv
+    test_enrolls: ${datamodule.models.B5.metadata}/test_enrolls.csv
+    dev_trials: ${datamodule.models.B5.metadata}/dev_trials.csv
+    test_trials: ${datamodule.models.B5.metadata}/test_trials.csv
+
+  T8-5:
+    data_dir: ${datamodule.root_dir}/T8-5/data
+    metadata: ${datamodule.models.T8-5.data_dir}/metadata
+    train: ${datamodule.models.T8-5.metadata}/train.csv
+    dev: ${datamodule.models.T8-5.metadata}/dev.csv
+    test: ${datamodule.models.T8-5.metadata}/test.csv
+    dev_enrolls: ${datamodule.models.T8-5.metadata}/dev_enrolls.csv
+    test_enrolls: ${datamodule.models.T8-5.metadata}/test_enrolls.csv
+    dev_trials: ${datamodule.models.T8-5.metadata}/dev_trials.csv
+    test_trials: ${datamodule.models.T8-5.metadata}/test_trials.csv
 
 transform: null
 
 loaders:
   train:
-    batch_size: 24
+    batch_size: 16
     shuffle: True
     num_workers: 4
     drop_last: True
     pin_memory: False
 
   valid:
-    batch_size: 24
+    batch_size: 16
     shuffle: False
     num_workers: 4
     drop_last: False
