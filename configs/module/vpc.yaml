@@ -35,26 +35,27 @@ model:
     max_length: 512
 
   classifiers:
-    fuser:
-      _target_: src.modules.multimodal_vpc.NormalizedWeightedSum
-      audio_embedding_size: ${module.model.classifiers.classifiers_config.audio_embedding_size}
-      text_embedding_size: ${module.model.classifiers.classifiers_config.text_embedding_size}
-      bottleneck_size: ${module.model.classifiers.classifiers_config.bottleneck_size}
-
-    audio_classifier:
-      _target_: torch.nn.Identity
-      # _target_: torch.nn.Sequential
-      # _args_:
-      #   - _target_: torch.nn.Linear
-      #     in_features: ${module.model.classifiers.classifiers_config.bottleneck_size}
-      #     out_features: ${module.model.classifiers.classifiers_config.num_classes}
-
     fusion_classifier:
-      _target_: src.modules.multimodal_vpc.FusionClassifier
+      _target_: src.modules.multimodal_vpc.FusionClassifierWithResiduals
+      fuse_model:
+        _target_: src.modules.multimodal_vpc.NormalizedWeightedSum
+        audio_embedding_size: ${module.model.classifiers.classifiers_config.audio_embedding_size}
+        text_embedding_size: ${module.model.classifiers.classifiers_config.text_embedding_size}
+        bottleneck_size: ${module.model.classifiers.classifiers_config.bottleneck_size}
       input_size: ${module.model.classifiers.classifiers_config.fusion_classifier_input_size}
       hidden_size: ${module.model.classifiers.classifiers_config.fusion_classifier_hidden_size}
       num_classes: ${module.model.classifiers.classifiers_config.num_classes}
       dropout: 0.3
+      norm_type: "batch"
+
+    # fusion_classifier:
+      # _target_: src.modules.multimodal_vpc.RobustFusionClassifier
+      # audio_size: ${module.model.classifiers.classifiers_config.audio_embedding_size}
+      # text_size: ${module.model.classifiers.classifiers_config.text_embedding_size}
+      # hidden_size: ${module.model.classifiers.classifiers_config.bottleneck_size}
+      # num_classes: ${module.model.classifiers.classifiers_config.num_classes}
+      # dropout_audio: 0.3
+      # dropout_text: 0.1
 
     classifiers_config:
       num_classes: ${datamodule.num_classes}
@@ -70,12 +71,12 @@ model:
 
 criterion:
   train_criterion:
-    main_criterion:
-      # _target_: torch.nn.CrossEntropyLoss
-      _target_: src.modules.multimodal_vpc.EnhancedCriterion
-      temperature: 0.1  # Increased temperature for more stable gradients
+    _target_: src.modules.multimodal_vpc.EnhancedCriterion
+    temperature: 0.1  # Increased temperature for more stable gradients
+    # _target_: src.modules.multimodal_vpc.MultiModalFusionLoss
+    # _target_: torch.nn.CrossEntropyLoss
 
-  loss: ${module.criterion.train_criterion.main_criterion} # for callbacks
+  loss: ${module.criterion.train_criterion} # for callbacks
 
 gradient_clip_val: 5.0
 
@@ -85,6 +86,16 @@ optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-5
 
+# lr_scheduler:
+#   scheduler:
+#     _target_: torch.optim.lr_scheduler.OneCycleLR
+#     max_lr: 1.0e-4
+#     pct_start: 0.05  # 10% of training for warmup
+#     anneal_strategy: "cos"
+#     cycle_momentum: False
+#   extras:
+#     interval: "step"
+#     frequency: 1
 
 lr_scheduler:
   scheduler:

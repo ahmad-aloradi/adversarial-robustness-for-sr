@@ -1,9 +1,13 @@
 import os
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Literal, Callable
 from collections import defaultdict
+from dataclasses import dataclass
+from enum import Enum, auto
 
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
 import pytorch_lightning as pl
 from hydra.utils import instantiate
 from omegaconf import DictConfig
@@ -11,19 +15,18 @@ from tqdm import tqdm
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from src.datamodules.components.vpc25.vpc_dataset import VPC25Item, VPC25VerificationItem
+from src.datamodules.components.vpc25.vpc_dataset import VPC25Item, VPC25VerificationItem, VPC25ClassCollate
 from src import utils
 from src.modules.components.utils import EmbeddingCache
+from src.modules.metrics.metrics import AS_norm 
 from src.modules.losses.components.focal_loss import FocalLoss
 
 
 log = utils.get_pylogger(__name__)
 
 
-# Override the following constants if needed
-MAIN_FEATS = "fusion"
-AUX_FEATS = "audio"
-EMBED_FEATS = "fusion"  # which embedding to use for speaker ID
+# which embedding to use for speaker ID; override when necessary
+EMBED_FEATS = "fusion"
 
 # Constants
 METRIC_NAMES = {
@@ -38,8 +41,6 @@ LOSS_TYPES = {
     "AUDIO": "audio",
     "GENDER": "gender",
     "FUSION": "fusion",
-    "MAIN": MAIN_FEATS,
-    "AUX": AUX_FEATS
 }
 
 EMBEDS = {
@@ -50,6 +51,11 @@ EMBEDS = {
     "CLASS": "class_preds"
 }
 
+class EmbeddingType(Enum):
+    TEXT = auto()
+    AUDIO = auto()
+    FUSION = auto()
+    LAST_HIDDEN = auto()  # The layer before classifier
 
 ###################################
 """"Custom Fusion Models"""
@@ -98,6 +104,7 @@ class ConcatFusion(torch.nn.Module):
 class EnhancedCriterion(nn.Module):
     def __init__(self, temperature: float = 0.07):
         super().__init__()
+        # TODO: Replace CE by AMM?
         self.ce_loss = nn.CrossEntropyLoss()
         self.temperature = temperature
         self.focal_loss = FocalLoss(gamma=2.0)
@@ -171,9 +178,9 @@ class EnhancedCriterion(nn.Module):
         return loss
 
     def forward(self, outputs: Dict[str, torch.Tensor], targets: torch.Tensor) -> torch.Tensor:
-        ce_loss = self.ce_loss(outputs[f"{LOSS_TYPES['MAIN']}_logits"], targets)
+        ce_loss = self.ce_loss(outputs[f"{LOSS_TYPES['FUSION']}_logits"], targets)
         contr_loss = self.contrastive_loss(outputs[EMBEDS["FUSION"]], targets)
-        focal_loss = self.focal_loss(outputs[f"{LOSS_TYPES['MAIN']}_logits"], targets)
+        focal_loss = self.focal_loss(outputs[f"{LOSS_TYPES['FUSION']}_logits"], targets)
         
         # Log component losses for debugging
         if torch.isnan(ce_loss) or torch.isnan(contr_loss) or torch.isnan(focal_loss):
@@ -182,68 +189,541 @@ class EnhancedCriterion(nn.Module):
         # Increase CE loss weight and reduce contrastive loss weight
         return 1.0 * ce_loss + 0.05 * contr_loss + 0.1 * focal_loss
 
-class ResidualBlock(nn.Module):
-    """A residual block with batch normalization and dropout."""
-    def __init__(self, in_features: int, hidden_features: int, dropout: float = 0.3):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Linear(in_features, hidden_features),
-            nn.BatchNorm1d(hidden_features),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout),
-            nn.Linear(hidden_features, in_features),
-            nn.BatchNorm1d(in_features)
-        )
-        
-        # Initialize weights
-        for m in self.block.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.nn.functional.relu(x + self.block(x))
 
-class FusionClassifier(nn.Module):
-    """Fusion classifier with residual connections."""
-    def __init__(self, input_size: int, hidden_size: int, num_classes: int, dropout: float = 0.3):
+class FusionClassifierWithResiduals(nn.Module):
+    def __init__(
+        self,
+        fuse_model: nn.Module,
+        input_size: int, 
+        hidden_size: int, 
+        num_classes: int, 
+        dropout: float = 0.3,
+        num_residuals: int = 2,
+        norm_type: Literal['batch', 'layer'] = 'batch',
+        embedding_type: EmbeddingType = EmbeddingType.FUSION
+    ):
         super().__init__()
-        self.input_norm = nn.BatchNorm1d(input_size)
-        self.residual1 = ResidualBlock(input_size, hidden_size, dropout)
-        self.residual2 = ResidualBlock(input_size, hidden_size, dropout)
+        self.embedding_type = embedding_type
+
+        # define fuse_model
+        self.fuse_model = fuse_model
+        
+        # Factory for normalization layers
+        norm_factory: Callable = {
+            'batch': nn.BatchNorm1d,
+            'layer': nn.LayerNorm
+        }[norm_type]
+        
+        self.input_norm = norm_factory(input_size)
         self.classifier = nn.Linear(input_size, num_classes)
         
-        # Initialize classifier weights
-        nn.init.xavier_uniform_(self.classifier.weight)
-        nn.init.zeros_(self.classifier.bias)
+        # Create residual blocks
+        self.residuals = nn.ModuleList([
+            self._create_residual_block(input_size, hidden_size, dropout, norm_factory)
+            for _ in range(num_residuals)
+        ])
+
+    @staticmethod
+    def get_embedding(fused_feats: Dict[str, torch.Tensor], 
+                    last_hidden: torch.Tensor,
+                    embedding_type: EmbeddingType) -> torch.Tensor:
+        """Get the selected embedding type."""
+        embedding_map = {
+            EmbeddingType.TEXT: fused_feats["text_emb"],
+            EmbeddingType.AUDIO: fused_feats["audio_emb"],
+            EmbeddingType.FUSION: fused_feats["fusion_emb"],
+            EmbeddingType.LAST_HIDDEN: last_hidden
+        }
+        assert embedding_type in embedding_map, f"Invalid embedding type: {embedding_type}"
+        assert embedding_map[embedding_type].dim() == 2, f"Invalid embedding shape: {embedding_map[embedding_type].shape}"
+        normalized_embeds = torch.nn.functional.normalize(embedding_map[embedding_type], p=2, dim=-1)
+        return normalized_embeds
+
+    @staticmethod
+    def _create_residual_block(input_size: int, hidden_size: int, dropout: float, norm_factory: Callable
+                               ) -> nn.Sequential:
+        """Create a residual block with given specifications."""
+        return nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            norm_factory(hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(hidden_size, input_size),
+            norm_factory(input_size)
+        )
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.input_norm(x)
-        x = self.residual1(x)
-        x = self.residual2(x)
-        return self.classifier(x)
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        """Forward pass through the entire network."""
+        # fuse features
+        fused_feats = self.fuse_model(inputs)
+        
+        x = self.input_norm(fused_feats['fusion_emb'])
+        for block in self.residuals:
+            x = torch.nn.functional.relu(x + block(x))
+
+        logits = self.classifier(x)
+        class_prob = torch.nn.functional.softmax(logits, dim=1)
+        class_preds = torch.argmax(class_prob, dim=-1)
+
+        # Get selected embedding type
+        features = FusionClassifierWithResiduals.get_embedding(fused_feats, x, self.embedding_type)
+
+        return {
+            EMBEDS["TEXT"]: fused_feats["text_emb"],
+            EMBEDS["AUDIO"]: fused_feats["audio_emb"],
+            EMBEDS["FUSION"]: fused_feats["audio_emb"],
+            EMBEDS["ID"]: features,
+            EMBEDS["CLASS"]: class_preds,
+            f"fusion_logits": logits,
+        }
+
+###################################
+@dataclass
+class LossWeights:
+    """Configurable weights for different loss components."""
+    main: float = 1.0
+    audio: float = 1.0
+    text: float = 1.0
+    fusion: float = 1.0
+    consistency: float = 0.1
+    confidence: float = 0.05
+    smoothness: float = 0.01
+
+
+class MultiModalFusionLoss(nn.Module):
+    """
+    Loss function for multi-modal fusion classification with multiple regularization terms.
+    
+    Features:
+    - Individual classification losses for each modality
+    - Consistency regularization between modalities
+    - Confidence regularization to prevent overconfidence
+    - Temporal smoothness regularization (optional)
+    - Modality-specific loss weighting
+    """
+    
+    def __init__(
+        self,
+        confidence_target: float = 0.9,
+        label_smoothing: float = 0.0
+    ):
+        super().__init__()
+        self.weights = LossWeights()
+        self.confidence_target = confidence_target
+        self.label_smoothing = label_smoothing
+        
+    def classification_loss(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute classification loss with label smoothing."""
+        return F.cross_entropy(
+            logits,
+            targets,
+            label_smoothing=self.label_smoothing
+        )
+    
+    def consistency_loss(
+        self,
+        predictions: List[torch.Tensor]
+    ) -> torch.Tensor:
+        """
+        Compute consistency loss between different predictions using KL divergence.
+        Uses average prediction as the target distribution.
+        """
+        stacked_preds = torch.stack([
+            F.softmax(pred, dim=-1) for pred in predictions
+        ], dim=1)
+        
+        mean_pred = stacked_preds.mean(dim=1, keepdim=True)
+        
+        kl_divs = F.kl_div(
+            stacked_preds.log(),
+            mean_pred.expand_as(stacked_preds),
+            reduction='none'
+        ).mean(dim=-1).sum(dim=-1)
+        
+        return kl_divs.mean()
+    
+    def confidence_loss(
+        self,
+        confidences: List[torch.Tensor]
+    ) -> torch.Tensor:
+        """
+        Regularize prediction confidences to prevent overconfidence.
+        Uses BCE loss against a target confidence value.
+        """
+        stacked_conf = torch.cat(confidences, dim=1)
+        target_conf = torch.full_like(stacked_conf, self.confidence_target)
+        
+        return F.binary_cross_entropy(
+            stacked_conf,
+            target_conf,
+            reduction='mean'
+        )
+    
+    def forward(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        targets: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute the complete loss with all components.
+        
+        Args:
+            outputs: Dictionary containing model outputs
+            targets: Ground truth labels
+            
+        Returns:
+            Dictionary containing total loss and individual loss components
+        """
+        # Individual classification losses
+        main_loss = self.classification_loss(outputs["logits"], targets)
+        audio_loss = self.classification_loss(outputs["audio_logits"], targets)
+        text_loss = self.classification_loss(outputs["text_logits"], targets)
+        fusion_loss = self.classification_loss(outputs["fusion_logits"], targets)
+        
+        # Consistency between predictions
+        consistency_loss = self.consistency_loss([
+            outputs["audio_logits"],
+            outputs["text_logits"],
+            outputs["fusion_logits"]
+        ])
+        
+        # Confidence regularization
+        confidence_loss = self.confidence_loss([
+            outputs["audio_confidence"],
+            outputs["text_confidence"]
+        ])
+                
+        # Combine all losses
+        total_loss = (
+            self.weights.main * main_loss +
+            self.weights.audio * audio_loss +
+            self.weights.text * text_loss +
+            self.weights.fusion * fusion_loss +
+            self.weights.consistency * consistency_loss +
+            self.weights.confidence * confidence_loss
+        )
+        
+        return {
+            "loss": total_loss,
+            "main_loss": main_loss,
+            "audio_loss": audio_loss,
+            "text_loss": text_loss,
+            "fusion_loss": fusion_loss,
+            "consistency_loss": consistency_loss,
+            "confidence_loss": confidence_loss,
+        }
+
+    def update_weights(self, new_weights: LossWeights):
+        """Update loss component weights during training."""
+        self.weights = new_weights
+
+
+class RobustFusionClassifier(nn.Module):
+    """
+    Classifier with:
+    - Adaptive denoising with learned residual mixing
+    - Modality-specific confidence estimation
+    - Dynamic fusion gating
+    - Simplified loss with stability enhancements
+    """
+    
+    def __init__(self, audio_size: int, text_size: int, 
+                 hidden_size: int, num_classes: int,
+                 dropout_audio: float = 0.3, dropout_text: float = 0.1):
+        super().__init__()
+        
+        # Audio processing path
+        self.audio_branch = nn.Sequential(
+            nn.LayerNorm(audio_size),
+            nn.Linear(audio_size, hidden_size),
+            nn.GELU(),
+            nn.Dropout(dropout_audio)
+        )
+        
+        # Denoising components
+        self.denoise_transform = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size)
+        )
+        self.mix_controller = nn.Sequential(
+            nn.Linear(hidden_size*2, hidden_size//2),
+            nn.ReLU(),
+            nn.Linear(hidden_size//2, 1),
+            nn.Sigmoid()
+        )
+
+        # Text processing path
+        self.text_branch = nn.Sequential(
+            nn.LayerNorm(text_size),
+            nn.Linear(text_size, hidden_size),
+            nn.GELU(),
+            nn.Dropout(dropout_text)
+        )
+
+        # Confidence networks
+        self.audio_confidence = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size//2),
+            nn.ReLU(),
+            nn.Linear(hidden_size//2, 1),
+            nn.Sigmoid()
+        )
+        self.text_confidence = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size//2),
+            nn.ReLU(),
+            nn.Linear(hidden_size//2, 1),
+            nn.Sigmoid()
+        )
+
+        # Classification heads
+        self.audio_classifier = nn.Linear(hidden_size, num_classes)
+        self.text_classifier = nn.Linear(hidden_size, num_classes)
+        self.fusion_classifier = nn.Linear(hidden_size*2, num_classes)
+
+        # Adaptive fusion gating
+        self.adaptive_gate = nn.Sequential(
+            nn.Linear(hidden_size * 2 + 2, hidden_size),  # *2 for text/audio,  +2 for confidences
+            nn.ReLU(),
+            nn.Linear(hidden_size, 3),
+            nn.Softmax(dim=-1)
+            )
+        
+    def adaptive_noise(self, x: torch.Tensor) -> torch.Tensor:
+        """Train-time noise injection with random intensity"""
+        if self.training:
+            noise_scale = torch.rand(x.size(0), 1, device=x.device) * 0.2
+            return x + torch.randn_like(x) * noise_scale
+        return x
+
+    def denoise_audio(self, audio_features: torch.Tensor) -> torch.Tensor:
+        """Learnable residual denoising with adaptive mixing"""
+        # noisy_features = self.adaptive_noise(audio_features)
+        # denoised = self.denoise_transform(noisy_features)
+        denoised = self.denoise_transform(audio_features)
+
+        # Concatenate original and denoised features for mixing decision
+        concat_input = torch.cat([audio_features, denoised], dim=-1)
+        mix_ratio = self.mix_controller(concat_input)
+
+        return mix_ratio * denoised + (1 - mix_ratio) * audio_features, mix_ratio
+
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        audio_emb, text_emb = inputs
+        
+        # Process modalities
+        audio_features = self.audio_branch(audio_emb)
+        audio_features, audio_noise_mix_ratio = self.denoise_audio(audio_features)
+        text_features = self.text_branch(text_emb)
+        
+        # Calculate confidences
+        audio_conf = self.audio_confidence(audio_features)
+        text_conf = self.text_confidence(text_features)
+                
+        # Confidence-weighted fusion
+        fusion_features = torch.cat([
+            audio_features * audio_conf,
+            text_features * text_conf
+        ], dim=-1)
+
+        # Predictions
+        audio_logits = self.audio_classifier(audio_features)
+        text_logits = self.text_classifier(text_features)
+        fusion_logits = self.fusion_classifier(fusion_features)
+        
+        # Adaptive ensemble weighting
+        gate_input = torch.cat([audio_features, text_features, audio_conf, text_conf], dim=-1)
+        ensemble_weights = self.adaptive_gate(gate_input)
+        
+        # Final prediction with residual audio connection
+        final_logits = (ensemble_weights[:, 0:1] * audio_logits +
+                        ensemble_weights[:, 1:2] * text_logits +
+                        ensemble_weights[:, 2:3] * fusion_logits)
+
+        predicted_class = torch.argmax(final_logits, dim=-1)
+        
+        return {
+            "logits": final_logits,
+            "audio_logits": audio_logits,
+            "text_logits": text_logits,
+            "fusion_logits": fusion_logits,
+            EMBEDS["CLASS"]: predicted_class,
+            EMBEDS["AUDIO"]: audio_features,
+            EMBEDS["TEXT"]: text_features,
+            EMBEDS["FUSION"]: fusion_features,
+            "audio_confidence": audio_conf,
+            "text_confidence": text_conf,
+            "ensemble_weights": ensemble_weights,
+            "audio_noise_mix_ratio": audio_noise_mix_ratio
+        }
+
 
 ###################################
 class EmbeddingMetrics:
-    def __init__(self, trainer, stage: str):
+    def __init__(self, trainer: 'pl.Trainer', stage: str, cohort_per_model: int = 1000):
         self.trainer = trainer
         self.stage = stage
-        
+        self.cohort_per_model = cohort_per_model
+
     @property
     def _trial_results(self):
         if not hasattr(self, '_results'):
             self._results = []
         return self._results
 
-    def get_loaders(self):
+    @property
+    def _cohort_indices(self, 
+                        speaker_col: str = 'speaker_id',
+                        model_col: str = 'model',
+                        model_extract_fn: callable = lambda x: x.split(os.sep)[0],
+                        filepath_col: str = 'rel_filepath'):
+        """
+        Compute balanced cohort indices ensuring good coverage across models and speakers.
+        
+        Args:
+            speaker_col: Name of the column containing speaker IDs
+            model_col: Name of the column containing model identifiers
+            model_extract_fn: Function to extract model ID from filepath
+            filepath_col: Name of the column containing file paths
+            
+        Returns:
+            List of selected indices for cohort
+        """
+        if not hasattr(self, '_indices'):
+            df = self.trainer.datamodule.train_data.dataset
+            
+            # Extract model and speaker information if needed
+            if model_col not in df.columns and filepath_col in df.columns:
+                df[model_col] = df[filepath_col].apply(model_extract_fn)
+            
+            # Validate required columns
+            required_cols = [speaker_col, model_col]
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                raise ValueError(f"Missing required columns: {missing_cols}")
+            
+            # Get unique models and speakers
+            unique_models = df[model_col].unique()
+            unique_speakers = df[speaker_col].unique()
+            min_speakers_per_model = 0.8 * len(unique_speakers)  # Require at least 80% speaker coverage
+            
+            # Validate speaker coverage across models
+            model_speaker_coverage = {}
+            for model in unique_models:
+                model_speakers = df[df[model_col] == model][speaker_col].unique()
+                coverage = len(model_speakers)
+                model_speaker_coverage[model] = coverage
+                if coverage < min_speakers_per_model:
+                    print(f"WARNING: Model {model} only has {coverage} speakers out of {len(unique_speakers)} total speakers")
+            
+            # Calculate samples per model-speaker combination
+            target_samples_per_speaker = max(1, self.cohort_per_model // len(unique_speakers))
+            
+            all_indices = []
+            for model in unique_models:
+                model_df = df[df[model_col] == model]
+                model_indices = []
+                
+                # Sample from each speaker for this model
+                for speaker in unique_speakers:
+                    speaker_df = model_df[model_df[speaker_col] == speaker]
+                    if len(speaker_df) > 0:
+                        # Determine number of samples for this speaker
+                        n_samples = min(target_samples_per_speaker, len(speaker_df))
+                        
+                        # Sample without replacement if possible
+                        replace = n_samples > len(speaker_df)
+                        sampled = speaker_df.sample(
+                            n=n_samples,
+                            replace=replace,
+                            random_state=torch.initial_seed()
+                        )
+                        model_indices.extend(sampled.index.tolist())
+                
+                # If we haven't met our per-model quota, sample additional utterances
+                remaining_samples = self.cohort_per_model - len(model_indices)
+                if remaining_samples > 0:
+                    # Exclude already sampled indices
+                    available_indices = model_df.index.difference(model_indices)
+                    if len(available_indices) > 0:
+                        additional_df = df.loc[available_indices]
+                        n_additional = min(remaining_samples, len(additional_df))
+                        if n_additional > 0:
+                            additional_samples = additional_df.sample(
+                                n=n_additional,
+                                replace=False,
+                                random_state=torch.initial_seed()
+                            )
+                            model_indices.extend(additional_samples.index.tolist())
+                
+                all_indices.extend(model_indices)
+            
+            # Final validation
+            final_df = df.loc[all_indices]
+            final_models = final_df[model_col].unique()
+            final_speakers = final_df[speaker_col].unique()
+            
+            print(f"Cohort statistics:")
+            print(f"- Total samples: {len(all_indices)}")
+            print(f"- Models represented: {len(final_models)}/{len(unique_models)}")
+            print(f"- Speakers represented: {len(final_speakers)}/{len(unique_speakers)}")
+            for model in final_models:
+                model_samples = final_df[final_df[model_col] == model]
+                print(f"- Model {model}: {len(model_samples)} samples, "
+                    f"{len(model_samples[speaker_col].unique())} speakers")
+            
+            self._indices = all_indices
+        
+        return self._indices
+
+    def get_loaders(self) -> Tuple[DataLoader, DataLoader]:
         if self.stage == 'test':
-            return self.trainer.datamodule.test_enrollment_dataloader()
-        return self.trainer.datamodule.dev_enrollment_dataloader()
+            enroll_loader, unique_loader = self.trainer.datamodule.test_enrollment_dataloader()
+        else:
+            enroll_loader, unique_loader = self.trainer.datamodule.dev_enrollment_dataloader()
+        return enroll_loader, unique_loader
+
+    def get_cohort_loader(self) -> DataLoader:        
+        return DataLoader(
+            dataset=Subset(self.trainer.datamodule.train_data, self._cohort_indices),
+            batch_size=self.trainer.datamodule.loaders.train.batch_size,
+            num_workers=self.trainer.datamodule.loaders.train.num_workers,
+            pin_memory=self.trainer.datamodule.loaders.train.pin_memory,
+            collate_fn=VPC25ClassCollate(),
+            shuffle=False
+        )
+
+    @property
+    def cohort_embeddings(self) -> Optional[Dict[str, torch.Tensor]]:
+        """Get the computed cohort embeddings."""
+        return self._embeddings
+
+    def set_cohort_embeddings(self, embeddings_dict: Dict[str, torch.Tensor]) -> None:
+        """Set the cohort embeddings.
+        
+        Args:
+            embeddings_dict: Dictionary mapping model IDs to their cohort embeddings
+        """
+        self._embeddings = embeddings_dict
+        
+        # Set cohort embeddings in the metrics
+        metrics = [
+            self.trainer.model.valid_metric if self.stage == 'valid' 
+            else self.trainer.model.test_metric
+        ]
+        for metric in metrics:
+            metric.cohort_embeddings = embeddings_dict
 
     def cleanup(self):
         if hasattr(self, '_results'):
             delattr(self, '_results')
+        if hasattr(self, '_indices'):
+            delattr(self, '_indices')
+        if hasattr(self, '_embeddings'):
+            delattr(self, '_embeddings')
 
 class MultiModalVPCModel(pl.LightningModule):
     """Multi-modal Voice Print Classification Model.
@@ -285,6 +765,9 @@ class MultiModalVPCModel(pl.LightningModule):
         self._max_cache_size = self._text_embeds_cache_config.get("max_size", 500000)
         self._bypass_text_warmup = self._text_embeds_cache_config.get("bypass_warmup", False)
         self._text_embedding_cache = EmbeddingCache(max_size=self._max_cache_size)
+        
+        # Initialize cohort embeddings for score normalization
+        self.normalize_test_scores = model.get("normalize_test_scores", False)
 
     ############ Setup init ############
     def _setup_metrics(self, metrics: DictConfig) -> None:
@@ -307,14 +790,11 @@ class MultiModalVPCModel(pl.LightningModule):
         self.audio_processor_kwargs = model.audio_processor_kwargs
         
         # Fusion and classification
-        self.audio_classifier = instantiate(model.classifiers.audio_classifier)
-        self.fuser = instantiate(model.classifiers.fuser)
         self.fusion_classifier = instantiate(model.classifiers.fusion_classifier)
 
     def _setup_training_components(self, criterion: DictConfig, optimizer: DictConfig, lr_scheduler: DictConfig) -> None:
         """Initialize loss functions, optimizer and learning rate scheduler."""
         self.train_criterion = instantiate(criterion.train_criterion)        
-        self._audio_embed_train = len(self.train_criterion) > 1
         self.optimizer = optimizer
         self.slr_params = lr_scheduler
 
@@ -329,20 +809,12 @@ class MultiModalVPCModel(pl.LightningModule):
 
     def _log_step_metrics(self, results: Dict[str, Any], batch: VPC25Item, stage: str) -> None:
         criterion = getattr(self, f"{stage}_criterion")
-        main_loss = criterion.main_criterion.__class__.__name__
         
         # Log losses
         logged_dict = {
-            f"{LOSS_TYPES['MAIN']}_{main_loss}/{stage}": results[LOSS_TYPES['MAIN']].item()
+            f"{LOSS_TYPES['FUSION']}_{criterion.__class__.__name__}/{stage}": results[LOSS_TYPES['FUSION']].item()
         }
-        
-        if self._audio_embed_train:
-            aux_loss = criterion.aux_criterion.__class__.__name__
-            logged_dict.update({
-                f"multitask_loss/{stage}": results["loss"].item(),
-                f"{LOSS_TYPES['AUX']}_{aux_loss}/{stage}": results[LOSS_TYPES['AUX']].item()
-            })
-        
+                
         self.log_dict(
             logged_dict,
             batch_size=getattr(self.batch_sizes, stage),
@@ -352,7 +824,7 @@ class MultiModalVPCModel(pl.LightningModule):
         # Log metrics
         metric = getattr(self, f"{stage}_metric")
         computed_metric = metric(
-            results["outputs"][f"{LOSS_TYPES['MAIN']}_logits"],
+            results["outputs"][f"{LOSS_TYPES['FUSION']}_logits"],
             batch.class_id
         )
         
@@ -433,10 +905,12 @@ class MultiModalVPCModel(pl.LightningModule):
         return torch.stack(text_embeddings)
 
     ############ Lightning ############
-    def _get_audio_embeddings(self, batch_audio: torch.Tensor) -> torch.Tensor:
+    def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
         if hasattr(self.audio_encoder, "encode_batch"):
             # For speechbrain encoders (e.g., x-vector)
-            audio_emb = self.audio_encoder.encode_batch(batch_audio).squeeze(1)
+            audio_emb = self.audio_encoder.encode_batch(wavs=batch_audio,
+                                                        wav_lens=batch_audio_lens/max(batch_audio_lens)
+                                                        ).squeeze(1)
         else:
             # For transformers-based encoders (e.g., wav2vec) 
             input_values = self.audio_processor(
@@ -453,47 +927,29 @@ class MultiModalVPCModel(pl.LightningModule):
         text_emb = self.get_text_embeddings(batch.text)
 
         # Process audio (no caching)
-        audio_emb = self._get_audio_embeddings(batch.audio)
+        audio_emb = self._get_audio_embeddings(batch.audio, batch.audio_length)
 
-        # Fusion and classification
-        fused_feats = self.fuser((audio_emb, text_emb))
-        fusion_logits = self.fusion_classifier(fused_feats["fusion_emb"])
-        class_prob = torch.nn.functional.softmax(fusion_logits, dim=1)
-        class_preds = torch.argmax(class_prob, dim=-1)
-        audio_logits = self.audio_classifier(fused_feats["audio_emb"])
+        # Fuse embeddings and classify
+        outputs = self.fusion_classifier((audio_emb, text_emb))
 
-        return {
-            EMBEDS["TEXT"]: fused_feats["text_emb"],
-            EMBEDS["AUDIO"]: fused_feats["audio_emb"],
-            EMBEDS["FUSION"]: fused_feats["fusion_emb"],
-            EMBEDS["CLASS"]: class_preds,
-            f"{LOSS_TYPES['MAIN']}_logits": fusion_logits,
-            f"{LOSS_TYPES['AUX']}_logits": audio_logits,
-        }
+        return outputs
 
     def model_step(self, batch: VPC25Item, criterion: Optional[Any] = None) -> Dict[str, Any]:
         """Perform a single model step."""
         outputs = self(batch)
 
         # Compute loss
-        main_loss = (
-                    criterion.main_criterion(outputs, batch.class_id)
-                    if isinstance(criterion.main_criterion, EnhancedCriterion)
-                    else criterion.main_criterion(outputs[f"{LOSS_TYPES['MAIN']}_logits"], batch.class_id)
-                )
-
-        aux_loss = torch.zeros_like(main_loss)
-        if self._audio_embed_train:
-            aux_loss = criterion.aux_criterion(outputs[f"{LOSS_TYPES['AUX']}_logits"], batch.class_id)
-            total_loss = main_loss + aux_loss
+        if isinstance(criterion, EnhancedCriterion):
+            main_loss = criterion(outputs, batch.class_id)
+        elif isinstance(criterion, MultiModalFusionLoss):
+            main_loss = criterion(outputs, batch.class_id)
+            main_loss = main_loss['loss']
+        elif criterion is not None:
+            main_loss = criterion(outputs[f"fusion_logits"], batch.class_id)
         else:
-            total_loss = main_loss
-
-        return {
-            LOSS_TYPES["MAIN"]: main_loss,
-            LOSS_TYPES["AUX"]: aux_loss,
-            "loss": total_loss, # must be called loss for lightning to track it
-            "outputs": outputs}
+            raise ValueError("Invalid criterion")
+        
+        return {LOSS_TYPES["FUSION"]: main_loss, "loss": main_loss, "outputs": outputs}
 
     def on_train_start(self) -> None:
         # by default lightning executes validation step sanity checks before
@@ -525,16 +981,27 @@ class MultiModalVPCModel(pl.LightningModule):
         """Compute embeddings for eval trials."""
         self.metric_tracker = EmbeddingMetrics(self.trainer, 'valid')
         enroll_dev_loader, unique_dev_loader = self.metric_tracker.get_loaders()
+
+        self.metric_tracker.set_cohort_embeddings(None)
+
         self.enrol_dev_embeds = self._compute_enrollment_embeddings(enroll_dev_loader)
-        self.dev_embeds = self._compute_test_embeddings(unique_dev_loader)
+        self.dev_embeds = self._compute_test_embeddings(unique_dev_loader, mode='dev')
 
     @torch.inference_mode()
     def on_test_start(self) -> None:
         """Compute embeddings for test trials."""
         self.metric_tracker = EmbeddingMetrics(self.trainer, 'test')
         enroll_test_loader, unique_test_loader = self.metric_tracker.get_loaders()
+
+        cohort_loader = self.metric_tracker.get_cohort_loader()
+        if self.normalize_test_scores:
+            cohort_embeddings = self._compute_cohort_embeddings(cohort_loader)
+            self.metric_tracker.set_cohort_embeddings(cohort_embeddings)
+        else:
+            self.metric_tracker.set_cohort_embeddings(None)
+
         self.enrol_embeds = self._compute_enrollment_embeddings(enroll_test_loader)
-        self.test_embeds = self._compute_test_embeddings(unique_test_loader)
+        self.test_embeds = self._compute_test_embeddings(unique_test_loader, mode='test')
 
     @torch.inference_mode()
     def validation_step(self, batch: VPC25VerificationItem, batch_idx: int) -> None:
@@ -616,10 +1083,11 @@ class MultiModalVPCModel(pl.LightningModule):
 
         return enrol_embeds
 
-    def _compute_test_embeddings(self, dataloader) -> dict:
+    def _compute_test_embeddings(self, dataloader, mode: str = 'test') -> dict:
         embeddings_dict = {}
+        desc = f"Computing {mode} embeddings"
 
-        with tqdm(dataloader, desc="Computing test/dev embeddings") as pbar:        
+        with tqdm(dataloader, desc=desc) as pbar:        
             for batch in pbar:
                 outputs = self(batch)
                 test = outputs[EMBEDS["ID"]]
@@ -631,6 +1099,22 @@ class MultiModalVPCModel(pl.LightningModule):
 
         return embeddings_dict
 
+    def _compute_cohort_embeddings(self, dataloader) -> dict:
+        embeddings_dict = {}
+
+        with tqdm(dataloader, desc=f"Computing cohort embeddings") as pbar:        
+            for batch in pbar:
+                outputs = self(batch)
+                test = outputs[EMBEDS["ID"]]
+                # Handle frame-level embeddings (if applicable)
+                if len(test.shape) == 3:  # [1, num_frames, embedding_dim]
+                    test = test.mean(dim=1)  # [num_frames, embedding_dim]
+                
+                model = [path.split(os.sep)[-5] for path in batch.audio_path]
+                embeddings_dict.update({model: emb for model, emb in zip(model, test)})
+
+        return embeddings_dict
+
     def _trials_eval_step(self, batch, is_test: bool):
         """Common logic for test and validation steps."""
         embeds = self.test_embeds if is_test else self.dev_embeds
@@ -639,18 +1123,50 @@ class MultiModalVPCModel(pl.LightningModule):
 
         trial_embeddings = torch.stack([embeds[path] for path in batch.audio_path])
         enroll_embeddings = torch.stack([enrol[model][enroll_id]
-                                        for model, enroll_id in zip(batch.model, batch.enroll_id)])
-        scores = torch.nn.functional.cosine_similarity(enroll_embeddings, trial_embeddings)
+                                    for model, enroll_id in zip(batch.model, batch.enroll_id)])
+        cohort_embeddings = metric.cohort_embeddings
+
+        # Compute raw cosine similarity scores
+        raw_scores = torch.nn.functional.cosine_similarity(enroll_embeddings, trial_embeddings)
+        
+        if cohort_embeddings is not None:
+            normalized_scores = []
+            for i, (enroll_emb, test_emb, model) in enumerate(zip(enroll_embeddings, trial_embeddings, batch.model)):
+                raw_score = raw_scores[i]
+                
+                # Get model-specific cohort embeddings
+                model_cohort = cohort_embeddings.get(model)
+                assert model_cohort is not None, f"No cohort embeddings found for model {model}"
+                if isinstance(model_cohort, dict):
+                    model_cohort = torch.stack(list(model_cohort.values()))
+                if model_cohort.ndim != 2:
+                    raise ValueError(f"Invalid cohort embeddings shape for model {model}: {model_cohort.shape}")
+                
+                # Apply AS-Norm
+                norm_score = AS_norm(score=raw_score,
+                                     enroll_embedding=enroll_emb,
+                                     test_embedding=test_emb, 
+                                     cohort_embeddings=model_cohort, topk=300)
+                normalized_scores.append(norm_score)
+            
+            # Convert back to tensor
+            normalized_scores = torch.tensor(normalized_scores, device=raw_scores.device)
+        
+        else:
+            normalized_scores = raw_scores.clone()
+
+        # Update metric with normalized scores
+        metric.update(scores=normalized_scores, labels=torch.tensor(batch.trial_label))
         
         batch_dict = {
             "enrollment_id": batch.enroll_id,
             "audio_path": batch.audio_path,
             "label": batch.trial_label,
-            "score": scores.tolist(),
-            "model": batch.model,            
+            "score": raw_scores.detach().cpu().tolist(),
+            "norm_score": normalized_scores.detach().cpu().tolist(),
+            "model": batch.model,
         }
         self.metric_tracker._trial_results.append(batch_dict)
-        metric.update(scores, torch.tensor(batch.trial_label))
 
     def _epoch_end_common(self, is_test: bool) -> None:
         """Common logic for test and validation epoch end."""
@@ -664,14 +1180,16 @@ class MultiModalVPCModel(pl.LightningModule):
                 "audio_path": audio_path,
                 "label": label,
                 "score": score,
+                "norm_score": norm_score,
                 "model": model,                
             }
             for batch in self.metric_tracker._trial_results
-            for enroll_id, audio_path, label, score, model in zip(
+            for enroll_id, audio_path, label, score, norm_score, model in zip(
                 batch["enrollment_id"],
                 batch["audio_path"],
                 batch["label"],
                 batch["score"],
+                batch["norm_score"],
                 batch["model"],
             )
         ])
@@ -692,15 +1210,15 @@ class MultiModalVPCModel(pl.LightningModule):
         
         postfix = METRIC_NAMES['TEST'] if is_test else METRIC_NAMES['VALID']
         prefixed_metrics = {
-            f"{metric.__class__.__name__}/{postfix}/{key}": value 
-            for key, value in metrics.items()
+            f"{metric.__class__.__name__}/{postfix}/{key}": value for key, value in metrics.items()
         }
         self.log_dict(prefixed_metrics, **self.logging_params)
 
         # log self.fuser.audio_weight and self.fuser.text_weight if they exist (NormalizedWeightedSum)
-        if hasattr(self.fuser, "audio_weight") and hasattr(self.fuser, "text_weight"):
-            self.log("audio_weight", self.fuser.audio_weight, **self.logging_params)
-            self.log("text_weight", self.fuser.text_weight, **self.logging_params)
+        if hasattr(self.fusion_classifier.fuse_model, "audio_weight") and \
+            hasattr(self.fusion_classifier.fuse_model, "text_weight"):
+            self.log("audio_weight", self.fusion_classifier.fuse_model.audio_weight, **self.logging_params)
+            self.log("text_weight", self.fusion_classifier.fuse_model.text_weight, **self.logging_params)
 
         # Update scores dataframe with metrics
         scores.loc[:, metrics.keys()] = [v.item() if torch.is_tensor(v) else v for v in metrics.values()]
@@ -709,8 +1227,10 @@ class MultiModalVPCModel(pl.LightningModule):
         stage = 'test' if is_test else 'valid'
         save_path = os.path.join(self.trainer.log_dir, f"{stage}_scores.csv")
         scores.to_csv(save_path, index=False)
-        torch.save(enrol_embeds, os.path.join(self.trainer.log_dir, "enrol_embeds.pt"))
+        torch.save(enrol_embeds, os.path.join(self.trainer.log_dir, f"{stage}_enrol_embeds.pt"))
         torch.save(trials_embeds, os.path.join(self.trainer.log_dir, f"{stage}_embeds.pt"))
+        if metric.cohort_embeddings is not None:
+            torch.save(metric.cohort_embeddings, os.path.join(self.trainer.log_dir, f"{stage}_cohort_embeds.pt"))
 
         figures = metric.plot_curves() or {}
         for name, fig in figures.items():
