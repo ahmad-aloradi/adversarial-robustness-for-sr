@@ -505,11 +505,11 @@ class BaseDataset(Dataset):
     @staticmethod
     def _calculate_max_samples(max_duration: Union[None, float, int], sample_rate: int) -> int:
         """Calculate maximum number of samples based on duration and sample rate."""
-        if isinstance(max_duration, (int, float)):
-            return int(max_duration * sample_rate)
-        elif max_duration is None:
+        if max_duration is None or max_duration == -1:
             return -1
-        raise ValueError("max_duration must be an int, float, or None")
+        if max_duration > 0:
+            return int(max_duration * sample_rate)
+        raise ValueError(f"max_duration must be -1, None, or a positive number, got {max_duration}")
     
     @staticmethod
     def _process_audio(audio_path: Union[str, Path], audio_processor: AudioProcessor, max_samples: int) -> torch.Tensor:

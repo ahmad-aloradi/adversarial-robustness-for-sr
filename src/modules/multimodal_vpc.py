@@ -20,6 +20,7 @@ from src import utils
 from src.modules.components.utils import EmbeddingCache
 from src.modules.metrics.metrics import AS_norm 
 from src.modules.losses.components.focal_loss import FocalLoss
+from datetime import datetime
 
 
 log = utils.get_pylogger(__name__)
@@ -102,13 +103,17 @@ class ConcatFusion(torch.nn.Module):
 
 ###################################
 class EnhancedCriterion(nn.Module):
-    def __init__(self, temperature: float = 0.07):
+    def __init__(
+            self, 
+            classification_loss: Callable,
+            temperature: float = 0.07
+            ):
         super().__init__()
-        # TODO: Replace CE by AMM?
-        self.ce_loss = nn.CrossEntropyLoss()
+        self.classification_loss = classification_loss
         self.temperature = temperature
         self.focal_loss = FocalLoss(gamma=2.0)
         self.eps = 1e-8
+        self.unsqueeze = True if self.classification_loss.__class__.__name__ == 'LogSoftmaxWrapper' else False
         
     def get_contrastive_pairs(self, embeddings: torch.Tensor, targets: torch.Tensor):
         """Create positive and negative pairs from embeddings within the batch."""
@@ -178,16 +183,21 @@ class EnhancedCriterion(nn.Module):
         return loss
 
     def forward(self, outputs: Dict[str, torch.Tensor], targets: torch.Tensor) -> torch.Tensor:
-        ce_loss = self.ce_loss(outputs[f"{LOSS_TYPES['FUSION']}_logits"], targets)
+        targets_unsqeezed = targets.unsqueeze(1) if self.unsqueeze else targets
+        outputs_unsqeezed = {
+            k: v.unsqueeze(1) if self.unsqueeze and 'logits' in k else v
+            for k, v in outputs.items()
+        }
+
+        classification_loss = self.classification_loss(outputs_unsqeezed[f"{LOSS_TYPES['FUSION']}_logits"], targets_unsqeezed)
         contr_loss = self.contrastive_loss(outputs[EMBEDS["FUSION"]], targets)
         focal_loss = self.focal_loss(outputs[f"{LOSS_TYPES['FUSION']}_logits"], targets)
         
         # Log component losses for debugging
-        if torch.isnan(ce_loss) or torch.isnan(contr_loss) or torch.isnan(focal_loss):
-            log.warning(f"NaN detected in losses - CE: {ce_loss.item()}, Contrastive: {contr_loss.item()}, Focal: {focal_loss.item()}")
+        if torch.isnan(classification_loss) or torch.isnan(contr_loss) or torch.isnan(focal_loss):
+            log.warning(f"NaN detected in losses - CE: {classification_loss.item()}, Contrastive: {contr_loss.item()}, Focal: {focal_loss.item()}")
         
-        # Increase CE loss weight and reduce contrastive loss weight
-        return 1.0 * ce_loss + 0.05 * contr_loss + 0.1 * focal_loss
+        return classification_loss + 0.05 * contr_loss + 0.1 * focal_loss
 
 
 class FusionClassifierWithResiduals(nn.Module):
@@ -304,25 +314,14 @@ class MultiModalFusionLoss(nn.Module):
     
     def __init__(
         self,
+        classification_loss: Callable,
         confidence_target: float = 0.9,
-        label_smoothing: float = 0.0
     ):
         super().__init__()
+        self.classification_loss = classification_loss
         self.weights = LossWeights()
         self.confidence_target = confidence_target
-        self.label_smoothing = label_smoothing
-        
-    def classification_loss(
-        self,
-        logits: torch.Tensor,
-        targets: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute classification loss with label smoothing."""
-        return F.cross_entropy(
-            logits,
-            targets,
-            label_smoothing=self.label_smoothing
-        )
+        self.unsqueeze = True if self.classification_loss.__class__.__name__ == 'LogSoftmaxWrapper' else False
     
     def consistency_loss(
         self,
@@ -378,11 +377,18 @@ class MultiModalFusionLoss(nn.Module):
         Returns:
             Dictionary containing total loss and individual loss components
         """
+        
+        targets_unsqeezed = targets.unsqueeze(1) if self.unsqueeze else targets
+        outputs_unsqeezed = {
+            k: v.unsqueeze(1) if self.unsqueeze and 'logits' in k else v
+            for k, v in outputs.items()
+        }
+
         # Individual classification losses
-        main_loss = self.classification_loss(outputs["logits"], targets)
-        audio_loss = self.classification_loss(outputs["audio_logits"], targets)
-        text_loss = self.classification_loss(outputs["text_logits"], targets)
-        fusion_loss = self.classification_loss(outputs["fusion_logits"], targets)
+        main_loss = self.classification_loss(outputs_unsqeezed["logits"], targets_unsqeezed)
+        audio_loss = self.classification_loss(outputs_unsqeezed["audio_logits"], targets_unsqeezed)
+        text_loss = self.classification_loss(outputs_unsqeezed["text_logits"], targets_unsqeezed)
+        fusion_loss = self.classification_loss(outputs_unsqeezed["fusion_logits"], targets_unsqeezed)
         
         # Consistency between predictions
         consistency_loss = self.consistency_loss([
@@ -767,7 +773,7 @@ class MultiModalVPCModel(pl.LightningModule):
         self._text_embedding_cache = EmbeddingCache(max_size=self._max_cache_size)
         
         # Initialize cohort embeddings for score normalization
-        self.normalize_test_scores = model.get("normalize_test_scores", False)
+        self.normalize_test_scores = model.get("normalize_test_scores", True)
 
     ############ Setup init ############
     def _setup_metrics(self, metrics: DictConfig) -> None:
@@ -1102,18 +1108,35 @@ class MultiModalVPCModel(pl.LightningModule):
     def _compute_cohort_embeddings(self, dataloader) -> dict:
         embeddings_dict = {}
 
-        with tqdm(dataloader, desc=f"Computing cohort embeddings") as pbar:        
+        with tqdm(dataloader, desc="Computing cohort embeddings") as pbar:
             for batch in pbar:
                 outputs = self(batch)
-                test = outputs[EMBEDS["ID"]]
-                # Handle frame-level embeddings (if applicable)
-                if len(test.shape) == 3:  # [1, num_frames, embedding_dim]
-                    test = test.mean(dim=1)  # [num_frames, embedding_dim]
-                
-                model = [path.split(os.sep)[-5] for path in batch.audio_path]
-                embeddings_dict.update({model: emb for model, emb in zip(model, test)})
+                cohort = outputs[EMBEDS["ID"]]
 
-        return embeddings_dict
+                # Handle frame-level embeddings (if applicable)
+                if len(cohort.shape) == 3:  # [1, num_frames, embedding_dim]
+                    cohort = cohort.mean(dim=1)  # [num_frames, embedding_dim]
+
+                # Extract model keys from audio paths
+                model_keys = [path.split(os.sep)[-5] for path in batch.audio_path]
+                
+                # Ensure model_keys is a list
+                if not isinstance(model_keys, (list, tuple)):
+                    model_keys = [model_keys]
+
+                # Update embeddings dictionary
+                for model_key in set(model_keys):
+                    if model_key not in embeddings_dict:
+                        embeddings_dict[model_key] = []
+                    embeddings_dict[model_key].append(cohort)
+
+        # Stack all embeddings for each model into a single tensor
+        final_embeddings = {
+            model_id: torch.cat(embeddings, dim=0)
+            for model_id, embeddings in embeddings_dict.items()
+        }
+
+        return final_embeddings
 
     def _trials_eval_step(self, batch, is_test: bool):
         """Common logic for test and validation steps."""
@@ -1215,8 +1238,8 @@ class MultiModalVPCModel(pl.LightningModule):
         self.log_dict(prefixed_metrics, **self.logging_params)
 
         # log self.fuser.audio_weight and self.fuser.text_weight if they exist (NormalizedWeightedSum)
-        if hasattr(self.fusion_classifier.fuse_model, "audio_weight") and \
-            hasattr(self.fusion_classifier.fuse_model, "text_weight"):
+        fuse_model = getattr(self.fusion_classifier, "fuse_model", None)
+        if fuse_model is not None and hasattr(fuse_model, "audio_weight") and hasattr(fuse_model, "text_weight"):
             self.log("audio_weight", self.fusion_classifier.fuse_model.audio_weight, **self.logging_params)
             self.log("text_weight", self.fusion_classifier.fuse_model.text_weight, **self.logging_params)
 
@@ -1225,12 +1248,15 @@ class MultiModalVPCModel(pl.LightningModule):
         
         # Save scores to CSV
         stage = 'test' if is_test else 'valid'
-        save_path = os.path.join(self.trainer.log_dir, f"{stage}_scores.csv")
-        scores.to_csv(save_path, index=False)
-        torch.save(enrol_embeds, os.path.join(self.trainer.log_dir, f"{stage}_enrol_embeds.pt"))
-        torch.save(trials_embeds, os.path.join(self.trainer.log_dir, f"{stage}_embeds.pt"))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        artifacts_dir = os.path.join(self.trainer.default_root_dir, f'test_artifacts_{timestamp}')
+        os.makedirs(artifacts_dir, exist_ok=True)
+
+        scores.to_csv(os.path.join(artifacts_dir, f"{stage}_scores.csv"), index=False)
+        torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{stage}_enrol_embeds.pt"))
+        torch.save(trials_embeds, os.path.join(artifacts_dir, f"{stage}_embeds.pt"))
         if metric.cohort_embeddings is not None:
-            torch.save(metric.cohort_embeddings, os.path.join(self.trainer.log_dir, f"{stage}_cohort_embeds.pt"))
+            torch.save(metric.cohort_embeddings, os.path.join(artifacts_dir, f"{stage}_cohort_embeds.pt"))
 
         figures = metric.plot_curves() or {}
         for name, fig in figures.items():

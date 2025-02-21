@@ -514,7 +514,7 @@ def AS_norm(score: float,
             cohort_embeddings: torch.Tensor, 
             topk: int = 300,
             eps: float = 1e-10,
-            min_cohort_size: int = 200) -> float:
+            min_cohort_size: int = 300) -> float:
     """
     Adaptive Symmetric Normalization (AS-Norm) for speaker verification
     
