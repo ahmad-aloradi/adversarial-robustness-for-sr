@@ -950,8 +950,10 @@ class MultiModalVPCModel(pl.LightningModule):
         elif isinstance(criterion, MultiModalFusionLoss):
             main_loss = criterion(outputs, batch.class_id)
             main_loss = main_loss['loss']
-        elif criterion is not None:
+        elif isinstance(criterion, torch.nn.CrossEntropyLoss):
             main_loss = criterion(outputs[f"fusion_logits"], batch.class_id)
+        elif criterion.__class__.__name__ == 'LogSoftmaxWrapper':
+            main_loss = criterion(outputs[f"fusion_logits"].unsqueeze(1), batch.class_id.unsqueeze(1))
         else:
             raise ValueError("Invalid criterion")
         
