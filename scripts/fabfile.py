@@ -8,7 +8,7 @@ from fabric.contrib.project import rsync_project
 
 
 env.user = 'iwal021h'
-CLUSTER_NAME = 'alex'    #'tinygpu' 'alex''
+CLUSTER_NAME = 'alex'    #'tinygpu' 'alex'
 env.hosts = ['alex.nhr.fau.de'] if CLUSTER_NAME == 'alex' else ['tinyx.nhr.fau.de']
 GPU = 'a100'  #'rtx2080ti' 'rtx3080'
 
@@ -16,16 +16,9 @@ PATH_PROJECT = '~/adversarial-robustness-for-sr'  # project folder on the hpc cl
 CONDA_PATH = 'comfort' if CLUSTER_NAME == 'alex' else 'comfort_hpc'
 
 WOODY_DIR = f'/home/woody/iwal/{env.user}'
-RESULTS_DIR = WOODY_DIR + os.sep + 'results' 
+RESULTS_DIR = WOODY_DIR + os.sep + 'results'
 DATA_DIR = WOODY_DIR + os.sep + 'datasets'
 
-try:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-except PermissionError:
-    print('Permission denied.')
-
-# os.chdir(f'{PATH_PROJECT}')
 
 def timestamp():
     return str(datetime.datetime.now()).split('.')[0].replace(' ', '_').replace(':', '-')
@@ -42,10 +35,10 @@ def sync_results(expdir_name):
     )
 
 def create_bash_script(settings, script_arguments):
-    # """Creates a pbs file. Uses the scratch SSD for buffering training data."""
+    """Creates a pbs file. Uses the scratch SSD for buffering training data."""
 
     script_arguments_str = ' '.join(['%s=%s' % (key, val) for key, val in script_arguments.items()])
-    job_string =\
+    job_string = \
 """#!/bin/bash -l
 #
 # job name
@@ -69,8 +62,10 @@ cd {path_project}
 # transfer tarballs to the local SSD in $TMPDIR and untar it
 # In case the data is transferred, wait for 15 minutes to avoid double unpacking of data
 if ! [ -d "$TMPDIR/{datamodule_dir}" ]; then
-time rsync -ahv {data_path}/{datamodule_dir}.tar.gz $TMPDIR/.
-tar -xzf $TMPDIR/{datamodule_dir}.tar.gz -C $TMPDIR/.
+mkdir $TMPDIR/{vpc_dirname}
+time rsync -ahv {data_path}/{datamodule_dir}.tar.gz $TMPDIR/{vpc_dirname}/.
+tar -xzf $TMPDIR/{datamodule_dir}.tar.gz -C $TMPDIR/{vpc_dirname}/.
+rsync -ahv {data_path}/{datamodule_dir}/data/metadata $TMPDIR/{datamodule_dir}/data/.
 
 echo "Data transferred to SSD"
 elif [ -d "$TMPDIR/{datamodule_dir}" ]; then
@@ -88,7 +83,7 @@ python {script_name} {script_arguments} paths.data_dir=$TMPDIR
 
 def run_bash_script(pbs):
     with cd(PATH_PROJECT):
-        run('PATH=$PATH:/apps/slurm/current/bin && cat << EOF |  sbatch\n%s\nEOF' % pbs, shell=True)
+        run('PATH=$PATH:/apps/slurm/current/bin && cat << "EOF" |  sbatch\n%s\nEOF' % pbs, shell=True)
 
 @task
 def scancel():
@@ -110,7 +105,6 @@ def clean_logs():
 @task
 def cmd(cmd):
     """Wraps the command over 'run'."""
-    # with cd(PATH_PROJECT):
     run(cmd)
 
 @task
@@ -132,9 +126,6 @@ def check_pending(job_name):
     files = run('squeue -t PENDING --format "%.j" -h').split()
     return 1 if job_name in files else 0
 
-def timestamp_jobname(jobname):
-    return jobname + f'{timestamp()}'
-
 def check_file_exists(file_path):
     result = run(f'test -f {file_path} && echo 1 || echo 0')
     if result.stdout.strip() == '1':
@@ -142,43 +133,40 @@ def check_file_exists(file_path):
     else:
         return 0
 
-# @task
+@task
 def run_exp():
     """The main function that generates all jobs """
 
-    batch_size = 128
+    batch_size = 64
     max_epochs = 30
     datset_dir = 'vpc2025_official'
 
     settings = {
-        'script_name': 'train.py',
+        'script_name': 'src/train.py',
         'cluster': CLUSTER_NAME,
         'path_project': PATH_PROJECT,
         'env_name': CONDA_PATH,
-        'data_path': f'{DATA_DIR + os.sep + "vpc2025_official"}',
+        'data_path': DATA_DIR,
+        'vpc_dirname': datset_dir,
         'gpu': GPU,
         'num_nodes': 1,  # Multi-node are not possible on TinyGPU.
         'walltime': '24:00:00',
         'num_gpus': 1,
         'cuda': '11.1.0',  # '10.0'
-        # 'job_name': 'exp_%s_%s_%s' % (script[:-3], timestamp(), uuid.uuid4().hex[:6]),
     }
-    
-    datasets= ["{B3: ${datamodule.available_models.B3}}",
+
+    datasets = ["{B3: ${datamodule.available_models.B3}}",
                "{B4: ${datamodule.available_models.B4}}",
                "{B5: ${datamodule.available_models.B5}}",
                "{T8-5: ${datamodule.available_models.T8-5}}",
                "{T12-5: ${datamodule.available_models.T12-5}}",
-               "{T25-1: ${datamodule.available_models.T25-1}}"] 
-
+               "{T25-1: ${datamodule.available_models.T25-1}}"]
     classifiers = ["robust", "normalized"]
-    
     loss_functions = ["fusion", "enhanced", "aam"]
 
     for dataset in datasets:
         for classifier in classifiers:
             for loss_function in loss_functions:
-
                 dataset_name = dataset.split('.')[-1][:-2]
                 classifier_name = classifier.split('=')[-1]
                 loss_func_name = loss_function.split('=')[-1]
@@ -194,16 +182,19 @@ def run_exp():
                     'module': 'vpc',
                     'trainer': 'gpu',
                     'name': name,
-                    'logger': 'tensorboard',
-                    'datamodule.models': f"{dataset}",
+                    'logger': 'neptune',
+                    'logger.neptune.with_id': name,
+                    'datamodule.models': f"'{dataset}'",
                     'datamodule.loaders.train.batch_size': batch_size,
                     'datamodule.loaders.valid.batch_size': batch_size,
+                    'datamodule.dataset.max_duration': 12,
                     'module.model.classifiers.selected_classifier': f"{classifier}",
                     'module.criterion.selected_criterion': f"{loss_function}",
                     'trainer.max_epochs': max_epochs,
                     'paths.log_dir': f'{RESULTS_DIR}',
                     'hydra.run.dir': f'{RESULTS_DIR}/train/runs/{name}',
                     "+trainer.num_sanity_val_steps": 0
+
                 }
 
                 # Check for pending jobs: continue_flag = 1 if the job is pending
@@ -215,17 +206,18 @@ def run_exp():
 
                 # 2- if not: do the following:
                 # get last_ckpt path
-                path_to_exps = PATH_PROJECT + os.sep + 'logs' + os.sep + 'experiments' + os.sep + 'runs' + os.sep + name
-                last_ckpt = os.path.join(path_to_exps, 'checkpoints' + os.sep + 'last.ckpt')
+                last_ckpt = os.path.join(script_arguments['hydra.run.dir'], f'checkpoints/last.ckpt')
 
                 last_ckpt_exists = check_file_exists(f'{last_ckpt}')
                 if last_ckpt_exists:
-                    script_arguments['trainer.ckpt_path'] = last_ckpt
+                    script_arguments['ckpt_path'] = last_ckpt
 
                 bash_script = create_bash_script(settings, script_arguments)
                 run_bash_script(bash_script)
-
                 time.sleep(0.1)
-    
+                break
+            break
+        break
+
 if __name__ == '__main__':
     run_exp()

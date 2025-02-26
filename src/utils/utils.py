@@ -11,7 +11,7 @@ from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning import Callback
-from pytorch_lightning.loggers import logger as LightningLoggerBase
+from pytorch_lightning.loggers.logger import Logger as PLLogger
 from pytorch_lightning.utilities import rank_zero_only
 
 from src.modules.losses import load_loss
@@ -137,17 +137,17 @@ def instantiate_callbacks(callbacks_cfg: DictConfig) -> List[Callback]:
     return callbacks
 
 
-def instantiate_loggers(logger_cfg: DictConfig) -> List[LightningLoggerBase]:
+def instantiate_loggers(logger_cfg: DictConfig) -> List[PLLogger]:
     """Instantiates loggers from config.
 
     Args:
         logger_cfg (DictConfig): Loggers config.
 
     Returns:
-        List[LightningLoggerBase]: List with all instantiated loggers.
+        List[PLLogger]: List with all instantiated loggers.
     """
 
-    logger: List[LightningLoggerBase] = []
+    logger: List[PLLogger] = []
 
     if not logger_cfg:
         log.warning("No logger configs found! Skipping...")

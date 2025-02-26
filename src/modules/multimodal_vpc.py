@@ -773,7 +773,7 @@ class MultiModalVPCModel(pl.LightningModule):
         self._text_embedding_cache = EmbeddingCache(max_size=self._max_cache_size)
         
         # Initialize cohort embeddings for score normalization
-        self.normalize_test_scores = model.get("normalize_test_scores", True)
+        self.normalize_test_scores = model.get("normalize_test_scores", False)
 
     ############ Setup init ############
     def _setup_metrics(self, metrics: DictConfig) -> None:
@@ -1250,8 +1250,8 @@ class MultiModalVPCModel(pl.LightningModule):
         
         # Save scores to CSV
         stage = 'test' if is_test else 'valid'
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        artifacts_dir = os.path.join(self.trainer.default_root_dir, f'test_artifacts_{timestamp}')
+        dir_suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if is_test else ""
+        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"{stage}_artifacts{dir_suffix}")
         os.makedirs(artifacts_dir, exist_ok=True)
 
         scores.to_csv(os.path.join(artifacts_dir, f"{stage}_scores.csv"), index=False)
@@ -1267,7 +1267,11 @@ class MultiModalVPCModel(pl.LightningModule):
     def log_figure_with_fallback(self, name: str, fig: plt.Figure, step: int) -> None:
         """Log figure with fallback for loggers that don't support figure logging."""
         if hasattr(self.logger, 'experiment'):
-            self.logger.experiment[f'metrics/{name}'].upload(fig)
+            logger_type = type(self.logger.experiment).__name__
+            if logger_type == 'SummaryWriter':  # TensorBoard
+                self.logger.experiment.add_figure(f'metrics/{name}', fig, global_step=step)
+            else:  # Other loggers like WandB or MLFlow
+                self.logger.experiment[f'metrics/{name}'].upload(fig)
 
     ############ Load and save ############
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
