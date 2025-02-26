@@ -9,7 +9,7 @@ from pytorch_lightning import (
     Trainer,
     seed_everything,
 )
-from pytorch_lightning.loggers import logger as LightningLoggerBase
+from pytorch_lightning.loggers.logger import Logger as PLLogger
 
 # --------------------------------------------------------------------------- #
 # `pyrootutils.setup_root(...)` above is optional line to make environment more
@@ -91,7 +91,7 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
     )
 
     log.info("Instantiating loggers...")
-    logger: List[LightningLoggerBase] = utils.instantiate_loggers(
+    logger: List[PLLogger] = utils.instantiate_loggers(
         cfg.get("logger")
     )
 

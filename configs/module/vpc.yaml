@@ -90,7 +90,7 @@ criterion:
       _target_: src.modules.multimodal_vpc.MultiModalFusionLoss
       classification_loss: 
         <<: *_base_aam_
-    aam_loss:
+    aam:
       <<: *_base_aam_
     cross_entropy:
       _target_: torch.nn.CrossEntropyLoss
