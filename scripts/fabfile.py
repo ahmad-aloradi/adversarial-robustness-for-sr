@@ -160,7 +160,8 @@ def run_exp():
                "{B5: ${datamodule.available_models.B5}}",
                "{T8-5: ${datamodule.available_models.T8-5}}",
                "{T12-5: ${datamodule.available_models.T12-5}}",
-               "{T25-1: ${datamodule.available_models.T25-1}}"]
+               "{T25-1: ${datamodule.available_models.T25-1}}",
+               "${datamodule.available_models}"]
     classifiers = ["robust", "normalized"]
     loss_functions = ["fusion", "enhanced", "aam"]
 

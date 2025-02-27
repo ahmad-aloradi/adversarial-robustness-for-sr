@@ -106,7 +106,9 @@ class EnhancedCriterion(nn.Module):
     def __init__(
             self, 
             classification_loss: Callable,
-            temperature: float = 0.07
+            temperature: float = 0.07,
+            contrastive_weight: float = 0.05,
+            focal_weight: float = 0.1
             ):
         super().__init__()
         self.classification_loss = classification_loss
@@ -114,6 +116,8 @@ class EnhancedCriterion(nn.Module):
         self.focal_loss = FocalLoss(gamma=2.0)
         self.eps = 1e-8
         self.unsqueeze = True if self.classification_loss.__class__.__name__ == 'LogSoftmaxWrapper' else False
+        self.contrastive_weight = contrastive_weight
+        self.focal_weight = focal_weight
         
     def get_contrastive_pairs(self, embeddings: torch.Tensor, targets: torch.Tensor):
         """Create positive and negative pairs from embeddings within the batch."""
@@ -135,6 +139,11 @@ class EnhancedCriterion(nn.Module):
         # Check for valid input
         if embeddings.size(0) < 2:
             return torch.tensor(0.0, device=embeddings.device)
+            
+        # Check for NaN or Inf values and handle them
+        if torch.isnan(embeddings).any() or torch.isinf(embeddings).any():
+            log.warning("NaN or Inf detected in embeddings for contrastive loss")
+            embeddings = torch.nan_to_num(embeddings, nan=0.0, posinf=1.0, neginf=-1.0)
             
         # Normalize embeddings and clamp for stability
         embeddings_norm = torch.nn.functional.normalize(embeddings, p=2, dim=1)
@@ -183,23 +192,106 @@ class EnhancedCriterion(nn.Module):
         return loss
 
     def forward(self, outputs: Dict[str, torch.Tensor], targets: torch.Tensor) -> torch.Tensor:
-        targets_unsqeezed = targets.unsqueeze(1) if self.unsqueeze else targets
-        outputs_unsqeezed = {
-            k: v.unsqueeze(1) if self.unsqueeze and 'logits' in k else v
-            for k, v in outputs.items()
-        }
-
-        classification_loss = self.classification_loss(outputs_unsqeezed[f"{LOSS_TYPES['FUSION']}_logits"], targets_unsqeezed)
-        contr_loss = self.contrastive_loss(outputs[EMBEDS["FUSION"]], targets)
-        focal_loss = self.focal_loss(outputs[f"{LOSS_TYPES['FUSION']}_logits"], targets)
+        # Input validation
+        for key, tensor in outputs.items():
+            if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                log.warning(f"NaN or Inf detected in output tensor '{key}'")
+                outputs[key] = torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # Prepare inputs for classification loss
+        targets_unsqueezed = targets.unsqueeze(1) if self.unsqueeze else targets
+        
+        # Handle output formatting based on loss requirements
+        fusion_logits_key = f"{LOSS_TYPES['FUSION']}_logits"
+        fusion_embeds_key = EMBEDS["FUSION"]
+        
+        # Ensure keys exist in outputs
+        if fusion_logits_key not in outputs:
+            log.error(f"Missing key {fusion_logits_key} in outputs")
+            return torch.tensor(float('nan'), device=targets.device)
+        if fusion_embeds_key not in outputs:
+            log.error(f"Missing key {fusion_embeds_key} in outputs")
+            return torch.tensor(float('nan'), device=targets.device)
+            
+        # Prepare outputs with appropriate shapes
+        outputs_unsqueezed = {}
+        for k, v in outputs.items():
+            if self.unsqueeze and 'logits' in k:
+                outputs_unsqueezed[k] = v.unsqueeze(1)
+            else:
+                outputs_unsqueezed[k] = v
+        
+        # Compute classification loss
+        try:
+            if self.classification_loss.__class__.__name__ == 'BCEWithLogitsLoss' or \
+               self.classification_loss.__class__.__name__ == 'BCELoss':
+                # If using BCE loss, ensure inputs are in valid range
+                fusion_logits = outputs_unsqueezed[fusion_logits_key]
+                
+                # If BCE (not BCE with logits), apply sigmoid and clamp
+                if self.classification_loss.__class__.__name__ == 'BCELoss':
+                    fusion_logits = torch.sigmoid(fusion_logits)
+                    fusion_logits = torch.clamp(fusion_logits, min=self.eps, max=1.0-self.eps)
+                    outputs_unsqueezed[fusion_logits_key] = fusion_logits
+                    
+            classification_loss = self.classification_loss(outputs_unsqueezed[fusion_logits_key], targets_unsqueezed)
+        except Exception as e:
+            log.error(f"Error in classification loss: {e}")
+            classification_loss = torch.tensor(0.0, device=targets.device)
+            
+        # Compute contrastive loss
+        try:
+            contr_loss = self.contrastive_loss(outputs[fusion_embeds_key], targets)
+        except Exception as e:
+            log.error(f"Error in contrastive loss: {e}")
+            contr_loss = torch.tensor(0.0, device=targets.device)
+        
+        # Compute focal loss
+        try:
+            # For focal loss, ensure logits are properly formatted
+            focal_inputs = outputs[fusion_logits_key]
+            if isinstance(self.focal_loss, FocalLoss) and hasattr(self.focal_loss, 'binary') and self.focal_loss.binary:
+                # If binary focal loss, ensure proper sigmoid and clamping
+                focal_inputs = torch.sigmoid(focal_inputs)
+                focal_inputs = torch.clamp(focal_inputs, min=self.eps, max=1.0-self.eps)
+                
+            focal_loss = self.focal_loss(focal_inputs, targets)
+        except Exception as e:
+            log.error(f"Error in focal loss: {e}")
+            focal_loss = torch.tensor(0.0, device=targets.device)
         
         # Log component losses for debugging
         if torch.isnan(classification_loss) or torch.isnan(contr_loss) or torch.isnan(focal_loss):
-            log.warning(f"NaN detected in losses - CE: {classification_loss.item()}, Contrastive: {contr_loss.item()}, Focal: {focal_loss.item()}")
+            log.warning(f"NaN detected in losses - CE: {classification_loss.item() if not torch.isnan(classification_loss) else 'NaN'}, "
+                        f"Contrastive: {contr_loss.item() if not torch.isnan(contr_loss) else 'NaN'}, "
+                        f"Focal: {focal_loss.item() if not torch.isnan(focal_loss) else 'NaN'}")
+            
+            # Return only the losses that aren't NaN
+            total_loss = torch.tensor(0.0, device=targets.device)
+            if not torch.isnan(classification_loss):
+                total_loss = total_loss + classification_loss
+            if not torch.isnan(contr_loss) and self.contrastive_weight > 0:
+                total_loss = total_loss + self.contrastive_weight * contr_loss
+            if not torch.isnan(focal_loss) and self.focal_weight > 0:
+                total_loss = total_loss + self.focal_weight * focal_loss
+                
+            # If all losses are NaN, return a small constant to avoid breaking the backward pass
+            if torch.isnan(total_loss):
+                log.error("All losses are NaN, returning small constant")
+                return torch.tensor(1e-5, device=targets.device, requires_grad=True)
+                
+            return total_loss
         
-        return classification_loss + 0.05 * contr_loss + 0.1 * focal_loss
-
-
+        # Combine losses with weights
+        total_loss = classification_loss + self.contrastive_weight * contr_loss + self.focal_weight * focal_loss
+        
+        # Final sanity check
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            log.error("Final loss is NaN or Inf, returning small constant")
+            return torch.tensor(1e-5, device=targets.device, requires_grad=True)
+            
+        return total_loss
+    
 class FusionClassifierWithResiduals(nn.Module):
     def __init__(
         self,
