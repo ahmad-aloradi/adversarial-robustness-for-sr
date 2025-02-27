@@ -46,7 +46,7 @@ model:
     # Available classifier definitions
     available_classifiers:
       normalized:
-        _target_: src.modules.multimodal_vpc.FusionClassifierWithResiduals
+        _target_: src.modules.multimodal_vpc.FixedFusionClassifierWithResiduals
         fuse_model:
           _target_: src.modules.multimodal_vpc.NormalizedWeightedSum
           audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
@@ -57,6 +57,44 @@ model:
         num_classes: ${module.model.classifiers.config.num_classes}
         dropout: 0.3
         norm_type: "batch"
+      
+      identity_gated:
+        _target_: src.modules.multimodal_vpc.FixedFusionClassifierWithResiduals
+        fuse_model:
+          _target_: src.modules.multimodal_vpc.IdentityGatedFusion
+          audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
+          text_embedding_size: ${module.model.classifiers.config.text_embedding_size}
+          bottleneck_size: ${module.model.classifiers.config.bottleneck_size}
+          dropout: 0.2
+        input_size: ${module.model.classifiers.config.fusion_classifier_input_size}
+        hidden_size: ${module.model.classifiers.config.fusion_classifier_hidden_size}
+        num_classes: ${module.model.classifiers.config.num_classes}
+        dropout: 0.3
+        norm_type: "batch"
+      
+      speaker_attention:
+        _target_: src.modules.multimodal_vpc.FixedFusionClassifierWithResiduals
+        fuse_model:
+          _target_: src.modules.multimodal_vpc.SpeakerFocusedAttention
+          audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
+          text_embedding_size: ${module.model.classifiers.config.text_embedding_size}
+          bottleneck_size: ${module.model.classifiers.config.bottleneck_size}
+          num_heads: 4
+          dropout: 0.1
+        input_size: ${module.model.classifiers.config.fusion_classifier_input_size}
+        hidden_size: ${module.model.classifiers.config.fusion_classifier_hidden_size}
+        num_classes: ${module.model.classifiers.config.num_classes}
+        dropout: 0.3
+        norm_type: "batch"
+      
+      hierarchical:
+        _target_: src.modules.multimodal_vpc.RobustHierarchicalFusion
+        audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
+        text_embedding_size: ${module.model.classifiers.config.text_embedding_size}
+        hidden_size: ${module.model.classifiers.config.bottleneck_size}
+        num_classes: ${module.model.classifiers.config.num_classes}
+        dropout: 0.3
+      
       robust:
         _target_: src.modules.multimodal_vpc.RobustFusionClassifier
         audio_size: ${module.model.classifiers.config.audio_embedding_size}
@@ -66,13 +104,16 @@ model:
         dropout_audio: 0.3
         dropout_text: 0.1
 
-    # Selected classifier (defaults to normalized)
-    selected_classifier: normalized  # Can be overridden via command line by: "module.criterion.selected_criterion=fusion"
+    # Selected classifier (defaults to identity_gated)
+    selected_classifier: identity_gated
     fusion_classifier: ${module.model.classifiers.available_classifiers.${module.model.classifiers.selected_classifier}}
 
   embedding_cache:
     max_size: 500000
     bypass_warmup: True
+    
+  # Enable score normalization for improved performance
+  normalize_test_scores: True
 
 criterion:
   available_criteria:
@@ -82,21 +123,31 @@ criterion:
         _target_: speechbrain.nnet.losses.AdditiveAngularMargin
         margin: 0.2 
         scale: 30.0
+    
+    stabilized:
+      _target_: src.modules.multimodal_vpc.StabilizedCriterion      
+      classification_loss: 
+        <<: *_base_aam_
+      contrastive_weight: 0.05
+    
     enhanced:
       _target_: src.modules.multimodal_vpc.EnhancedCriterion      
       classification_loss: 
         <<: *_base_aam_
+    
     fusion:
       _target_: src.modules.multimodal_vpc.MultiModalFusionLoss
       classification_loss: 
         <<: *_base_aam_
+    
     aam:
       <<: *_base_aam_
+    
     cross_entropy:
       _target_: torch.nn.CrossEntropyLoss
 
-  # Selected criterion (defaults to enhanced)
-  selected_criterion: enhanced  # Can be overridden via command line
+  # Selected criterion (defaults to stabilized)
+  selected_criterion: stabilized
   train_criterion: ${module.criterion.available_criteria.${module.criterion.selected_criterion}}
 
   # For callbacks
@@ -110,14 +161,14 @@ optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-5
 
+# Use improved learning rate scheduler with warmup
 lr_scheduler:
   scheduler:
-    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-    mode: "min"
-    factor: 0.3
-    min_lr: 1.0e-9
-    patience: 2
-    verbose: True
+    _target_: src.modules.multimodal_vpc.CosineWarmupScheduler
+    warmup_epochs: 2
+    max_epochs: 20
+    warmup_start_lr: 1.0e-6
+    eta_min: 1.0e-7
   extras:
     monitor: ${replace:"__metric__/valid"}/${module.metrics.valid_best.target_key}
     interval: "epoch"
@@ -146,3 +197,15 @@ batch_sizes:
   train: ${datamodule.loaders.train.batch_size}
   valid: ${datamodule.loaders.valid.batch_size}
   test: ${datamodule.loaders.test.batch_size}
+
+# Add callbacks for dynamic loss weight adjustment
+callbacks:
+  adaptive_loss_weights:
+    _target_: src.modules.multimodal_vpc.AdaptiveLossWeights
+    initial_contrastive_weight: 0.05
+    min_weight: 0.01  
+    max_weight: 0.2
+    patience: 3
+    factor: 0.5
+    monitor: ${replace:"__metric__/valid"}/${module.metrics.valid_best.target_key} # Monitor EER metric
+    mode: "min"  # Lower EER is better
