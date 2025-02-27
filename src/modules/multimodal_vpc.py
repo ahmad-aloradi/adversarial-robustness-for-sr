@@ -364,8 +364,8 @@ class FusionClassifierWithResiduals(nn.Module):
             x = torch.nn.functional.relu(x + block(x))
 
         logits = self.classifier(x)
-        class_prob = torch.nn.functional.softmax(logits, dim=1)
-        class_preds = torch.argmax(class_prob, dim=-1)
+        logits = torch.nn.functional.softmax(logits, dim=1)
+        class_preds = torch.argmax(logits, dim=-1)
 
         # Get selected embedding type
         features = FusionClassifierWithResiduals.get_embedding(fused_feats, x, self.embedding_type)
@@ -377,6 +377,7 @@ class FusionClassifierWithResiduals(nn.Module):
             EMBEDS["ID"]: features,
             EMBEDS["CLASS"]: class_preds,
             f"fusion_logits": logits,
+            f"logits": logits,
         }
 
 ###################################
@@ -580,7 +581,7 @@ class RobustFusionClassifier(nn.Module):
         # Classification heads
         self.audio_classifier = nn.Linear(hidden_size, num_classes)
         self.text_classifier = nn.Linear(hidden_size, num_classes)
-        self.fusion_classifier = nn.Linear(hidden_size*2, num_classes)
+        self.fusion_classifier = nn.Linear(hidden_size * 2, num_classes)
 
         # Adaptive fusion gating
         self.adaptive_gate = nn.Sequential(
@@ -641,6 +642,7 @@ class RobustFusionClassifier(nn.Module):
                         ensemble_weights[:, 1:2] * text_logits +
                         ensemble_weights[:, 2:3] * fusion_logits)
 
+        final_logits = torch.nn.functional.softmax(final_logits, dim=-1)
         predicted_class = torch.argmax(final_logits, dim=-1)
         
         return {
