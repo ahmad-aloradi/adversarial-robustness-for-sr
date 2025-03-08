@@ -33,12 +33,12 @@ model:
     truncation: True
     max_length: 512
 
+### classifiers ###
   classifiers:
     # Common configuration
     config:
       num_classes: ${datamodule.num_classes}
       bottleneck_size: 512
-      fusion_classifier_input_size: 512
       fusion_classifier_hidden_size: 1024
       audio_embedding_size: 192  # ECAPA embedding size
       text_embedding_size: 768   # BERT embedding size
@@ -46,97 +46,68 @@ model:
     # Available classifier definitions
     available_classifiers:
       normalized:
-        _target_: src.modules.multimodal_vpc.FixedFusionClassifierWithResiduals
+        _target_: src.modules.multimodal_vpc.FusionClassifierWithResiduals
         fuse_model:
-          _target_: src.modules.multimodal_vpc.NormalizedWeightedSum
+          _target_: src.modules.multimodal_vpc.InstanceAwareWeightedSum
           audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
           text_embedding_size: ${module.model.classifiers.config.text_embedding_size}
-          bottleneck_size: ${module.model.classifiers.config.bottleneck_size}
-        input_size: ${module.model.classifiers.config.fusion_classifier_input_size}
+          hidden_size: ${module.model.classifiers.config.bottleneck_size}
+          dropout_audio: 0.3
+          dropout_text: 0.1
+          accum_method: 'sum'
+        input_size: ${module.model.classifiers.config.bottleneck_size}
         hidden_size: ${module.model.classifiers.config.fusion_classifier_hidden_size}
         num_classes: ${module.model.classifiers.config.num_classes}
-        dropout: 0.3
-        norm_type: "batch"
-      
-      identity_gated:
-        _target_: src.modules.multimodal_vpc.FixedFusionClassifierWithResiduals
-        fuse_model:
-          _target_: src.modules.multimodal_vpc.IdentityGatedFusion
-          audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
-          text_embedding_size: ${module.model.classifiers.config.text_embedding_size}
-          bottleneck_size: ${module.model.classifiers.config.bottleneck_size}
-          dropout: 0.2
-        input_size: ${module.model.classifiers.config.fusion_classifier_input_size}
-        hidden_size: ${module.model.classifiers.config.fusion_classifier_hidden_size}
-        num_classes: ${module.model.classifiers.config.num_classes}
-        dropout: 0.3
-        norm_type: "batch"
-      
-      speaker_attention:
-        _target_: src.modules.multimodal_vpc.FixedFusionClassifierWithResiduals
-        fuse_model:
-          _target_: src.modules.multimodal_vpc.SpeakerFocusedAttention
-          audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
-          text_embedding_size: ${module.model.classifiers.config.text_embedding_size}
-          bottleneck_size: ${module.model.classifiers.config.bottleneck_size}
-          num_heads: 4
-          dropout: 0.1
-        input_size: ${module.model.classifiers.config.fusion_classifier_input_size}
-        hidden_size: ${module.model.classifiers.config.fusion_classifier_hidden_size}
-        num_classes: ${module.model.classifiers.config.num_classes}
-        dropout: 0.3
-        norm_type: "batch"
-      
-      hierarchical:
-        _target_: src.modules.multimodal_vpc.RobustHierarchicalFusion
+        dropout_residual: 0.1
+        num_residuals: 4
+        norm_type: 'batch'
+            
+      robust:
+        _target_: src.modules.multimodal_vpc.RobustFusionClassifier
         audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
         text_embedding_size: ${module.model.classifiers.config.text_embedding_size}
         hidden_size: ${module.model.classifiers.config.bottleneck_size}
         num_classes: ${module.model.classifiers.config.num_classes}
-        dropout: 0.3
-      
-      robust:
-        _target_: src.modules.multimodal_vpc.RobustFusionClassifier
-        audio_size: ${module.model.classifiers.config.audio_embedding_size}
-        text_size: ${module.model.classifiers.config.text_embedding_size}
-        hidden_size: ${module.model.classifiers.config.bottleneck_size}
-        num_classes: ${module.model.classifiers.config.num_classes}
+        norm_type: 'batch'
+        accum_method: 'sum'
         dropout_audio: 0.3
         dropout_text: 0.1
 
-    # Selected classifier (defaults to identity_gated)
-    selected_classifier: identity_gated
+    # Selected classifier (defaults to robust)
+    selected_classifier: robust
     fusion_classifier: ${module.model.classifiers.available_classifiers.${module.model.classifiers.selected_classifier}}
 
+### caching ###
   embedding_cache:
     max_size: 500000
     bypass_warmup: True
     
-  # Enable score normalization for improved performance
-  normalize_test_scores: True
+  # Enable score normalization
+  normalize_test_scores: False
 
+### criteria and metrics ###
 criterion:
   available_criteria:
     _base_aam_: &_base_aam_
       _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
       loss_fn:
         _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-        margin: 0.2 
+        margin: 0.2
         scale: 30.0
-    
-    stabilized:
-      _target_: src.modules.multimodal_vpc.StabilizedCriterion      
-      classification_loss: 
-        <<: *_base_aam_
-      contrastive_weight: 0.05
-    
-    enhanced:
-      _target_: src.modules.multimodal_vpc.EnhancedCriterion      
-      classification_loss: 
-        <<: *_base_aam_
-    
-    fusion:
-      _target_: src.modules.multimodal_vpc.MultiModalFusionLoss
+
+    comprehensive:
+      _target_: src.modules.multimodal_vpc.MultiModalLoss
+      classifier_name: ${module.model.classifiers.selected_classifier}
+      weights:
+        _target_: src.modules.multimodal_vpc.LossWeights
+        ensemble: ${map:${module.model.classifiers.selected_classifier},robust,1.0,0.0}
+        fusion: ${map:${module.model.classifiers.selected_classifier},normalized,1.0,0.2}
+        audio: 0.2
+        text: 0.2
+        contrastive: 0.1
+        consistency: 1.0
+        confidence: 0.1
+      confidence_target: 0.9
       classification_loss: 
         <<: *_base_aam_
     
@@ -146,33 +117,12 @@ criterion:
     cross_entropy:
       _target_: torch.nn.CrossEntropyLoss
 
-  # Selected criterion (defaults to stabilized)
-  selected_criterion: stabilized
+  # Selected criterion (defaults to comprehensive)
+  selected_criterion: comprehensive
   train_criterion: ${module.criterion.available_criteria.${module.criterion.selected_criterion}}
 
   # For callbacks
   loss: ${module.criterion.train_criterion}
-
-gradient_clip_val: 5.0
-
-optimizer:
-  _target_: torch.optim.AdamW
-  _partial_: True
-  lr: 1.0e-4
-  weight_decay: 1.0e-5
-
-# Use improved learning rate scheduler with warmup
-lr_scheduler:
-  scheduler:
-    _target_: src.modules.multimodal_vpc.CosineWarmupScheduler
-    warmup_epochs: 2
-    max_epochs: 20
-    warmup_start_lr: 1.0e-6
-    eta_min: 1.0e-7
-  extras:
-    monitor: ${replace:"__metric__/valid"}/${module.metrics.valid_best.target_key}
-    interval: "epoch"
-    frequency: 1
 
 metrics:
   train:
@@ -187,6 +137,52 @@ metrics:
     _target_: src.modules.metrics.metrics.AutoSyncDictMinMetric
     target_key: "eer"
 
+### optimizer and lr_scheduler ###
+gradient_clip_val: 5.0
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: True
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+
+scheduler_settings:
+  available_lr_scheduler:
+    warmup_cosine:
+      _target_: torch.optim.lr_scheduler.SequentialLR
+      schedulers:
+        - _target_: torch.optim.lr_scheduler.LinearLR
+          start_factor: 0.1
+          total_iters: ${int:${mul:${trainer.max_epochs},0.1}}
+        - _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+          T_max: ${int:${sub:${trainer.max_epochs},${module.scheduler_settings.available_lr_scheduler.warmup_cosine.schedulers[0].total_iters}}} # Remaining epochs after linear warmup
+          eta_min: ${mul:${module.optimizer.lr},0.05}
+      milestones:
+        - ${int:${mul:${trainer.max_epochs},0.1}}  # 10% of total epochs are used for linear warmup, remaining for cosine annealing
+      extras:
+        monitor: valid/${replace:"__metric__"}/${module.metrics.valid_best.target_key}
+        interval: epoch
+        frequency: 1
+
+    reduce_on_plateau:
+      scheduler:
+        _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+        mode: "max"
+        factor: 0.3
+        min_lr: 1.0e-9
+        patience: 10
+        verbose: True
+      extras:
+        monitor: valid/${replace:"__metric__"}/${module.metrics.valid_best.target_key}
+        interval: "epoch"
+        frequency: 1
+
+  # Selected scheduler (defaults to reduce_on_plateau)
+  selected_lr_scheduler: reduce_on_plateau
+
+lr_scheduler: ${module.scheduler_settings.available_lr_scheduler.${module.scheduler_settings.selected_lr_scheduler}}
+
+### extras and callbacks ###
 logging_params:
   on_step: False
   on_epoch: True
@@ -197,15 +193,3 @@ batch_sizes:
   train: ${datamodule.loaders.train.batch_size}
   valid: ${datamodule.loaders.valid.batch_size}
   test: ${datamodule.loaders.test.batch_size}
-
-# Add callbacks for dynamic loss weight adjustment
-callbacks:
-  adaptive_loss_weights:
-    _target_: src.modules.multimodal_vpc.AdaptiveLossWeights
-    initial_contrastive_weight: 0.05
-    min_weight: 0.01  
-    max_weight: 0.2
-    patience: 3
-    factor: 0.5
-    monitor: ${replace:"__metric__/valid"}/${module.metrics.valid_best.target_key} # Monitor EER metric
-    mode: "min"  # Lower EER is better

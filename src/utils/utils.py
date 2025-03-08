@@ -331,14 +331,19 @@ def register_custom_resolvers(
     version_base: str, config_path: str, config_name: str
 ) -> Callable:
     """Optional decorator to register custom OmegaConf resolvers. It is
-    excepted to call before `hydra.main` decorator call.
+    expected to call before `hydra.main` decorator call.
 
-    Replace resolver: To avoiding copying of loss and metric names in configs,
+    1. Replace resolver: To avoiding copying of loss and metric names in configs,
     there is custom resolver during hydra initialization which replaces
     `__loss__` to `loss.__class__.__name__` and `__metric__` to
     `main_metric.__class__.__name__` For example: ${replace:"__metric__/valid"}
     Use quotes for defining internal value in ${replace:"..."} to avoid grammar
     problems with hydra config parser.
+
+    2. mul resolver: To multiply two values. For example: ${mul:2:3}
+    3. add resolver: To add two values. For example: ${add:2:3}
+    4. sub resolver: To subtract two values. For example: ${sub:2:3}
+    5. int resolver: To convert value to integer. For example: ${int:2.5}
 
     Args:
         version_base (str): Hydra version base.
@@ -360,7 +365,22 @@ def register_custom_resolvers(
     if args.config_name:
         config_name = args.config_name
 
-    # register of replace resolver
+    # register the arithmetic resolvers resolver
+    if not OmegaConf.has_resolver("mul"):
+        OmegaConf.register_new_resolver("mul", lambda a, b: float(a) * float(b))
+    if not OmegaConf.has_resolver("sum"):
+        OmegaConf.register_new_resolver("sum", lambda a, b: a + b)
+    if not OmegaConf.has_resolver("sub"):
+        OmegaConf.register_new_resolver("sub", lambda a, b: a - b)
+    # register the "int" resolver
+    if not OmegaConf.has_resolver("int"):
+        OmegaConf.register_new_resolver("int", lambda a: int(a))
+    # register the "map" resolver for conditional mapping
+    if not OmegaConf.has_resolver("map"):
+        OmegaConf.register_new_resolver(
+            "map", lambda value, target, true_val, false_val: true_val if value == target else false_val)
+
+    # register the replace resolver
     if not OmegaConf.has_resolver("replace"):
         with initialize_config_dir(
             version_base=version_base, config_dir=config_path
@@ -375,16 +395,19 @@ def register_custom_resolvers(
 
         OmegaConf.register_new_resolver(
             "replace",
-            lambda item: item.replace("__loss__", loss.__class__.__name__
-                                      ).replace("__metric__", metric.__class__.__name__
-                                                ).replace("__metric_best__", metric_best.__class__.__name__),
+            lambda item: item.replace(
+                "__loss__", loss.__class__.__name__
+            ).replace(
+                "__metric__", metric.__class__.__name__
+            ).replace(
+                "__metric_best__", metric_best.__class__.__name__
+            ),
         )
 
     def decorator(function: Callable) -> Callable:
         @wraps(function)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             return function(*args, **kwargs)
-
         return wrapper
 
     return decorator

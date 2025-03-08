@@ -1,7 +1,6 @@
 import hydra
 import torch
-from omegaconf import DictConfig
-
+from omegaconf import DictConfig, OmegaConf, ListConfig
 
 def load_loss(loss_cfg: DictConfig) -> torch.nn.Module:
     """Load loss module.
@@ -13,11 +12,12 @@ def load_loss(loss_cfg: DictConfig) -> torch.nn.Module:
         torch.nn.Module: Loss module.
     """
 
-    weight_params = {}
+    # Convert only list-like weight parameters to tensors
     for param_name, param_value in loss_cfg.items():
-        if "weight" in param_name:
-            weight_params[param_name] = torch.tensor(param_value).float()
+        if "weight" in param_name and isinstance(param_value, ListConfig):
+            loss_cfg[param_name] = torch.tensor(param_value).float()
 
-    loss = hydra.utils.instantiate(loss_cfg, **weight_params)
+    # Instantiate the loss using Hydra
+    loss = hydra.utils.instantiate(loss_cfg)
 
     return loss

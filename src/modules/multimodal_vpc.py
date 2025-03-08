@@ -1,17 +1,14 @@
 import os
-from typing import Any, Dict, Optional, List, Tuple, Literal, Callable
+import json
+from typing import Any, Dict, Optional, List, Tuple, Literal, Callable, Union
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum, auto
-from contextlib import nullcontext
-import math
 
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LambdaLR
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback
 from hydra.utils import instantiate
@@ -24,6 +21,7 @@ from src.datamodules.components.vpc25.vpc_dataset import VPC25Item, VPC25Verific
 from src import utils
 from src.modules.components.utils import EmbeddingCache
 from src.modules.metrics.metrics import AS_norm 
+from src.modules.losses.components.focal_loss import FocalLoss
 from datetime import datetime
 
 
@@ -62,371 +60,81 @@ class EmbeddingType(Enum):
     FUSION = auto()
     LAST_HIDDEN = auto()  # The layer before classifier
 
+
 ###################################
-""""Custom Fusion Models"""
-class NormalizedWeightedSum(nn.Module):
-    def __init__(self, audio_embedding_size, text_embedding_size, bottleneck_size, *args, **kwargs):
+class InstanceAwareWeightedSum(nn.Module):
+    def __init__(self, audio_embedding_size: int,
+                 text_embedding_size: int,
+                 hidden_size: int,
+                 dropout_audio: float = 0.3,
+                 dropout_text: float = 0.1,
+                 accum_method: Literal['sum', 'concat'] = 'sum'
+                 ):
         super().__init__()
-        # Projection layers
+
+        # Setup hidden_size based off accumulation method
+        assert accum_method in ['sum', 'concat'], f"Invalid accumulation method: {accum_method}"
+        hidden_size = hidden_size if accum_method == 'sum' else hidden_size // 2
+        self.accum_method = accum_method
+
+        # Audio processing path
         self.audio_proj = nn.Sequential(
             nn.LayerNorm(audio_embedding_size),
-            nn.Linear(audio_embedding_size, bottleneck_size)
+            nn.Linear(audio_embedding_size, hidden_size),
+            nn.GELU(),
+            nn.Dropout(dropout_audio)
         )
+        # Text processing path
         self.text_proj = nn.Sequential(
             nn.LayerNorm(text_embedding_size),
-            nn.Linear(text_embedding_size, bottleneck_size)
-        )
-        # Learnable weights for weighted sum
-        self.audio_weight = nn.Parameter(torch.tensor(1.0))
-        self.text_weight = nn.Parameter(torch.tensor(1.0))
-
-    def forward(self, emebds):
-        assert len(emebds) == 2, f"Expected 2 embeddings, but found: {len(emebds)}"
-        assert type(emebds) == tuple, f"Expected tuple of embeddings, but found: {type(emebds)}"
-        audio_emb = emebds[0]
-        text_emb = emebds[1]
-
-        audio_emb = self.audio_proj(audio_emb)
-        text_emb = self.text_proj(text_emb)
-    
-        return {"fusion_emb": self.audio_weight * audio_emb + self.text_weight * text_emb, 
-                "audio_emb": audio_emb,
-                "text_emb": text_emb}  
-
-class IdentityGatedFusion(nn.Module):
-    """
-    Speaker identity-focused gated fusion approach.
-    Uses gating mechanisms to control modality contribution based on identity-relevance.
-    """
-    def __init__(self, audio_embedding_size, text_embedding_size, bottleneck_size, dropout=0.2):
-        super().__init__()
-        # Projection layers
-        self.audio_proj = nn.Sequential(
-            nn.LayerNorm(audio_embedding_size),
-            nn.Linear(audio_embedding_size, bottleneck_size),
+            nn.Linear(text_embedding_size, hidden_size),
             nn.GELU(),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout_text)
         )
-        self.text_proj = nn.Sequential(
-            nn.LayerNorm(text_embedding_size),
-            nn.Linear(text_embedding_size, bottleneck_size),
-            nn.GELU(),
-            nn.Dropout(dropout)
-        )
-        
-        # Identity relevance gates - determine how relevant each modality is for identity
-        self.audio_id_gate = nn.Sequential(
-            nn.Linear(bottleneck_size, bottleneck_size // 2),
-            nn.GELU(),
-            nn.Linear(bottleneck_size // 2, 1),
-            nn.Sigmoid()
-        )
-        
-        self.text_id_gate = nn.Sequential(
-            nn.Linear(bottleneck_size, bottleneck_size // 2),
-            nn.GELU(),
-            nn.Linear(bottleneck_size // 2, 1),
-            nn.Sigmoid()
-        )
-        
-        # Shared identity space projection
-        self.id_fusion = nn.Sequential(
-            nn.Linear(bottleneck_size * 2, bottleneck_size),
-            nn.LayerNorm(bottleneck_size),
-            nn.GELU()
-        )
-        
-    def forward(self, embeddings):
-        assert len(embeddings) == 2, f"Expected 2 embeddings, but found: {len(embeddings)}"
-        audio_emb, text_emb = embeddings
-        
-        # Project each modality to common space
-        audio_features = self.audio_proj(audio_emb)
-        text_features = self.text_proj(text_emb)
-        
-        # Calculate identity relevance weights
-        audio_id_weight = self.audio_id_gate(audio_features)
-        text_id_weight = self.text_id_gate(text_features)
-        
-        # Apply weights
-        weighted_audio = audio_features * audio_id_weight
-        weighted_text = text_features * text_id_weight
-        
-        # Fusion with identity focus
-        concat_features = torch.cat([weighted_audio, weighted_text], dim=-1)
-        fusion_emb = self.id_fusion(concat_features)
-        
-        return {
-            "fusion_emb": fusion_emb,
-            "audio_emb": audio_features,
-            "text_emb": text_features,
-            "audio_weight": audio_id_weight,
-            "text_weight": text_id_weight
-        }
-
-class SpeakerFocusedAttention(nn.Module):
-    """
-    Speaker-focused attention fusion tailored for speaker ID tasks.
-    Uses self-attention within modalities and identity-focused cross-modal integration.
-    """
-    def __init__(self, audio_embedding_size, text_embedding_size, bottleneck_size, num_heads=4, dropout=0.1):
-        super().__init__()
-        
-        # Project to common dimension
-        self.audio_proj = nn.Sequential(
-            nn.LayerNorm(audio_embedding_size),
-            nn.Linear(audio_embedding_size, bottleneck_size),
-            nn.GELU(),
-            nn.Dropout(dropout)
-        )
-        
-        self.text_proj = nn.Sequential(
-            nn.LayerNorm(text_embedding_size),
-            nn.Linear(text_embedding_size, bottleneck_size),
-            nn.GELU(),
-            nn.Dropout(dropout)
-        )
-        
-        # Self-attention for each modality to focus on identity-relevant features
-        self.audio_self_attention = nn.MultiheadAttention(
-            embed_dim=bottleneck_size, 
-            num_heads=num_heads, 
-            dropout=dropout, 
-            batch_first=True
-        )
-        
-        self.text_self_attention = nn.MultiheadAttention(
-            embed_dim=bottleneck_size, 
-            num_heads=num_heads, 
-            dropout=dropout, 
-            batch_first=True
-        )
-        
-        # Identity-focused fusion with gating
-        self.identity_gate = nn.Sequential(
-            nn.Linear(bottleneck_size * 2, bottleneck_size // 2),
+        self.weight_predictor = nn.Sequential(
+            nn.Linear(audio_embedding_size + text_embedding_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(bottleneck_size // 2, 2),  # 2 for audio and text weights
+            nn.Linear(hidden_size, 2),  # Outputs weights for audio and text
             nn.Softmax(dim=-1)
         )
-        
-        # Final fusion layer
-        self.fusion_layer = nn.Sequential(
-            nn.Linear(bottleneck_size, bottleneck_size),
-            nn.LayerNorm(bottleneck_size),
-            nn.GELU()
-        )
-        
+    
     def forward(self, embeddings):
         audio_emb, text_emb = embeddings
-        batch_size = audio_emb.size(0)
-        
-        # Project to common dimension
+        concat_emb = torch.cat([audio_emb, text_emb], dim=-1)
         audio_proj = self.audio_proj(audio_emb)
         text_proj = self.text_proj(text_emb)
+        weights = self.weight_predictor(concat_emb)  # [batch_size, 2] --> 0 for audio, 1 for text
         
-        # Reshape for attention if needed
-        audio_seq = audio_proj.unsqueeze(1)  # [batch_size, 1, bottleneck_size]
-        text_seq = text_proj.unsqueeze(1)    # [batch_size, 1, bottleneck_size]
-        
-        # Apply self-attention to find identity-relevant features
-        audio_attn, _ = self.audio_self_attention(
-            query=audio_seq,
-            key=audio_seq,
-            value=audio_seq
-        )
-        
-        text_attn, _ = self.text_self_attention(
-            query=text_seq,
-            key=text_seq,
-            value=text_seq
-        )
-        
-        # Squeeze sequence dimension
-        audio_attn = audio_attn.squeeze(1)  # [batch_size, bottleneck_size]
-        text_attn = text_attn.squeeze(1)    # [batch_size, bottleneck_size]
-        
-        # Calculate identity-relevance gate
-        joint_features = torch.cat([audio_attn, text_attn], dim=-1)
-        modal_weights = self.identity_gate(joint_features)
-        
-        # Apply identity-focused fusion
-        identity_features = (
-            modal_weights[:, 0:1] * audio_attn + 
-            modal_weights[:, 1:2] * text_attn
-        )
-        
-        # Final fusion transformation
-        fusion_emb = self.fusion_layer(identity_features)
+        if self.accum_method == 'sum':
+            fusion_emb = weights[:, 0:1] * audio_proj + weights[:, 1:2] * text_proj
+        elif self.accum_method == 'concat':
+            fusion_emb = torch.cat((weights[:, 0:1] * audio_proj, weights[:, 1:2] * text_proj), dim=-1)
         
         return {
-            "fusion_emb": fusion_emb,
-            "audio_emb": audio_attn,
-            "text_emb": text_attn,
-            "modal_weights": modal_weights
-        }
+            "fusion_emb": fusion_emb, 
+            "audio_emb": audio_proj,
+            "text_emb": text_proj,
+            "audio_weights": weights[:, 0:1],
+            "text_weights": weights[:, 1:2]
+            } 
 
-class ConcatFusion(torch.nn.Module):
-    def __init__(self, dim=1, *args, **kwargs):
-        super(ConcatFusion, self).__init__()
-        self.dim = dim
 
-    def forward(self, emebds):
-        assert len(emebds) == 2, f"Expected 2 embeddings, but found: {len(emebds)}"
-        assert type(emebds) == tuple, f"Expected tuple of embeddings, but found: {type(emebds)}"
-        return {"fusion_emb": torch.cat(emebds, dim=self.dim),
-                "audio_emb": emebds[0],
-                "text_emb": emebds[1]}
-
-###################################
-class StabilizedCriterion(nn.Module):
-    def __init__(
-            self, 
-            classification_loss: Callable,
-            contrastive_weight: float = 0.05,
-            weight_scheduler: Optional[Callable] = None
-            ):
-        super().__init__()
-        self.classification_loss = classification_loss
-        self.contrastive_weight = contrastive_weight
-        self.eps = 1e-8
-        self.weight_scheduler = weight_scheduler  # Callable that takes epoch and returns weight
-        self._current_epoch = 0
-        
-    def set_epoch(self, epoch):
-        """Set current epoch for weight scheduling."""
-        self._current_epoch = epoch
-        
-    def cosine_similarity_matrix(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """Compute cosine similarity matrix with gradient clipping for stability."""
-        # L2 normalize embeddings
-        embeddings_norm = F.normalize(embeddings, p=2, dim=1)
-        
-        # Compute cosine similarity matrix with safe clipping
-        similarity_matrix = torch.matmul(embeddings_norm, embeddings_norm.T)
-        similarity_matrix = torch.clamp(similarity_matrix, min=-1.0 + self.eps, max=1.0 - self.eps)
-        
-        return similarity_matrix
-    
-    def get_contrastive_pairs(self, targets: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Create positive and negative pair masks."""
-        batch_size = targets.size(0)
-        
-        # Create mask matrices
-        labels_matrix = targets.unsqueeze(1).expand(batch_size, batch_size)
-        positive_mask = labels_matrix == labels_matrix.T
-        positive_mask.fill_diagonal_(False)  # Remove self pairs
-        negative_mask = ~positive_mask
-        negative_mask.fill_diagonal_(False)  # Remove self pairs
-        
-        return positive_mask, negative_mask
-    
-    def contrastive_loss(self, embeddings: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Compute supervised contrastive loss with improved stability."""
-        # Skip if batch is too small
-        if embeddings.size(0) <= 1:
-            return torch.tensor(0.0, device=embeddings.device)
-            
-        # Compute similarity matrix
-        similarity_matrix = self.cosine_similarity_matrix(embeddings)
-        
-        # Get positive and negative masks
-        positive_mask, negative_mask = self.get_contrastive_pairs(targets)
-        
-        # Skip samples without positive or negative pairs
-        valid_samples = (positive_mask.sum(dim=1) > 0) & (negative_mask.sum(dim=1) > 0)
-        if not valid_samples.any():
-            return torch.tensor(0.0, device=embeddings.device)
-        
-        # Apply numerically stable softmax-based contrastive loss
-        # Use logsumexp trick for numerical stability
-        pos_similarities = similarity_matrix * positive_mask.float()
-        neg_similarities = similarity_matrix * negative_mask.float()
-        
-        # Replace zeros with large negative values for logsumexp
-        pos_similarities = pos_similarities.masked_fill(positive_mask == 0, -1e9)
-        neg_similarities = neg_similarities.masked_fill(negative_mask == 0, -1e9)
-        
-        # Compute logits using log-sum-exp trick
-        pos_logits = torch.logsumexp(pos_similarities, dim=1)
-        neg_logits = torch.logsumexp(neg_similarities, dim=1)
-        
-        # Compute loss only for valid samples
-        per_sample_loss = -pos_logits + neg_logits
-        per_sample_loss = per_sample_loss * valid_samples.float()
-        
-        # Return mean over valid samples
-        n_valid = valid_samples.sum().item()
-        loss = per_sample_loss.sum() / max(n_valid, 1)
-        
-        return loss
-        
-    def forward(self, outputs: Dict[str, torch.Tensor], targets: torch.Tensor) -> torch.Tensor:
-        """Forward pass with gradient monitoring and clipping."""
-        # Get current contrastive weight (possibly from scheduler)
-        current_contrastive_weight = (
-            self.weight_scheduler(self._current_epoch) 
-            if self.weight_scheduler is not None 
-            else self.contrastive_weight
-        )
-        
-        # Compute classification loss with gradient monitoring
-        with torch.autograd.detect_anomaly() if self.training else nullcontext():
-            # Extract required outputs
-            fusion_embeds = outputs.get(EMBEDS["FUSION"])
-            fusion_logits = outputs.get(f"{LOSS_TYPES['FUSION']}_logits")
-            
-            if fusion_logits is None or fusion_embeds is None:
-                print(f"ERROR: Missing required outputs: fusion_logits or fusion_embeds")
-                return torch.tensor(1.0, device=targets.device, requires_grad=True)
-            
-            # Compute losses
-            try:
-                # Handle different classification loss types
-                if self.classification_loss.__class__.__name__ == 'LogSoftmaxWrapper':
-                    targets_unsqueezed = targets.unsqueeze(1)
-                    fusion_logits_unsqueezed = fusion_logits.unsqueeze(1)
-                    classification_loss = self.classification_loss(fusion_logits_unsqueezed, targets_unsqueezed)
-                else:
-                    classification_loss = self.classification_loss(fusion_logits, targets)
-                
-                # Only compute contrastive loss if weight is non-zero
-                if current_contrastive_weight > 0:
-                    contrastive_loss = self.contrastive_loss(fusion_embeds, targets)
-                    total_loss = classification_loss + current_contrastive_weight * contrastive_loss
-                else:
-                    total_loss = classification_loss
-                
-                # Final safety check - replace NaN/Inf with safe value
-                if not torch.isfinite(total_loss):
-                    print(f"WARNING: Non-finite loss detected: {total_loss}. Using classification loss only.")
-                    total_loss = classification_loss
-                    
-                    # If classification loss is also non-finite, use safe value
-                    if not torch.isfinite(classification_loss):
-                        print(f"WARNING: Classification loss is non-finite. Using safe value.")
-                        total_loss = torch.tensor(1.0, device=targets.device, requires_grad=True)
-                
-                return total_loss
-                
-            except Exception as e:
-                print(f"ERROR in loss computation: {e}. Using safe value.")
-                return torch.tensor(1.0, device=targets.device, requires_grad=True)
-
-class FixedFusionClassifierWithResiduals(nn.Module):
+class FusionClassifierWithResiduals(nn.Module):
     def __init__(
         self,
         fuse_model: nn.Module,
         input_size: int, 
         hidden_size: int, 
-        num_classes: int, 
-        dropout: float = 0.3,
+        num_classes: int,
+        dropout_residual: float = 0.1,
         num_residuals: int = 2,
         norm_type: Literal['batch', 'layer'] = 'batch',
         embedding_type: EmbeddingType = EmbeddingType.FUSION
     ):
         super().__init__()
         self.embedding_type = embedding_type
+
+        # define fuse_model
         self.fuse_model = fuse_model
         
         # Factory for normalization layers
@@ -435,19 +143,22 @@ class FixedFusionClassifierWithResiduals(nn.Module):
             'layer': nn.LayerNorm
         }[norm_type]
         
-        self.input_norm = norm_factory(input_size)
-        self.classifier = nn.Linear(input_size, num_classes)
+        # Audio & Text classifiers
+        self.audio_classifier = nn.Linear(input_size, num_classes)
+        self.text_classifier = nn.Linear(input_size, num_classes)
         
-        # Create residual blocks
+        # fusion classifier
+        self.fusion_norm = norm_factory(input_size)
         self.residuals = nn.ModuleList([
-            self._create_residual_block(input_size, hidden_size, dropout, norm_factory)
+            self._create_residual_block(input_size, hidden_size, dropout_residual, norm_factory)
             for _ in range(num_residuals)
         ])
+        self.fusion_classifier = nn.Linear(input_size, num_classes)
 
     @staticmethod
     def get_embedding(fused_feats: Dict[str, torch.Tensor], 
-                     last_hidden: torch.Tensor,
-                     embedding_type: EmbeddingType) -> torch.Tensor:
+                    last_hidden: torch.Tensor,
+                    embedding_type: EmbeddingType) -> torch.Tensor:
         """Get the selected embedding type."""
         embedding_map = {
             EmbeddingType.TEXT: fused_feats["text_emb"],
@@ -477,139 +188,178 @@ class FixedFusionClassifierWithResiduals(nn.Module):
         """Forward pass through the entire network."""
         # fuse features
         fused_feats = self.fuse_model(inputs)
-        
-        x = self.input_norm(fused_feats['fusion_emb'])
+
+        # classify audio and text features
+        audio_logits = self.audio_classifier(fused_feats["audio_emb"])
+        text_logits = self.text_classifier(fused_feats["text_emb"])
+
+        # fusion classifier        
+        x = self.fusion_norm(fused_feats['fusion_emb'])
         for block in self.residuals:
-            # Apply residual connection with ReLU
-            residual_output = block(x)
-            x = torch.nn.functional.relu(x + residual_output)
-
-        # Define the input for the classifier as the last hidden state after residual blocks
-        fused_feats['fusion_emb'] = x
-        logits = self.classifier(fused_feats['fusion_emb'])
-
-        # Apply softmax for probability outputs
-        probs = torch.nn.functional.softmax(logits, dim=1)
-        class_preds = torch.argmax(probs, dim=-1)
+            x = torch.nn.functional.relu(x + block(x))
+        fusion_logits = self.fusion_classifier(x)
+        class_prob = torch.nn.functional.softmax(fusion_logits, dim=1)
+        class_preds = torch.argmax(class_prob, dim=-1)
 
         # Get selected embedding type
-        features = self.get_embedding(fused_feats, fused_feats['fusion_emb'], self.embedding_type)
+        features = FusionClassifierWithResiduals.get_embedding(fused_feats, x, self.embedding_type)
 
         return {
             EMBEDS["TEXT"]: fused_feats["text_emb"],
             EMBEDS["AUDIO"]: fused_feats["audio_emb"],
-            EMBEDS["FUSION"]: fused_feats["fusion_emb"],
+            EMBEDS["FUSION"]: fused_feats["audio_emb"],
             EMBEDS["ID"]: features,
             EMBEDS["CLASS"]: class_preds,
-            f"fusion_logits": probs,
-            f"logits": probs,
+            f"fusion_logits": fusion_logits,
+            f"audio_logits": audio_logits,
+            f"text_logits": text_logits
         }
 
-class RobustHierarchicalFusion(nn.Module):
+
+class RobustFusionClassifier(nn.Module):
     """
-    Hierarchical fusion model that combines early, mid, and late fusion approaches
-    for more robust speaker identification with dynamic adaptation.
+    Classifier with:
+    - Adaptive denoising with learned residual mixing
+    - Modality-specific confidence estimation
+    - Dynamic fusion gating
+    - Simplified loss with stability enhancements
     """
-    def __init__(
-        self,
-        audio_embedding_size: int,
-        text_embedding_size: int,
-        hidden_size: int,
-        num_classes: int,
-        dropout: float = 0.3,
-    ):
+    
+    def __init__(self,
+                 audio_embedding_size: int, 
+                 text_embedding_size: int, 
+                 hidden_size: int,
+                 num_classes: int,
+                 dropout_audio: float = 0.3,
+                 dropout_text: float = 0.1,
+                 accum_method: Literal['sum', 'concat'] = 'sum',
+                 norm_type: Literal['batch', 'layer'] = 'batch',
+                 embedding_type: EmbeddingType = EmbeddingType.FUSION
+                 ):
         super().__init__()
         
-        # Early fusion: project to common space
-        self.audio_proj = nn.Sequential(
-            nn.LayerNorm(audio_embedding_size),
-            nn.Linear(audio_embedding_size, hidden_size),
-            nn.GELU(),
-            nn.Dropout(dropout)
+        # Setup hidden_size based off accumulation method
+        assert accum_method in ['sum', 'concat'], f"Invalid accumulation method: {accum_method}"
+        fusion_dependent_hidden = 2 * hidden_size if accum_method == 'concat' else hidden_size
+        self.accum_method = accum_method
+        self.embedding_type = embedding_type
+        
+        # Factory for normalization layers
+        norm_factory: Callable = {
+            'batch': nn.BatchNorm1d,
+            'layer': nn.LayerNorm
+        }[norm_type]
+
+        # Distortion estimator
+        self.distortion_estimator = nn.Sequential(
+            nn.Linear(audio_embedding_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_size // 2, hidden_size // 4)  # Distortion vector
         )
-        self.text_proj = nn.Sequential(
-            nn.LayerNorm(text_embedding_size),
+        
+        # Audio branch conditioned on distortion
+        self.audio_branch = nn.Sequential(
+            norm_factory(audio_embedding_size + hidden_size // 4),  # Input size includes distortion vector
+            nn.Linear(audio_embedding_size + hidden_size // 4, hidden_size),
+            nn.GELU(),
+            nn.Dropout(dropout_audio)
+        )        
+
+        # Text processing path
+        self.text_branch = nn.Sequential(
+            norm_factory(text_embedding_size),
             nn.Linear(text_embedding_size, hidden_size),
             nn.GELU(),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout_text)
         )
-        
-        # Mid-level fusion with identity gating
-        self.identity_fusion = IdentityGatedFusion(
-            audio_embedding_size=hidden_size,
-            text_embedding_size=hidden_size,
-            bottleneck_size=hidden_size,
-            dropout=dropout
-        )
-        
-        # Gating mechanism to control modality contribution
-        self.audio_gate = nn.Sequential(
-            nn.Linear(hidden_size, 1),
+
+        # Confidence networks
+        self.audio_confidence = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_size // 2, 1),
             nn.Sigmoid()
         )
-        self.text_gate = nn.Sequential(
-            nn.Linear(hidden_size, 1),
+        self.text_confidence = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size//2),
+            nn.ReLU(),
+            nn.Linear(hidden_size // 2, 1),
             nn.Sigmoid()
         )
-        
-        # Modal-specific classifiers
+
+        # Classification heads
         self.audio_classifier = nn.Linear(hidden_size, num_classes)
         self.text_classifier = nn.Linear(hidden_size, num_classes)
+        self.fusion_classifier = nn.Linear(fusion_dependent_hidden, num_classes)
+
+        # Adaptive fusion gating
+        self.adaptive_gate = nn.Sequential(
+            nn.Linear(2 * hidden_size + 2, hidden_size),  # *2 for text/audio,  +2 for confidences
+            nn.ReLU(),
+            nn.Linear(hidden_size, 3),
+            nn.Softmax(dim=-1)
+            )
+
+    @staticmethod
+    def get_embedding(fused_feats: Dict[str, torch.Tensor], 
+                    last_hidden: torch.Tensor,
+                    embedding_type: EmbeddingType) -> torch.Tensor:
+        """Get the selected embedding type."""
+        embedding_map = {
+            EmbeddingType.TEXT: fused_feats["text_emb"],
+            EmbeddingType.AUDIO: fused_feats["audio_emb"],
+            EmbeddingType.FUSION: fused_feats["fusion_emb"],
+            EmbeddingType.LAST_HIDDEN: last_hidden
+        }
+        assert embedding_type in embedding_map, f"Invalid embedding type: {embedding_type}"
+        assert embedding_map[embedding_type].dim() == 2, f"Invalid embedding shape: {embedding_map[embedding_type].shape}"
+        normalized_embeds = torch.nn.functional.normalize(embedding_map[embedding_type], p=2, dim=-1)
+        return normalized_embeds
+
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        audio_emb, text_emb = inputs
         
-        # Late fusion classifier
-        self.fusion_classifier = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.LayerNorm(hidden_size),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, num_classes)
-        )
+        # Process modalities
+        # 1. process audio
+        distortion_estimate = self.distortion_estimator(audio_emb)
+        audio_input = torch.cat([audio_emb, distortion_estimate], dim=-1)
+        audio_features = self.audio_branch(audio_input)        
+        # 2. process text
+        text_features = self.text_branch(text_emb)
         
-        # Final ensemble weights (learnable)
-        self.ensemble_weights = nn.Parameter(torch.ones(3) / 3)  # Initialize with equal weights
-        
-    def forward(self, inputs):
-        audio_input, text_input = inputs
-        
-        # Early fusion - project to common space
-        audio_features = self.audio_proj(audio_input)
-        text_features = self.text_proj(text_input)
-        
-        # Mid-level fusion with identity gating
-        fusion_outputs = self.identity_fusion((audio_features, text_features))
-        fusion_features = fusion_outputs["fusion_emb"]
-        
-        # Apply confidence gating
-        audio_confidence = self.audio_gate(audio_features)
-        text_confidence = self.text_gate(text_features)
-        
-        # Compute modality-specific logits
-        audio_logits = self.audio_classifier(audio_features * audio_confidence)
-        text_logits = self.text_classifier(text_features * text_confidence)
-        
-        # Compute fusion logits
+        # Calculate confidences
+        audio_conf = self.audio_confidence(audio_features)
+        text_conf = self.text_confidence(text_features)
+                
+        # Confidence-weighted fusion
+        if self.accum_method == 'sum':
+            fusion_features = audio_features * audio_conf + text_features * text_conf
+        elif self.accum_method == 'concat':
+            fusion_features = torch.cat((audio_features * audio_conf, text_features * text_conf), dim=-1)
+
+        # Predictions
+        audio_logits = self.audio_classifier(audio_features)
+        text_logits = self.text_classifier(text_features)
         fusion_logits = self.fusion_classifier(fusion_features)
         
-        # Apply softmax to get class probabilities
-        audio_probs = F.softmax(audio_logits, dim=-1)
-        text_probs = F.softmax(text_logits, dim=-1)
-        fusion_probs = F.softmax(fusion_logits, dim=-1)
+        # Adaptive ensemble weighting
+        gate_input = torch.cat([audio_features, text_features, audio_conf, text_conf], dim=-1)
+        ensemble_weights = self.adaptive_gate(gate_input)
         
-        # Normalize ensemble weights
-        norm_weights = F.softmax(self.ensemble_weights, dim=0)
-        
-        # Ensemble predictions
-        final_probs = (
-            norm_weights[0] * audio_probs +
-            norm_weights[1] * text_probs +
-            norm_weights[2] * fusion_probs
-        )
-        
-        # Get predicted class
-        predicted_class = torch.argmax(final_probs, dim=-1)
+        # Final prediction with residual audio connection
+        final_logits = (ensemble_weights[:, 0:1] * audio_logits +
+                        ensemble_weights[:, 1:2] * text_logits +
+                        ensemble_weights[:, 2:3] * fusion_logits)
+
+        class_prob = torch.nn.functional.softmax(final_logits, dim=1)
+        predicted_class = torch.argmax(class_prob, dim=-1)
+
+        # get representation
+        fused_feats = {'text_emb': text_features, 'audio_emb': audio_features, 'fusion_emb': fusion_features}
+        features = RobustFusionClassifier.get_embedding(fused_feats, last_hidden=fusion_features, embedding_type=self.embedding_type)
         
         return {
-            "logits": final_probs,  # Main logits for overall loss
+            "ensemble_logits": final_logits,
             "audio_logits": audio_logits,
             "text_logits": text_logits,
             "fusion_logits": fusion_logits,
@@ -617,115 +367,302 @@ class RobustHierarchicalFusion(nn.Module):
             EMBEDS["AUDIO"]: audio_features,
             EMBEDS["TEXT"]: text_features,
             EMBEDS["FUSION"]: fusion_features,
-            "audio_confidence": audio_confidence,
-            "text_confidence": text_confidence,
-            "ensemble_weights": norm_weights
+            EMBEDS["ID"]: features,
+            "audio_confidence": audio_conf,
+            "text_confidence": text_conf,
+            "ensemble_weights": ensemble_weights,
         }
 
 ###################################
-class AdaptiveLossWeights(Callback):
+@dataclass
+class LossWeights:
+    """Configurable weights for different loss components"""
+    ensemble: float = 1.0
+    fusion: float = 1.0
+    audio: float = 0.2
+    text: float = 0.2
+    contrastive: float = 0.1
+    consistency: float = 0.1
+    confidence: float = 0.1
+
+    @classmethod
+    def from_dict(cls, weights_dict: Dict[str, float]) -> 'LossWeights':
+        """Create LossWeights from a dictionary"""
+        return cls(**{k: v for k, v in weights_dict.items() if hasattr(cls, k)})
+
+
+class MultiModalLoss(nn.Module):
     """
-    Callback that dynamically adjusts loss weights based on validation performance.
+    Loss function for multi-modal fusion with multiple regularization terms.
+    Supports different classifier architectures with adaptive loss components.
     """
     def __init__(
         self,
-        initial_contrastive_weight: float = 0.05,
-        min_weight: float = 0.01,
-        max_weight: float = 0.2,
-        patience: int = 3,
-        factor: float = 0.5,
-        monitor: str = "valid/eer",
-        mode: str = "min"
+        classification_loss: Callable,
+        classifier_name: Literal['normalized', 'robust'],
+        weights: Optional[LossWeights] = None,
+        confidence_target: float = 0.9,
+        weight_scheduler: Optional[Callable] = None,
+        return_dict: bool = True
     ):
         super().__init__()
-        self.initial_contrastive_weight = initial_contrastive_weight
-        self.current_weight = initial_contrastive_weight
-        self.min_weight = min_weight
-        self.max_weight = max_weight
-        self.patience = patience
-        self.factor = factor
-        self.monitor = monitor
-        self.mode = mode
-        self.best_score = float('inf') if mode == "min" else float('-inf')
-        self.wait_count = 0
+        # Core configuration
+        self.classification_loss = classification_loss
+        self.classifier_name = classifier_name
+        self.weights = weights or LossWeights()
+        self.confidence_target = confidence_target
+        self.weight_scheduler = weight_scheduler
+        self.return_dict = return_dict
         
-    def on_validation_epoch_end(self, trainer, pl_module):
-        # Get current monitored metric
-        logs = trainer.callback_metrics
-        current_score = logs.get(self.monitor)
+        # Validation
+        if classifier_name not in ['normalized', 'robust']:
+            raise ValueError(f"Invalid classifier name: {classifier_name}. Expected 'normalized' or 'robust'")
+            
+        # Performance optimization
+        self.eps = 1e-8
+        self._current_epoch = 0
+        self.unsqueeze = classification_loss.__class__.__name__ == 'LogSoftmaxWrapper'
         
-        if current_score is None:
-            return
+        # Pre-compute constants
+        self.embed_keys = {EMBEDS[modality].lower(): modality.lower() for modality in ["TEXT", "AUDIO", "FUSION"]}
+                          
+        # Define classifier-specific configurations
+        self.key_configs = {
+            'normalized': {
+                'logits_patterns': [(r'(audio|text|fusion)_logits', lambda m: m.group(1))],
+                'embedding_prefixes': list(self.embed_keys.keys()),
+                'active_weights': {'audio', 'text', 'fusion', 'contrastive', 'consistency'}
+            },
+            'robust': {
+                'logits_patterns': [ (r'(ensemble|audio|text|fusion)_logits', lambda m: m.group(1))],
+                'embedding_prefixes': list(self.embed_keys.keys()) + [r'(audio|text|fusion)_features'],
+                'confidence_pattern': r'(audio|text)_confidence',
+                'active_weights': {'ensemble', 'audio', 'text', 'fusion', 'contrastive', 'consistency', 'confidence'}
+            }
+        }
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set current epoch for weight scheduling."""
+        self._current_epoch = epoch
+        if self.weight_scheduler is not None:
+            new_weights = self.weight_scheduler(epoch)
+            if isinstance(new_weights, dict):
+                self.weights = LossWeights.from_dict(new_weights)
+            elif isinstance(new_weights, LossWeights):
+                self.weights = new_weights
+
+    def cosine_similarity_matrix(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Compute cosine similarity matrix with gradient clipping for stability."""
+        embeddings_norm = F.normalize(embeddings, p=2, dim=1)
+        similarity_matrix = torch.matmul(embeddings_norm, embeddings_norm.T)
+        similarity_matrix = torch.clamp(similarity_matrix, min=-1.0 + self.eps, max=1.0 - self.eps)
+        # return similarity_matrix / self.temperature
+        return similarity_matrix
+
+    def contrastive_loss(self, embeddings: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute supervised contrastive loss with improved stability."""
+        # Early return for small batches
+        if embeddings.size(0) <= 1:
+            return torch.tensor(0.0, device=embeddings.device)
             
-        # Convert to float if it's a tensor
-        if isinstance(current_score, torch.Tensor):
-            current_score = current_score.item()
+        similarity_matrix = self.cosine_similarity_matrix(embeddings)
+        
+        # Create masks for positive and negative pairs
+        batch_size = targets.size(0)
+        labels_matrix = targets.unsqueeze(1).expand(batch_size, batch_size)
+        positive_mask = labels_matrix == labels_matrix.T
+        positive_mask.fill_diagonal_(False)
+        negative_mask = ~positive_mask
+        negative_mask.fill_diagonal_(False)
+        
+        # Check for valid samples (with both positive and negative pairs)
+        valid_samples = (positive_mask.sum(dim=1) > 0) & (negative_mask.sum(dim=1) > 0)
+        if not valid_samples.any():
+            return torch.tensor(0.0, device=embeddings.device)
             
-        # Check if score improved
-        improved = (self.mode == "min" and current_score < self.best_score) or \
-                  (self.mode == "max" and current_score > self.best_score)
-                  
-        if improved:
-            self.best_score = current_score
-            self.wait_count = 0
-        else:
-            self.wait_count += 1
+        # Calculate loss using log-sum-exp for numerical stability
+        pos_similarities = similarity_matrix.masked_fill(~positive_mask, -1e9)
+        neg_similarities = similarity_matrix.masked_fill(~negative_mask, -1e9)
+        
+        pos_logits = torch.logsumexp(pos_similarities, dim=1)
+        neg_logits = torch.logsumexp(neg_similarities, dim=1)
+        
+        # Apply loss only to valid samples
+        per_sample_loss = (-pos_logits + neg_logits) * valid_samples.float()
+        n_valid = valid_samples.sum().item()
+        
+        return per_sample_loss.sum() / max(n_valid, 1)
+
+    def consistency_loss(self, predictions: List[torch.Tensor]) -> torch.Tensor:
+        if len(predictions) < 2:
+            return torch.tensor(0.0, device=predictions[0].device)
+        
+        # 1. Compute log-probabilities safely with log_softmax
+        log_probs = [F.log_softmax(pred, dim=-1) for pred in predictions]  # (batch, num_classes)
+        
+        # 2. Convert to probabilities (clamped to avoid underflow)
+        probs = [log_prob.exp().clamp(min=1e-8) for log_prob in log_probs]  # (batch, num_classes)
+        stacked_probs = torch.stack(probs, dim=1)  # (batch, num_modalities, num_classes)
+        
+        # 3. Compute mean probability distribution
+        mean_probs = stacked_probs.mean(dim=1, keepdim=True)  # (batch, 1, num_classes)
+        mean_probs = mean_probs.clamp(min=1e-8)  # Avoid log(0)
+        
+        # 4. Compute KL divergence safely
+        log_mean_probs = torch.log(mean_probs)  # (batch, 1, num_classes)
+        
+        # Expand to match stacked_probs shape
+        log_mean_probs_expanded = log_mean_probs.expand_as(stacked_probs)
+        
+        # KL(p_i || mean_p) = sum(p_i * (log(p_i) - log(mean_p)))
+        kl_divs = F.kl_div(
+            input=log_mean_probs_expanded,  # log(mean_p)
+            target=stacked_probs,           # p_i
+            reduction='none'
+        ).sum(dim=-1)  # Sum over classes
+        
+        return kl_divs.mean()  # Average over batch and modalities
+
+    def confidence_loss(self, confidences: List[torch.Tensor]) -> torch.Tensor:
+        """Regularize prediction confidences to prevent overconfidence."""
+        if not confidences:
+            return torch.tensor(0.0, device=confidences[0].device)
             
-        # Adjust weights if patience exceeded
-        if self.wait_count >= self.patience:
-            self.wait_count = 0
-            self.current_weight *= self.factor
-            self.current_weight = max(self.min_weight, self.current_weight)
+        stacked_conf = torch.cat(confidences, dim=1)
+        target_conf = torch.full_like(stacked_conf, self.confidence_target)
+        
+        return F.binary_cross_entropy(stacked_conf, target_conf, reduction='mean')
+
+    def _prepare_inputs(self, outputs: Dict[str, torch.Tensor], targets: torch.Tensor):
+        """Prepare inputs by handling unsqueezing."""
+        # Handle target unsqueezing
+        targets_unsqueezed = targets.unsqueeze(1) if self.unsqueeze and targets.dim() == 1 else targets
+        
+        # Handle outputs unsqueezing
+        outputs_unsqueezed = {}
+        for k, v in outputs.items():
+            needs_unsqueeze = (
+                self.unsqueeze and 
+                ('logits' in k.lower() or k == EMBEDS["CLASS"]) and 
+                v.dim() == 2
+            )
+            outputs_unsqueezed[k] = v.unsqueeze(1) if needs_unsqueeze else v
             
-            # Update model's loss weights
-            for criterion in [pl_module.train_criterion]:
-                if hasattr(criterion, 'contrastive_weight'):
-                    criterion.contrastive_weight = self.current_weight
+        return outputs_unsqueezed, targets_unsqueezed
+
+    def _extract_keys(self, outputs: Dict[str, torch.Tensor]) -> Tuple[Dict, Dict, Dict]:
+        """Extract relevant keys based on classifier type."""
+        config = self.key_configs[self.classifier_name]
+        
+        logits_keys = {}
+        embedding_keys = {}
+        confidence_keys = {}
+        
+        # Process keys
+        for key in outputs:
+            key_lower = key.lower()
+            
+            # Extract logits keys
+            for pattern, name_fn in config.get('logits_patterns', []):
+                if callable(name_fn):
+                    import re
+                    match = re.match(pattern, key_lower)
+                    if match:
+                        logits_keys[name_fn(match)] = key
+                elif key_lower == pattern:
+                    logits_keys[name_fn] = key
+            
+            # Extract embedding keys
+            if key_lower in self.embed_keys:
+                embedding_keys[self.embed_keys[key_lower]] = key
+            
+            # Extract confidence keys (robust classifier only)
+            if self.classifier_name == 'robust' and key_lower.endswith('_confidence'):
+                modality = key_lower[:-11]  # Remove '_confidence'
+                if modality in ['audio', 'text']:
+                    confidence_keys[modality] = key
                     
-            print(f"Adjusted contrastive weight to {self.current_weight:.5f}")
+        # Determine active weights
+        active_weights = set(config['active_weights'])
+        if 'consistency' in active_weights and len(logits_keys) < 2:
+            active_weights.remove('consistency')
+        if 'confidence' in active_weights and not confidence_keys:
+            active_weights.remove('confidence')
             
-    def on_train_epoch_start(self, trainer, pl_module):
-        # Log current weight for monitoring
-        pl_module.log("train/contrastive_weight", self.current_weight)
-        
-        # Update current epoch in criterion for weight scheduling
-        if hasattr(pl_module.train_criterion, 'set_epoch'):
-            pl_module.train_criterion.set_epoch(trainer.current_epoch)
+        return logits_keys, embedding_keys, confidence_keys, active_weights
 
-
-class CosineWarmupScheduler(LambdaLR):
-    """
-    Learning rate scheduler with cosine annealing and warm-up.
-    """
-    def __init__(
+    def forward(
         self,
-        optimizer: Optimizer,
-        warmup_epochs: int,
-        max_epochs: int,
-        warmup_start_lr: float = 1e-8,
-        eta_min: float = 1e-8,
-        last_epoch: int = -1
-    ):
-        self.warmup_epochs = warmup_epochs
-        self.max_epochs = max_epochs
-        self.warmup_start_lr = warmup_start_lr
-        self.eta_min = eta_min
+        outputs: Dict[str, torch.Tensor],
+        targets: torch.Tensor,
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Compute loss based on classifier type and outputs."""
+        # Prepare inputs
+        outputs_unsqueezed, targets_unsqueezed = self._prepare_inputs(outputs, targets)
         
-        # Get initial LR for each param group to calculate warmup steps
-        self.base_lrs = [group['lr'] for group in optimizer.param_groups]
+        # Extract keys and determine active weights
+        logits_keys, embedding_keys, confidence_keys, active_weights = self._extract_keys(outputs)
         
-        # Define the LR lambda function
-        def lr_lambda(epoch):
-            if epoch < warmup_epochs:
-                # Linear warmup
-                return ((self.base_lrs[0] - warmup_start_lr) * epoch / warmup_epochs + warmup_start_lr) / self.base_lrs[0]
+        # Initialize losses container
+        losses = {}
+        
+        # Compute classification losses for all modalities
+        for modality, key in logits_keys.items():
+            weight = getattr(self.weights, modality, 0)
+            if modality in active_weights and weight > 0:
+                losses[f"{modality}_loss"] = self.classification_loss(
+                    outputs_unsqueezed[key], 
+                    targets_unsqueezed
+                )
+        
+        # Compute contrastive loss if applicable
+        if (embedding_keys and "contrastive" in active_weights and 
+                getattr(self.weights, "contrastive", 0) > 0):
+            embed_key = embedding_keys.get("fusion")
+            if embed_key:
+                losses["contrastive_loss"] = self.contrastive_loss(
+                    outputs[embed_key], 
+                    targets
+                )
+        
+        # Compute consistency loss if applicable
+        if (len(logits_keys) >= 2 and "consistency" in active_weights and 
+                getattr(self.weights, "consistency", 0) > 0):
+            # Get all logits except for ensemble_logits
+            logits_list = [outputs[key] for key in logits_keys.values() if 'ensemble_logits' not in key]
+            losses["consistency_loss"] = self.consistency_loss(logits_list)
+        
+        # Compute confidence loss if applicable
+        if (confidence_keys and "confidence" in active_weights and 
+                getattr(self.weights, "confidence", 0) > 0):
+            confidence_list = [outputs[key] for key in confidence_keys.values()]
+            losses["confidence_loss"] = self.confidence_loss(confidence_list)
+        
+        # Combine all losses with weights
+        total_loss = torch.tensor(0.0, device=targets.device, requires_grad=True)
+        for loss_name, loss_value in losses.items():
+            weight_attr = loss_name.split("_")[0]
+            weight = getattr(self.weights, weight_attr, 0.0)
+            if weight > 0:
+                total_loss = total_loss + weight * loss_value
+        
+        # Handle potential NaN/Inf values
+        if not torch.isfinite(total_loss):
+            # Try to use reliable fallback losses
+            for fallback in ["main_loss", "fusion_loss"]:
+                if fallback in losses and torch.isfinite(losses[fallback]):
+                    total_loss = losses[fallback]
+                    break
             else:
-                # Cosine annealing
-                progress = (epoch - warmup_epochs) / (max_epochs - warmup_epochs)
-                return (eta_min + 0.5 * (self.base_lrs[0] - eta_min) * (1 + math.cos(math.pi * progress))) / self.base_lrs[0]
-                
-        super().__init__(optimizer, lr_lambda, last_epoch)
-
+                # Last resort fallback
+                total_loss = torch.tensor(1.0, device=targets.device, requires_grad=True)
+        
+        # Add total loss to dictionary
+        losses["loss"] = total_loss
+        
+        return losses if self.return_dict else total_loss
+    
+###################################
 class EmbeddingMetrics:
     def __init__(self, trainer: 'pl.Trainer', stage: str, cohort_per_model: int = 1000):
         self.trainer = trainer
@@ -976,7 +913,7 @@ class MultiModalVPCModel(pl.LightningModule):
         
         # Log losses
         logged_dict = {
-            f"{LOSS_TYPES['FUSION']}_{criterion.__class__.__name__}/{stage}": results[LOSS_TYPES['FUSION']].item()
+            f"{stage}/{LOSS_TYPES['FUSION']}_{criterion.__class__.__name__}": results[LOSS_TYPES['FUSION']].item()
         }
                 
         self.log_dict(
@@ -993,7 +930,7 @@ class MultiModalVPCModel(pl.LightningModule):
         )
         
         self.log(
-            f"{metric.__class__.__name__}/{stage}",
+            f"{stage}/{metric.__class__.__name__}",
             computed_metric,
             batch_size=getattr(self.batch_sizes, stage),
             **self.logging_params
@@ -1004,23 +941,24 @@ class MultiModalVPCModel(pl.LightningModule):
         """Pre-computes and caches text embeddings for unique training texts.
         
         Uses batched processing for memory efficiency and shows a progress bar.
-        Cache warmup runs on a subset of unique texts (2 batches worth) to reduce startup time.
         """
         # Get unique texts from training data
         unique_texts = list(set(self.trainer.datamodule.train_data.dataset.text))
         
-        # Limit to first two batches worth of texts for faster startup
+        # Define batch size for processing
         batch_size = 384
+        
+        # Optional: Limit to subset of texts for faster startup
+        max_texts = batch_size * 10  # Uncomment to process only 2 batches
+        unique_texts = unique_texts[:max_texts]
         
         # Process texts in batches with progress bar
         with torch.no_grad():
             with tqdm(total=len(unique_texts), desc="Warming up cache") as pbar:
                 for i in range(0, len(unique_texts), batch_size):
-                    batch_texts = unique_texts[i:i+batch_size]
+                    batch_texts = unique_texts[i: i + batch_size]
                     # Get embeddings and immediately delete the tensor since we only need the cached values
-                    embeddings = self.get_text_embeddings(batch_texts)
-                    del embeddings  # Explicitly free memory
-                    torch.cuda.empty_cache()  # Clear CUDA cache if using GPU
+                    _ = self.get_text_embeddings(batch_texts)
                     pbar.update(len(batch_texts))
 
     def get_text_embeddings(self, batch_texts: List[str]) -> torch.Tensor:
@@ -1103,19 +1041,15 @@ class MultiModalVPCModel(pl.LightningModule):
         outputs = self(batch)
 
         # Compute loss
-        if criterion is None:
-            # For inference mode
-            return {"outputs": outputs}
-            
-        if isinstance(criterion, StabilizedCriterion):
-            main_loss = criterion(outputs, batch.class_id)
-        elif hasattr(criterion, '__call__'):
-            if criterion.__class__.__name__ == 'LogSoftmaxWrapper':
-                main_loss = criterion(outputs[f"fusion_logits"].unsqueeze(1), batch.class_id.unsqueeze(1))
-            else:
-                main_loss = criterion(outputs[f"fusion_logits"], batch.class_id)
+        if isinstance(criterion, MultiModalLoss):
+            loss = criterion(outputs, batch.class_id)
+            main_loss = loss["loss"] if isinstance(loss, dict) else loss
+        elif isinstance(criterion, torch.nn.CrossEntropyLoss):
+            main_loss = criterion(outputs[f"fusion_logits"], batch.class_id)
+        elif criterion.__class__.__name__ == 'LogSoftmaxWrapper':
+            main_loss = criterion(outputs[f"fusion_logits"].unsqueeze(1), batch.class_id.unsqueeze(1))
         else:
-            raise ValueError(f"Invalid criterion type: {type(criterion)}")
+            raise ValueError("Invalid criterion")
         
         return {LOSS_TYPES["FUSION"]: main_loss, "loss": main_loss, "outputs": outputs}
 
@@ -1130,6 +1064,10 @@ class MultiModalVPCModel(pl.LightningModule):
 
     def training_step(self, batch: VPC25Item, batch_idx: int) -> Dict[str, torch.Tensor]:
         results = self.model_step(batch, self.train_criterion)
+        
+        if batch_idx % 2000 == 0:
+            torch.cuda.empty_cache()
+
         self._log_step_metrics(results, batch, METRIC_NAMES["TRAIN"])
         return results
 
@@ -1138,8 +1076,8 @@ class MultiModalVPCModel(pl.LightningModule):
 
         # Cache processing
         stats = self._text_embedding_cache.stats()
-        self.log("train/cache_hit_rate", stats["hit_rate"])
-        self.log("train/cache_size", len(self._text_embedding_cache))
+        self.log("train/cache/cache_hit_rate", stats["hit_rate"])
+        self.log("train/cache/cache_size", len(self._text_embedding_cache))
         # resize the cache if it exceeds the max size
         if len(self._text_embedding_cache) > self._max_cache_size:
             self._text_embedding_cache.resize(self._max_cache_size)
@@ -1182,15 +1120,16 @@ class MultiModalVPCModel(pl.LightningModule):
         self._trials_eval_step(batch, is_test=True)
 
     def on_validation_epoch_end(self) -> None:
-        self._epoch_end_common(is_test=False)
-
-        # log the valid_metric_best
         valid_metric = self.valid_metric.compute()
         self.valid_metric_best.update(valid_metric)
         best_metrics_dict = self.valid_metric_best.compute()
 
+        self._epoch_end_common(is_test=False)
+        torch.cuda.empty_cache()  # Clear CUDA cache if using GPU
+
+        # Log the best metrics
         prefixed_metrics_best = {
-            f"{self.valid_metric_best.__class__.__name__}/{METRIC_NAMES['BEST']}/{key}": value 
+            f"{METRIC_NAMES['BEST']}/{self.valid_metric_best.__class__.__name__}/{key}": value 
             for key, value in best_metrics_dict.items()
         }
         self.log_dict(prefixed_metrics_best, **self.logging_params)
@@ -1390,57 +1329,72 @@ class MultiModalVPCModel(pl.LightningModule):
         self.metric_tracker.cleanup()
 
     def _end_of_epoch_metrics(self, enrol_embeds: Dict, trials_embeds: Dict, scores: pd.DataFrame, metric, is_test: bool) -> None:
-        """compute EER and minDCF"""
+        """Compute EER and minDCF, handle logging and saving of artifacts."""
+        # Compute metrics (EER, minDCF, etc.)
         metrics = metric.compute()
         
-        postfix = METRIC_NAMES['TEST'] if is_test else METRIC_NAMES['VALID']
-        prefixed_metrics = {
-            f"{metric.__class__.__name__}/{postfix}/{key}": value for key, value in metrics.items()
-        }
+        # Log metrics with appropriate prefix (test or valid)
+        stage = METRIC_NAMES['TEST'] if is_test else METRIC_NAMES['VALID']
+        prefixed_metrics = {f"{stage}/{metric.__class__.__name__}/{key}": value for key, value in metrics.items()}
         self.log_dict(prefixed_metrics, **self.logging_params)
 
-        # log self.fuser.audio_weight and self.fuser.text_weight if they exist (NormalizedWeightedSum)
-        fuse_model = getattr(self.fusion_classifier, "fuse_model", None)
-        if fuse_model is not None:
-            # Log weights for normalized weighted sum
-            if hasattr(fuse_model, "audio_weight") and hasattr(fuse_model, "text_weight"):
-                self.log("audio_weight", fuse_model.audio_weight, **self.logging_params)
-                self.log("text_weight", fuse_model.text_weight, **self.logging_params)
-            
-            # Log weights for identity gated fusion or speaker-focused attention
-            if hasattr(fuse_model, "modal_weights"):
-                weights = fuse_model.modal_weights
-                if weights is not None and weights.numel() > 0:
-                    self.log("audio_modal_weight", weights[0].item(), **self.logging_params)
-                    self.log("text_modal_weight", weights[1].item(), **self.logging_params)
-
-        # Update scores dataframe with metrics
+        # Update scores DataFrame with computed metrics
         scores.loc[:, metrics.keys()] = [v.item() if torch.is_tensor(v) else v for v in metrics.values()]
         
-        # Save scores to CSV
-        stage = 'test' if is_test else 'valid'
+        # Set up directory for saving artifacts
         dir_suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if is_test else ""
         artifacts_dir = os.path.join(self.trainer.default_root_dir, f"{stage}_artifacts{dir_suffix}")
         os.makedirs(artifacts_dir, exist_ok=True)
 
+        # Save scores as CSV
         scores.to_csv(os.path.join(artifacts_dir, f"{stage}_scores.csv"), index=False)
+        
+        # Save embeddings
         torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{stage}_enrol_embeds.pt"))
         torch.save(trials_embeds, os.path.join(artifacts_dir, f"{stage}_embeds.pt"))
         if metric.cohort_embeddings is not None:
             torch.save(metric.cohort_embeddings, os.path.join(artifacts_dir, f"{stage}_cohort_embeds.pt"))
 
+        # Plot and log figures for the current epoch
         figures = metric.plot_curves() or {}
         for name, fig in figures.items():
-            self.log_figure_with_fallback(f"{stage}_{name}_scores", fig, step=self.current_epoch)
+            self.log_figure_with_fallback(f"{stage}_{name}_scores", fig, stage=stage, step=self.current_epoch)
 
-    def log_figure_with_fallback(self, name: str, fig: plt.Figure, step: int) -> None:
+        # Save test metrics as a JSON file during the test phase
+        if is_test:
+            metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
+            with open(os.path.join(artifacts_dir, "test_metrics.json"), "w") as f:
+                json.dump(metrics_for_save, f, indent=4)
+
+        # Validation-specific logic: Check if this is the best validation epoch
+        if not is_test:
+            best_metrics = self.valid_metric_best.compute()
+            current_eer = metrics.get('EER', float('inf'))
+            best_eer = best_metrics.get('EER', float('inf'))
+            
+            # Save best validation scores, embeddings, and binary metrics plots
+            if current_eer == best_eer:
+                for name, fig in figures.items():
+                    self.log_figure_with_fallback(f"best_valid_{name}_scores", fig, stage=stage, step=self.current_epoch)
+                
+                scores.to_csv(os.path.join(artifacts_dir, "best_valid_scores.csv"), index=False)
+                torch.save(enrol_embeds, os.path.join(artifacts_dir, "best_valid_enrol_embeds.pt"))
+                torch.save(trials_embeds, os.path.join(artifacts_dir, "best_valid_embeds.pt"))
+                if metric.cohort_embeddings is not None:
+                    torch.save(metric.cohort_embeddings, os.path.join(artifacts_dir, "best_valid_cohort_embeds.pt"))
+ 
+    def log_figure_with_fallback(self, name: str, fig: plt.Figure, stage: str, step: int) -> None:
         """Log figure with fallback for loggers that don't support figure logging."""
-        if hasattr(self.logger, 'experiment'):
-            logger_type = type(self.logger.experiment).__name__
-            if logger_type == 'SummaryWriter':  # TensorBoard
-                self.logger.experiment.add_figure(f'metrics/{name}', fig, global_step=step)
-            else:  # Other loggers like WandB or MLFlow
-                self.logger.experiment[f'metrics/{name}'].upload(fig)
+        try:
+            if hasattr(self.logger, 'experiment'):
+                logger_type = type(self.logger.experiment).__name__
+                if logger_type == 'SummaryWriter':  # TensorBoard
+                    self.logger.experiment.add_figure(f'{stage}/binary_metrics_plots/{name}', fig, global_step=step)
+                else:  # Other loggers like WandB or MLFlow
+                    self.logger.experiment[f'{stage}/binary_metrics_plots/{name}'].upload(fig)
+        finally:
+            # Always close the figure to prevent memory leaks
+            plt.close(fig)
 
     ############ Load and save ############
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
