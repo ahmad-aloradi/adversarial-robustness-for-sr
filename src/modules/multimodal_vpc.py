@@ -1065,7 +1065,7 @@ class MultiModalVPCModel(pl.LightningModule):
     def training_step(self, batch: VPC25Item, batch_idx: int) -> Dict[str, torch.Tensor]:
         results = self.model_step(batch, self.train_criterion)
         
-        if batch_idx % 2000 == 0:
+        if batch_idx % 3000 == 0:
             torch.cuda.empty_cache()
 
         self._log_step_metrics(results, batch, METRIC_NAMES["TRAIN"])
@@ -1369,8 +1369,8 @@ class MultiModalVPCModel(pl.LightningModule):
         # Validation-specific logic: Check if this is the best validation epoch
         if not is_test:
             best_metrics = self.valid_metric_best.compute()
-            current_eer = metrics.get('EER', float('inf'))
-            best_eer = best_metrics.get('EER', float('inf'))
+            current_eer = metrics.get(self.valid_metric_best.target_key, float('inf'))
+            best_eer = best_metrics.get(self.valid_metric_best.target_key, float('inf'))
             
             # Save best validation scores, embeddings, and binary metrics plots
             if current_eer == best_eer:
@@ -1389,9 +1389,9 @@ class MultiModalVPCModel(pl.LightningModule):
             if hasattr(self.logger, 'experiment'):
                 logger_type = type(self.logger.experiment).__name__
                 if logger_type == 'SummaryWriter':  # TensorBoard
-                    self.logger.experiment.add_figure(f'{stage}/binary_metrics_plots/{name}', fig, global_step=step)
+                    self.logger.experiment.add_figure(f'binary_metrics_plots/{name}', fig, global_step=step)
                 else:  # Other loggers like WandB or MLFlow
-                    self.logger.experiment[f'{stage}/binary_metrics_plots/{name}'].upload(fig)
+                    self.logger.experiment[f'binary_metrics_plots/{name}'].upload(fig)
         finally:
             # Always close the figure to prevent memory leaks
             plt.close(fig)

@@ -54,14 +54,20 @@ def process(config, delimiter, save_csv=True):
         Delimiter for the .csv file.
     """
     # Read the file as raw text first
-    with open(os.path.join(config['speaker_filepath']), 'r') as f:
+    with open(config['speaker_filepath'], 'r') as f:
         lines = [line.strip() for line in f if not line.startswith(';')]
 
     data = []
     for line in lines:
         if line:  # Skip empty lines
             parts = line.rsplit(delimiter, 4)
-            if len(parts) == 5:
+            # special case; an incorrectly labelled line
+            if '|CBW|Simon' in line:
+                # delete the last '|' in the line
+                line = '60   | M | train-clean-100  | 20.18 | CBW Simon'
+                parts = line.rsplit(delimiter, 4)
+                data.append([part.strip() for part in parts])
+            elif len(parts) == 5:
                 data.append([part.strip() for part in parts])
 
     df_speaker = pd.DataFrame(data, columns=list(asdict(SPEAKER_CLS))) 
@@ -142,7 +148,7 @@ def process(config, delimiter, save_csv=True):
         dfs[subset] = dfs[subset][DF_COLS]
 
         if save_csv:
-            write_dataset_csv(df=dfs[subset], path=os.path.join(config['metdata_path'], f'{os.path.basename(subset)}.csv'))
+            write_dataset_csv(df=dfs[subset], path=os.path.join(config['metadata_path'], f'{os.path.basename(subset)}.csv'))
         
     return dfs, df_speaker
 
@@ -161,24 +167,34 @@ def read_config(config_path):
     except FileNotFoundError:
         raise FileNotFoundError('Config file {} does not exist'.format(config_path))
 
-def read_hydra_config(config_path: str = "conf", config_name: str = "config") -> DictConfig:
+
+def read_hydra_config(config_path: str = "conf", config_name: str = "config", overrides: list = None) -> DictConfig:
     with initialize(version_base=None, config_path=config_path):
-        cfg = compose(config_name=config_name)
+        cfg = compose(config_name=config_name, overrides=overrides)
         return cfg
 
 def generate_csvs(config, save_csv=True, delimiter="|"):
-    os.makedirs(config['metdata_path'], exist_ok=True)
-    if config['train_csv'] and config['dev_csv'] and config['test_csv'] and config['speaker_csv_path']:
+    os.makedirs(config['metadata_path'], exist_ok=True)
+
+    if os.path.isfile(config['train_csv']) and os.path.isfile(config['dev_csv']) and os.path.isfile(config['test_csv']) and os.path.isfile(config['speaker_csv_path']):
         # load them and return them
         read_paths = [config['train_csv'], config['dev_csv'], config['test_csv']]
         write_paths = [config['train_csv_exp_filepath'], config['dev_csv_exp_filepath'], config['test_csv_exp_filepath']]
-        return {write_path: pd.read_csv(read_path, sep=delimiter) for read_path, write_path in zip(read_paths, write_paths)},\
-                pd.read_csv(config['speaker_csv_path'], sep=delimiter)
+        return {write_path: pd.read_csv(read_path, sep=delimiter)
+                for read_path, write_path in zip(read_paths, write_paths)}, \
+               pd.read_csv(config['speaker_csv_path'], sep=delimiter)
     
     dfs, df_speaker = process(config, delimiter=config['sep'], save_csv=save_csv)
     return dfs, df_speaker
 
 
 if __name__ == '__main__':
-    config = read_hydra_config(config_path='../../../../configs/datamodule/datasets', config_name='librispeech.yaml')
+    config = read_hydra_config(config_path='../../../../configs',
+                               config_name='train.yaml',
+                               overrides=[
+                                   f"paths.data_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data",
+                                   'datamodule=datasets/librispeech',
+                                   f"datamodule.dataset.artifacts_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data/librispeech/metadata"
+                                   ])
+    config = config.datamodule.dataset
     dfs, df_speaker = generate_csvs(config=config)

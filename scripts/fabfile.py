@@ -224,7 +224,7 @@ def run_exp():
                         dataset_name = "available_models"
                     classifier_name = classifier.split('=')[-1]
                     loss_func_name = loss_function.split('=')[-1]
-                    job_name = 'classifier-' + classifier_name + '_' + 'loss-' + loss_func_name + '_' + dataset_name
+                    job_name = 'classifier-' + classifier_name + '_' + 'loss-' + loss_func_name + '_' + dataset_name + '_' + scheduler
 
                     # Defined this way to avoid re-training on different runs
                     settings['job_name'] = job_name
