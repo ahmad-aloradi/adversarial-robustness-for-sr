@@ -1,4 +1,4 @@
-_target_: src.modules.multimodal_vpc.MultiModalVPCModel
+_target_: src.modules.sv.SpeakerVerification
 
 defaults:
   - _self_
@@ -11,27 +11,12 @@ model:
     _target_: speechbrain.inference.EncoderClassifier.from_hparams
     source: "speechbrain/spkrec-ecapa-voxceleb"
     savedir: "local/.pretrained_models/spkrec-ecapa-voxceleb"
-    run_opts:
-      device: "cuda"
+    # run_opts:
+    #   device: "cuda"
 
   audio_processor_kwargs:
     return_tensors: "pt"
     sampling_rate: 16000
-
-  text_processor:
-    _target_: transformers.BertTokenizer.from_pretrained
-    pretrained_model_name_or_path: "bert-base-uncased"
-
-  text_encoder:
-    _target_: transformers.BertModel.from_pretrained
-    pretrained_model_name_or_path: ${module.model.text_processor.pretrained_model_name_or_path}
-    num_labels: ${module.model.classifiers.config.num_classes}
-
-  text_processor_kwargs:
-    return_tensors: "pt"
-    padding: "max_length"
-    truncation: True
-    max_length: 512
 
 ### classifiers ###
   classifiers:
@@ -39,40 +24,7 @@ model:
     config:
       num_classes: ${datamodule.num_classes}
       bottleneck_size: 512
-      fusion_classifier_hidden_size: 1024
       audio_embedding_size: 192  # ECAPA embedding size
-      text_embedding_size: 768   # BERT embedding size
-
-    # Available classifier definitions
-    available_classifiers:
-      normalized:
-        _target_: src.modules.multimodal_vpc.FusionClassifierWithResiduals
-        fuse_model:
-          _target_: src.modules.multimodal_vpc.NormalizedWeightedSum
-          audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
-          text_embedding_size: ${module.model.classifiers.config.text_embedding_size}
-          hidden_size: ${module.model.classifiers.config.bottleneck_size}
-        input_size: ${module.model.classifiers.config.bottleneck_size}
-        hidden_size: ${module.model.classifiers.config.fusion_classifier_hidden_size}
-        num_classes: ${module.model.classifiers.config.num_classes}
-        dropout_residual: 0.1
-        num_residuals: 2
-        norm_type: 'batch'
-            
-      robust:
-        _target_: src.modules.multimodal_vpc.RobustFusionClassifier
-        audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
-        text_embedding_size: ${module.model.classifiers.config.text_embedding_size}
-        hidden_size: ${module.model.classifiers.config.bottleneck_size}
-        num_classes: ${module.model.classifiers.config.num_classes}
-        norm_type: 'layer'
-        accum_method: 'concat'
-        dropout_audio: 0.3
-        dropout_text: 0.1
-
-    # Selected classifier (defaults to robust)
-    selected_classifier: robust
-    fusion_classifier: ${module.model.classifiers.available_classifiers.${module.model.classifiers.selected_classifier}}
 
 ### caching ###
   embedding_cache:
@@ -80,42 +32,22 @@ model:
     bypass_warmup: True
     
   # Enable score normalization
-  normalize_test_scores: False
+  normalize_test_scores: True
 
 ### criteria and metrics ###
 criterion:
-  available_criteria:
-    _base_aam_: &_base_aam_
+  available_criteria:    
+    aam:
       _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
       loss_fn:
         _target_: speechbrain.nnet.losses.AdditiveAngularMargin
         margin: 0.2
-        scale: 30.0
-
-    comprehensive:
-      _target_: src.modules.multimodal_vpc.MultiModalLoss
-      classifier_name: ${module.model.classifiers.selected_classifier}
-      weights:
-        _target_: src.modules.multimodal_vpc.LossWeights
-        ensemble: ${map:${module.model.classifiers.selected_classifier},robust,1.0,0.0}
-        fusion: ${map:${module.model.classifiers.selected_classifier},normalized,1.0,0.2}
-        audio: 0.2
-        text: 0.2
-        contrastive: 0.1
-        consistency: 1.0
-        confidence: 0.1
-      confidence_target: 0.9
-      classification_loss: 
-        <<: *_base_aam_
-    
-    aam:
-      <<: *_base_aam_
-    
+        scale: 30.0    
     cross_entropy:
       _target_: torch.nn.CrossEntropyLoss
 
   # Selected criterion (defaults to comprehensive)
-  selected_criterion: comprehensive
+  selected_criterion: aam
   train_criterion: ${module.criterion.available_criteria.${module.criterion.selected_criterion}}
 
   # For callbacks

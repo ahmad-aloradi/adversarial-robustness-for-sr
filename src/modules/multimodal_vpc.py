@@ -62,61 +62,36 @@ class EmbeddingType(Enum):
 
 
 ###################################
-class InstanceAwareWeightedSum(nn.Module):
-    def __init__(self, audio_embedding_size: int,
-                 text_embedding_size: int,
-                 hidden_size: int,
-                 dropout_audio: float = 0.3,
-                 dropout_text: float = 0.1,
-                 accum_method: Literal['sum', 'concat'] = 'sum'
-                 ):
+class NormalizedWeightedSum(nn.Module):
+    def __init__(self, audio_embedding_size, text_embedding_size, hidden_size):
         super().__init__()
-
-        # Setup hidden_size based off accumulation method
-        assert accum_method in ['sum', 'concat'], f"Invalid accumulation method: {accum_method}"
-        hidden_size = hidden_size if accum_method == 'sum' else hidden_size // 2
-        self.accum_method = accum_method
-
-        # Audio processing path
+        # Projection layers
         self.audio_proj = nn.Sequential(
             nn.LayerNorm(audio_embedding_size),
             nn.Linear(audio_embedding_size, hidden_size),
-            nn.GELU(),
-            nn.Dropout(dropout_audio)
+            nn.ReLU(inplace=True)
         )
-        # Text processing path
         self.text_proj = nn.Sequential(
             nn.LayerNorm(text_embedding_size),
             nn.Linear(text_embedding_size, hidden_size),
-            nn.GELU(),
-            nn.Dropout(dropout_text)
+            nn.ReLU(inplace=True)
         )
-        self.weight_predictor = nn.Sequential(
-            nn.Linear(audio_embedding_size + text_embedding_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, 2),  # Outputs weights for audio and text
-            nn.Softmax(dim=-1)
-        )
+        # Learnable weights for weighted sum
+        self.audio_weight = nn.Parameter(torch.tensor(1.0))
+        self.text_weight = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, emebds):
+        assert len(emebds) == 2, f"Expected 2 embeddings, but found: {len(emebds)}"
+        assert type(emebds) == tuple, f"Expected tuple of embeddings, but found: {type(emebds)}"
+        audio_emb = emebds[0]
+        text_emb = emebds[1]
+
+        audio_emb = self.audio_proj(audio_emb)
+        text_emb = self.text_proj(text_emb)
     
-    def forward(self, embeddings):
-        audio_emb, text_emb = embeddings
-        concat_emb = torch.cat([audio_emb, text_emb], dim=-1)
-        audio_proj = self.audio_proj(audio_emb)
-        text_proj = self.text_proj(text_emb)
-        weights = self.weight_predictor(concat_emb)  # [batch_size, 2] --> 0 for audio, 1 for text
-        
-        if self.accum_method == 'sum':
-            fusion_emb = weights[:, 0:1] * audio_proj + weights[:, 1:2] * text_proj
-        elif self.accum_method == 'concat':
-            fusion_emb = torch.cat((weights[:, 0:1] * audio_proj, weights[:, 1:2] * text_proj), dim=-1)
-        
-        return {
-            "fusion_emb": fusion_emb, 
-            "audio_emb": audio_proj,
-            "text_emb": text_proj,
-            "audio_weights": weights[:, 0:1],
-            "text_weights": weights[:, 1:2]
-            } 
+        return {"fusion_emb": self.audio_weight * audio_emb + self.text_weight * text_emb, 
+                "audio_emb": audio_emb,
+                "text_emb": text_emb}  
 
 
 class FusionClassifierWithResiduals(nn.Module):
@@ -207,7 +182,7 @@ class FusionClassifierWithResiduals(nn.Module):
         return {
             EMBEDS["TEXT"]: fused_feats["text_emb"],
             EMBEDS["AUDIO"]: fused_feats["audio_emb"],
-            EMBEDS["FUSION"]: fused_feats["audio_emb"],
+            EMBEDS["FUSION"]: fused_feats["fusion_emb"],
             EMBEDS["ID"]: features,
             EMBEDS["CLASS"]: class_preds,
             f"fusion_logits": fusion_logits,

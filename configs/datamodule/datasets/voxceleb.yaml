@@ -53,8 +53,8 @@ loaders:
     drop_last: False
     pin_memory: False
 
-  predict:
-    batch_size: 8
+  enrollment:
+    batch_size: 1 # 1 for enrollment
     shuffle: False
     num_workers: 0
     drop_last: False

@@ -13,8 +13,14 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
 from src.datamodules.components.voxceleb.voxceleb_prep import VoxCelebProcessor
 from src import utils
 from src.datamodules.components.utils import CsvProcessor
+from src.datamodules.components.common import VoxcelebDefaults, get_dataset_class
+from src import utils
+
 
 log = utils.get_pylogger(__name__)
+DATASET_DEFAULTS = VoxcelebDefaults()
+DATASET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
+
 
 class VoxCelebDataModule(LightningDataModule):
     def __init__(self,
@@ -32,48 +38,48 @@ class VoxCelebDataModule(LightningDataModule):
         self.csv_processor = CsvProcessor(verbose=self.dataset.verbose, fill_value='N/A')
 
     def prepare_data(self):
-        voxceleb_processor = VoxCelebProcessor(root_dir=self.dataset.data_dir,
-                                               verbose=self.dataset.verbose,
-                                               artifcats_dir=self.dataset.voxceleb_artifacts_dir,
-                                               sep=self.dataset.sep)
-        
-        _, _ = voxceleb_processor.generate_metadata(
-            base_search_dir=self.dataset.base_search_dir,
-            min_duration=self.dataset.min_duration,
-            save_df=self.dataset.save_csv
-            )
+        if self.train_data is None:
+            voxceleb_processor = VoxCelebProcessor(root_dir=self.dataset.data_dir,
+                                                verbose=self.dataset.verbose,
+                                                artifcats_dir=self.dataset.voxceleb_artifacts_dir,
+                                                sep=self.dataset.sep)
+            
+            _, _ = voxceleb_processor.generate_metadata(
+                base_search_dir=self.dataset.base_search_dir,
+                min_duration=self.dataset.min_duration,
+                save_df=self.dataset.save_csv
+                )
 
-        # Get class id and speaker stats
-        updated_dev_csv, speaker_lookup_csv = self.csv_processor.process(
-            dataset_files=[self.dataset.dev_csv_file],
-            spks_metadata_paths=[self.dataset.metadata_csv_file],
-            verbose=self.dataset.verbose)
-        
-        # save the updated csv
-        VoxCelebProcessor.save_csv(updated_dev_csv, self.dataset.dev_csv_file)
-        VoxCelebProcessor.save_csv(speaker_lookup_csv, self.dataset.speaker_lookup)
-        
-        # split the dataset into train and validation
-        CsvProcessor.split_dataset(
-            df=updated_dev_csv,
-            train_ratio = self.dataset.train_ratio,
-            save_csv=self.dataset.save_csv,
-            speaker_overlap=self.dataset.speaker_overlap,
-            speaker_id_col='speaker_id',
-            train_csv=self.dataset.train_csv_file,
-            val_csv=self.dataset.val_csv_file,
-            sep=self.dataset.sep,
-            seed=self.dataset.seed
-            )
-        
-        # enrich the verification file
-        _ = voxceleb_processor.enrich_verification_file(
-            veri_test_path=self.dataset.veri_test_path,
-            metadata_path=self.dataset.metadata_csv_file,
-            output_path=self.dataset.veri_test_output_path,
-            sep=self.dataset.sep,
-            )
-        
+            # Get class id and speaker stats
+            updated_dev_csv, speaker_lookup_csv = self.csv_processor.process(
+                dataset_files=[self.dataset.dev_csv_file],
+                spks_metadata_paths=[self.dataset.metadata_csv_file],
+                verbose=self.dataset.verbose)
+            
+            # save the updated csv
+            VoxCelebProcessor.save_csv(updated_dev_csv, self.dataset.dev_csv_file)
+            VoxCelebProcessor.save_csv(speaker_lookup_csv, self.dataset.speaker_lookup)
+            
+            # split the dataset into train and validation
+            CsvProcessor.split_dataset(
+                df=updated_dev_csv,
+                train_ratio = self.dataset.train_ratio,
+                save_csv=self.dataset.save_csv,
+                speaker_overlap=self.dataset.speaker_overlap,
+                speaker_id_col=DATASET_CLS.SPEAKER_ID,
+                train_csv=self.dataset.train_csv_file,
+                val_csv=self.dataset.val_csv_file,
+                sep=self.dataset.sep,
+                seed=self.dataset.seed
+                )
+            
+            # enrich the verification file
+            _ = voxceleb_processor.enrich_verification_file(
+                veri_test_path=self.dataset.veri_test_path,
+                metadata_path=self.dataset.metadata_csv_file,
+                output_path=self.dataset.veri_test_output_path,
+                sep=self.dataset.sep,
+                )    
 
     def setup(self, stage: Optional[str] = None):
         if stage == 'fit' or stage is None:
