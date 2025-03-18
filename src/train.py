@@ -1,4 +1,5 @@
 from typing import Any, List, Optional, Tuple
+import sys
 
 import hydra
 import pyrootutils
@@ -172,7 +173,7 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     return metric_dict, object_dict
 
 
-@utils.register_custom_resolvers(**_HYDRA_PARAMS)
+@utils.register_custom_resolvers(**_HYDRA_PARAMS | {'overrides': sys.argv[1:]})
 @hydra.main(**_HYDRA_PARAMS)
 def main(cfg: DictConfig) -> Optional[float]:
 

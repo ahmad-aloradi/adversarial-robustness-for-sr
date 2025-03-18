@@ -328,7 +328,7 @@ def get_args_parser() -> argparse.ArgumentParser:
 
 
 def register_custom_resolvers(
-    version_base: str, config_path: str, config_name: str
+    version_base: str, config_path: str, config_name: str, overrides: Optional[list] = None
 ) -> Callable:
     """Optional decorator to register custom OmegaConf resolvers. It is
     expected to call before `hydra.main` decorator call.
@@ -349,6 +349,7 @@ def register_custom_resolvers(
         version_base (str): Hydra version base.
         config_path (str): Hydra config path.
         config_name (str): Hydra config name.
+        overrides (Optional[list]): Hydra overrides.
 
     Returns:
         Callable: Decorator that registers custom resolvers before running
@@ -386,7 +387,7 @@ def register_custom_resolvers(
             version_base=version_base, config_dir=config_path
         ):
             cfg = compose(
-                config_name=config_name, return_hydra_config=True, overrides=[]
+                config_name=config_name, return_hydra_config=True, overrides=overrides if overrides else []
             )
         cfg_tmp = cfg.copy()
         loss = load_loss(cfg_tmp.module.criterion.loss)

@@ -69,23 +69,17 @@ class NormalizedWeightedSum(nn.Module):
         self.audio_proj = nn.Sequential(
             nn.LayerNorm(audio_embedding_size),
             nn.Linear(audio_embedding_size, hidden_size),
-            nn.ReLU(inplace=True)
         )
         self.text_proj = nn.Sequential(
             nn.LayerNorm(text_embedding_size),
             nn.Linear(text_embedding_size, hidden_size),
-            nn.ReLU(inplace=True)
         )
         # Learnable weights for weighted sum
         self.audio_weight = nn.Parameter(torch.tensor(1.0))
         self.text_weight = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, emebds):
-        assert len(emebds) == 2, f"Expected 2 embeddings, but found: {len(emebds)}"
-        assert type(emebds) == tuple, f"Expected tuple of embeddings, but found: {type(emebds)}"
-        audio_emb = emebds[0]
-        text_emb = emebds[1]
-
+        audio_emb, text_emb = emebds
         audio_emb = self.audio_proj(audio_emb)
         text_emb = self.text_proj(text_emb)
     
