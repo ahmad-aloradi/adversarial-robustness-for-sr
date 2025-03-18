@@ -91,3 +91,31 @@ In this particular case, the directory structure looks like:
 └── README.md
 ```
 
+## Data Preparation
+### Structure
+Our pipeline collect data as `.csv` files with a certain columns,, which are defined in `src/datamodules/components/common.py` as:
+```python
+@dataclass(frozen=True)
+class BaseDatasetCols:
+    DATASET: Literal['dataset_name'] = 'dataset_name'
+    LANGUAGE: Literal['language'] = 'language'
+    NATIONALITY: Literal['country'] = 'country'
+    SR: Literal['sample_rate'] = 'sample_rate'
+    SPEAKER_ID: Literal['speaker_id'] = 'speaker_id'
+    CLASS_ID: Literal['class_id'] = 'class_id'
+    SPEAKER_NAME: Literal['speaker_name'] = 'speaker_name'
+    GENDER: Literal['gender'] = 'gender'
+    SPLIT: Literal['split'] = 'split'
+    REC_DURATION: Literal['recording_duration'] = 'recording_duration'
+    REL_FILEPATH: Literal['rel_filepath'] = 'rel_filepath'
+    TEXT: Literal['text'] = 'text'
+```
+Additional columns can be added by overriding the base columns. Non-existing are set to defaults defined in `common.py`.
+
+This enfirced homogeneity in columns allows composing datasets without complications.
+
+### Preprare the csvs
+Follow `scripts/datasets/prep_{DATASET}.sh`.
+
+### Recipes
+At the moment we support recipes for the following datasets: `VoxCeleb`, `LibriSpeech`, `VoicePrivacyAttacker`. Currecntly, we expect the dataset to be downloaded on your machine, but we are slowly trying to intgrate the download in the `scripts/datasets`.
