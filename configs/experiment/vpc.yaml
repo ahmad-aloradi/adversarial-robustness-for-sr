@@ -1,0 +1,61 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /callbacks: default.yaml
+  - override /datamodule: datasets/vpc.yaml
+  - override /module: vpc.yaml
+  - override /trainer: gpu.yaml
+  - override /logger: tensorboard.yaml
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+tags: ["vpc25", "de-anonmyzation"]
+seed: 42
+
+trainer:
+  min_epochs: 10
+  max_epochs: 25
+  gradient_clip_val: 5.0
+
+callbacks:
+  model_checkpoint:
+    mode: min
+    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+  early_stopping:
+    mode: min
+    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+    patience: 10
+
+datamodule:
+  loaders:
+    train:
+      batch_size: 16
+    valid:
+      batch_size: 16
+    test:
+      batch_size: 16
+    enrollment:
+      batch_size: 1
+
+module:
+  model:
+    normalize_test_scores: False
+    classifiers: 
+      selected_classifier: robust
+  criterion:
+    selected_criterion: comprehensive   # aam  cross_entropy comprehensive
+  scheduler_settings:
+    selected_lr_scheduler: reduce_on_plateau  # reduce_on_plateau warmup_cosine
+  optimizer:
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
+
+
+# logger:
+#   wandb:
+#     tags: ${tags}
+#     group: "mnist"

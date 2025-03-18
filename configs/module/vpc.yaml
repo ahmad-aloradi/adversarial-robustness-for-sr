@@ -135,7 +135,6 @@ metrics:
     target_key: "eer"
 
 ### optimizer and lr_scheduler ###
-gradient_clip_val: 5.0
 
 optimizer:
   _target_: torch.optim.AdamW

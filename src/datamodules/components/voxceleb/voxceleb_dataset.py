@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union, Optional
+from typing import List, Tuple, Union, Optional, Literal
 import sys
 from pathlib import Path
 from dataclasses import dataclass
@@ -24,7 +24,7 @@ class VoxCelebVerificationItem:
     test_length: int
     trial_label: int
     same_gender_label: int
-    same_nationality_label: int
+    same_country_label: int
     enroll_path: str
     test_path: str
     sample_rate: int
@@ -34,6 +34,15 @@ class VoxcelebItem(DatasetItem):
     """Single item from dataset."""
     sample_rate: float = 16000.0
 
+
+@dataclass
+class VoxCelebEnrollItem:
+    """Single verification trial from VoxCeleb dataset."""
+    audio: torch.Tensor
+    audio_length: torch.Tensor
+    audio_path: str
+    speaker_id: str
+
 ####### Coallate functions #######
 class TrainCollate(BaseCollate):
     pass
@@ -41,9 +50,9 @@ class TrainCollate(BaseCollate):
 class VerificationCollate(BaseCollate):
     """Collate function for verification pairs"""
     def __call__(self, batch) -> VoxCelebVerificationItem:
-        enroll_wavs, test_wavs, labels, same_gender_labels, same_nationality_labels, enroll_paths, test_paths, sample_rate = zip(
+        enroll_wavs, test_wavs, labels, same_gender_labels, same_country_labels, enroll_paths, test_paths, sample_rate = zip(
             *[(item.enroll_audio, item.test_audio, item.trial_label, 
-               item.same_gender_label, item.same_nationality_label,
+               item.same_gender_label, item.same_country_label,
                item.enroll_path, item.test_path, item.sample_rate) for item in batch])
         
         # Process enrollment utterances
@@ -61,17 +70,39 @@ class VerificationCollate(BaseCollate):
             test_length=lengths2,
             trial_label=labels,
             same_gender_label=same_gender_labels,
-            same_nationality_label=same_nationality_labels,
+            same_country_label=same_country_labels,
             enroll_path=enroll_paths,
             test_path=test_paths,
             sample_rate=sample_rate
         )
 
 
+class EnrollCoallate(BaseCollate):
+    def __init__(self, pad_value = 0):
+        super().__init__(pad_value)
+
+    def __call__(self, batch):
+        spk_ids = [item[0] for item in batch]
+        audios = [item[1] for item in batch]
+        paths = [item[2] for item in batch]
+        lengths = torch.tensor([wav.shape[0] for wav in audios])
+        # pad the audio sequences
+        padded_audio = pad_sequence(audios, batch_first=True, padding_value=self.pad_value)
+
+        assert len(spk_ids) == 1, 'Only 1 per enrollment is supported at the moment'
+        
+        return VoxCelebEnrollItem(
+            audio=padded_audio,
+            audio_length=lengths,
+            speaker_id=spk_ids,
+            audio_path=paths
+            )
+    
 ####### Datasets #######
 
 class VoxCelebDataset(BaseDataset):
     pass
+
 
 class VoxCelebVerificationDataset(Dataset):
     """
@@ -123,11 +154,40 @@ class VoxCelebVerificationDataset(Dataset):
             test_length=test_wav.shape[0],
             trial_label=row.label,
             same_gender_label=row.same_gender.item(), 
-            same_nationality_label=row.same_nationality.item(),
+            same_country_label=row.same_country.item(),
             enroll_path=enroll_path,
             test_path=test_path,
             sample_rate=self.audio_processor.sample_rate
         )
+
+
+class VoxCelebEnroll(Dataset):    
+    def __init__(
+        self,
+        data_dir: str,
+        phase: Literal['enrollment', 'test'],
+        dataset: pd.DataFrame,
+        sample_rate: int = 16000,
+    ):
+        self.data_dir = Path(data_dir)
+        self.phase = phase
+        self.dataset = dataset
+        self.audio_processor = AudioProcessor(sample_rate)
+        
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx) -> VoxCelebVerificationItem:
+        # Load paths and label from dataset
+        row = self.dataset.iloc[idx]
+        path = row.enroll_path if self.phase == 'enrollment' else row.test_path
+        spk_id = row.enroll_id if self.phase == 'enrollment' else row.test_id
+
+        # Load and process both utterances
+        wav, _ = self.audio_processor.process_audio(str(self.data_dir / path))
+        
+        return (spk_id, wav, path)
+
 
 
 if __name__ == "__main__":

@@ -1,27 +1,27 @@
 import os
 import json
-from typing import Any, Dict, Optional, List, Tuple, Literal, Callable, Union
+from typing import Any, Dict, Optional, Tuple
 from collections import defaultdict
-from dataclasses import dataclass
-from enum import Enum, auto
+import random
 
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import Callback
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from tqdm import tqdm
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from src.datamodules.components.vpc25.vpc_dataset import VPC25Item, VPC25VerificationItem, VPC25ClassCollate
+from src.datamodules.components.voxceleb.voxceleb_dataset import (
+    VoxcelebItem,
+    VoxCelebVerificationItem,
+    TrainCollate)
 from src import utils
 from src.modules.components.utils import EmbeddingCache
 from src.modules.metrics.metrics import AS_norm 
-from src.modules.losses.components.focal_loss import FocalLoss
 from datetime import datetime
 
 
@@ -43,19 +43,12 @@ class EmbeddingMetrics:
         return self._results
 
     @property
-    def _cohort_indices(self, 
-                        speaker_col: str = 'speaker_id',
-                        model_col: str = 'model',
-                        model_extract_fn: callable = lambda x: x.split(os.sep)[0],
-                        filepath_col: str = 'rel_filepath'):
+    def _cohort_indices(self, speaker_col: str = 'speaker_id'):
         """
-        Compute balanced cohort indices ensuring good coverage across models and speakers.
+        Compute balanced cohort indices ensuring good coverage across speakers.
         
         Args:
             speaker_col: Name of the column containing speaker IDs
-            model_col: Name of the column containing model identifiers
-            model_extract_fn: Function to extract model ID from filepath
-            filepath_col: Name of the column containing file paths
             
         Returns:
             List of selected indices for cohort
@@ -63,95 +56,31 @@ class EmbeddingMetrics:
         if not hasattr(self, '_indices'):
             df = self.trainer.datamodule.train_data.dataset
             
-            # Extract model and speaker information if needed
-            if model_col not in df.columns and filepath_col in df.columns:
-                df[model_col] = df[filepath_col].apply(model_extract_fn)
-            
             # Validate required columns
-            required_cols = [speaker_col, model_col]
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            if missing_cols:
-                raise ValueError(f"Missing required columns: {missing_cols}")
+            if speaker_col not in df.columns:
+                raise ValueError(f"Missing required column: {speaker_col}")
             
-            # Get unique models and speakers
-            unique_models = df[model_col].unique()
+            # Get unique speakers
             unique_speakers = df[speaker_col].unique()
-            min_speakers_per_model = 0.8 * len(unique_speakers)  # Require at least 80% speaker coverage
+            min_speakers_required = int(0.8 * len(unique_speakers))
             
-            # Validate speaker coverage across models
-            model_speaker_coverage = {}
-            for model in unique_models:
-                model_speakers = df[df[model_col] == model][speaker_col].unique()
-                coverage = len(model_speakers)
-                model_speaker_coverage[model] = coverage
-                if coverage < min_speakers_per_model:
-                    print(f"WARNING: Model {model} only has {coverage} speakers out of {len(unique_speakers)} total speakers")
-            
-            # Calculate samples per model-speaker combination
-            target_samples_per_speaker = max(1, self.cohort_per_model // len(unique_speakers))
-            
+            # Sample from each speaker (max 10 samples per speaker)
             all_indices = []
-            for model in unique_models:
-                model_df = df[df[model_col] == model]
-                model_indices = []
+            for speaker in list(unique_speakers):
+                indices = df[df[speaker_col] == speaker].index.tolist()
+                all_indices.extend(random.sample(indices, min(10, len(indices))))
                 
-                # Sample from each speaker for this model
-                for speaker in unique_speakers:
-                    speaker_df = model_df[model_df[speaker_col] == speaker]
-                    if len(speaker_df) > 0:
-                        # Determine number of samples for this speaker
-                        n_samples = min(target_samples_per_speaker, len(speaker_df))
-                        
-                        # Sample without replacement if possible
-                        replace = n_samples > len(speaker_df)
-                        sampled = speaker_df.sample(
-                            n=n_samples,
-                            replace=replace,
-                            random_state=torch.initial_seed()
-                        )
-                        model_indices.extend(sampled.index.tolist())
-                
-                # If we haven't met our per-model quota, sample additional utterances
-                remaining_samples = self.cohort_per_model - len(model_indices)
-                if remaining_samples > 0:
-                    # Exclude already sampled indices
-                    available_indices = model_df.index.difference(model_indices)
-                    if len(available_indices) > 0:
-                        additional_df = df.loc[available_indices]
-                        n_additional = min(remaining_samples, len(additional_df))
-                        if n_additional > 0:
-                            additional_samples = additional_df.sample(
-                                n=n_additional,
-                                replace=False,
-                                random_state=torch.initial_seed()
-                            )
-                            model_indices.extend(additional_samples.index.tolist())
-                
-                all_indices.extend(model_indices)
-            
-            # Final validation
-            final_df = df.loc[all_indices]
-            final_models = final_df[model_col].unique()
-            final_speakers = final_df[speaker_col].unique()
-            
-            print(f"Cohort statistics:")
-            print(f"- Total samples: {len(all_indices)}")
-            print(f"- Models represented: {len(final_models)}/{len(unique_models)}")
-            print(f"- Speakers represented: {len(final_speakers)}/{len(unique_speakers)}")
-            for model in final_models:
-                model_samples = final_df[final_df[model_col] == model]
-                print(f"- Model {model}: {len(model_samples)} samples, "
-                    f"{len(model_samples[speaker_col].unique())} speakers")
+                # Stop once we have enough speaker coverage
+                if len(all_indices) >= min_speakers_required:
+                    break
             
             self._indices = all_indices
         
         return self._indices
 
     def get_loaders(self) -> Tuple[DataLoader, DataLoader]:
-        if self.stage == 'test':
-            enroll_loader, unique_loader = self.trainer.datamodule.test_enrollment_dataloader()
-        else:
-            enroll_loader, unique_loader = self.trainer.datamodule.dev_enrollment_dataloader()
+        assert self.stage == 'test'
+        enroll_loader, unique_loader = self.trainer.datamodule.enrolling_dataloader()
         return enroll_loader, unique_loader
 
     def get_cohort_loader(self) -> DataLoader:        
@@ -160,7 +89,7 @@ class EmbeddingMetrics:
             batch_size=self.trainer.datamodule.loaders.train.batch_size,
             num_workers=self.trainer.datamodule.loaders.train.num_workers,
             pin_memory=self.trainer.datamodule.loaders.train.pin_memory,
-            collate_fn=VPC25ClassCollate(),
+            collate_fn=TrainCollate(),
             shuffle=False
         )
 
@@ -223,7 +152,7 @@ class SpeakerVerification(pl.LightningModule):
         self._setup_training_components(criterion, optimizer, lr_scheduler)
         
         # Freeze pretrained components
-        self._freeze_pretrained_components(finetune_audioenc=model.get("finetune_audioenc", False)) 
+        self._freeze_pretrained_components(finetune=False)
 
         # Initialize text embedding cache with appropriate limits
         self._embeds_cache_config = model.get("embedding_cache", {})
@@ -248,21 +177,21 @@ class SpeakerVerification(pl.LightningModule):
         self.audio_processor = instantiate(model.audio_processor)
         self.audio_encoder = instantiate(model.audio_encoder)
         self.audio_processor_kwargs = model.audio_processor_kwargs
+        self.classifier = instantiate(model.classifiers.classifier)
 
     def _setup_training_components(self, criterion: DictConfig, optimizer: DictConfig, lr_scheduler: DictConfig) -> None:
         """Initialize loss functions, optimizer and learning rate scheduler."""
-        self.train_criterion = instantiate(criterion.train_criterion)        
+        self.train_criterion = instantiate(criterion.train_criterion)
+        self.valid_criterion = instantiate(criterion.valid_criterion)     
         self.optimizer = optimizer
         self.slr_params = lr_scheduler
 
-    def _freeze_pretrained_components(self, finetune_audioenc: bool = False) -> None:
+    def _freeze_pretrained_components(self, finetune=False) -> None:
         """Freeze pretrained components and enable training for others."""
-        if hasattr(self.audio_encoder, "encode_batch"):
-                self._finetune_audioenc = finetune_audioenc    # Finetune for speechbrain encoders (e.g., x-vector)
         for param in self.audio_encoder.parameters():
-            param.requires_grad = self._finetune_audioenc
+            param.requires_grad = finetune
 
-    def _log_step_metrics(self, results: Dict[str, Any], batch: VPC25Item, stage: str) -> None:
+    def _log_step_metrics(self, results: Dict[str, Any], batch: VoxcelebItem, stage: str) -> None:
         criterion = getattr(self, f"{stage}_criterion")
         
         # Log losses
@@ -314,23 +243,34 @@ class SpeakerVerification(pl.LightningModule):
                     pbar.update(len(batch_audios))
 
     ############ Lightning ############
-    def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
+    def _get_uncached_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
         if hasattr(self.audio_encoder, "encode_batch"):
             # For speechbrain encoders (e.g., x-vector)
-            audio_emb = self.audio_encoder.encode_batch(wavs=batch_audio,
-                                                        wav_lens=batch_audio_lens/max(batch_audio_lens)
-                                                        ).squeeze(1)
-        else:
-            # For transformers-based encoders (e.g., wav2vec) 
+            audio_emb = self.audio_encoder.encode_batch(
+                wavs=batch_audio,
+                wav_lens=batch_audio_lens/max(batch_audio_lens)
+                ).squeeze(1)
+        
+        # For transformers-based encoders (e.g., wav2vec) 
+        elif False:              
             input_values = self.audio_processor(
                 batch_audio, 
                 **self.audio_processor_kwargs).input_values.squeeze(0).to(self.device)
             audio_outputs = self.audio_encoder(input_values)
             audio_emb = audio_outputs.last_hidden_state.mean(dim=1)
-
+            
+        else:
+            # TODO: strange mismatch during testing 
+            if self.device != batch_audio.device:
+                batch_audio = batch_audio.to(self.device)
+            if self.device != batch_audio_lens.device:
+                batch_audio_lens = batch_audio_lens.to(self.device)
+            input_values = self.audio_processor(batch_audio)
+            audio_emb = self.audio_encoder(input_values, lengths=batch_audio_lens/max(batch_audio_lens)).squeeze(1)
+        
         return audio_emb
 
-    def get_audio_embeddings_with_caching(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
+    def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
         """Get audio embeddings with caching optimization.
         
         Args:
@@ -366,7 +306,7 @@ class SpeakerVerification(pl.LightningModule):
             
             # Get embeddings for uncached audio
             with torch.no_grad():
-                new_embeddings = self._get_audio_embeddings(uncached_audio, uncached_lens)
+                new_embeddings = self._get_uncached_audio_embeddings(uncached_audio, uncached_lens)
             
             # Update cache and embeddings list
             for idx, (audio, embedding) in enumerate(zip(uncached_audio, new_embeddings)):
@@ -380,12 +320,13 @@ class SpeakerVerification(pl.LightningModule):
         # Stack all embeddings and ensure they're on the correct device
         return torch.stack(audio_embeddings)
 
-    def forward(self, batch: VPC25Item) -> Dict[str, torch.Tensor]:
+    def forward(self, batch: VoxcelebItem) -> Dict[str, torch.Tensor]:
         """Process text/audio inputs with optimized embedding caching."""
         audio_emb = self._get_audio_embeddings(batch.audio, batch.audio_length)
-        return {"embeds": audio_emb, 'logits': None}
+        logits = self.classifier(audio_emb)
+        return {"embeds": audio_emb, 'logits': logits}
 
-    def model_step(self, batch: VPC25Item, criterion: Optional[Any] = None) -> Dict[str, Any]:
+    def model_step(self, batch: VoxcelebItem, criterion: Optional[Any] = None) -> Dict[str, Any]:
         """Perform a single model step."""
         outputs = self(batch)
 
@@ -408,7 +349,7 @@ class SpeakerVerification(pl.LightningModule):
         if self.current_epoch == 0 and not self._bypass_warmup:
             self._warmup_cache()
 
-    def training_step(self, batch: VPC25Item, batch_idx: int) -> Dict[str, torch.Tensor]:
+    def training_step(self, batch: VoxcelebItem, batch_idx: int) -> Dict[str, torch.Tensor]:
         results = self.model_step(batch, self.train_criterion)
         
         if batch_idx % 3000 == 0:
@@ -428,16 +369,17 @@ class SpeakerVerification(pl.LightningModule):
         if len(self._embedding_cache) > self._max_cache_size:
             self._embedding_cache.resize(self._max_cache_size)
 
-    @torch.inference_mode()
     def on_validation_start(self) -> None:
-        """Compute embeddings for eval trials."""
-        self.metric_tracker = EmbeddingMetrics(self.trainer, 'valid')
-        enroll_dev_loader, unique_dev_loader = self.metric_tracker.get_loaders()
+        pass
 
-        self.metric_tracker.set_cohort_embeddings(None)
+    def on_validation_epoch_end(self) -> None:
+        self.valid_metric.reset()
 
-        self.enrol_dev_embeds = self._compute_enrollment_embeddings(enroll_dev_loader)
-        self.dev_embeds = self._compute_test_embeddings(unique_dev_loader, mode='dev')
+    @torch.inference_mode()
+    def validation_step(self, batch: VoxcelebItem, batch_idx: int) -> Dict[str, torch.Tensor]:
+        results = self.model_step(batch, self.valid_criterion)
+        self._log_step_metrics(results, batch, 'valid')
+        return results
 
     @torch.inference_mode()
     def on_test_start(self) -> None:
@@ -445,41 +387,20 @@ class SpeakerVerification(pl.LightningModule):
         self.metric_tracker = EmbeddingMetrics(self.trainer, 'test')
         enroll_test_loader, unique_test_loader = self.metric_tracker.get_loaders()
 
-        cohort_loader = self.metric_tracker.get_cohort_loader()
         if self.normalize_test_scores:
+            cohort_loader = self.metric_tracker.get_cohort_loader()
             cohort_embeddings = self._compute_cohort_embeddings(cohort_loader)
             self.metric_tracker.set_cohort_embeddings(cohort_embeddings)
         else:
             self.metric_tracker.set_cohort_embeddings(None)
 
-        self.enrol_embeds = self._compute_enrollment_embeddings(enroll_test_loader)
+        self.enrol_embeds = self._compute_test_embeddings(enroll_test_loader, mode='enrollment')
         self.test_embeds = self._compute_test_embeddings(unique_test_loader, mode='test')
 
     @torch.inference_mode()
-    def validation_step(self, batch: VPC25VerificationItem, batch_idx: int) -> None:
-        """Compute EER and minDCF on validation trials"""
-        self._trials_eval_step(batch, is_test=False)
-
-    @torch.inference_mode()
-    def test_step(self, batch: VPC25VerificationItem, batch_idx: int) -> None:
+    def test_step(self, batch: VoxCelebVerificationItem, batch_idx: int) -> None:
         """Compute EER and minDCF on these test trials"""        
         self._trials_eval_step(batch, is_test=True)
-
-    def on_validation_epoch_end(self) -> None:
-        valid_metric = self.valid_metric.compute()
-        self.valid_metric_best.update(valid_metric)
-        best_metrics_dict = self.valid_metric_best.compute()
-
-        self._epoch_end_common(is_test=False)
-        torch.cuda.empty_cache()  # Clear CUDA cache if using GPU
-
-        # Log the best metrics
-        prefixed_metrics_best = {
-            f"valid_best/{self.valid_metric_best.__class__.__name__}/{key}": value 
-            for key, value in best_metrics_dict.items()
-        }
-        self.log_dict(prefixed_metrics_best, **self.logging_params)
-        self.valid_metric.reset()
 
     def on_test_epoch_end(self) -> None:
         self._epoch_end_common(is_test=True)
@@ -504,51 +425,19 @@ class SpeakerVerification(pl.LightningModule):
         return {"optimizer": optimizer}
 
     ############ Dev and eval utils ############
-    def _compute_enrollment_embeddings(self, dataloader) -> dict:
-        embeddings_dict = {}
-        enrol_embeds = defaultdict(dict)
-
-        with tqdm(dataloader, desc="Computing enrollment embeddings") as pbar:
-            for batch in pbar:
-                outputs = self(batch)
-                enroll = outputs['embeds']
-                # Handle frame-level embeddings (if applicable)
-                if len(enroll.shape) == 3:  # [1, num_frames, embedding_dim]
-                    enroll = enroll.mean(dim=1)  # [1, embedding_dim]
-
-                # Explicitly check/create nested structure
-                model_key = batch.model
-                speaker_key = batch.speaker_id
-
-                if model_key not in embeddings_dict:
-                    embeddings_dict[model_key] = {}  # Create model entry
-                model_dict = embeddings_dict[model_key]
-
-                if speaker_key not in model_dict:
-                    model_dict[speaker_key] = []  # Create speaker entry
-                model_dict[speaker_key].append(enroll)  # Append to list
-
-        # Aggregate embeddings by taking the mean
-        for model_id, class_embeddings in embeddings_dict.items():
-            for speaker_id, embeddings in class_embeddings.items():
-                stacked_embeddings = torch.cat(embeddings, dim=0)
-                enrol_embeds[model_id][speaker_id] = stacked_embeddings.mean(dim=0)
-
-        return enrol_embeds
-
     def _compute_test_embeddings(self, dataloader, mode: str = 'test') -> dict:
         embeddings_dict = {}
         desc = f"Computing {mode} embeddings"
 
-        with tqdm(dataloader, desc=desc) as pbar:        
+        with tqdm(dataloader, desc=desc) as pbar: 
             for batch in pbar:
                 outputs = self(batch)
-                test = outputs['embeds']
+                embed = outputs['embeds']
                 # Handle frame-level embeddings (if applicable)
-                if len(test.shape) == 3:  # [1, num_frames, embedding_dim]
-                    test = test.mean(dim=1)  # [num_frames, embedding_dim]
+                if len(embed.shape) == 3:  # [1, num_frames, embedding_dim]
+                    embed = embed.mean(dim=1)  # [num_frames, embedding_dim]
 
-                embeddings_dict.update({path: emb for path, emb in zip(batch.audio_path, test)})
+                embeddings_dict.update({path: emb for path, emb in zip(batch.audio_path, embed)})
 
         return embeddings_dict
 
@@ -591,32 +480,23 @@ class SpeakerVerification(pl.LightningModule):
         enrol = self.enrol_embeds if is_test else self.enrol_dev_embeds
         metric = self.test_metric if is_test else self.valid_metric
 
-        trial_embeddings = torch.stack([embeds[path] for path in batch.audio_path])
-        enroll_embeddings = torch.stack([enrol[model][enroll_id]
-                                    for model, enroll_id in zip(batch.model, batch.enroll_id)])
+        trial_embeddings = torch.stack([embeds[path] for path in batch.test_path])
+        enroll_embeddings = torch.stack([enrol[path] for path in batch.enroll_path])
         cohort_embeddings = metric.cohort_embeddings
 
         # Compute raw cosine similarity scores
         raw_scores = torch.nn.functional.cosine_similarity(enroll_embeddings, trial_embeddings)
         
+        # Apply AS-Norm
         if cohort_embeddings is not None:
             normalized_scores = []
-            for i, (enroll_emb, test_emb, model) in enumerate(zip(enroll_embeddings, trial_embeddings, batch.model)):
+            for i, (enroll_emb, test_emb) in enumerate(zip(enroll_embeddings, trial_embeddings)):
                 raw_score = raw_scores[i]
-                
-                # Get model-specific cohort embeddings
-                model_cohort = cohort_embeddings.get(model)
-                assert model_cohort is not None, f"No cohort embeddings found for model {model}"
-                if isinstance(model_cohort, dict):
-                    model_cohort = torch.stack(list(model_cohort.values()))
-                if model_cohort.ndim != 2:
-                    raise ValueError(f"Invalid cohort embeddings shape for model {model}: {model_cohort.shape}")
-                
-                # Apply AS-Norm
                 norm_score = AS_norm(score=raw_score,
                                      enroll_embedding=enroll_emb,
                                      test_embedding=test_emb, 
-                                     cohort_embeddings=model_cohort, topk=300)
+                                     cohort_embeddings=cohort_embeddings,
+                                     topk=500)
                 normalized_scores.append(norm_score)
             
             # Convert back to tensor
@@ -629,12 +509,15 @@ class SpeakerVerification(pl.LightningModule):
         metric.update(scores=normalized_scores, labels=torch.tensor(batch.trial_label))
         
         batch_dict = {
-            "enrollment_id": batch.enroll_id,
-            "audio_path": batch.audio_path,
-            "label": batch.trial_label,
+            "enroll_path": batch.enroll_path,
+            "test_path": batch.test_path,
+            "enroll_length": batch.enroll_length,
+            "test_length": batch.test_length,
+            "trial_label": batch.trial_label,
+            "same_country_label": batch.same_country_label,
+            "same_gender_label": batch.same_gender_label,
             "score": raw_scores.detach().cpu().tolist(),
             "norm_score": normalized_scores.detach().cpu().tolist(),
-            "model": batch.model,
         }
         self.metric_tracker._trial_results.append(batch_dict)
 
@@ -646,21 +529,28 @@ class SpeakerVerification(pl.LightningModule):
 
         scores = pd.DataFrame([
             {
-                "enrollment_id": enroll_id,
-                "audio_path": audio_path,
-                "label": label,
+                "enroll_path": enroll_path,
+                "test_path": test_path,
+                "enroll_length": enroll_length,
+                "test_length": test_length,
+                "trial_label": trial_label,
+                "same_country_label": same_country_label,
+                "same_gender_label": same_gender_label,
                 "score": score,
                 "norm_score": norm_score,
-                "model": model,                
             }
             for batch in self.metric_tracker._trial_results
-            for enroll_id, audio_path, label, score, norm_score, model in zip(
-                batch["enrollment_id"],
-                batch["audio_path"],
-                batch["label"],
+            for enroll_path, test_path, enroll_length, test_length, 
+            trial_label, same_country_label, same_gender_label, score, norm_score in zip(
+                batch["enroll_path"],
+                batch["test_path"],
+                batch["enroll_length"],
+                batch["test_length"],
+                batch["trial_label"],
+                batch["same_country_label"],
+                batch["same_gender_label"],
                 batch["score"],
                 batch["norm_score"],
-                batch["model"],
             )
         ])
 
@@ -711,23 +601,6 @@ class SpeakerVerification(pl.LightningModule):
             metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
             with open(os.path.join(artifacts_dir, "test_metrics.json"), "w") as f:
                 json.dump(metrics_for_save, f, indent=4)
-
-        # Validation-specific logic: Check if this is the best validation epoch
-        if not is_test:
-            best_metrics = self.valid_metric_best.compute()
-            current_eer = metrics.get(self.valid_metric_best.target_key, float('inf'))
-            best_eer = best_metrics.get(self.valid_metric_best.target_key, float('inf'))
-            
-            # Save best validation scores, embeddings, and binary metrics plots
-            if current_eer == best_eer:
-                for name, fig in figures.items():
-                    self.log_figure_with_fallback(f"best_valid_{name}_scores", fig, stage=stage, step=self.current_epoch)
-                
-                scores.to_csv(os.path.join(artifacts_dir, "best_valid_scores.csv"), index=False)
-                torch.save(enrol_embeds, os.path.join(artifacts_dir, "best_valid_enrol_embeds.pt"))
-                torch.save(trials_embeds, os.path.join(artifacts_dir, "best_valid_embeds.pt"))
-                if metric.cohort_embeddings is not None:
-                    torch.save(metric.cohort_embeddings, os.path.join(artifacts_dir, "best_valid_cohort_embeds.pt"))
  
     def log_figure_with_fallback(self, name: str, fig: plt.Figure, stage: str, step: int) -> None:
         """Log figure with fallback for loggers that don't support figure logging."""

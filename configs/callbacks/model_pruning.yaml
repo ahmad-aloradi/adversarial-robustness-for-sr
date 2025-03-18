@@ -1,0 +1,7 @@
+model_pruning:
+  _target_: pytorch_lightning.callbacks.ModelPruning
+  pruning_fn: l1_unstructured
+  amount: 0.5
+  parameters_to_prune: null
+  use_global_unstructured: True
+  

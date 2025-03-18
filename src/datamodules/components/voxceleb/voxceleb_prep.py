@@ -29,11 +29,12 @@ class VoxCelebUtterance:
     recording_duration: float
     source: str
     split: str
+    class_id: Union[int, float] = None
     dataset_name: str = DATASET_DEFAULTS.dataset_name
     sample_rate: int = DATASET_DEFAULTS.sample_rate
     language: str = DATASET_DEFAULTS.language
     gender: Optional[str] = None
-    country: Optional[str] = None
+    country: Optional[str] = DATASET_DEFAULTS.country
     speaker_name: Optional[str] = None
     text: Optional[str] = None
 
@@ -474,8 +475,7 @@ class VoxCelebProcessor:
         # Save if output path provided
         if output_path:
             VoxCelebProcessor.save_csv(veri_df, output_path, sep=sep)            
-        else:
-            return veri_df
+        return veri_df
 
 
     @staticmethod

@@ -1068,8 +1068,8 @@ class MultiModalVPCModel(pl.LightningModule):
         self.metric_tracker = EmbeddingMetrics(self.trainer, 'test')
         enroll_test_loader, unique_test_loader = self.metric_tracker.get_loaders()
 
-        cohort_loader = self.metric_tracker.get_cohort_loader()
         if self.normalize_test_scores:
+            cohort_loader = self.metric_tracker.get_cohort_loader()
             cohort_embeddings = self._compute_cohort_embeddings(cohort_loader)
             self.metric_tracker.set_cohort_embeddings(cohort_embeddings)
         else:

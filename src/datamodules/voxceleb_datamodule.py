@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Literal
 
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
@@ -9,7 +9,9 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
     VoxCelebDataset, 
     VoxCelebVerificationDataset, 
     TrainCollate, 
-    VerificationCollate)
+    VerificationCollate,
+    VoxCelebEnroll,
+    EnrollCoallate)
 from src.datamodules.components.voxceleb.voxceleb_prep import VoxCelebProcessor
 from src import utils
 from src.datamodules.components.utils import CsvProcessor
@@ -57,6 +59,8 @@ class VoxCelebDataModule(LightningDataModule):
                 verbose=self.dataset.verbose)
             
             # save the updated csv
+            # subsample 10000 row for testing
+            updated_dev_csv = updated_dev_csv.sample(1000)
             VoxCelebProcessor.save_csv(updated_dev_csv, self.dataset.dev_csv_file)
             VoxCelebProcessor.save_csv(speaker_lookup_csv, self.dataset.speaker_lookup)
             
@@ -74,12 +78,45 @@ class VoxCelebDataModule(LightningDataModule):
                 )
             
             # enrich the verification file
-            _ = voxceleb_processor.enrich_verification_file(
+            test_df = voxceleb_processor.enrich_verification_file(
                 veri_test_path=self.dataset.veri_test_path,
                 metadata_path=self.dataset.metadata_csv_file,
                 output_path=self.dataset.veri_test_output_path,
                 sep=self.dataset.sep,
-                )    
+                )
+            
+            self.enroll_data =  VoxCelebDataModule._extract_enroll_test(test_df, mode='enroll')
+            self.unique_trial_data =  VoxCelebDataModule._extract_enroll_test(test_df, mode='test')
+
+    @staticmethod
+    def _extract_enroll_test(df: pd.DataFrame, mode: Literal['enroll', 'test']):
+        # Get unique enroll_paths
+        unique_enroll_paths = df[f'{mode}_path'].unique()        
+        results_list = []
+        enroll_columns = [col for col in df.columns if col.startswith(f'{mode}_')]
+        
+        for path in unique_enroll_paths:
+            path_df = df[df[f'{mode}_path'] == path]
+
+            # Initialize dictionary for this path's results
+            path_result = {f'{mode}_path': path}
+            
+            # Check each enroll column to see if it's constant
+            for column in enroll_columns:
+                if column != f'{mode}_path':  # Skip the enroll_path/test_path column itself
+                    unique_values = path_df[column].unique()
+                    
+                    # If there's only one unique value, this column is constant for this path
+                    if len(unique_values) == 1:
+                        path_result[column] = unique_values[0]
+            
+            # Add this path's results to our list
+            results_list.append(path_result)
+        
+        # Convert results to DataFrame
+        results_df = pd.DataFrame(results_list)
+        
+        return results_df
 
     def setup(self, stage: Optional[str] = None):
         if stage == 'fit' or stage is None:
@@ -99,9 +136,23 @@ class VoxCelebDataModule(LightningDataModule):
         if stage == 'test' or stage is None:
             self.test_data = VoxCelebVerificationDataset(
                 self.dataset.wav_dir,
-                self.dataset.veri_test_path,
+                self.dataset.veri_test_output_path,
                 self.dataset.sample_rate,
             )
+            
+            self.enrollment_data = VoxCelebEnroll(
+                data_dir=self.dataset.wav_dir,
+                phase='enrollment',
+                sample_rate=self.dataset.sample_rate,
+                dataset=self.enroll_data
+                )
+            
+            self.test_unique_data = VoxCelebEnroll(
+                data_dir=self.dataset.wav_dir,
+                phase='test',
+                sample_rate=self.dataset.sample_rate,
+                dataset=self.unique_trial_data
+                )
 
     def train_dataloader(self):
         return DataLoader(
@@ -135,6 +186,26 @@ class VoxCelebDataModule(LightningDataModule):
             drop_last=self.loaders.test.drop_last,
             collate_fn=VerificationCollate()
         )
+
+    def enrolling_dataloader(self) -> DataLoader:
+        trial_unique = DataLoader(
+            self.test_unique_data,
+            batch_size=self.loaders.enrollment.batch_size,
+            shuffle=self.loaders.enrollment.shuffle,
+            num_workers=self.loaders.enrollment.num_workers,
+            pin_memory=self.loaders.enrollment.pin_memory,
+            collate_fn=EnrollCoallate()
+            )
+
+        enroll_loader = DataLoader(
+            self.enrollment_data,
+            batch_size=self.loaders.enrollment.batch_size,
+            shuffle=self.loaders.enrollment.shuffle,
+            num_workers=self.loaders.enrollment.num_workers,
+            pin_memory=self.loaders.enrollment.pin_memory,
+            collate_fn=EnrollCoallate()
+            )
+        return enroll_loader, trial_unique
 
 
 if __name__ == "__main__":

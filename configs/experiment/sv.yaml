@@ -1,0 +1,62 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  # - override /callbacks: default.yaml
+  - /callbacks/model_pruning
+  - override /datamodule: datasets/voxceleb.yaml
+  - override /module: sv.yaml
+  - override /trainer: gpu.yaml
+  - override /logger: tensorboard.yaml
+
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+tags: ["voxceleb", "pruning"]
+seed: 42
+
+trainer:
+  min_epochs: 10
+  max_epochs: 25
+  gradient_clip_val: 5.0
+
+callbacks:
+  model_checkpoint:
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+  early_stopping:
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: 5
+
+datamodule:
+  loaders:
+    train:
+      batch_size: 64
+    valid:
+      batch_size: 64
+    test:
+      batch_size: 64
+    enrollment:
+      batch_size: 1
+
+module:
+  model:
+    normalize_test_scores: True
+  criterion:
+    selected_criterion: aam   # aam  cross_entropy
+  scheduler_settings:
+    selected_lr_scheduler: reduce_on_plateau  # reduce_on_plateau warmup_cosine
+  optimizer:
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
+
+
+# logger:
+#   wandb:
+#     tags: ${tags}
+#     group: "mnist"
+
