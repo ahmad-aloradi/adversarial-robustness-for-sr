@@ -59,8 +59,6 @@ class VoxCelebDataModule(LightningDataModule):
                 verbose=self.dataset.verbose)
             
             # save the updated csv
-            # subsample 10000 row for testing
-            updated_dev_csv = updated_dev_csv.sample(1000)
             VoxCelebProcessor.save_csv(updated_dev_csv, self.dataset.dev_csv_file)
             VoxCelebProcessor.save_csv(speaker_lookup_csv, self.dataset.speaker_lookup)
             
