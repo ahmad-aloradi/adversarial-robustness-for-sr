@@ -55,7 +55,7 @@ model:
         input_size: ${module.model.classifiers.config.bottleneck_size}
         hidden_size: ${module.model.classifiers.config.fusion_classifier_hidden_size}
         num_classes: ${module.model.classifiers.config.num_classes}
-        dropout_residual: 0.1
+        dropout_residual: 0.3
         num_residuals: 2
         norm_type: 'batch'
             
@@ -164,9 +164,9 @@ scheduler_settings:
       scheduler:
         _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
         mode: "min"
-        factor: 0.25
+        factor: 0.3
         min_lr: 1.0e-7
-        patience: 3
+        patience: 2
         verbose: True
       extras:
         monitor: valid/${replace:"__metric__"}/${module.metrics.valid_best.target_key}

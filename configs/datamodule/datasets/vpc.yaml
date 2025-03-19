@@ -90,8 +90,8 @@ available_models:
     dev_trials: ${datamodule.available_models.T25-1.metadata}/dev_trials.csv
     test_trials: ${datamodule.available_models.T25-1.metadata}/test_trials.csv
 
-# Models to use (defaults to all available); override via command line datamodule.models={B3: ${datamodule.available_models.B3}}
-models: ${datamodule.available_models}
+# for all models use: #${datamodule.available_models}); override via command line datamodule.models={B3: ${datamodule.available_models.B3}}
+models: ???
 
 transform: null
 

@@ -22,6 +22,7 @@ trainer:
   min_epochs: 10
   max_epochs: 25
   gradient_clip_val: 5.0
+  num_sanity_val_steps: 0
 
 callbacks:
   model_checkpoint:
@@ -46,10 +47,17 @@ datamodule:
 module:
   model:
     normalize_test_scores: True
+
   criterion:
     selected_criterion: aam   # aam  cross_entropy
+
   scheduler_settings:
     selected_lr_scheduler: reduce_on_plateau  # reduce_on_plateau warmup_cosine
+    available_lr_scheduler:
+      reduce_on_plateau:
+        scheduler:
+          mode: "max"
+
   optimizer:
     lr: 1.0e-4
     weight_decay: 1.0e-5

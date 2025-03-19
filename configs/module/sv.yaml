@@ -120,10 +120,10 @@ scheduler_settings:
     reduce_on_plateau:
       scheduler:
         _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-        mode: "min"
-        factor: 0.25
+        mode: "max"
+        factor: 0.3
         min_lr: 1.0e-7
-        patience: 3
+        patience: 2
         verbose: True
       extras:
         monitor: ${replace:"valid/__metric__"}

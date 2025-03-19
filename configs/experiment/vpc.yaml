@@ -20,6 +20,7 @@ trainer:
   min_epochs: 10
   max_epochs: 25
   gradient_clip_val: 5.0
+  num_sanity_val_steps: 0
 
 callbacks:
   model_checkpoint:
@@ -31,6 +32,14 @@ callbacks:
     patience: 10
 
 datamodule:
+  dataset:
+    max_duration: 12.0
+
+  models:
+    B3: ${datamodule.available_models.B3}
+    B5: ${datamodule.available_models.B5}
+    T8-5: ${datamodule.available_models.T8-5}
+
   loaders:
     train:
       batch_size: 16
@@ -46,10 +55,17 @@ module:
     normalize_test_scores: False
     classifiers: 
       selected_classifier: robust
+      
   criterion:
     selected_criterion: comprehensive   # aam  cross_entropy comprehensive
+
   scheduler_settings:
     selected_lr_scheduler: reduce_on_plateau  # reduce_on_plateau warmup_cosine
+    available_lr_scheduler:
+      reduce_on_plateau:
+        scheduler:
+          mode: "min"
+
   optimizer:
     lr: 1.0e-4
     weight_decay: 1.0e-5

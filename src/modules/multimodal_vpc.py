@@ -122,12 +122,23 @@ class FusionClassifierWithResiduals(nn.Module):
             self._create_residual_block(input_size, hidden_size, dropout_residual, norm_factory)
             for _ in range(num_residuals)
         ])
+
+        # Initialize weights
+        for block in self.residuals:
+            for m in block.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
         self.fusion_classifier = nn.Linear(input_size, num_classes)
+        nn.init.xavier_uniform_(self.fusion_classifier.weight)
+        nn.init.zeros_(self.fusion_classifier.bias)
 
     @staticmethod
     def get_embedding(fused_feats: Dict[str, torch.Tensor], 
-                    last_hidden: torch.Tensor,
-                    embedding_type: EmbeddingType) -> torch.Tensor:
+                      last_hidden: torch.Tensor,
+                      embedding_type: EmbeddingType) -> torch.Tensor:
         """Get the selected embedding type."""
         embedding_map = {
             EmbeddingType.TEXT: fused_feats["text_emb"],
@@ -166,6 +177,7 @@ class FusionClassifierWithResiduals(nn.Module):
         x = self.fusion_norm(fused_feats['fusion_emb'])
         for block in self.residuals:
             x = torch.nn.functional.relu(x + block(x))
+        
         fusion_logits = self.fusion_classifier(x)
         class_prob = torch.nn.functional.softmax(fusion_logits, dim=1)
         class_preds = torch.argmax(class_prob, dim=-1)
@@ -271,8 +283,8 @@ class RobustFusionClassifier(nn.Module):
 
     @staticmethod
     def get_embedding(fused_feats: Dict[str, torch.Tensor], 
-                    last_hidden: torch.Tensor,
-                    embedding_type: EmbeddingType) -> torch.Tensor:
+                      last_hidden: torch.Tensor,
+                      embedding_type: EmbeddingType) -> torch.Tensor:
         """Get the selected embedding type."""
         embedding_map = {
             EmbeddingType.TEXT: fused_feats["text_emb"],
@@ -1034,7 +1046,7 @@ class MultiModalVPCModel(pl.LightningModule):
     def training_step(self, batch: VPC25Item, batch_idx: int) -> Dict[str, torch.Tensor]:
         results = self.model_step(batch, self.train_criterion)
         
-        if batch_idx % 3000 == 0:
+        if batch_idx % 2000 == 0:
             torch.cuda.empty_cache()
 
         self._log_step_metrics(results, batch, METRIC_NAMES["TRAIN"])
