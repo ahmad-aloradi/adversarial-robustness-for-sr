@@ -51,10 +51,10 @@ datamodule:
       batch_size: 1
 
 module:
+  normalize_test_scores: True
   model:
-    normalize_test_scores: False
     classifiers: 
-      selected_classifier: robust
+      selected_classifier: robust   # normalized robust
       
   criterion:
     selected_criterion: comprehensive   # aam  cross_entropy comprehensive

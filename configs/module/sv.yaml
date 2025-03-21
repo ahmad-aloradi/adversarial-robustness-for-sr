@@ -102,7 +102,6 @@ model:
 
 ### classifiers ###
   classifiers:
-    # Common configuration
     config:
       num_classes: ${datamodule.num_classes}
       bottleneck_size: 512
@@ -120,9 +119,6 @@ model:
     max_size: 500000
     bypass_warmup: True
     
-  # Enable score normalization
-  normalize_test_scores: False
-
 ### criteria and metrics ###
 criterion:
   available_criteria:    
@@ -136,7 +132,7 @@ criterion:
       _target_: torch.nn.CrossEntropyLoss
 
   # Selected criterion (defaults to comprehensive)
-  selected_criterion: aam
+  selected_criterion: ???
   train_criterion: ${module.criterion.available_criteria.${module.criterion.selected_criterion}}
   valid_criterion: ${module.criterion.available_criteria.${module.criterion.selected_criterion}}
 
@@ -196,7 +192,7 @@ scheduler_settings:
         frequency: 1
 
   # Selected scheduler (defaults to reduce_on_plateau)
-  selected_lr_scheduler: reduce_on_plateau
+  selected_lr_scheduler: ???
 
 lr_scheduler: ${module.scheduler_settings.available_lr_scheduler.${module.scheduler_settings.selected_lr_scheduler}}
 
@@ -211,3 +207,13 @@ batch_sizes:
   train: ${datamodule.loaders.train.batch_size}
   valid: ${datamodule.loaders.valid.batch_size}
   test: ${datamodule.loaders.test.batch_size}
+
+### score normalization ###
+normalize_test_scores: ???   # apply score normalization or not
+scores_norm:
+  embeds_metric_params:
+    num_speakers_in_cohort: 6000
+    min_utts_per_speaker: 7
+  scores_norm_params:
+    topk: 10000
+    min_cohort_size: 3000

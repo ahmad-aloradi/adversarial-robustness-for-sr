@@ -15,6 +15,7 @@ from omegaconf import DictConfig
 from tqdm import tqdm
 import pandas as pd
 import matplotlib.pyplot as plt
+from omegaconf import OmegaConf
 
 from src.datamodules.components.voxceleb.voxceleb_dataset import (
     VoxcelebItem,
@@ -29,7 +30,6 @@ from datetime import datetime
 log = utils.get_pylogger(__name__)
 
 
-
 ###################################
 class EmbeddingMetrics:
     def __init__(
@@ -37,7 +37,7 @@ class EmbeddingMetrics:
         trainer: pl.Trainer,
         stage: str,
         num_speakers_in_cohort: int = 6000,
-        min_utts_per_speaker: int = 3,
+        min_utts_per_speaker: int = 6,
         speaker_col: str = 'speaker_id'
     ):
         """Initialize the EmbeddingMetrics class.
@@ -45,8 +45,8 @@ class EmbeddingMetrics:
         Args:
             trainer: PyTorch Lightning Trainer instance.
             stage: Stage of evaluation ('valid' or 'test').
-            num_speakers_in_cohort: Number of speakers to include in the cohort (default: 3000).
-            min_utts_per_speaker: Target number of utterances to sample per speaker (default: 4).
+            num_speakers_in_cohort: Number of speakers to include in the cohort (default: 6000).
+            min_utts_per_speaker: Target number of utterances to sample per speaker (default: 6).
             speaker_col: Column name for speaker IDs in the dataset (default: 'speaker_id').
         """
         self.trainer = trainer
@@ -194,8 +194,10 @@ class SpeakerVerification(pl.LightningModule):
         self._bypass_warmup = self._embeds_cache_config.get("bypass_warmup", False)
         self._embedding_cache = EmbeddingCache(max_size=self._max_cache_size)
         
-        # Initialize cohort embeddings for score normalization
-        self.normalize_test_scores = model.get("normalize_test_scores", False)
+        # Embeddings norm configs
+        self.normalize_test_scores = kwargs.get("normalize_test_scores", False)
+        self.scores_norm = kwargs.get("scores_norm",
+                                      OmegaConf.create({"embeds_metric_params": {}, "scores_norm_params": {}}))
 
     ############ Setup init ############
     def _setup_metrics(self, metrics: DictConfig) -> None:
@@ -210,7 +212,6 @@ class SpeakerVerification(pl.LightningModule):
         # Audio processing
         self.audio_processor = instantiate(model.audio_processor)
         self.audio_encoder = instantiate(model.audio_encoder)
-        self.audio_processor_kwargs = model.audio_processor_kwargs
         self.classifier = instantiate(model.classifiers.classifier)
         
         # Setup wav augmentation if configured
@@ -435,7 +436,9 @@ class SpeakerVerification(pl.LightningModule):
     @torch.inference_mode()
     def on_test_start(self) -> None:
         """Compute embeddings for test trials."""
-        self.metric_tracker = EmbeddingMetrics(self.trainer, 'test')
+        self.metric_tracker = EmbeddingMetrics(self.trainer,
+                                               stage='test',
+                                               **self.scores_norm.embeds_metric_params)
         enroll_test_loader, unique_test_loader = self.metric_tracker.get_loaders()
 
         if self.normalize_test_scores:
@@ -498,7 +501,7 @@ class SpeakerVerification(pl.LightningModule):
         assert cohort_path is None or cohort_path.is_file(), f'Unexpected cohort_path file: {cohort_path}'        
         
         if cohort_path is not None:
-            print('Loading Cohort Emebds')
+            log.info('Loading Cohort Embeddings')
             return torch.load(cohort_path)
 
         embeddings_list = []
@@ -514,7 +517,6 @@ class SpeakerVerification(pl.LightningModule):
                 embeddings_list.append(cohort)
         
         cohort_embeds = torch.cat(embeddings_list, dim=0)
-        torch.save(cohort_embeds, cohort_path)
         return cohort_embeds
 
     def _trials_eval_step(self, batch, is_test: bool):
@@ -538,8 +540,7 @@ class SpeakerVerification(pl.LightningModule):
                                      enroll_embedding=enroll_embeddings[i, ...],
                                      test_embedding=trial_embeddings[i, ...], 
                                      cohort_embeddings=cohort_embeddings,
-                                     topk=10000,
-                                     min_cohort_size=3000)
+                                     **self.scores_norm.scores_norm_params)
                 normalized_scores.append(norm_score)
             normalized_scores = torch.tensor(normalized_scores, device=raw_scores.device)
         else:

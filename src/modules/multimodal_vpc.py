@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional, List, Tuple, Literal, Callable, Union
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum, auto
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -16,6 +17,7 @@ from omegaconf import DictConfig
 from tqdm import tqdm
 import pandas as pd
 import matplotlib.pyplot as plt
+from omegaconf import OmegaConf
 
 from src.datamodules.components.vpc25.vpc_dataset import VPC25Item, VPC25VerificationItem, VPC25ClassCollate
 from src import utils
@@ -645,7 +647,7 @@ class MultiModalLoss(nn.Module):
     
 ###################################
 class EmbeddingMetrics:
-    def __init__(self, trainer: 'pl.Trainer', stage: str, cohort_per_model: int = 1000):
+    def __init__(self, trainer: 'pl.Trainer', stage: str, cohort_per_model: int = 15000):
         self.trainer = trainer
         self.stage = stage
         self.cohort_per_model = cohort_per_model
@@ -848,8 +850,10 @@ class MultiModalVPCModel(pl.LightningModule):
         self._bypass_text_warmup = self._text_embeds_cache_config.get("bypass_warmup", False)
         self._text_embedding_cache = EmbeddingCache(max_size=self._max_cache_size)
         
-        # Initialize cohort embeddings for score normalization
-        self.normalize_test_scores = model.get("normalize_test_scores", False)
+        # Embeddings norm configs
+        self.normalize_test_scores = kwargs.get("normalize_test_scores", False)
+        self.scores_norm = kwargs.get("scores_norm",
+                                      OmegaConf.create({"embeds_metric_params": {}, "scores_norm_params": {}}))
 
     ############ Setup init ############
     def _setup_metrics(self, metrics: DictConfig) -> None:
@@ -935,7 +939,7 @@ class MultiModalVPCModel(pl.LightningModule):
         
         # Process texts in batches with progress bar
         with torch.no_grad():
-            with tqdm(total=len(unique_texts), desc="Warming up cache") as pbar:
+            with tqdm(total=len(unique_texts), desc="Warming up cache", leave=False) as pbar:
                 for i in range(0, len(unique_texts), batch_size):
                     batch_texts = unique_texts[i: i + batch_size]
                     # Get embeddings and immediately delete the tensor since we only need the cached values
@@ -1066,7 +1070,10 @@ class MultiModalVPCModel(pl.LightningModule):
     @torch.inference_mode()
     def on_validation_start(self) -> None:
         """Compute embeddings for eval trials."""
-        self.metric_tracker = EmbeddingMetrics(self.trainer, 'valid')
+        self.metric_tracker = EmbeddingMetrics(self.trainer, 
+                                               stage='valid',
+                                               **self.scores_norm.embeds_metric_params
+                                               )
         enroll_dev_loader, unique_dev_loader = self.metric_tracker.get_loaders()
 
         self.metric_tracker.set_cohort_embeddings(None)
@@ -1076,8 +1083,10 @@ class MultiModalVPCModel(pl.LightningModule):
 
     @torch.inference_mode()
     def on_test_start(self) -> None:
-        """Compute embeddings for test trials."""
-        self.metric_tracker = EmbeddingMetrics(self.trainer, 'test')
+        self.metric_tracker = EmbeddingMetrics(self.trainer, 
+                                               stage='test',
+                                               **self.scores_norm.embeds_metric_params
+                                               )
         enroll_test_loader, unique_test_loader = self.metric_tracker.get_loaders()
 
         if self.normalize_test_scores:
@@ -1143,7 +1152,7 @@ class MultiModalVPCModel(pl.LightningModule):
         embeddings_dict = {}
         enrol_embeds = defaultdict(dict)
 
-        with tqdm(dataloader, desc="Computing enrollment embeddings") as pbar:
+        with tqdm(dataloader, desc="Computing enrollment embeddings", leave=False) as pbar:
             for batch in pbar:
                 outputs = self(batch)
                 enroll = outputs[EMBEDS["ID"]]
@@ -1175,7 +1184,7 @@ class MultiModalVPCModel(pl.LightningModule):
         embeddings_dict = {}
         desc = f"Computing {mode} embeddings"
 
-        with tqdm(dataloader, desc=desc) as pbar:        
+        with tqdm(dataloader, desc=desc, leave=False) as pbar:
             for batch in pbar:
                 outputs = self(batch)
                 test = outputs[EMBEDS["ID"]]
@@ -1188,9 +1197,17 @@ class MultiModalVPCModel(pl.LightningModule):
         return embeddings_dict
 
     def _compute_cohort_embeddings(self, dataloader) -> dict:
+        exp_root_path = Path(self.trainer.default_root_dir)
+        cohort_path = next(exp_root_path.rglob('test*/test_cohort_embeds.pt'), None)
+        assert cohort_path is None or cohort_path.is_file(), f'Unexpected cohort_path file: {cohort_path}'
+        
+        if cohort_path is not None:
+            log.info('Loading Cohort Embeddings')
+            return torch.load(cohort_path)
+        
         embeddings_dict = {}
 
-        with tqdm(dataloader, desc="Computing cohort embeddings") as pbar:
+        with tqdm(dataloader, desc="Computing cohort embeddings", leave=False) as pbar:
             for batch in pbar:
                 outputs = self(batch)
                 cohort = outputs[EMBEDS["ID"]]
@@ -1237,7 +1254,6 @@ class MultiModalVPCModel(pl.LightningModule):
         if cohort_embeddings is not None:
             normalized_scores = []
             for i, (enroll_emb, test_emb, model) in enumerate(zip(enroll_embeddings, trial_embeddings, batch.model)):
-                raw_score = raw_scores[i]
                 
                 # Get model-specific cohort embeddings
                 model_cohort = cohort_embeddings.get(model)
@@ -1248,10 +1264,11 @@ class MultiModalVPCModel(pl.LightningModule):
                     raise ValueError(f"Invalid cohort embeddings shape for model {model}: {model_cohort.shape}")
                 
                 # Apply AS-Norm
-                norm_score = AS_norm(score=raw_score,
+                norm_score = AS_norm(score=raw_scores[i],
                                      enroll_embedding=enroll_emb,
                                      test_embedding=test_emb, 
-                                     cohort_embeddings=model_cohort, topk=300)
+                                     cohort_embeddings=model_cohort,
+                                     **self.scores_norm.scores_norm_params)
                 normalized_scores.append(norm_score)
             
             # Convert back to tensor

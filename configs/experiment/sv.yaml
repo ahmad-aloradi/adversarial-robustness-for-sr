@@ -45,8 +45,7 @@ datamodule:
       batch_size: 1
 
 module:
-  model:
-    normalize_test_scores: True
+  normalize_test_scores: True
 
   criterion:
     selected_criterion: aam   # aam  cross_entropy
