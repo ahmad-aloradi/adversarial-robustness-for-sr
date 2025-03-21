@@ -98,7 +98,7 @@ class FusionClassifierWithResiduals(nn.Module):
         dropout_residual: float = 0.1,
         num_residuals: int = 2,
         norm_type: Literal['batch', 'layer'] = 'batch',
-        embedding_type: EmbeddingType = EmbeddingType.FUSION
+        embedding_type: EmbeddingType = EmbeddingType.LAST_HIDDEN
     ):
         super().__init__()
         self.embedding_type = embedding_type
