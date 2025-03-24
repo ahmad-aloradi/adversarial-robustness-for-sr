@@ -701,7 +701,7 @@ class EmbeddingMetrics:
                 coverage = len(model_speakers)
                 model_speaker_coverage[model] = coverage
                 if coverage < min_speakers_per_model:
-                    print(f"WARNING: Model {model} only has {coverage} speakers out of {len(unique_speakers)} total speakers")
+                    log.info(f"WARNING: Model {model} only has {coverage} speakers out of {len(unique_speakers)} total speakers")
             
             # Calculate samples per model-speaker combination
             target_samples_per_speaker = max(1, self.cohort_per_model // len(unique_speakers))
@@ -750,13 +750,13 @@ class EmbeddingMetrics:
             final_models = final_df[model_col].unique()
             final_speakers = final_df[speaker_col].unique()
             
-            print(f"Cohort statistics:")
-            print(f"- Total samples: {len(all_indices)}")
-            print(f"- Models represented: {len(final_models)}/{len(unique_models)}")
-            print(f"- Speakers represented: {len(final_speakers)}/{len(unique_speakers)}")
+            log.info(f"Cohort statistics:")
+            log.info(f"- Total samples: {len(all_indices)}")
+            log.info(f"- Models represented: {len(final_models)}/{len(unique_models)}")
+            log.info(f"- Speakers represented: {len(final_speakers)}/{len(unique_speakers)}")
             for model in final_models:
                 model_samples = final_df[final_df[model_col] == model]
-                print(f"- Model {model}: {len(model_samples)} samples, "
+                log.info(f"- Model {model}: {len(model_samples)} samples, "
                     f"{len(model_samples[speaker_col].unique())} speakers")
             
             self._indices = all_indices
@@ -831,6 +831,7 @@ class MultiModalVPCModel(pl.LightningModule):
         self.save_hyperparameters(logger=False)
         self.logging_params = logging_params
         self.batch_sizes = kwargs.get("batch_sizes")
+        self.data_augemntation = kwargs.get("data_augemntation", None)
         
         # Initialize metrics
         self._setup_metrics(metrics)
@@ -877,6 +878,12 @@ class MultiModalVPCModel(pl.LightningModule):
         
         # Fusion and classification
         self.fusion_classifier = instantiate(model.classifiers.fusion_classifier)
+
+        # Setup wav augmentation if configured
+        if self.data_augemntation is not None:
+            assert "wav_augmenter" in self.data_augemntation.augmentations, 'Expected augmentations.wav_augmenter when passing data_augemntation'
+            self.wav_augmenter = instantiate(self.data_augemntation.augmentations.wav_augmenter)
+
 
     def _setup_training_components(self, criterion: DictConfig, optimizer: DictConfig, lr_scheduler: DictConfig) -> None:
         """Initialize loss functions, optimizer and learning rate scheduler."""
@@ -1010,6 +1017,12 @@ class MultiModalVPCModel(pl.LightningModule):
 
     def forward(self, batch: VPC25Item) -> Dict[str, torch.Tensor]:
         """Process text/audio inputs with optimized embedding caching."""
+        # Handle waveform augmentation if specified.
+        if self.training and hasattr(self, "wav_augmenter"):
+            batch.audio, batch.audio_length = self.wav_augmenter(batch.audio, batch.audio_length)
+            batch.class_id = self.wav_augmenter.replicate_labels(batch.class_id)
+            batch.text = batch.text * (len(self.wav_augmenter.augmentations) + self.wav_augmenter.concat_original)
+
         # Process text (with cache optimization)
         text_emb = self.get_text_embeddings(batch.text)
 
