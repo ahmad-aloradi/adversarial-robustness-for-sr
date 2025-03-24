@@ -15,7 +15,7 @@ defaults:
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["voxceleb", "pruning"]
+tags: ["voxceleb", "pruning",  "sv", "ecapa"]
 seed: 42
 
 trainer:
@@ -31,7 +31,7 @@ callbacks:
   early_stopping:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    patience: 5
+    patience: 8
 
 datamodule:
   loaders:
@@ -51,7 +51,7 @@ module:
     selected_criterion: aam   # aam  cross_entropy
 
   scheduler_settings:
-    selected_lr_scheduler: reduce_on_plateau  # reduce_on_plateau warmup_cosine
+    selected_lr_scheduler: warmup_cosine  # reduce_on_plateau warmup_cosine
     available_lr_scheduler:
       reduce_on_plateau:
         scheduler:
