@@ -1,20 +1,21 @@
-cat configs/experiment/vpc_aug.yaml
 # @package _global_
 
 # to execute this experiment run:
 # python train.py experiment=example
 
 defaults:
-  - override /callbacks: default.yaml
-  - override /datamodule: datasets/vpc.yaml
-  - override /module: vpc.yaml
+  # - override /callbacks: default.yaml
+  - /callbacks/model_pruning
+  - override /datamodule: datasets/voxceleb.yaml
+  - override /module: sv.yaml
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
+
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["data_augmentation", "vpc25", "de-anonmyzation"]
+tags: ["data_augmentation", "model_pruning", "voxceleb", "sv", "ecapa"]
 seed: 42
 
 trainer:
@@ -25,57 +26,50 @@ trainer:
 
 callbacks:
   model_checkpoint:
-    mode: min
-    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
   early_stopping:
-    mode: min
-    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
-    patience: 10
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: 8
 
 datamodule:
   dataset:
-    max_duration: 12.0
-
-  models:
-    B3: ${datamodule.available_models.B3}
-    B5: ${datamodule.available_models.B5}
-    T8-5: ${datamodule.available_models.T8-5}
+    max_duration: 3.0
 
   loaders:
     train:
-      batch_size: 4
+      batch_size: 32
     valid:
-      batch_size: 4
+      batch_size: 32
     test:
-      batch_size: 4
+      batch_size: 8
     enrollment:
       batch_size: 1
 
 module:
-
   normalize_test_scores: True
-  model:
-    classifiers: 
-      selected_classifier: robust   # normalized robust
-      
+
   criterion:
-    selected_criterion: comprehensive   # aam  cross_entropy comprehensive
+    selected_criterion: aam   # aam  cross_entropy
 
   scheduler_settings:
-    selected_lr_scheduler: reduce_on_plateau  # reduce_on_plateau warmup_cosine
+    selected_lr_scheduler: warmup_cosine  # reduce_on_plateau warmup_cosine
     available_lr_scheduler:
       reduce_on_plateau:
         scheduler:
-          mode: "min"
+          mode: "max"
 
   optimizer:
     lr: 1.0e-4
     weight_decay: 1.0e-5
 
+  ### Data for augmentation ###
   data_augemntation:
+
     noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
     rir_dataset_url: https://www.dropbox.com/scl/fi/linhy77c36mu10965a836/RIRs.zip?rlkey=pg9cu8vrpn2u173vhiqyu743u&dl=1
-    data_folder_rir_noises: ${paths.data_dir}/voxceleb/RIRS_NOISES
+    data_folder_rir_noises: ${datamodule.dataset.data_dir}/RIRS_NOISES
     noise_annotation: ${module.data_augemntation.data_folder_rir_noises}/noise.csv
     rir_annotation: ${module.data_augemntation.data_folder_rir_noises}/reverb.csv
 
@@ -97,8 +91,8 @@ module:
       add_noise:
         _target_: speechbrain.augment.time_domain.AddNoise
         csv_file: ${module.data_augemntation.noise_annotation}
-        snr_low: 10
-        snr_high: 20
+        snr_low: 0
+        snr_high: 15
         noise_sample_rate: ${datamodule.dataset.sample_rate}
         clean_sample_rate: ${datamodule.dataset.sample_rate}
         num_workers: ${datamodule.loaders.train.num_workers}
@@ -120,8 +114,8 @@ module:
 
       drop_chunk:
         _target_: speechbrain.augment.time_domain.DropChunk
-        drop_length_low: 2000
-        drop_length_high: 8000
+        drop_length_low: 1000
+        drop_length_high: 2000
         drop_count_low: 1
         drop_count_high: 5
 
@@ -142,3 +136,4 @@ module:
 #   wandb:
 #     tags: ${tags}
 #     group: "mnist"
+

@@ -34,6 +34,9 @@ callbacks:
     patience: 8
 
 datamodule:
+  dataset:
+    max_duration: 3.0
+
   loaders:
     train:
       batch_size: 64

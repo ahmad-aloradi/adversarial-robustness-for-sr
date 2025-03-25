@@ -277,7 +277,7 @@ class SpeakerVerification(pl.LightningModule):
         
         # Process texts in batches with progress bar
         with torch.no_grad():
-            with tqdm(total=len(unique_audios), desc="Warming up cache") as pbar:
+            with tqdm(total=len(unique_audios), desc="Warming up cache", leave=False) as pbar:
                 for i in range(0, len(unique_audios), batch_size):
                     batch_audios = unique_audios[i: i + batch_size]
                     batch_audios_lens = unique_audios_lens[i: i + batch_size] 
@@ -386,6 +386,8 @@ class SpeakerVerification(pl.LightningModule):
         if isinstance(criterion, torch.nn.CrossEntropyLoss):
             main_loss = criterion(outputs[f"logits"], batch.class_id)
         elif criterion.__class__.__name__ == 'LogSoftmaxWrapper':
+            if outputs[f"logits"].ndim == 3 and outputs[f"logits"].shape[1] == 1:
+                outputs[f"logits"] = outputs[f"logits"].squeeze(1)
             main_loss = criterion(outputs[f"logits"].unsqueeze(1), batch.class_id.unsqueeze(1))
         else:
             raise ValueError("Invalid criterion")
@@ -483,7 +485,7 @@ class SpeakerVerification(pl.LightningModule):
         embeddings_dict = {}
         desc = f"Computing {mode} embeddings"
 
-        with tqdm(dataloader, desc=desc) as pbar: 
+        with tqdm(dataloader, desc=desc, leave=False) as pbar:
             for batch in pbar:
                 outputs = self(batch)
                 embed = outputs['embeds']
@@ -505,7 +507,7 @@ class SpeakerVerification(pl.LightningModule):
             return torch.load(cohort_path)
 
         embeddings_list = []
-        with tqdm(dataloader, desc="Computing cohort embeddings") as pbar:
+        with tqdm(dataloader, desc="Computing cohort embeddings", leave=False) as pbar:
             for batch in pbar:
                 outputs = self(batch)
                 cohort = outputs['embeds']
