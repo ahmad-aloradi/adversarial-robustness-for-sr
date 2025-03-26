@@ -95,7 +95,7 @@ criterion:
 
     enhanced:
       _target_: src.modules.multimodal_vpc.EnhancedCriterion
-      classification_loss: ???
+      classification_loss: null
 
     comprehensive:
       _target_: src.modules.losses.components.multi_modal_losses.MultiModalLoss
@@ -110,7 +110,7 @@ criterion:
         consistency: 1.0
         confidence: 0.1
       confidence_target: 0.9
-      classification_loss: ???
+      classification_loss: null
     
   # Selected criterion (defaults to comprehensive)
   selected_criterion: ???

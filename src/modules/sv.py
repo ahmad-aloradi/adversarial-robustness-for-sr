@@ -186,7 +186,7 @@ class SpeakerVerification(pl.LightningModule):
         self._setup_training_components(criterion, optimizer, lr_scheduler)
         
         # Freeze pretrained components
-        self._freeze_pretrained_components(finetune=False)
+        self._freeze_pretrained_components()
 
         # Initialize text embedding cache with appropriate limits
         self._embeds_cache_config = model.get("embedding_cache", {})
@@ -226,10 +226,11 @@ class SpeakerVerification(pl.LightningModule):
         self.optimizer = optimizer
         self.slr_params = lr_scheduler
 
-    def _freeze_pretrained_components(self, finetune=False) -> None:
+    def _freeze_pretrained_components(self) -> None:
         """Freeze pretrained components and enable training for others."""
-        for param in self.audio_encoder.parameters():
-            param.requires_grad = finetune
+        if hasattr(self.audio_encoder, "encode_batch"):
+            for param in self.audio_encoder.parameters():
+                param.requires_grad = False
 
     def _log_step_metrics(self, results: Dict[str, Any], batch: VoxcelebItem, stage: str) -> None:
         criterion = getattr(self, f"{stage}_criterion")
