@@ -33,7 +33,7 @@ callbacks:
 
 datamodule:
   dataset:
-    max_duration: 12.0
+    max_duration: 10.0
 
   models:
     B3: ${datamodule.available_models.B3}
@@ -52,39 +52,41 @@ datamodule:
 
 module:
   normalize_test_scores: True
-  model:
-    classifiers: 
-      selected_classifier: robust   # normalized robust
       
   criterion:
-    selected_criterion: comprehensive   # aam  cross_entropy comprehensive
-    available_criteria:
-      comprehensive:
-        _target_: src.modules.losses.components.multi_modal_losses.MultiModalLoss
-        classifier_name: ${module.model.classifiers.selected_classifier}
-        weights:
-          _target_: src.modules.losses.components.multi_modal_losses.LossWeights
-          ensemble: ${map:${module.model.classifiers.selected_classifier},robust,1.0,0.0}
-          fusion: ${map:${module.model.classifiers.selected_classifier},normalized,1.0,0.2}
-          audio: 0.2
-          text: 0.2
-          contrastive: 0.1
-          consistency: 1.0
-          confidence: 0.1
-        confidence_target: 0.9
-        classification_loss: 
-          _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
-          loss_fn:
-            _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-            margin: 0.2
-            scale: 30.0
+    train_criterion:
+      _target_: src.modules.losses.components.multi_modal_losses.MultiModalLoss
+      classifier_name: robust
+      weights:
+        _target_: src.modules.losses.components.multi_modal_losses.LossWeights
+        ensemble: 1.0
+        fusion: 0.2
+        audio: 0.2
+        text: 0.2
+        contrastive: 0.1
+        consistency: 1.0
+        confidence: 0.1
+      confidence_target: 0.9
+      classification_loss: 
+        _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
+        loss_fn:
+          _target_: speechbrain.nnet.losses.AdditiveAngularMargin
+          margin: 0.2
+          scale: 30.0
 
-  scheduler_settings:
-    selected_lr_scheduler: reduce_on_plateau  # reduce_on_plateau warmup_cosine
-    available_lr_scheduler:
-      reduce_on_plateau:
-        scheduler:
-          mode: "min"
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: "min"
+      factor: 0.25
+      min_lr: 1.0e-7
+      patience: 2
+      verbose: True
+    extras:
+      monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+      interval: "epoch"
+      frequency: 1
+
 
   optimizer:
     lr: 1.0e-4

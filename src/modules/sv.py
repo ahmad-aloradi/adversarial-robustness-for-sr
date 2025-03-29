@@ -211,8 +211,9 @@ class SpeakerVerification(pl.LightningModule):
         """Initialize encoders and classifiers."""
         # Audio processing
         self.audio_processor = instantiate(model.audio_processor)
+        self.audio_processor_normalizer = instantiate(model.audio_processor_normalizer)
         self.audio_encoder = instantiate(model.audio_encoder)
-        self.classifier = instantiate(model.classifiers.classifier)
+        self.classifier = instantiate(model.classifier)
         
         # Setup wav augmentation if configured
         if self.data_augemntation is not None:
@@ -294,15 +295,6 @@ class SpeakerVerification(pl.LightningModule):
                 wavs=batch_audio,
                 wav_lens=batch_audio_lens/max(batch_audio_lens)
                 ).squeeze(1)
-        
-        # For transformers-based encoders (e.g., wav2vec) 
-        elif False:              
-            input_values = self.audio_processor(
-                batch_audio, 
-                **self.audio_processor_kwargs).input_values.squeeze(0).to(self.device)
-            audio_outputs = self.audio_encoder(input_values)
-            audio_emb = audio_outputs.last_hidden_state.mean(dim=1)
-            
         else:
             # TODO: strange mismatch during testing 
             if self.device != batch_audio.device:
@@ -310,6 +302,7 @@ class SpeakerVerification(pl.LightningModule):
             if self.device != batch_audio_lens.device:
                 batch_audio_lens = batch_audio_lens.to(self.device)
             input_values = self.audio_processor(batch_audio)
+            input_values = self.audio_processor_normalizer(input_values, lengths=batch_audio_lens/max(batch_audio_lens))
             audio_emb = self.audio_encoder(input_values, lengths=batch_audio_lens/max(batch_audio_lens)).squeeze(1)
         
         return audio_emb

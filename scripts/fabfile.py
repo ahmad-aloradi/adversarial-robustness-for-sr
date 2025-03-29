@@ -187,6 +187,7 @@ def run_exp():
 
     batch_size = 64
     max_epochs = 30
+    max_duration = 10
     dataset_dirname = 'vpc2025_official'
 
     settings = {
@@ -203,74 +204,65 @@ def run_exp():
         'cuda': '11.1.0',  # '10.0'
     }
 
-    datasets = ["{B3: ${datamodule.available_models.B3}}",
-               "{B4: ${datamodule.available_models.B4}}",
-               "{B5: ${datamodule.available_models.B5}}",
-               "{T8-5: ${datamodule.available_models.T8-5}}",
-               "{T12-5: ${datamodule.available_models.T12-5}}",
-               "{T25-1: ${datamodule.available_models.T25-1}}",
-               "${datamodule.available_models}"]
-    classifiers = ["robust", "normalized"]
-    loss_functions = ["comprehensive", "aam", "cross_entropy"]
-    schedulers = ["reduce_on_plateau", "warmup_cosine"]
+    # datasets = ["{B3: ${datamodule.available_models.B3}}",
+    #            "{B4: ${datamodule.available_models.B4}}",
+    #            "{B5: ${datamodule.available_models.B5}}",
+    #            "{T8-5: ${datamodule.available_models.T8-5}}",
+    #            "{T12-5: ${datamodule.available_models.T12-5}}",
+    #            "{T25-1: ${datamodule.available_models.T25-1}}",
+    #            "${datamodule.available_models}"]
+    datasets = ["${datamodule.available_models}"]
+    experiments = ["vpc_amm_aug.yaml", "vpc_amm.yaml", "vpc_ce.yaml"]
 
-    for dataset in datasets:
-        for scheduler in schedulers:
-            for classifier in classifiers:
-                for loss_function in loss_functions:
-                    if dataset.startswith("{") and ":" in dataset:
-                        dataset_name = dataset.split(":")[0].strip("{").strip()
-                    else:
-                        dataset_name = "available_models"
-                    classifier_name = classifier.split('=')[-1]
-                    loss_func_name = loss_function.split('=')[-1]
-                    job_name = 'classifier-' + classifier_name + '_' + 'loss-' + loss_func_name + '_' + dataset_name + '_' + scheduler
+    for experiment in experiments:
+        for dataset in datasets:
+            if dataset.startswith("{") and ":" in dataset:
+                dataset_name = dataset.split(":")[0].strip("{").strip()
+            else:
+                dataset_name = "available_models"
+            job_name = 'experiment-' + experiment + '_' + dataset_name + '_' + 'max_duration-' + max_duration
 
-                    # Defined this way to avoid re-training on different runs
-                    settings['job_name'] = job_name
-                    settings['datamodule_dir'] = dataset_dirname + os.sep + dataset_name
-                    name = dataset_name + os.sep + job_name + '_' + str(batch_size)
+            # Defined this way to avoid re-training on different runs
+            settings['job_name'] = job_name
+            settings['datamodule_dir'] = dataset_dirname + os.sep + dataset_name
+            name = dataset_name + os.sep + job_name + '_' + str(batch_size)
 
-                    script_arguments = {
-                        'datamodule': 'datasets/vpc',
-                        'module': 'vpc',
-                        'trainer': 'gpu',
-                        'name': name,
-                        'logger': 'tensorboard',
-                        # 'logger.neptune.with_id': name,
-                        'datamodule.models': f"'{dataset}'",
-                        'datamodule.loaders.train.batch_size': batch_size,
-                        'datamodule.loaders.valid.batch_size': batch_size,
-                        'datamodule.dataset.max_duration': 12,
-                        'module.model.classifiers.selected_classifier': f"{classifier}",
-                        'module.criterion.selected_criterion': f"{loss_function}",
-                        "module.scheduler_settings.selected_lr_scheduler": f"{scheduler}",
-                        'trainer.max_epochs': max_epochs,
-                        'paths.log_dir': f'{RESULTS_DIR}',
-                        'hydra.run.dir': f'{RESULTS_DIR}/train/runs/{name}',
-                        "+trainer.num_sanity_val_steps": 0
-                    }
+            script_arguments = {
+                'datamodule': 'datasets/vpc',
+                'experiment': f'experiment/vpc/{experiment}',
+                'module': 'vpc',
+                'trainer': 'gpu',
+                'name': name,
+                'logger': 'tensorboard',
+                # 'logger.neptune.with_id': name,
+                'datamodule.models': f"'{dataset}'",
+                'datamodule.loaders.train.batch_size': batch_size,
+                'datamodule.loaders.valid.batch_size': batch_size,
+                'datamodule.dataset.max_duration': max_duration,
+                'trainer.max_epochs': max_epochs,
+                'paths.log_dir': f'{RESULTS_DIR}',
+                'hydra.run.dir': f'{RESULTS_DIR}/train/runs/{name}',
+                "trainer.num_sanity_val_steps": 0
+            }
 
-                    # Check for pending jobs: continue_flag = 1 if the job is pending
-                    continue_flag = check_pending(job_name)
+            # Check for pending jobs: continue_flag = 1 if the job is pending
+            continue_flag = check_pending(job_name)
 
-                    # 1- if pending: do nothing
-                    if continue_flag:
-                        continue
+            # 1- if pending: do nothing
+            if continue_flag:
+                continue
 
-                    # 2- if not: do the following:
-                    # get last_ckpt path
-                    last_ckpt = os.path.join(script_arguments['hydra.run.dir'], f'checkpoints/last.ckpt')
+            # 2- if not: do the following:
+            # get last_ckpt path
+            last_ckpt = os.path.join(script_arguments['hydra.run.dir'], f'checkpoints/last.ckpt')
 
-                    last_ckpt_exists = check_file_exists(f'{last_ckpt}')
-                    if last_ckpt_exists:
-                        script_arguments['ckpt_path'] = last_ckpt
+            last_ckpt_exists = check_file_exists(f'{last_ckpt}')
+            if last_ckpt_exists:
+                script_arguments['ckpt_path'] = last_ckpt
 
-                    bash_script = create_bash_script(settings, script_arguments)
-                    run_bash_script(bash_script)
-                    time.sleep(0.1)
-                    break
-                break
+            bash_script = create_bash_script(settings, script_arguments)
+            run_bash_script(bash_script)
+            time.sleep(0.1)
             break
         break
 

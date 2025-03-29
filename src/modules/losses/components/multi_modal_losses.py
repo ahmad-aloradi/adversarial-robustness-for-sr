@@ -231,6 +231,7 @@ class MultiModalLoss(nn.Module):
         classifier_name: Literal['normalized', 'robust'],
         weights: Optional[LossWeights] = None,
         confidence_target: float = 0.9,
+        contrastive_temprature: float = 1.0,
         weight_scheduler: Optional[Callable] = None,
         return_dict: bool = True
     ):
@@ -241,6 +242,7 @@ class MultiModalLoss(nn.Module):
         self.weights = weights or LossWeights()
         self.confidence_target = confidence_target
         self.weight_scheduler = weight_scheduler
+        self.contrastive_temprature = contrastive_temprature
         self.return_dict = return_dict
         
         # Validation
@@ -285,8 +287,7 @@ class MultiModalLoss(nn.Module):
         embeddings_norm = F.normalize(embeddings, p=2, dim=1)
         similarity_matrix = torch.matmul(embeddings_norm, embeddings_norm.T)
         similarity_matrix = torch.clamp(similarity_matrix, min=-1.0 + self.eps, max=1.0 - self.eps)
-        # return similarity_matrix / self.temperature
-        return similarity_matrix
+        return similarity_matrix / self.contrastive_temprature
 
     def contrastive_loss(self, embeddings: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute supervised contrastive loss with improved stability."""

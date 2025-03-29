@@ -6,7 +6,8 @@ defaults:
 model:
   # audio_processor:
   #   _target_: torch.nn.Identity
-  # 
+  # audio_processor_normalizer:
+  #   _target_: torch.nn.Identity
   # audio_encoder:
   #   _target_: speechbrain.inference.EncoderClassifier.from_hparams
   #   source: "speechbrain/spkrec-ecapa-voxceleb"
@@ -27,6 +28,11 @@ model:
     left_frames: 0
     right_frames: 0
 
+  audio_processor_normalizer:
+    _target_: speechbrain.processing.features.InputNormalization
+    norm_type: sentence
+    std_norm: False
+
   audio_encoder:
     _target_: speechbrain.lobes.models.ECAPA_TDNN.ECAPA_TDNN
     input_size: ${module.model.audio_processor.n_mels}
@@ -35,19 +41,13 @@ model:
     dilations: [1, 2, 3, 4, 1]
     groups: [1, 1, 1, 1, 1]
     attention_channels: 128
-    lin_neurons: 192
+    lin_neurons: 192  # ECAPA embedding size
 
-  ### classifiers ###
-  classifiers:
-    config:
-      num_classes: ${datamodule.num_classes}
-      bottleneck_size: 512
-      audio_embedding_size: 192  # ECAPA embedding size
-
-    classifier: 
-      _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
-      input_size:  ${module.model.classifiers.config.audio_embedding_size}
-      out_neurons: ${module.model.classifiers.config.num_classes}
+  ### classifier ###
+  classifier: 
+    _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+    input_size: ${module.model.audio_encoder.lin_neurons}
+    out_neurons:  ${datamodule.num_classes}
 
 ### caching ###
   embedding_cache:
@@ -56,20 +56,14 @@ model:
     
 ### criteria and metrics ###
 criterion:
-  available_criteria:    
-    aam:
-      _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
-      loss_fn:
-        _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-        margin: 0.2
-        scale: 30.0    
-    cross_entropy:
-      _target_: torch.nn.CrossEntropyLoss
-
-  # Selected criterion (defaults to comprehensive)
-  selected_criterion: ???
-  train_criterion: ${module.criterion.available_criteria.${module.criterion.selected_criterion}}
-  valid_criterion: ${module.criterion.available_criteria.${module.criterion.selected_criterion}}
+  aam: &_amm_
+    _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
+    loss_fn:
+      _target_: speechbrain.nnet.losses.AdditiveAngularMargin
+      margin: 0.2
+      scale: 30.0
+  train_criterion: *_amm_
+  valid_criterion: *_amm_
 
   # For callbacks
   loss: ${module.criterion.train_criterion}
@@ -78,11 +72,11 @@ metrics:
   train: 
     _target_: "torchmetrics.Accuracy"
     task: "multiclass"
-    num_classes: ${module.model.classifiers.config.num_classes}
+    num_classes: ${datamodule.num_classes}
   valid:
     _target_: "torchmetrics.Accuracy"
     task: "multiclass"
-    num_classes: ${module.model.classifiers.config.num_classes}
+    num_classes: ${datamodule.num_classes}
   valid_best:
     _target_: torchmetrics.MaxMetric
   test:
@@ -95,41 +89,8 @@ optimizer:
   lr: 1.0e-4
   weight_decay: 1.0e-5
 
-scheduler_settings:
-  available_lr_scheduler:
-    warmup_cosine:
-      _target_: torch.optim.lr_scheduler.SequentialLR
-      schedulers:
-        - _target_: torch.optim.lr_scheduler.LinearLR
-          start_factor: 0.1
-          total_iters: ${int:${mul:${trainer.max_epochs},0.1}}
-        - _target_: torch.optim.lr_scheduler.CosineAnnealingLR
-          T_max: ${int:${sub:${trainer.max_epochs},${module.scheduler_settings.available_lr_scheduler.warmup_cosine.schedulers[0].total_iters}}} # Remaining epochs after linear warmup
-          eta_min: ${mul:${module.optimizer.lr},0.05}
-      milestones:
-        - ${int:${mul:${trainer.max_epochs},0.1}}  # 10% of total epochs are used for linear warmup, remaining for cosine annealing
-      extras:
-        monitor: ${replace:"valid/__metric__"}
-        interval: epoch
-        frequency: 1
+lr_scheduler: ???
 
-    reduce_on_plateau:
-      scheduler:
-        _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-        mode: "max"
-        factor: 0.3
-        min_lr: 1.0e-7
-        patience: 2
-        verbose: True
-      extras:
-        monitor: ${replace:"valid/__metric__"}
-        interval: "epoch"
-        frequency: 1
-
-  # Selected scheduler (defaults to reduce_on_plateau)
-  selected_lr_scheduler: ???
-
-lr_scheduler: ${module.scheduler_settings.available_lr_scheduler.${module.scheduler_settings.selected_lr_scheduler}}
 
 ### extras and callbacks ###
 logging_params:

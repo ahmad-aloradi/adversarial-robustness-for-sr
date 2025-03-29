@@ -210,6 +210,7 @@ class RobustFusionClassifier(nn.Module):
         fusion_dependent_hidden = 2 * hidden_size if accum_method == 'concat' else hidden_size
         self.accum_method = accum_method
         self.embedding_type = embedding_type
+        distortion_size = hidden_size // 4
         
         # Factory for normalization layers
         norm_factory: Callable = {
@@ -221,13 +222,13 @@ class RobustFusionClassifier(nn.Module):
         self.distortion_estimator = nn.Sequential(
             nn.Linear(audio_embedding_size, hidden_size // 2),
             nn.ReLU(),
-            nn.Linear(hidden_size // 2, hidden_size // 4)  # Distortion vector
+            nn.Linear(hidden_size // 2, distortion_size)  # Distortion vector
         )
         
         # Audio branch conditioned on distortion
         self.audio_branch = nn.Sequential(
-            norm_factory(audio_embedding_size + hidden_size // 4),  # Input size includes distortion vector
-            nn.Linear(audio_embedding_size + hidden_size // 4, hidden_size),
+            norm_factory(audio_embedding_size + distortion_size),  # Input size includes distortion vector
+            nn.Linear(audio_embedding_size + distortion_size, hidden_size),
             nn.GELU(),
             nn.Dropout(dropout_audio)
         )        
@@ -312,7 +313,7 @@ class RobustFusionClassifier(nn.Module):
         # Adaptive ensemble weighting
         gate_input = torch.cat([audio_features, text_features, audio_conf, text_conf], dim=-1)
         ensemble_weights = self.adaptive_gate(gate_input)
-        
+
         # Final prediction with residual audio connection
         final_logits = (ensemble_weights[:, 0:1] * audio_logits +
                         ensemble_weights[:, 1:2] * text_logits +
@@ -324,7 +325,7 @@ class RobustFusionClassifier(nn.Module):
         # get representation
         fused_feats = {'text_emb': text_features, 'audio_emb': audio_features, 'fusion_emb': fusion_features}
         features = RobustFusionClassifier.get_embedding(fused_feats, last_hidden=fusion_features, embedding_type=self.embedding_type)
-        
+
         return {
             "ensemble_logits": final_logits,
             "audio_logits": audio_logits,
@@ -572,7 +573,7 @@ class MultiModalVPCModel(pl.LightningModule):
         self.audio_processor_kwargs = model.audio_processor_kwargs
         
         # Fusion and classification
-        self.fusion_classifier = instantiate(model.classifiers.fusion_classifier)
+        self.fusion_classifier = instantiate(model.fusion_classifier)
 
         # Setup wav augmentation if configured
         if self.data_augemntation is not None:

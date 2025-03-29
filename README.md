@@ -93,7 +93,7 @@ In this particular case, the directory structure looks like:
 
 ## Data Preparation
 ### Structure
-Our pipeline collect data as `.csv` files with a certain columns,, which are defined in `src/datamodules/components/common.py` as:
+Our pipeline collect data as `.csv` files with a certain columns, which are defined in `src/datamodules/components/common.py` as:
 ```python
 @dataclass(frozen=True)
 class BaseDatasetCols:
@@ -112,10 +112,14 @@ class BaseDatasetCols:
 ```
 Additional columns can be added by overriding the base columns. Non-existing are set to defaults defined in `common.py`.
 
-This enfirced homogeneity in columns allows composing datasets without complications.
+This enforced homogeneity in columns allows composing datasets without complications.
 
 ### Preprare the csvs
-Follow `scripts/datasets/prep_{DATASET}.sh`.
+Follow `scripts/datasets/prep_{DATASET}.sh`. If you face any problems with these scripts, please report to ahmad.aloradi94@gmail.com.
+
+#### Known Issues: 
+1. `VoicePrivacy2025` dataset: when untarring the `T25-1` model's data, there is a mis-named . PLEASE FIX typo MANUALLY.
+2. `LibriSpeech` dataset: In `SPEAKERS.TXT`, line 60 used to create a problem when loading as `.csv` with `sep='|'`. It is now automatically handleded.
 
 ### Recipes
-At the moment we support recipes for the following datasets: `VoxCeleb`, `LibriSpeech`, `VoicePrivacyAttacker`. Currecntly, we expect the dataset to be downloaded on your machine, but we are slowly trying to intgrate the download in the `scripts/datasets`.
+At the moment we support recipes for the following datasets: `VoxCeleb`, `LibriSpeech`, `VoicePrivacy2025`. Currecntly, we expect the dataset to be downloaded on your machine, but we are slowly trying to intgrate the download in the `scripts/datasets`.
