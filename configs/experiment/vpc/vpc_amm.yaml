@@ -13,7 +13,7 @@ defaults:
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["vpc25", "de-anonmyzation", "amm"]
+tags: ["vpc25", "de-anonmyzation", "amm", "comprehensive"]
 seed: 42
 
 trainer:
@@ -78,7 +78,7 @@ module:
     scheduler:
       _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
       mode: "min"
-      factor: 0.25
+      factor: 0.3
       min_lr: 1.0e-7
       patience: 2
       verbose: True

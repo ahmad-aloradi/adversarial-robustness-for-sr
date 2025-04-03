@@ -1,0 +1,17 @@
+gradient_monitoring:
+  _target_: src.callbacks.gradients_callbacks.GradientMonitor
+  # Basic logging configuration
+  log_freq: ${mul:10,${trainer.log_every_n_steps}}  # Log every 10N steps
+  track_norm_types: [2]  # Track L2 norm
+  # Visualization options
+  visualize_on_end: true  # Generate summary plots at end of training
+  # Gradient tracking options
+  track_per_layer: true  # Whether to track per-layer gradient statistics
+  track_stats: true  # Whether to track gradient statistics (mean, std, max, min)
+  # Layer filtering options
+  max_layers_to_track: null  # Maximum number of layers to track (null = all)
+  include_patterns: null  # Regex patterns to include layers (null = all)
+  exclude_patterns: null  # Regex patterns to exclude layers (null = none)
+  # Misc options
+  verbose: true  # Enable verbose logging
+  max_history_length: 1000  # Maximum number of gradient history entries to store

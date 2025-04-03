@@ -79,10 +79,6 @@ logging_params:
   sync_dist: True
   prog_bar: True
 
-batch_sizes:
-  train: ${datamodule.loaders.train.batch_size}
-  valid: ${datamodule.loaders.valid.batch_size}
-  test: ${datamodule.loaders.test.batch_size}
 
 ### score normalization ###
 normalize_test_scores: ???   # apply score normalization or not

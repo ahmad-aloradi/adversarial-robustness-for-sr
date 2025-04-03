@@ -3,4 +3,7 @@ defaults:
   - early_stopping.yaml
   - model_summary.yaml
   - tqdm_progress_bar.yaml
+  - learning_rate_monitor.yaml
+  - wandb.yaml
+  # - gradient_monitor.yaml
   - _self_

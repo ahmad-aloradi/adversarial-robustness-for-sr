@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from subprocess import check_output, run  # nosec B404, B603, B607
 
@@ -34,7 +35,7 @@ class WatchModel(Callback):
     """Make wandb watch model at the beginning of the run."""
 
     def __init__(self, log: str = "gradients", log_freq: int = 100) -> None:
-        self.log = log
+        self._log = log
         self.log_freq = log_freq
 
     @rank_zero_only
@@ -42,7 +43,7 @@ class WatchModel(Callback):
         logger = get_wandb_logger(trainer=trainer)
         logger.watch(
             model=trainer.model,
-            log=self.log,
+            log=self._log,
             log_freq=self.log_freq,
             log_graph=True,
         )
@@ -120,7 +121,8 @@ class UploadCheckpointsAsArtifact(Callback):
         ckpts = wandb.Artifact("experiment-ckpts", type="checkpoints")
 
         if self.upload_best_only:
-            ckpts.add_file(trainer.checkpoint_callback.best_model_path)
+            if os.path.exists(trainer.checkpoint_callback.best_model_path):
+                ckpts.add_file(trainer.checkpoint_callback.best_model_path)
         else:
             for path in Path(self.ckpt_dir).rglob("*.ckpt"):
                 ckpts.add_file(str(path))
