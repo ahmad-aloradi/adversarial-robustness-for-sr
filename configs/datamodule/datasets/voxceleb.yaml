@@ -24,7 +24,7 @@ dataset:
 
   min_duration: 0.5
   max_duration: 10.0
-  speaker_overlap: False
+  speaker_overlap: True
   train_ratio: 0.98
 
 transforms: null
@@ -33,14 +33,14 @@ num_classes: 7205
 
 loaders:
   train:
-    batch_size: 8
+    batch_size: 32
     shuffle: True
     num_workers: 4
     drop_last: True
     pin_memory: False
 
   valid:
-    batch_size: 8
+    batch_size: 32
     shuffle: False
     num_workers: 4
     drop_last: False
@@ -53,8 +53,8 @@ loaders:
     drop_last: False
     pin_memory: False
 
-  predict:
-    batch_size: 8
+  enrollment:
+    batch_size: 1 # 1 for enrollment
     shuffle: False
     num_workers: 0
     drop_last: False

@@ -1,0 +1,86 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /callbacks: default.yaml
+  - override /datamodule: datasets/vpc.yaml
+  - override /module: vpc.yaml
+  - override /module/model: residuals.yaml
+  - override /trainer: gpu.yaml
+  - override /logger: tensorboard.yaml
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+tags: ["vpc25", "de-anonmyzation", "CrossEntropy", "Normalized"]
+seed: 42
+
+trainer:
+  min_epochs: 10
+  max_epochs: 25
+  gradient_clip_val: 5.0
+  num_sanity_val_steps: 0
+
+callbacks:
+  model_checkpoint:
+    mode: min
+    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+  early_stopping:
+    mode: min
+    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+    patience: 10
+
+datamodule:
+  dataset:
+    max_duration: 10.0
+
+  models:
+    B3: ${datamodule.available_models.B3}
+    B5: ${datamodule.available_models.B5}
+    T8-5: ${datamodule.available_models.T8-5}
+
+  loaders:
+    train:
+      batch_size: 24
+    valid:
+      batch_size: 24
+    test:
+      batch_size: 8
+    enrollment:
+      batch_size: 1
+
+module:
+  normalize_test_scores: True
+
+  criterion:
+    train_criterion:
+      _target_: src.modules.losses.components.multi_modal_losses.EnhancedCriterion
+      temperature: 0.2
+      classification_loss:
+        _target_: torch.nn.CrossEntropyLoss
+
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: "min"
+      factor: 0.25
+      min_lr: 1.0e-7
+      patience: 2
+      verbose: True
+    extras:
+      monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+      interval: "epoch"
+      frequency: 1
+
+
+  optimizer:
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
+
+
+# logger:
+#   wandb:
+#     tags: ${tags}
+#     group: "mnist"

@@ -1,4 +1,6 @@
 from typing import Any, List, Optional, Tuple
+import sys
+import os
 
 import hydra
 import pyrootutils
@@ -78,6 +80,21 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     if cfg.get("seed"):
         log.info(f"Seed everything with <{cfg.seed}>")
         seed_everything(cfg.seed, workers=True)
+
+    # Prepare noise and RIR data for augmentation if configured
+    if "data_augemntation" in cfg.module and "prepare_noise_data" in cfg.module.data_augemntation:
+        if os.path.exists(cfg.module.data_augemntation.prepare_noise_data.csv_file):
+            log.info(f"{cfg.module.data_augemntation.prepare_noise_data.csv_file} exists. Skipping noise data preparation")
+        else:
+            log.info(f"{cfg.module.data_augemntation.prepare_noise_data.csv_file} Does not exist. Preparing noise data for augmentation")
+            hydra.utils.instantiate(cfg.module.data_augemntation.prepare_noise_data)
+        
+    if "data_augemntation" in cfg.module and "prepare_rir_data" in cfg.module.data_augemntation:
+        if os.path.exists(cfg.module.data_augemntation.prepare_rir_data.csv_file):
+            log.info(f"{cfg.module.data_augemntation.prepare_rir_data.csv_file} exists. Skipping RIR data preparation")
+        else:
+            log.info(f"{cfg.module.data_augemntation.prepare_rir_data.csv_file} Does not exist. Preparing noise data for augmentation")
+            hydra.utils.instantiate(cfg.module.data_augemntation.prepare_rir_data)
 
     # Init lightning datamodule
     log.info(f"Instantiating datamodule <{cfg.datamodule._target_}>")
@@ -172,7 +189,7 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     return metric_dict, object_dict
 
 
-@utils.register_custom_resolvers(**_HYDRA_PARAMS)
+@utils.register_custom_resolvers(**_HYDRA_PARAMS | {'overrides': sys.argv[1:]})
 @hydra.main(**_HYDRA_PARAMS)
 def main(cfg: DictConfig) -> Optional[float]:
 

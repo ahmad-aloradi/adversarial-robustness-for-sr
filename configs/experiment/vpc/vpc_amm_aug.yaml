@@ -1,0 +1,163 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - override /callbacks: default.yaml
+  - override /datamodule: datasets/vpc.yaml
+  - override /module: vpc.yaml
+  - override /trainer: gpu.yaml
+  - override /logger: tensorboard.yaml
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+tags: ["vpc25", "de-anonmyzation", "amm", "data_augmentation"]
+seed: 42
+
+trainer:
+  min_epochs: 10
+  max_epochs: 25
+  gradient_clip_val: 5.0
+  num_sanity_val_steps: 0
+
+callbacks:
+  model_checkpoint:
+    mode: min
+    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+  early_stopping:
+    mode: min
+    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+    patience: 10
+
+datamodule:
+  dataset:
+    max_duration: 10.0
+
+  models:
+    B3: ${datamodule.available_models.B3}
+    B5: ${datamodule.available_models.B5}
+    T8-5: ${datamodule.available_models.T8-5}
+
+  loaders:
+    train:
+      batch_size: 16
+    valid:
+      batch_size: 16
+    test:
+      batch_size: 16
+    enrollment:
+      batch_size: 1
+
+module:
+  normalize_test_scores: True
+      
+  criterion:
+    train_criterion:
+      _target_: src.modules.losses.components.multi_modal_losses.MultiModalLoss
+      classifier_name: robust
+      weights:
+        _target_: src.modules.losses.components.multi_modal_losses.LossWeights
+        ensemble: 1.0
+        fusion: 0.2
+        audio: 0.2
+        text: 0.2
+        contrastive: 0.1
+        consistency: 1.0
+        confidence: 0.1
+      confidence_target: 0.9
+      classification_loss: 
+        _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
+        loss_fn:
+          _target_: speechbrain.nnet.losses.AdditiveAngularMargin
+          margin: 0.2
+          scale: 30.0
+
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: "min"
+      factor: 0.25
+      min_lr: 1.0e-7
+      patience: 2
+      verbose: True
+    extras:
+      monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+      interval: "epoch"
+      frequency: 1
+
+  optimizer:
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
+
+  data_augemntation:
+    noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
+    rir_dataset_url: https://www.dropbox.com/scl/fi/linhy77c36mu10965a836/RIRs.zip?rlkey=pg9cu8vrpn2u173vhiqyu743u&dl=1
+    data_folder_rir_noises: ${paths.data_dir}/voxceleb/RIRS_NOISES
+    noise_annotation: ${module.data_augemntation.data_folder_rir_noises}/noise.csv
+    rir_annotation: ${module.data_augemntation.data_folder_rir_noises}/reverb.csv
+
+    prepare_noise_data:
+      _target_: speechbrain.augment.preparation.prepare_dataset_from_URL
+      URL: ${module.data_augemntation.noise_dataset_url}
+      dest_folder: ${module.data_augemntation.data_folder_rir_noises}/noise
+      ext: wav
+      csv_file: ${module.data_augemntation.noise_annotation}
+
+    prepare_rir_data:
+      _target_: speechbrain.augment.preparation.prepare_dataset_from_URL
+      URL: ${module.data_augemntation.rir_dataset_url}
+      dest_folder: ${module.data_augemntation.data_folder_rir_noises}/rir
+      ext: wav
+      csv_file: ${module.data_augemntation.rir_annotation}
+
+    augmentations:
+      add_noise:
+        _target_: speechbrain.augment.time_domain.AddNoise
+        csv_file: ${module.data_augemntation.noise_annotation}
+        snr_low: 10
+        snr_high: 20
+        noise_sample_rate: ${datamodule.dataset.sample_rate}
+        clean_sample_rate: ${datamodule.dataset.sample_rate}
+        num_workers: ${datamodule.loaders.train.num_workers}
+
+      add_reverb:
+        _target_: speechbrain.augment.time_domain.AddReverb
+        csv_file: ${module.data_augemntation.rir_annotation}
+        reverb_sample_rate: ${datamodule.dataset.sample_rate}
+        clean_sample_rate: ${datamodule.dataset.sample_rate}
+        num_workers: ${datamodule.loaders.train.num_workers}
+
+      drop_freq:
+        _target_: speechbrain.augment.time_domain.DropFreq
+        drop_freq_low: 0
+        drop_freq_high: 1
+        drop_freq_count_low: 1
+        drop_freq_count_high: 3
+        drop_freq_width: 0.05
+
+      drop_chunk:
+        _target_: speechbrain.augment.time_domain.DropChunk
+        drop_length_low: 2000
+        drop_length_high: 8000
+        drop_count_low: 1
+        drop_count_high: 5
+
+      wav_augmenter:
+        _target_: speechbrain.augment.augmenter.Augmenter
+        parallel_augment: true
+        concat_original: true
+        min_augmentations: 4
+        max_augmentations: 4
+        augment_prob: 1.0
+        augmentations:
+          - ${module.data_augemntation.augmentations.add_noise}
+          - ${module.data_augemntation.augmentations.add_reverb}
+          - ${module.data_augemntation.augmentations.drop_freq}
+          - ${module.data_augemntation.augmentations.drop_chunk}
+
+# logger:
+#   wandb:
+#     tags: ${tags}
+#     group: "mnist"

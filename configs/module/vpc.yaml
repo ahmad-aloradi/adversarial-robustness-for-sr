@@ -2,6 +2,7 @@ _target_: src.modules.multimodal_vpc.MultiModalVPCModel
 
 defaults:
   - _self_
+  - model: robust.yaml  # Reference to a config group
 
 model:
   audio_processor:
@@ -25,7 +26,7 @@ model:
   text_encoder:
     _target_: transformers.BertModel.from_pretrained
     pretrained_model_name_or_path: ${module.model.text_processor.pretrained_model_name_or_path}
-    num_labels: ${module.model.classifiers.config.num_classes}
+    num_labels: ${datamodule.num_classes}
 
   text_processor_kwargs:
     return_tensors: "pt"
@@ -33,101 +34,26 @@ model:
     truncation: True
     max_length: 512
 
-  classifiers:
-    # Common configuration
-    config:
-      num_classes: ${datamodule.num_classes}
-      bottleneck_size: 512
-      fusion_classifier_input_size: 512
-      fusion_classifier_hidden_size: 1024
-      audio_embedding_size: 192  # ECAPA embedding size
-      text_embedding_size: 768   # BERT embedding size
+### classifier ###
+  # fusion_classifier: ${module.fusion_classifier}
 
-    # Available classifier definitions
-    available_classifiers:
-      normalized:
-        _target_: src.modules.multimodal_vpc.FusionClassifierWithResiduals
-        fuse_model:
-          _target_: src.modules.multimodal_vpc.NormalizedWeightedSum
-          audio_embedding_size: ${module.model.classifiers.config.audio_embedding_size}
-          text_embedding_size: ${module.model.classifiers.config.text_embedding_size}
-          bottleneck_size: ${module.model.classifiers.config.bottleneck_size}
-        input_size: ${module.model.classifiers.config.fusion_classifier_input_size}
-        hidden_size: ${module.model.classifiers.config.fusion_classifier_hidden_size}
-        num_classes: ${module.model.classifiers.config.num_classes}
-        dropout: 0.3
-        norm_type: "batch"
-      robust:
-        _target_: src.modules.multimodal_vpc.RobustFusionClassifier
-        audio_size: ${module.model.classifiers.config.audio_embedding_size}
-        text_size: ${module.model.classifiers.config.text_embedding_size}
-        hidden_size: ${module.model.classifiers.config.bottleneck_size}
-        num_classes: ${module.model.classifiers.config.num_classes}
-        dropout_audio: 0.3
-        dropout_text: 0.1
-
-    # Selected classifier (defaults to normalized)
-    selected_classifier: normalized  # Can be overridden via command line by: "module.criterion.selected_criterion=fusion"
-    fusion_classifier: ${module.model.classifiers.available_classifiers.${module.model.classifiers.selected_classifier}}
-
+### caching ###
   embedding_cache:
     max_size: 500000
     bypass_warmup: True
 
+### criteria and metrics ###
 criterion:
-  available_criteria:
-    _base_aam_: &_base_aam_
-      _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
-      loss_fn:
-        _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-        margin: 0.2 
-        scale: 30.0
-    enhanced:
-      _target_: src.modules.multimodal_vpc.EnhancedCriterion      
-      classification_loss: 
-        <<: *_base_aam_
-    fusion:
-      _target_: src.modules.multimodal_vpc.MultiModalFusionLoss
-      classification_loss: 
-        <<: *_base_aam_
-    aam:
-      <<: *_base_aam_
-    cross_entropy:
-      _target_: torch.nn.CrossEntropyLoss
-
-  # Selected criterion (defaults to enhanced)
-  selected_criterion: enhanced  # Can be overridden via command line
-  train_criterion: ${module.criterion.available_criteria.${module.criterion.selected_criterion}}
-
+  train_criterion: ???
+    
   # For callbacks
   loss: ${module.criterion.train_criterion}
-
-gradient_clip_val: 5.0
-
-optimizer:
-  _target_: torch.optim.AdamW
-  _partial_: True
-  lr: 1.0e-4
-  weight_decay: 1.0e-5
-
-lr_scheduler:
-  scheduler:
-    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-    mode: "min"
-    factor: 0.3
-    min_lr: 1.0e-9
-    patience: 2
-    verbose: True
-  extras:
-    monitor: ${replace:"__metric__/valid"}/${module.metrics.valid_best.target_key}
-    interval: "epoch"
-    frequency: 1
 
 metrics:
   train:
     _target_: "torchmetrics.Accuracy"
     task: "multiclass"
-    num_classes: ${module.model.classifiers.config.num_classes}
+    num_classes: ${datamodule.num_classes}
   valid:
     _target_: src.modules.metrics.metrics.VerificationMetrics
   test:
@@ -136,13 +62,29 @@ metrics:
     _target_: src.modules.metrics.metrics.AutoSyncDictMinMetric
     target_key: "eer"
 
+### optimizer and lr_scheduler ###
+
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: True
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+
+lr_scheduler: ???
+
+### extras and callbacks ###
 logging_params:
   on_step: False
   on_epoch: True
   sync_dist: True
   prog_bar: True
 
-batch_sizes:
-  train: ${datamodule.loaders.train.batch_size}
-  valid: ${datamodule.loaders.valid.batch_size}
-  test: ${datamodule.loaders.test.batch_size}
+
+### score normalization ###
+normalize_test_scores: ???   # apply score normalization or not
+scores_norm:
+  embeds_metric_params:
+    cohort_per_model: 40000
+  scores_norm_params:
+    topk: 10000
+    min_cohort_size: 3000

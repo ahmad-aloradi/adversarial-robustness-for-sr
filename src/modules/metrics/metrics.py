@@ -512,8 +512,7 @@ def AS_norm(score: float,
             enroll_embedding: torch.Tensor, 
             test_embedding: torch.Tensor, 
             cohort_embeddings: torch.Tensor, 
-            topk: int = 300,
-            eps: float = 1e-10,
+            topk: int = 3000,
             min_cohort_size: int = 300) -> float:
     """
     Adaptive Symmetric Normalization (AS-Norm) for speaker verification
@@ -524,12 +523,12 @@ def AS_norm(score: float,
         test_embedding: Test utterance embedding (1D tensor)
         cohort_embeddings: Impostor cohort embeddings (2D tensor: [num_cohorts, embedding_dim])
         topk: Number of top scores to consider for normalization
-        eps: Small constant to prevent division by zero
         min_cohort_size: Minimum number of cohort speakers required for reliable normalization
     
     Returns:
         Normalized score
     """
+    EPS = 1e-9
     # Cohort size validation
     if cohort_embeddings.shape[0] < min_cohort_size:
         raise ValueError(f"Cohort size ({cohort_embeddings.shape[0]}) is smaller than recommended minimum ({min_cohort_size}). "
@@ -551,7 +550,7 @@ def AS_norm(score: float,
     # Ensure all tensors are on the same device
     device = enroll_embedding.device
     score = score.to(device)
-    
+
     if topk > cohort_embeddings.shape[0]:
         print(f"WARNING: topk ({topk}) is larger than number of cohort embeddings ({cohort_embeddings.size(0)}). "
               f"Setting topk to maximum available: {cohort_embeddings.size(0)}")
@@ -559,26 +558,20 @@ def AS_norm(score: float,
 
     # Compute enrollment vs cohort scores
     with torch.no_grad():  # Add no_grad for efficiency
-        enroll_scores = torch.matmul(cohort_embeddings, enroll_embedding)
+        enroll_scores = torch.nn.functional.cosine_similarity(enroll_embedding, cohort_embeddings, dim=-1)
         enroll_top_scores, _ = torch.topk(enroll_scores, topk, dim=0)
         enroll_mean = enroll_top_scores.mean()
         enroll_std = enroll_top_scores.std(unbiased=True)  # Use unbiased standard deviation
-        
-        # Handle numerical stability
-        enroll_std = torch.clamp(enroll_std, min=eps)
 
-        # Compute test vs cohort scores
-        test_scores = torch.matmul(cohort_embeddings, test_embedding)
+        # Compute similarity scores between test and cohort
+        test_scores = torch.nn.functional.cosine_similarity(test_embedding, cohort_embeddings, dim=-1)
         test_top_scores, _ = torch.topk(test_scores, topk, dim=0)
         test_mean = test_top_scores.mean()
         test_std = test_top_scores.std(unbiased=True)  # Use unbiased standard deviation
-        
-        # Handle numerical stability
-        test_std = torch.clamp(test_std, min=eps)
 
         # Symmetric normalization
-        normalized_score = 0.5 * ((score - enroll_mean) / enroll_std + 
-                                (score - test_mean) / test_std)
+        normalized_score = 0.5 * ((score - enroll_mean) / (enroll_std + EPS) + 
+                                  (score - test_mean) / (test_std + EPS))
         
         # Final numerical stability check
         if torch.isnan(normalized_score) or torch.isinf(normalized_score):

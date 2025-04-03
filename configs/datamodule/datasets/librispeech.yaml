@@ -3,16 +3,16 @@ _target_: src.datamodules.librispeech_datamodule.LibrispeechDataModule
 dataset:
   dataset_dir: ${paths.data_dir}/librispeech # Replace data_dir with PROJECTROOT when testing
   artifacts_dir: ${hydra:runtime.output_dir}/librispeech_artifacts
-  metdata_path: ${datamodule.dataset.dataset_dir}/metadata
+  metadata_path: ${datamodule.dataset.dataset_dir}/metadata
   train_dir: ${datamodule.dataset.dataset_dir}/train-clean-360
   test_dir: ${datamodule.dataset.dataset_dir}/test-clean
   dev_dir: ${datamodule.dataset.dataset_dir}/dev-clean
+  
+  train_csv: ${datamodule.dataset.metadata_path}/train-clean-360.csv
+  dev_csv: ${datamodule.dataset.metadata_path}/dev-clean.csv
+  test_csv: ${datamodule.dataset.metadata_path}/test-clean.csv
 
-  train_csv: ${datamodule.dataset.metdata_path}/train-clean-360.csv
-  dev_csv: ${datamodule.dataset.metdata_path}/dev-clean.csv
-  test_csv: ${datamodule.dataset.metdata_path}/test-clean.csv
-
-  speaker_csv_path: ${datamodule.dataset.metdata_path}/SPEAKERS.csv
+  speaker_csv_path: ${datamodule.dataset.metadata_path}/SPEAKERS.csv
 
   train_csv_exp_filepath: ${datamodule.dataset.artifacts_dir}/train-clean-360.csv
   dev_csv_exp_filepath: ${datamodule.dataset.artifacts_dir}/dev-clean.csv
@@ -22,7 +22,7 @@ dataset:
   audio_file_type: flac
   annotation_format: .trans.txt
   sep: '|'
-  speaker_filepath: ${datamodule.dataset.train_dir}/LibriSpeech/SPEAKERS.TXT
+  speaker_filepath: ${datamodule.dataset.dataset_dir}/SPEAKERS.TXT
   save_csv: False
   verbose: True
   sample_rate: 16000
