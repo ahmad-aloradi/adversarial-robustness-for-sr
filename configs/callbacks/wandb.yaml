@@ -10,4 +10,4 @@ upload_ckpts_as_artifact:
 watch_model:
   _target_: src.callbacks.wandb_callbacks.WatchModel
   log: all
-  log_freq: ${mul:10,${trainer.log_every_n_steps}}
+  log_freq: ${oc.eval:"10 * ${trainer.log_every_n_steps}"} # Log every 10N logging steps
