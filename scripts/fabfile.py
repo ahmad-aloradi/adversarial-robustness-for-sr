@@ -6,8 +6,9 @@ from fabric.api import run, env, cd, task
 from fabric.contrib.project import rsync_project
 
 # Cluster configuration
-env.user = 'iwal021h'
-CLUSTER_NAME = 'alex'    # Options: 'tinygpu', 'alex'
+env.user = 'dsnf101h' # 'iwal021h'
+
+CLUSTER_NAME = 'tinygpu'    # Options: 'tinygpu', 'alex'
 env.hosts = ['alex.nhr.fau.de'] if CLUSTER_NAME == 'alex' else ['tinyx.nhr.fau.de']
 GPU = 'a100'  # Options: 'rtx2080ti', 'rtx3080', 'a100'
 
@@ -16,7 +17,7 @@ PATH_PROJECT = '~/adversarial-robustness-for-sr'  # project folder on the hpc cl
 LOCAL_RES_PATH = '/home.local/aloradi/hpc/'  # local results dir
 CONDA_ENV = 'comfort'
 
-WOODY_DIR = f'/home/woody/iwal/{env.user}'
+WOODY_DIR = f'/home/woody/{env.user[: 4]}/{env.user}'
 RESULTS_DIR = os.path.join(WOODY_DIR, 'results')
 DATA_DIR = os.path.join(WOODY_DIR, 'datasets')
 
@@ -123,8 +124,54 @@ else
 fi
 
 # Start the training process
+export http_proxy=http://proxy.nhr.fau.de:80
+export https_proxy=http://proxy.nhr.fau.de:80
+export HTTP_PROXY=http://proxy.nhr.fau.de:80
+export HTTPS_PROXY=http://proxy.nhr.fau.de:80
+
 echo 'Starting training'
 python {settings['script_name']} {script_arguments_str} paths.data_dir=$TMPDIR
+"""
+    return job_string
+
+
+def create_bash_script_sv(settings, script_arguments):
+    """
+    Creates a bash script with parallelized data transfer for enhanced performance.
+    
+    Args:
+        settings (dict): Dictionary containing job configuration settings.
+        script_arguments (dict): Dictionary of arguments to pass to the training script.
+    
+    Returns:
+        str: A bash script as a string, ready to be submitted to SLURM.
+    """
+    script_arguments_str = ' '.join([f'{k}={v}' for k, v in script_arguments.items()])
+    
+    job_string = f"""#!/bin/bash -l
+#SBATCH --job-name={settings['job_name']}
+#SBATCH --clusters={settings['cluster']}
+#SBATCH --partition={settings['gpu']}
+#SBATCH --nodes={settings['num_nodes']}
+#SBATCH --gres=gpu:{settings['gpu']}:{settings['num_gpus']}
+#SBATCH --time={settings['walltime']}
+#SBATCH --export=NONE
+
+# Load required modules and activate environment
+module load cuda/{settings['cuda']}
+source ~/miniconda3/bin/activate {settings['env_name']}
+cd {settings['path_project']}
+
+echo "No Data transfer is conducted for VoxCeleb dataset"
+
+# Start the training process
+export http_proxy=http://proxy.nhr.fau.de:80
+export https_proxy=http://proxy.nhr.fau.de:80
+export HTTP_PROXY=http://proxy.nhr.fau.de:80
+export HTTPS_PROXY=http://proxy.nhr.fau.de:80
+
+echo 'Starting training'
+python {settings['script_name']} {script_arguments_str} paths.data_dir=/home/woody/dsnf/dsnf101h/datasets
 """
     return job_string
 
@@ -182,11 +229,11 @@ def check_file_exists(file_path):
         return 0
 
 @task
-def run_exp():
-    """The main function that generates all jobs """
+def run_vpc():
+    """The main function that generates all VPC jobs """
 
-    batch_size = 64
-    max_epochs = 30
+    BATCH_SIZE = 64
+    max_epochs = 20
     max_duration = 10
     dataset_dirname = 'vpc2025_official'
 
@@ -204,45 +251,42 @@ def run_exp():
         'cuda': '11.1.0',  # '10.0'
     }
 
-    # datasets = ["{B3: ${datamodule.available_models.B3}}",
-    #            "{B4: ${datamodule.available_models.B4}}",
-    #            "{B5: ${datamodule.available_models.B5}}",
-    #            "{T8-5: ${datamodule.available_models.T8-5}}",
-    #            "{T12-5: ${datamodule.available_models.T12-5}}",
-    #            "{T25-1: ${datamodule.available_models.T25-1}}",
-    #            "${datamodule.available_models}"]
-    datasets = ["${datamodule.available_models}"]
-    experiments = ["vpc_amm_aug.yaml", "vpc_amm.yaml", "vpc_ce.yaml"]
+    # datasets = ["{B3: ${datamodule.available_models.B3}}"]
+    datasets = ["${datamodule.available_models}"]    
+    experiments = ["vpc_amm_aug", "vpc_amm_aug_cyclic"]
+
 
     for experiment in experiments:
         for dataset in datasets:
+
             if dataset.startswith("{") and ":" in dataset:
                 dataset_name = dataset.split(":")[0].strip("{").strip()
             else:
                 dataset_name = "available_models"
-            job_name = 'experiment-' + experiment + '_' + dataset_name + '_' + 'max_duration-' + max_duration
+            job_name = experiment + '-' + dataset_name + '-' + 'max_dur' + str(max_duration)
 
             # Defined this way to avoid re-training on different runs
             settings['job_name'] = job_name
             settings['datamodule_dir'] = dataset_dirname + os.sep + dataset_name
-            name = dataset_name + os.sep + job_name + '_' + str(batch_size)
+            name = dataset_name + os.sep + job_name + '-' + str(BATCH_SIZE)
 
             script_arguments = {
                 'datamodule': 'datasets/vpc',
-                'experiment': f'experiment/vpc/{experiment}',
+                'experiment': f'vpc/{experiment}',
                 'module': 'vpc',
                 'trainer': 'gpu',
                 'name': name,
-                'logger': 'tensorboard',
+                # 'logger': 'many_loggers.yaml',
+                # 'logger.wandb.id': name,
                 # 'logger.neptune.with_id': name,
                 'datamodule.models': f"'{dataset}'",
-                'datamodule.loaders.train.batch_size': batch_size,
-                'datamodule.loaders.valid.batch_size': batch_size,
+                'datamodule.loaders.train.batch_size': BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // 4,
+                'datamodule.loaders.valid.batch_size': BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // 4,
                 'datamodule.dataset.max_duration': max_duration,
                 'trainer.max_epochs': max_epochs,
                 'paths.log_dir': f'{RESULTS_DIR}',
                 'hydra.run.dir': f'{RESULTS_DIR}/train/runs/{name}',
-                "trainer.num_sanity_val_steps": 0
+                "trainer.num_sanity_val_steps": 0,
             }
 
             # Check for pending jobs: continue_flag = 1 if the job is pending
@@ -263,8 +307,83 @@ def run_exp():
             bash_script = create_bash_script(settings, script_arguments)
             run_bash_script(bash_script)
             time.sleep(0.1)
-            break
-        break
+
+
+@task
+def run_sv():
+    """The main function that generates all SV jobs """
+
+    BATCH_SIZE = 64
+    max_epochs = 10
+    max_duration = 3.0
+    dataset_dirname = 'voxceleb'
+
+    settings = {
+        'script_name': 'src/train.py',
+        'cluster': CLUSTER_NAME,
+        'path_project': PATH_PROJECT,
+        'env_name': CONDA_ENV,
+        'data_path': DATA_DIR,
+        'vpc_dirname': dataset_dirname,
+        'gpu': GPU,
+        'num_nodes': 1,  # Multi-node are not possible on TinyGPU.
+        'walltime': '24:00:00',
+        'num_gpus': 1,
+        'cuda': '11.1.0',  # '10.0'
+    }
+
+    experiments = ["sv_vanilla_plateau"]
+
+    for experiment in experiments:
+
+        dataset_name = "voxceleb"
+        batch_size = BATCH_SIZE
+        # batch_size = BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // 4
+        job_name = experiment + '-' + dataset_name + '-' + 'max_dur' + str(max_duration)
+
+        # Defined this way to avoid re-training on different runs
+        settings['job_name'] = job_name
+        settings['datamodule_dir'] = dataset_dirname + os.sep + dataset_name
+        name = dataset_name + os.sep + job_name + '-' + str(BATCH_SIZE)
+
+        script_arguments = {
+            'datamodule': 'datasets/voxceleb',
+            'experiment': f'sv/{experiment}',
+            'module': 'sv',
+            'trainer': 'gpu',
+            'name': name,
+            # 'logger': 'many_loggers.yaml',
+            # 'logger.wandb.id': name,
+            # 'logger.neptune.with_id': name,
+            'datamodule.loaders.train.batch_size': batch_size,
+            'datamodule.loaders.valid.batch_size': batch_size,
+            'datamodule.dataset.max_duration': max_duration,
+            'trainer.max_epochs': max_epochs,
+            'paths.log_dir': f'{RESULTS_DIR}',
+            'hydra.run.dir': f'{RESULTS_DIR}/train/runs/{name}',
+            "trainer.num_sanity_val_steps": 0,
+        }
+
+        # Check for pending jobs: continue_flag = 1 if the job is pending
+        continue_flag = check_pending(job_name)
+
+        # 1- if pending: do nothing
+        if continue_flag:
+            continue
+
+        # 2- if not: do the following:
+        # get last_ckpt path
+        last_ckpt = os.path.join(script_arguments['hydra.run.dir'], f'checkpoints/last.ckpt')
+
+        last_ckpt_exists = check_file_exists(f'{last_ckpt}')
+        if last_ckpt_exists:
+            script_arguments['ckpt_path'] = last_ckpt
+
+        bash_script = create_bash_script_sv(settings, script_arguments)
+        run_bash_script(bash_script)
+        time.sleep(0.1)
+
+
 
 if __name__ == '__main__':
-    run_exp()
+    run_vpc()

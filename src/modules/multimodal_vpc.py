@@ -714,7 +714,7 @@ class MultiModalVPCModel(pl.LightningModule):
         """Process text/audio inputs with optimized embedding caching."""
         # Handle waveform augmentation if specified.
         if self.training and hasattr(self, "wav_augmenter"):
-            batch.audio, batch.audio_length = self.wav_augmenter(batch.audio, batch.audio_length)
+            batch.audio, batch.audio_length = self.wav_augmenter(batch.audio, batch.audio_length / max(batch.audio_length))
             batch.class_id = self.wav_augmenter.replicate_labels(batch.class_id)
             batch.text = batch.text * (len(self.wav_augmenter.augmentations) + self.wav_augmenter.concat_original)
 

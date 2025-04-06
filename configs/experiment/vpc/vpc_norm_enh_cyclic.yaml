@@ -62,17 +62,15 @@ module:
       classification_loss:
         _target_: torch.nn.CrossEntropyLoss
 
-  lr_scheduler:
+  lr_scheduler: 
     scheduler:
-      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-      mode: "min"
-      factor: 0.25
-      min_lr: 1.0e-7
-      patience: 2
-      verbose: True
+        _target_: torch.optim.lr_scheduler.CyclicLR
+        base_lr: 1e-6
+        max_lr: ${module.optimizer.lr}
+        step_size_up: 2000
     extras:
-      monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
-      interval: "epoch"
+      monitor: ${replace:"valid/__metric__"}
+      interval: step
       frequency: 1
 
 

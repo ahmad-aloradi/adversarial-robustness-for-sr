@@ -364,7 +364,7 @@ class SpeakerVerification(pl.LightningModule):
         """Process text/audio inputs with optimized embedding caching."""
         # Add waveform augmentation if specified.
         if self.training and hasattr(self, "wav_augmenter"):
-            batch.audio, batch.audio_length = self.wav_augmenter(batch.audio, batch.audio_length)
+            batch.audio, batch.audio_length = self.wav_augmenter(batch.audio, batch.audio_length / max(batch.audio_length))
             batch.class_id = self.wav_augmenter.replicate_labels(batch.class_id)
             
         audio_emb = self._get_audio_embeddings(batch.audio, batch.audio_length)

@@ -19,8 +19,9 @@ seed: 42
 trainer:
   min_epochs: 10
   max_epochs: 25
-  gradient_clip_val: 5.0
+  gradient_clip_val: 1.0
   num_sanity_val_steps: 0
+  check_val_every_n_epoch: 1
 
 callbacks:
   model_checkpoint:
@@ -46,7 +47,7 @@ datamodule:
     valid:
       batch_size: 16
     test:
-      batch_size: 16
+      batch_size: 4
     enrollment:
       batch_size: 1
 
@@ -78,7 +79,7 @@ module:
     scheduler:
       _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
       mode: "min"
-      factor: 0.3
+      factor: 0.25
       min_lr: 1.0e-7
       patience: 2
       verbose: True

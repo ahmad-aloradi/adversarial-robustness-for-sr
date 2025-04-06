@@ -5,42 +5,48 @@
 
 defaults:
   - override /callbacks: default.yaml
-  - override /datamodule: datasets/voxceleb.yaml
-  - override /module: sv.yaml
+  - override /datamodule: datasets/vpc.yaml
+  - override /module: vpc.yaml
+  - override /module/model: residuals.yaml
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
-
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["voxceleb",  "sv", "ecapa", "cyclicLR", "speechbrain_ecapa"]
+tags: ["vpc25", "de-anonmyzation", "CrossEntropy", "Normalized"]
 seed: 42
 
 trainer:
   min_epochs: 10
-  max_epochs: 15
+  max_epochs: 25
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
+  check_val_every_n_epoch: 1
 
 callbacks:
   model_checkpoint:
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
+    mode: min
+    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
   early_stopping:
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
-    patience: 8
+    mode: min
+    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+    patience: 10
 
 datamodule:
   dataset:
-    max_duration: 3.0
+    max_duration: 10.0
+
+  models:
+    B3: ${datamodule.available_models.B3}
+    B5: ${datamodule.available_models.B5}
+    T8-5: ${datamodule.available_models.T8-5}
 
   loaders:
     train:
-      batch_size: 32
+      batch_size: 16
     valid:
-      batch_size: 32
+      batch_size: 16
     test:
       batch_size: 4
     enrollment:
@@ -49,24 +55,34 @@ datamodule:
 module:
   normalize_test_scores: True
 
+  criterion:
+    train_criterion:
+      _target_: src.modules.losses.components.multi_modal_losses.EnhancedCriterion
+      temperature: 0.2
+      classification_loss:
+        _target_: torch.nn.CrossEntropyLoss
+
   lr_scheduler: 
     scheduler:
         _target_: torch.optim.lr_scheduler.CyclicLR
         base_lr: 1e-6
         max_lr: ${module.optimizer.lr}
-        step_size_up: 65000
+        step_size_up: 2000
     extras:
       monitor: ${replace:"valid/__metric__"}
       interval: step
       frequency: 1
 
-  ### Data for augmentation ###
+
+  optimizer:
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
+
 
   data_augemntation:
-
     noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
     rir_dataset_url: https://www.dropbox.com/scl/fi/linhy77c36mu10965a836/RIRs.zip?rlkey=pg9cu8vrpn2u173vhiqyu743u&dl=1
-    data_folder_rir_noises: ${datamodule.dataset.data_dir}/RIRS_NOISES
+    data_folder_rir_noises: ${paths.data_dir}/voxceleb/RIRS_NOISES
     noise_annotation: ${module.data_augemntation.data_folder_rir_noises}/noise.csv
     rir_annotation: ${module.data_augemntation.data_folder_rir_noises}/reverb.csv
 
@@ -88,8 +104,8 @@ module:
       add_noise:
         _target_: speechbrain.augment.time_domain.AddNoise
         csv_file: ${module.data_augemntation.noise_annotation}
-        snr_low: 0
-        snr_high: 15
+        snr_low: 10
+        snr_high: 20
         noise_sample_rate: ${datamodule.dataset.sample_rate}
         clean_sample_rate: ${datamodule.dataset.sample_rate}
         num_workers: ${datamodule.loaders.train.num_workers}
@@ -111,8 +127,8 @@ module:
 
       drop_chunk:
         _target_: speechbrain.augment.time_domain.DropChunk
-        drop_length_low: 1000
-        drop_length_high: 2000
+        drop_length_low: 2000
+        drop_length_high: 8000
         drop_count_low: 1
         drop_count_high: 5
 
@@ -128,3 +144,9 @@ module:
           - ${module.data_augemntation.augmentations.add_reverb}
           - ${module.data_augemntation.augmentations.drop_freq}
           - ${module.data_augemntation.augmentations.drop_chunk}
+
+
+# logger:
+#   wandb:
+#     tags: ${tags}
+#     group: "mnist"
