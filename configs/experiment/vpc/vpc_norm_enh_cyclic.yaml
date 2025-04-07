@@ -67,7 +67,7 @@ module:
         _target_: torch.optim.lr_scheduler.CyclicLR
         base_lr: 1e-6
         max_lr: ${module.optimizer.lr}
-        step_size_up: 2000
+        step_size_up: ${oc.eval:"int(2 * 104015 / ${datamodule.loaders.train})"} # Full cycle every 4 epochs
     extras:
       monitor: ${replace:"valid/__metric__"}
       interval: step

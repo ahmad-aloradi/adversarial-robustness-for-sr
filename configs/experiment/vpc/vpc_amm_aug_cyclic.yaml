@@ -80,7 +80,7 @@ module:
         _target_: torch.optim.lr_scheduler.CyclicLR
         base_lr: 1e-6
         max_lr: ${module.optimizer.lr}
-        step_size_up: 2000
+        step_size_up: ${oc.eval:"int(2 * 104015 / ${datamodule.loaders.train})"} # Full cycle every 4 epochs
     extras:
       monitor: ${replace:"valid/__metric__"}
       interval: step
@@ -147,14 +147,12 @@ module:
         _target_: speechbrain.augment.augmenter.Augmenter
         parallel_augment: true
         concat_original: true
-        min_augmentations: 4
-        max_augmentations: 4
+        min_augmentations: 2
+        max_augmentations: 2
         augment_prob: 1.0
         augmentations:
           - ${module.data_augemntation.augmentations.add_noise}
           - ${module.data_augemntation.augmentations.add_reverb}
-          - ${module.data_augemntation.augmentations.drop_freq}
-          - ${module.data_augemntation.augmentations.drop_chunk}
 
 # logger:
 #   wandb:

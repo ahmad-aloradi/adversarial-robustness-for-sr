@@ -49,6 +49,7 @@ class EmbeddingType(Enum):
 
 
 ###################################
+
 class NormalizedWeightedSum(nn.Module):
     def __init__(self, audio_embedding_size, text_embedding_size, hidden_size):
         super().__init__()
@@ -180,6 +181,246 @@ class FusionClassifierWithResiduals(nn.Module):
             EMBEDS["CLASS"]: class_preds,
             f"fusion_logits": fusion_logits,
             f"audio_logits": audio_logits,
+            f"text_logits": text_logits
+        }
+    
+
+class AudioOnlyProcessor(nn.Module):
+    def __init__(self, audio_embedding_size, hidden_size):
+        super().__init__()
+        self.audio_proj = nn.Sequential(
+            nn.LayerNorm(audio_embedding_size),
+            nn.Linear(audio_embedding_size, hidden_size),
+        )
+
+    def forward(self, embeds):
+        audio_emb, _ = embeds  # Ignore text embedding
+        audio_emb = self.audio_proj(audio_emb)
+        
+        return {"fusion_emb": audio_emb,  # Fusion is just audio in this case
+                "audio_emb": audio_emb,
+                "text_emb": torch.zeros_like(audio_emb)}  # Empty placeholder
+
+
+class TextOnlyProcessor(nn.Module):
+    def __init__(self, text_embedding_size, hidden_size):
+        super().__init__()
+        self.text_proj = nn.Sequential(
+            nn.LayerNorm(text_embedding_size),
+            nn.Linear(text_embedding_size, hidden_size),
+        )
+
+    def forward(self, embeds):
+        _, text_emb = embeds  # Ignore audio embedding
+        text_emb = self.text_proj(text_emb)
+        
+        return {"fusion_emb": text_emb,  # Fusion is just text in this case
+                "audio_emb": torch.zeros_like(text_emb),  # Empty placeholder
+                "text_emb": text_emb}
+
+
+class AudioOnlyClassifier(nn.Module):
+    def __init__(
+        self,
+        fuse_model: nn.Module,
+        input_size: int, 
+        hidden_size: int, 
+        num_classes: int,
+        dropout_residual: float = 0.1,
+        num_residuals: int = 2,
+        norm_type: Literal['batch', 'layer'] = 'batch',
+        embedding_type: EmbeddingType = EmbeddingType.AUDIO
+    ):
+        super().__init__()
+        self.embedding_type = embedding_type
+
+        # define fuse_model
+        self.fuse_model = fuse_model
+        
+        # Factory for normalization layers
+        norm_factory: Callable = {
+            'batch': nn.BatchNorm1d,
+            'layer': nn.LayerNorm
+        }[norm_type]
+        
+        # Audio classifier
+        self.audio_classifier = nn.Linear(input_size, num_classes)
+        
+        # Audio processing path with residuals - same as in the fusion model
+        self.audio_norm = norm_factory(input_size)
+        self.residuals = nn.ModuleList([
+            self._create_residual_block(input_size, hidden_size, dropout_residual, norm_factory)
+            for _ in range(num_residuals)
+        ])
+
+        # Initialize weights
+        for block in self.residuals:
+            for m in block.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+        self.audio_final_classifier = nn.Linear(input_size, num_classes)
+        nn.init.xavier_uniform_(self.audio_final_classifier.weight)
+        nn.init.zeros_(self.audio_final_classifier.bias)
+
+    @staticmethod
+    def get_embedding(fused_feats: Dict[str, torch.Tensor], 
+                        last_hidden: torch.Tensor,
+                        embedding_type: EmbeddingType) -> torch.Tensor:
+        """Get the selected embedding type."""
+        embedding_map = {
+            EmbeddingType.AUDIO: fused_feats["audio_emb"],
+            EmbeddingType.LAST_HIDDEN: last_hidden
+        }
+        assert embedding_type in embedding_map, f"Invalid embedding type: {embedding_type}"
+        assert embedding_map[embedding_type].dim() == 2, f"Invalid embedding shape: {embedding_map[embedding_type].shape}"
+        normalized_embeds = torch.nn.functional.normalize(embedding_map[embedding_type], p=2, dim=-1)
+        return normalized_embeds
+
+    @staticmethod
+    def _create_residual_block(input_size: int, hidden_size: int, dropout: float, norm_factory: Callable
+                                ) -> nn.Sequential:
+        """Create a residual block with given specifications."""
+        return nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            norm_factory(hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(hidden_size, input_size),
+            norm_factory(input_size)
+        )
+    
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        """Forward pass through the entire network."""
+        # fuse features (in this case, just process audio)
+        fused_feats = self.fuse_model(inputs)
+
+        # Audio classifier with residuals
+        x = self.audio_norm(fused_feats['audio_emb'])
+        for block in self.residuals:
+            x = torch.nn.functional.relu(x + block(x))
+        
+        audio_logits = self.audio_classifier(fused_feats["audio_emb"])
+        final_logits = self.audio_final_classifier(x)
+        class_prob = torch.nn.functional.softmax(final_logits, dim=1)
+        class_preds = torch.argmax(class_prob, dim=-1)
+
+        # Get selected embedding type
+        features = AudioOnlyClassifier.get_embedding(fused_feats, x, self.embedding_type)
+
+        return {
+            EMBEDS["TEXT"]: fused_feats["text_emb"],  # Zero tensor
+            EMBEDS["AUDIO"]: fused_feats["audio_emb"],
+            EMBEDS["FUSION"]: fused_feats["audio_emb"],  # Use audio as fusion
+            EMBEDS["ID"]: features,
+            EMBEDS["CLASS"]: class_preds,
+            f"fusion_logits": final_logits,
+            f"audio_logits": audio_logits,
+            f"text_logits": torch.zeros_like(audio_logits)  # Zero tensor
+        }
+
+
+class TextOnlyClassifier(nn.Module):
+    def __init__(
+        self,
+        fuse_model: nn.Module,
+        input_size: int, 
+        hidden_size: int, 
+        num_classes: int,
+        dropout_residual: float = 0.1,
+        num_residuals: int = 2,
+        norm_type: Literal['batch', 'layer'] = 'batch',
+        embedding_type: EmbeddingType = EmbeddingType.TEXT
+    ):
+        super().__init__()
+        self.embedding_type = embedding_type
+
+        # define fuse_model
+        self.fuse_model = fuse_model
+        
+        # Factory for normalization layers
+        norm_factory: Callable = {
+            'batch': nn.BatchNorm1d,
+            'layer': nn.LayerNorm
+        }[norm_type]
+        
+        # Text classifier
+        self.text_classifier = nn.Linear(input_size, num_classes)
+        
+        # Text processing path with residuals - same as in the fusion model
+        self.text_norm = norm_factory(input_size)
+        self.residuals = nn.ModuleList([
+            self._create_residual_block(input_size, hidden_size, dropout_residual, norm_factory)
+            for _ in range(num_residuals)
+        ])
+
+        # Initialize weights
+        for block in self.residuals:
+            for m in block.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+
+        self.text_final_classifier = nn.Linear(input_size, num_classes)
+        nn.init.xavier_uniform_(self.text_final_classifier.weight)
+        nn.init.zeros_(self.text_final_classifier.bias)
+
+    @staticmethod
+    def get_embedding(fused_feats: Dict[str, torch.Tensor], 
+                        last_hidden: torch.Tensor,
+                        embedding_type: EmbeddingType) -> torch.Tensor:
+        """Get the selected embedding type."""
+        embedding_map = {
+            EmbeddingType.TEXT: fused_feats["text_emb"],
+            EmbeddingType.LAST_HIDDEN: last_hidden
+        }
+        assert embedding_type in embedding_map, f"Invalid embedding type: {embedding_type}"
+        assert embedding_map[embedding_type].dim() == 2, f"Invalid embedding shape: {embedding_map[embedding_type].shape}"
+        normalized_embeds = torch.nn.functional.normalize(embedding_map[embedding_type], p=2, dim=-1)
+        return normalized_embeds
+
+    @staticmethod
+    def _create_residual_block(input_size: int, hidden_size: int, dropout: float, norm_factory: Callable
+                                ) -> nn.Sequential:
+        """Create a residual block with given specifications."""
+        return nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            norm_factory(hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(hidden_size, input_size),
+            norm_factory(input_size)
+        )
+    
+    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        """Forward pass through the entire network."""
+        # fuse features (in this case, just process text)
+        fused_feats = self.fuse_model(inputs)
+
+        # Text classifier with residuals
+        x = self.text_norm(fused_feats['text_emb'])
+        for block in self.residuals:
+            x = torch.nn.functional.relu(x + block(x))
+        
+        text_logits = self.text_classifier(fused_feats["text_emb"])
+        final_logits = self.text_final_classifier(x)
+        class_prob = torch.nn.functional.softmax(final_logits, dim=1)
+        class_preds = torch.argmax(class_prob, dim=-1)
+
+        # Get selected embedding type
+        features = TextOnlyClassifier.get_embedding(fused_feats, x, self.embedding_type)
+
+        return {
+            EMBEDS["TEXT"]: fused_feats["text_emb"],
+            EMBEDS["AUDIO"]: fused_feats["audio_emb"],  # Zero tensor
+            EMBEDS["FUSION"]: fused_feats["text_emb"],  # Use text as fusion
+            EMBEDS["ID"]: features,
+            EMBEDS["CLASS"]: class_preds,
+            f"fusion_logits": final_logits,
+            f"audio_logits": torch.zeros_like(text_logits),  # Zero tensor
             f"text_logits": text_logits
         }
 

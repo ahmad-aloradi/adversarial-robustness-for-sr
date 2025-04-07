@@ -14,12 +14,15 @@ GPU = 'a100'  # Options: 'rtx2080ti', 'rtx3080', 'a100'
 
 # Path configuration
 PATH_PROJECT = '~/adversarial-robustness-for-sr'  # project folder on the hpc cluster
-LOCAL_RES_PATH = '/home.local/aloradi/hpc/'  # local results dir
 CONDA_ENV = 'comfort'
 
 WOODY_DIR = f'/home/woody/{env.user[: 4]}/{env.user}'
 RESULTS_DIR = os.path.join(WOODY_DIR, 'results')
 DATA_DIR = os.path.join(WOODY_DIR, 'datasets')
+
+# sync_results paths
+SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, 'train/runs/available_models/')  # remote results dir
+SYNC_DIR_LOCAL = '/dataHDD/ahmad/hpc_results/.'  # local results dir
 
 
 def timestamp():
@@ -33,8 +36,8 @@ def sync_results():
     Rsync the entire RESULTS_DIR from the HPC cluster to the local machine.
     """
     rsync_project(
-        remote_dir=RESULTS_DIR,
-        local_dir=LOCAL_RES_PATH,
+        remote_dir=SYNC_DIR_REMOTE,
+        local_dir=SYNC_DIR_LOCAL,
         exclude=['.DS_Store', '*.pyc', '__pycache__', '.git*', '.vscode'],
         delete=False,
         upload=False,
@@ -180,15 +183,18 @@ def run_bash_script(pbs):
     with cd(PATH_PROJECT):
         run('PATH=$PATH:/apps/slurm/current/bin && cat << "EOF" |  sbatch\n%s\nEOF' % pbs, shell=True)
 
+
 @task
 def scancel():
     """Stop all jobs associated to your username."""
     run("squeue | grep $USER | tr -s ' ' | cut -d ' ' -f 2 | xargs scancel")
 
+
 @task
 def squeue():
     """Get the queue status of the tinygpu cluster."""
     run('squeue -l') # -l: long report
+
 
 @task
 def clean_logs():
@@ -197,10 +203,12 @@ def clean_logs():
         run('rm *.o*')
         run('rm *.e*')
 
+
 @task
 def cmd(cmd):
     """Wraps the command over 'run'."""
     run(cmd)
+
 
 @task
 def lsp():
@@ -212,14 +220,17 @@ def lsr():
     """Returns the names of Running jobs ."""
     print(run('squeue -t RUNNING --format "%.j" -h').split())
 
+
 @task
 def lsa():
     """Returns the names of all jobs."""
     print(run('squeue --format "%.j" -h').split())
 
+
 def check_pending(job_name):
     files = run('squeue -t PENDING --format "%.j" -h').split()
     return 1 if job_name in files else 0
+
 
 def check_file_exists(file_path):
     result = run(f'test -f {file_path} && echo 1 || echo 0')
@@ -228,12 +239,14 @@ def check_file_exists(file_path):
     else:
         return 0
 
+
 @task
 def run_vpc():
     """The main function that generates all VPC jobs """
 
     BATCH_SIZE = 64
-    max_epochs = 20
+    NUM_AUG = 2
+    max_epochs = 25
     max_duration = 10
     dataset_dirname = 'vpc2025_official'
 
@@ -251,10 +264,13 @@ def run_vpc():
         'cuda': '11.1.0',  # '10.0'
     }
 
-    # datasets = ["{B3: ${datamodule.available_models.B3}}"]
-    datasets = ["${datamodule.available_models}"]    
-    experiments = ["vpc_amm_aug", "vpc_amm_aug_cyclic"]
-
+    datasets = ["{B3: ${datamodule.available_models.B3}}",
+                "{B4: ${datamodule.available_models.B4}}",
+                "{B5: ${datamodule.available_models.B5}}",
+                "{T8-5: ${datamodule.available_models.T8-5}},"
+                "{T12-5: ${datamodule.available_models.T12-5}}",
+                "{T25-1: ${datamodule.available_models.T25-1}}"]
+    experiments = ["vpc_norm_enh", "vpc_norm_enh_cyclic"]
 
     for experiment in experiments:
         for dataset in datasets:
@@ -280,8 +296,8 @@ def run_vpc():
                 # 'logger.wandb.id': name,
                 # 'logger.neptune.with_id': name,
                 'datamodule.models': f"'{dataset}'",
-                'datamodule.loaders.train.batch_size': BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // 4,
-                'datamodule.loaders.valid.batch_size': BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // 4,
+                'datamodule.loaders.train.batch_size': BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // NUM_AUG,
+                'datamodule.loaders.valid.batch_size': BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // NUM_AUG,
                 'datamodule.dataset.max_duration': max_duration,
                 'trainer.max_epochs': max_epochs,
                 'paths.log_dir': f'{RESULTS_DIR}',
@@ -314,6 +330,7 @@ def run_sv():
     """The main function that generates all SV jobs """
 
     BATCH_SIZE = 64
+    NUM_AUG = 4
     max_epochs = 10
     max_duration = 3.0
     dataset_dirname = 'voxceleb'
@@ -332,13 +349,12 @@ def run_sv():
         'cuda': '11.1.0',  # '10.0'
     }
 
-    experiments = ["sv_vanilla_plateau"]
+    experiments = ["sv_vanilla_plateau", "sv_vanilla"]
 
     for experiment in experiments:
 
         dataset_name = "voxceleb"
-        batch_size = BATCH_SIZE
-        # batch_size = BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // 4
+        batch_size = BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // NUM_AUG
         job_name = experiment + '-' + dataset_name + '-' + 'max_dur' + str(max_duration)
 
         # Defined this way to avoid re-training on different runs
@@ -382,7 +398,6 @@ def run_sv():
         bash_script = create_bash_script_sv(settings, script_arguments)
         run_bash_script(bash_script)
         time.sleep(0.1)
-
 
 
 if __name__ == '__main__':

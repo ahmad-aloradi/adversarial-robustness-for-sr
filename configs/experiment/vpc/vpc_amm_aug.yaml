@@ -117,8 +117,8 @@ module:
       add_noise:
         _target_: speechbrain.augment.time_domain.AddNoise
         csv_file: ${module.data_augemntation.noise_annotation}
-        snr_low: 10
-        snr_high: 20
+        snr_low: 0
+        snr_high: 15
         noise_sample_rate: ${datamodule.dataset.sample_rate}
         clean_sample_rate: ${datamodule.dataset.sample_rate}
         num_workers: ${datamodule.loaders.train.num_workers}
@@ -149,15 +149,12 @@ module:
         _target_: speechbrain.augment.augmenter.Augmenter
         parallel_augment: true
         concat_original: true
-        min_augmentations: 4
-        max_augmentations: 4
+        min_augmentations: 2
+        max_augmentations: 2
         augment_prob: 1.0
         augmentations:
           - ${module.data_augemntation.augmentations.add_noise}
           - ${module.data_augemntation.augmentations.add_reverb}
-          - ${module.data_augemntation.augmentations.drop_freq}
-          - ${module.data_augemntation.augmentations.drop_chunk}
-
 # logger:
 #   wandb:
 #     tags: ${tags}

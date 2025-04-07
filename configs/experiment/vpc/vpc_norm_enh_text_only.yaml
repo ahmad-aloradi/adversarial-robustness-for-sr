@@ -7,13 +7,14 @@ defaults:
   - override /callbacks: default.yaml
   - override /datamodule: datasets/vpc.yaml
   - override /module: vpc.yaml
+  - override /module/model: residuals_text_only.yaml
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["vpc25", "de-anonmyzation", "CrossEntropy"]
+tags: ["vpc25", "de-anonmyzation", "CrossEntropy", "Normalized", "Text-Only"]
 seed: 42
 
 trainer:
@@ -53,34 +54,29 @@ datamodule:
 
 module:
   normalize_test_scores: True
-        
+
+  fuser:
+
   criterion:
     train_criterion:
-      _target_: src.modules.losses.components.multi_modal_losses.MultiModalLoss
-      classifier_name: robust
-      weights:
-        _target_: src.modules.losses.components.multi_modal_losses.LossWeights
-        ensemble: 1.0
-        fusion: 0.2
-        audio: 0.2
-        text: 0.2
-        contrastive: 0.1
-        consistency: 1.0
-        confidence: 0.1
-      confidence_target: 0.9
-      classification_loss: 
+      _target_: src.modules.losses.components.multi_modal_losses.EnhancedCriterion
+      temperature: 0.2
+      classification_loss:
         _target_: torch.nn.CrossEntropyLoss
 
-  lr_scheduler: 
+  lr_scheduler:
     scheduler:
-        _target_: torch.optim.lr_scheduler.CyclicLR
-        base_lr: 1e-6
-        max_lr: ${module.optimizer.lr}
-        step_size_up: ${oc.eval:"int(2 * 104015 / ${datamodule.loaders.train})"} # Full cycle every 4 epochs
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: "min"
+      factor: 0.25
+      min_lr: 1.0e-7
+      patience: 2
+      verbose: True
     extras:
-      monitor: ${replace:"valid/__metric__"}
-      interval: step
+      monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+      interval: "epoch"
       frequency: 1
+
 
   optimizer:
     lr: 1.0e-4
