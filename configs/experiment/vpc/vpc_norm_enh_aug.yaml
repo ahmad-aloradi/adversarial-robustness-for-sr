@@ -37,10 +37,7 @@ datamodule:
   dataset:
     max_duration: 10.0
 
-  models:
-    B3: ${datamodule.available_models.B3}
-    B5: ${datamodule.available_models.B5}
-    T8-5: ${datamodule.available_models.T8-5}
+  models: null
 
   loaders:
     train:

@@ -267,9 +267,10 @@ def run_vpc():
     datasets = ["{B3: ${datamodule.available_models.B3}}",
                 "{B4: ${datamodule.available_models.B4}}",
                 "{B5: ${datamodule.available_models.B5}}",
-                "{T8-5: ${datamodule.available_models.T8-5}},"
+                "{T8-5: ${datamodule.available_models.T8-5}}",
                 "{T12-5: ${datamodule.available_models.T12-5}}",
-                "{T25-1: ${datamodule.available_models.T25-1}}"]
+                "{T25-1: ${datamodule.available_models.T25-1}}"
+                ]
     experiments = ["vpc_norm_enh", "vpc_norm_enh_cyclic"]
 
     for experiment in experiments:
@@ -323,7 +324,6 @@ def run_vpc():
             bash_script = create_bash_script(settings, script_arguments)
             run_bash_script(bash_script)
             time.sleep(0.1)
-
 
 @task
 def run_sv():
