@@ -119,28 +119,33 @@ module:
         drop_freq_low: 0
         drop_freq_high: 1
         drop_freq_count_low: 1
-        drop_freq_count_high: 3
+        drop_freq_count_high: 5
         drop_freq_width: 0.05
 
       drop_chunk:
         _target_: speechbrain.augment.time_domain.DropChunk
         drop_length_low: 2000
         drop_length_high: 8000
-        drop_count_low: 1
+        drop_count_low: 3
         drop_count_high: 5
+
+      speed_perturber:
+        _target_: speechbrain.augment.time_domain.SpeedPerturb
+        orig_freq: ${datamodule.dataset.sample_rate}
+        speeds: [90, 110]
+        device: cuda
 
       wav_augmenter:
         _target_: speechbrain.augment.augmenter.Augmenter
         parallel_augment: true
         concat_original: true
-        min_augmentations: 4
-        max_augmentations: 4
+        min_augmentations: 3
+        max_augmentations: 3
         augment_prob: 1.0
         augmentations:
-          - ${module.data_augemntation.augmentations.add_noise}
-          - ${module.data_augemntation.augmentations.add_reverb}
           - ${module.data_augemntation.augmentations.drop_freq}
           - ${module.data_augemntation.augmentations.drop_chunk}
+          - ${module.data_augemntation.augmentations.speed_perturber}
 
 
 # logger:
