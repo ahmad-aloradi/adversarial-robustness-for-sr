@@ -1333,17 +1333,17 @@ class MultiModalVPCModel(pl.LightningModule):
             if current_eer == best_eer:
 
                 metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in best_metrics.items()}
-                with open(os.path.join(artifacts_dir, "valid_best_metrics.json"), "w") as f:
+                with open(os.path.join(artifacts_dir, f"{METRIC_NAMES['BEST']}_metrics.json"), "w") as f:
                     json.dump(metrics_for_save, f, indent=4)
 
                 for name, fig in figures.items():
-                    self.log_figure_with_fallback(f"best_valid/binary_metrics_plots/{name}_scores", fig)
+                    self.log_figure_with_fallback(f"{METRIC_NAMES['BEST']}/binary_metrics_plots/{name}_scores", fig)
                 
-                scores.to_csv(os.path.join(artifacts_dir, "best_valid_scores.csv"), index=False)
-                torch.save(enrol_embeds, os.path.join(artifacts_dir, "best_valid_enrol_embeds.pt"))
-                torch.save(trials_embeds, os.path.join(artifacts_dir, "best_valid_embeds.pt"))
+                scores.to_csv(os.path.join(artifacts_dir, f"{METRIC_NAMES['BEST']}_scores.csv"), index=False)
+                torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{METRIC_NAMES['BEST']}_enrol_embeds.pt"))
+                torch.save(trials_embeds, os.path.join(artifacts_dir, f"{METRIC_NAMES['BEST']}_embeds.pt"))
                 if metric.cohort_embeddings is not None:
-                    torch.save(metric.cohort_embeddings, os.path.join(artifacts_dir, "best_valid_cohort_embeds.pt"))
+                    torch.save(metric.cohort_embeddings, os.path.join(artifacts_dir, f"{METRIC_NAMES['BEST']}_cohort_embeds.pt"))
  
     def log_figure_with_fallback(self, name: str, fig: plt.Figure) -> None:
         """Log figure with fallback for loggers that don't support figure logging.

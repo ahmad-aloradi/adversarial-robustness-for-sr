@@ -58,18 +58,18 @@ module:
       weights:
         _target_: src.modules.losses.components.multi_modal_losses.LossWeights
         ensemble: 1.0
-        fusion: 0.2
-        audio: 0.2
-        text: 0.2
-        contrastive: 0.1
-        consistency: 1.0
-        confidence: 0.1
+        fusion: 0.1
+        audio: 0.1
+        text: 0.1
+        contrastive: 0.0
+        consistency: 0.0
+        confidence: 0.0
       confidence_target: 0.9
       classification_loss: 
         _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
         loss_fn:
           _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-          margin: 0.2
+          margin: 0.15
           scale: 30.0
 
   lr_scheduler:
