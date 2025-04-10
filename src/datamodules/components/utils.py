@@ -352,12 +352,61 @@ class AudioProcessor:
                 new_freq=self.sample_rate
             )
 
-    def normalize_audio(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Normalize audio file and return waveform"""
+    def normalize_audio(self, waveform: torch.Tensor, method: str = "rms", target_level: float = -20.0, 
+                        clip_limit: float = 0.999, epsilon: float = 1e-8) -> torch.Tensor:
+        """
+        Normalize audio using various methods to handle different scenarios better than simple max normalization.
+        
+        Args:
+            waveform: Input waveform tensor of shape (1, samples)
+            method: Normalization method: 'peak', 'rms', 'percentile', or 'dynamic'
+            target_level: Target level in dB for RMS normalization (typically -20 dB)
+            clip_limit: Clipping limit for preventing excessive amplification (0-1)
+            epsilon: Small value to prevent division by zero
+            
+        Returns:
+            Normalized waveform tensor of shape (1, samples)
+        """
         waveform = waveform.squeeze(0)
         assert waveform.dim() == 1, "Expected single-channel audio"
+        
+        # Center the waveform by removing DC offset
         waveform = waveform - waveform.mean()
-        waveform = waveform / (waveform.abs().max() + torch.finfo(torch.float32).eps)
+        
+        if method == "peak":
+            # Traditional peak normalization
+            peak = waveform.abs().max() + epsilon
+            waveform = waveform / peak
+            
+        elif method == "rms":
+            # RMS normalization (based on signal energy)
+            rms = torch.sqrt(torch.mean(waveform ** 2))
+            target_rms = 10 ** (target_level / 20)  # Convert dB to linear
+            gain = target_rms / (rms + epsilon)
+            waveform = waveform * gain
+            
+        elif method == "percentile":
+            # Percentile-based normalization (robust to outliers)
+            sorted_abs = torch.sort(waveform.abs())[0]
+            idx = min(int(len(sorted_abs) * 0.995), len(sorted_abs) - 1)
+            ref_level = sorted_abs[idx] + epsilon
+            waveform = waveform / ref_level
+            
+        elif method == "dynamic":
+            # Dynamic range compression (logarithmic compression)
+            sign = torch.sign(waveform)
+            abs_wave = waveform.abs() + epsilon
+            compressed = sign * torch.log1p(abs_wave) / torch.log1p(torch.tensor(1.0))
+            peak = compressed.abs().max() + epsilon
+            waveform = compressed / peak
+        
+        else:
+            raise ValueError(f"Unsupported normalization method: {method}")
+        
+        # Apply clipping to prevent excessive values
+        if clip_limit < 1.0:
+            waveform = torch.clamp(waveform, min=-clip_limit, max=clip_limit)
+        
         return waveform.unsqueeze(0)
 
     def resolve_path(self, audio_path: str) -> Path:

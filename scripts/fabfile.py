@@ -21,8 +21,8 @@ RESULTS_DIR = os.path.join(WOODY_DIR, 'results')
 DATA_DIR = os.path.join(WOODY_DIR, 'datasets')
 
 # sync_results paths
-SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, 'train/runs/available_models/')  # remote results dir
-SYNC_DIR_LOCAL = '/dataHDD/ahmad/hpc_results/.'  # local results dir
+SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, 'train/runs/*/')  # remote results dir
+SYNC_DIR_LOCAL = '/dataHDD/ahmad/hpc_results/second_run/'  # local results dir
 
 
 def timestamp():
@@ -38,7 +38,7 @@ def sync_results():
     rsync_project(
         remote_dir=SYNC_DIR_REMOTE,
         local_dir=SYNC_DIR_LOCAL,
-        exclude=['.DS_Store', '*.pyc', '__pycache__', '.git*', '.vscode'],
+        exclude=['.DS_Store', '*.pyc', '__pycache__', '.git*', '*.ckpt', '*.pth', '.vscode'],
         delete=False,
         upload=False,
     )
@@ -87,8 +87,16 @@ transfer_and_extract() {{
     # Extract the tar.gz file
     tar -xzf "$dest_dir/$(basename "$model_tar")" -C "$dest_dir/"
 
-    # Transfer metadata if it exists
-    rsync -ah "$vpc_path/$model_name/data/metadata" "$dest_dir/$model_name/data/"
+    # Transfer metadata if it exists and is not already in the destination
+    if [ -d "$vpc_path/$model_name/data/metadata" ] && ! [ -d "$dest_dir/$model_name/data/metadata" ]; then
+        rsync -ah "$vpc_path/$model_name/data/metadata" "$dest_dir/$model_name/data/"
+    else
+        if ! [ -d "$vpc_path/$model_name/data/metadata" ]; then
+            echo "Skipping metadata transfer: Source metadata directory does not exist for $model_name"
+        elif [ -d "$dest_dir/$model_name/data/metadata" ]; then
+            echo "Skipping metadata transfer: Destination metadata directory already exists for $model_name"
+        fi
+    fi
 }}
 
 # Main data transfer logic
@@ -227,8 +235,13 @@ def lsa():
     print(run('squeue --format "%.j" -h').split())
 
 
-def check_pending(job_name):
-    files = run('squeue -t PENDING --format "%.j" -h').split()
+def check_running_pending(job_name):
+    """Check if a job is pending or running.
+    
+    Returns:
+        int: 1 if the job is pending or running, 0 otherwise
+    """
+    files = run('squeue -t PENDING,RUNNING --format "%.j" -h').split()
     return 1 if job_name in files else 0
 
 
@@ -244,8 +257,8 @@ def check_file_exists(file_path):
 def run_vpc():
     """The main function that generates all VPC jobs """
 
-    BATCH_SIZE = 64
-    NUM_AUG = 2
+    BATCH_SIZE = 32
+    NUM_AUG = 1
     max_epochs = 25
     max_duration = 10
     dataset_dirname = 'vpc2025_official'
@@ -271,7 +284,7 @@ def run_vpc():
                 "{T12-5: ${datamodule.available_models.T12-5}}",
                 "{T25-1: ${datamodule.available_models.T25-1}}"
                 ]
-    experiments = ["vpc_norm_enh", "vpc_norm_enh_cyclic"]
+    experiments = ["vpc_amm", "vpc_amm_cyclic"]
 
     for experiment in experiments:
         for dataset in datasets:
@@ -280,12 +293,12 @@ def run_vpc():
                 dataset_name = dataset.split(":")[0].strip("{").strip()
             else:
                 dataset_name = "available_models"
-            job_name = experiment + '-' + dataset_name + '-' + 'max_dur' + str(max_duration)
+            job_name = experiment + '-' + dataset_name + '-' + 'max_dur' + str(max_duration) + '-' + 'bs' + str(BATCH_SIZE)
 
             # Defined this way to avoid re-training on different runs
             settings['job_name'] = job_name
             settings['datamodule_dir'] = dataset_dirname + os.sep + dataset_name
-            name = dataset_name + os.sep + job_name + '-' + str(BATCH_SIZE)
+            name = dataset_name + os.sep + job_name
 
             script_arguments = {
                 'datamodule': 'datasets/vpc',
@@ -307,7 +320,7 @@ def run_vpc():
             }
 
             # Check for pending jobs: continue_flag = 1 if the job is pending
-            continue_flag = check_pending(job_name)
+            continue_flag = check_running_pending(job_name)
 
             # 1- if pending: do nothing
             if continue_flag:
@@ -323,14 +336,14 @@ def run_vpc():
 
             bash_script = create_bash_script(settings, script_arguments)
             run_bash_script(bash_script)
-            time.sleep(0.1)
+            time.sleep(60.0)
 
 @task
 def run_sv():
     """The main function that generates all SV jobs """
 
-    BATCH_SIZE = 64
-    NUM_AUG = 4
+    BATCH_SIZE = 32
+    NUM_AUG = 1
     max_epochs = 10
     max_duration = 3.0
     dataset_dirname = 'voxceleb'
@@ -355,12 +368,12 @@ def run_sv():
 
         dataset_name = "voxceleb"
         batch_size = BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // NUM_AUG
-        job_name = experiment + '-' + dataset_name + '-' + 'max_dur' + str(max_duration)
+        job_name = experiment + '-' + dataset_name + '-' + 'max_dur' + str(max_duration) + '-' + 'bs' + str(BATCH_SIZE)
 
         # Defined this way to avoid re-training on different runs
         settings['job_name'] = job_name
         settings['datamodule_dir'] = dataset_dirname + os.sep + dataset_name
-        name = dataset_name + os.sep + job_name + '-' + str(BATCH_SIZE)
+        name = dataset_name + os.sep + job_name
 
         script_arguments = {
             'datamodule': 'datasets/voxceleb',
@@ -381,7 +394,7 @@ def run_sv():
         }
 
         # Check for pending jobs: continue_flag = 1 if the job is pending
-        continue_flag = check_pending(job_name)
+        continue_flag = check_running_pending(job_name)
 
         # 1- if pending: do nothing
         if continue_flag:

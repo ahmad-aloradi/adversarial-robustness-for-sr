@@ -288,7 +288,7 @@ class SpeakerVerification(pl.LightningModule):
                     pbar.update(len(batch_audios))
 
     ############ Lightning ############
-    def _get_uncached_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
+    def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
         if hasattr(self.audio_encoder, "encode_batch"):
             # For speechbrain encoders (e.g., x-vector)
             audio_emb = self.audio_encoder.encode_batch(
@@ -306,59 +306,6 @@ class SpeakerVerification(pl.LightningModule):
             audio_emb = self.audio_encoder(input_values, lengths=batch_audio_lens/max(batch_audio_lens)).squeeze(1)
         
         return audio_emb
-
-    def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
-        """Get audio embeddings with caching optimization.
-        
-        Args:
-            batch_audio: Tensor of audio inputs to embed
-            batch_audio_lens: Tensor of audio lengths
-            
-        Returns:
-            torch.Tensor: Stacked tensor of embeddings for all audio inputs on the model's device
-        """
-        # Pre-allocate list for embeddings
-        audio_embeddings = [None] * len(batch_audio)
-        uncached_audio = []
-        uncached_lens = []
-        uncached_indices = []
-        
-        # Check cache for each audio input
-        for idx, (audio, length) in enumerate(zip(batch_audio, batch_audio_lens)):
-            audio_hash = hash((audio.cpu().numpy().tobytes(), length.item()))
-            audio_key = hash(audio_hash)
-            
-            cached_embedding = self._embedding_cache.get(audio_key)
-            if cached_embedding is not None:
-                # Move cached embedding to current device
-                audio_embeddings[idx] = cached_embedding.to(self.device)
-            else:
-                uncached_audio.append(audio)
-                uncached_lens.append(length)
-                uncached_indices.append(idx)
-        
-        # Process uncached audio in a single batch if any exist
-        if uncached_audio:
-            # Stack uncached audio into a batch
-            uncached_audio = torch.stack(uncached_audio)
-            uncached_lens = torch.stack(uncached_lens)
-            
-            # Get embeddings for uncached audio
-            with torch.no_grad():
-                new_embeddings = self._get_uncached_audio_embeddings(uncached_audio, uncached_lens)
-            
-            # Update cache and embeddings list
-            for idx, (audio, length, embedding) in enumerate(zip(uncached_audio, uncached_lens, new_embeddings)):
-                # Create key from audio tensor and length
-                audio_hash = hash((audio.cpu().numpy().tobytes(), length.item()))
-                audio_key = str(audio_hash)
-                # Store embedding in cache (detached and on CPU)
-                self._embedding_cache.update(audio_key, embedding.detach().cpu())
-                # Use the embedding directly from GPU for current forward pass
-                audio_embeddings[uncached_indices[idx]] = embedding
-        
-        # Stack all embeddings and ensure they're on the correct device
-        return torch.stack(audio_embeddings)
 
     def forward(self, batch: VoxcelebItem) -> Dict[str, torch.Tensor]:
         """Process text/audio inputs with optimized embedding caching."""
