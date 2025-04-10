@@ -69,6 +69,16 @@ available_models:
     test_enrolls: ${datamodule.available_models.T8-5.metadata}/test_enrolls.csv
     dev_trials: ${datamodule.available_models.T8-5.metadata}/dev_trials.csv
     test_trials: ${datamodule.available_models.T8-5.metadata}/test_trials.csv
+  T10-2:
+    data_dir: ${datamodule.root_dir}/T10-2/data
+    metadata: ${datamodule.available_models.T10-2.data_dir}/metadata
+    train: ${datamodule.available_models.T10-2.metadata}/train.csv
+    dev: ${datamodule.available_models.T10-2.metadata}/dev.csv
+    test: ${datamodule.available_models.T10-2.metadata}/test.csv
+    dev_enrolls: ${datamodule.available_models.T10-2.metadata}/dev_enrolls.csv
+    test_enrolls: ${datamodule.available_models.T10-2.metadata}/test_enrolls.csv
+    dev_trials: ${datamodule.available_models.T10-2.metadata}/dev_trials.csv
+    test_trials: ${datamodule.available_models.T10-2.metadata}/test_trials.csv
   T12-5:
     data_dir: ${datamodule.root_dir}/T12-5/data
     metadata: ${datamodule.available_models.T12-5.data_dir}/metadata
