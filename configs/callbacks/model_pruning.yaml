@@ -1,7 +1,19 @@
 model_pruning:
-  _target_: pytorch_lightning.callbacks.ModelPruning
-  pruning_fn: l1_unstructured
-  amount: 0.5
-  parameters_to_prune: null
-  use_global_unstructured: True
-  
+  _target_: src.callbacks.prune.SafeModelPruning
+  pruning_fn: l1_unstructured  # Function used for pruning (can be callable or string)
+  amount: ${oc.eval:0.5 if not ${callbacks.model_pruning.final_amount} else ${callbacks.model_pruning.final_amount}} # Amount to prune (can be int, float, or list)
+  use_global_unstructured: true  # Whether to use global unstructured pruning
+  apply_pruning: true  # Whether to apply pruning
+  make_pruning_permanent: true  # Whether to make pruning permanent
+  use_lottery_ticket_hypothesis: false  # Whether to use lottery ticket hypothesis
+  resample_parameters: false  # Whether to resample parameters
+  parameters_to_prune: null  # Optional list of (module, name) tuples to prune
+  pruning_dim: null  # Dimension along which to prune
+  pruning_norm: null  # Norm to use for pruning
+  verbose: 1  # Increase verbosity to see detailed parameter analysis
+  prune_on_train_epoch_end: true  # Whether to prune at the end of each epoch
+  scheduled_pruning: true  # Whether to use scheduled pruning
+  initial_amount: 0.1  # Initial pruning amount for scheduled pruning
+  final_amount: 0.9  # Final pruning amount for scheduled pruning
+  epochs_to_ramp: ${oc.eval:${trainer.max_epochs} // 1.2}  # Number of epochs to ramp up pruning
+  collect_metrics: true  # Whether to collect metrics during pruning
