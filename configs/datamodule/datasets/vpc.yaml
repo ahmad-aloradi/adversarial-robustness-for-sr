@@ -29,6 +29,16 @@ artifacts_paths:
   spks_test: ${datamodule.dataset.artifacts_dir}/speakers_test.csv
 
 available_models:
+  original:
+    data_dir: ${paths.data_dir}/librispeech
+    metadata: ${datamodule.available_models.original.data_dir}/vpc_metadata
+    train: ${datamodule.available_models.original.metadata}/train.csv
+    dev: ${datamodule.available_models.original.metadata}/dev.csv
+    test: ${datamodule.available_models.original.metadata}/test.csv
+    dev_enrolls: ${datamodule.available_models.original.metadata}/dev_enrolls.csv
+    test_enrolls: ${datamodule.available_models.original.metadata}/test_enrolls.csv
+    dev_trials: ${datamodule.available_models.original.metadata}/dev_trials.csv
+    test_trials: ${datamodule.available_models.original.metadata}/test_trials.csv
   B3:
     data_dir: ${datamodule.root_dir}/B3/data   
     metadata: ${datamodule.available_models.B3.data_dir}/metadata
