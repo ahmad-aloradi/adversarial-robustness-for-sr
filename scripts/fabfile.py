@@ -21,8 +21,8 @@ RESULTS_DIR = os.path.join(WOODY_DIR, 'results')
 DATA_DIR = os.path.join(WOODY_DIR, 'datasets')
 
 # sync_results paths
-SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, 'train/runs/*/')  # remote results dir
-SYNC_DIR_LOCAL = '/dataHDD/ahmad/hpc_results/second_run/'  # local results dir
+SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, 'train/runs/*/vpc_amm_cyclic-*-max_dur10-bs32')  # remote results dir
+SYNC_DIR_LOCAL = '/dataHDD/ahmad/hpc_results/third_run/'  # local results dir
 
 
 def timestamp():
@@ -56,6 +56,7 @@ def create_bash_script(settings, script_arguments):
         str: A bash script as a string, ready to be submitted to SLURM.
     """
     is_available_models = "available_models" in settings['datamodule_dir']
+    is_multiple_models = "librispeech" in settings['datamodule_dir']
     script_arguments_str = ' '.join([f'{k}={v}' for k, v in script_arguments.items()])
     
     job_string = f"""#!/bin/bash -l
@@ -72,69 +73,60 @@ module load cuda/{settings['cuda']}
 source ~/miniconda3/bin/activate {settings['env_name']}
 cd {settings['path_project']}
 
-# Define vpc_path for cleaner path references
-vpc_path="{settings['data_path']}/{settings['vpc_dirname']}"
+VPC_PATH="{settings['data_path']}/{settings['vpc_dirname']}"
+DEST_DIR="$TMPDIR/{settings['vpc_dirname']}"
 
-# Function to transfer and extract a model's data
-transfer_and_extract() {{
-    local model_name="$1"
-    local model_tar="$vpc_path/$model_name.tar.gz"
-    local dest_dir="$TMPDIR/{settings['vpc_dirname']}"
-
-    # Transfer the model's tar.gz file
-    rsync -ah "$model_tar" "$dest_dir/"
-
-    # Extract the tar.gz file
-    tar -xzf "$dest_dir/$(basename "$model_tar")" -C "$dest_dir/"
-
-    # Transfer metadata if it exists and is not already in the destination
-    if [ -d "$vpc_path/$model_name/data/metadata" ] && ! [ -d "$dest_dir/$model_name/data/metadata" ]; then
-        rsync -ah "$vpc_path/$model_name/data/metadata" "$dest_dir/$model_name/data/"
-    else
-        if ! [ -d "$vpc_path/$model_name/data/metadata" ]; then
-            echo "Skipping metadata transfer: Source metadata directory does not exist for $model_name"
-        elif [ -d "$dest_dir/$model_name/data/metadata" ]; then
-            echo "Skipping metadata transfer: Destination metadata directory already exists for $model_name"
-        fi
+# Function to transfer and extract model data
+transfer_model() {{
+    local model=$1
+        
+    local tar_file="$VPC_PATH/$model.tar.gz"
+    [[ ! -f "$tar_file" ]] && echo "Error: $tar_file not found" && return 1
+    
+    echo "Transferring $model"
+    rsync -ah "$tar_file" "$DEST_DIR/"
+    tar -xzf "$DEST_DIR/$(basename "$tar_file")" -C "$DEST_DIR/"
+    
+    # Transfer metadata if needed
+    if [[ "$model" != "librispeech" && -d "$VPC_PATH/$model/data/metadata" && ! -d "$DEST_DIR/$model/data/metadata" ]]; then
+        rsync -ah "$VPC_PATH/$model/data/metadata" "$DEST_DIR/$model/data/"
     fi
+    
+    echo "Completed transfer of $model"
+    return 0
 }}
 
-# Main data transfer logic
-if ! [ -d "$TMPDIR/{settings['datamodule_dir']}" ]; then
-    # Create the destination directory once
-    mkdir -p "$TMPDIR/{settings['vpc_dirname']}"
-
-    if [ "{is_available_models}" = "True" ]; then
-        echo "Transferring all available models in parallel"
-
-        # Find all model tar files (e.g., matching B* or T*)
-        model_tars=("$vpc_path"/{{B*,T*}}.tar.gz)
-
-        # Process each model in parallel
-        for model_tar in "${{model_tars[@]}}"; do
-            if [ -f "$model_tar" ]; then
-                model_name=$(basename "$model_tar" .tar.gz)
-                echo "Starting transfer of model: $model_name"
-                transfer_and_extract "$model_name" &
-            fi
+# Main data transfer
+if [[ ! -d "$DEST_DIR" ]]; then
+    mkdir -p "$DEST_DIR"
+    
+    if [[ "{is_available_models}" == "True" ]]; then
+        echo "Transferring models in parallel"
+        # Process B* and T* models
+        for model_tar in "$VPC_PATH"/{{B*,T*}}.tar.gz; do
+            [[ -f "$model_tar" ]] && transfer_model "$(basename "$model_tar" .tar.gz)" &
         done
-
-        # Wait for all parallel processes to finish
-        wait
-        echo "All models transferred and extracted"
+        
+        # Transfer librispeech for multiple models
+        [[ "{is_multiple_models}" == "True" ]] && transfer_model "librispeech" &
     else
-        echo "Transferring single model: {settings['datamodule_dir']}"
-        model_name=$(basename "{settings['datamodule_dir']}")
-        transfer_and_extract "$model_name"
+        # Extract model names from directory
+        IFS='_' read -ra MODELS <<< "$(basename "{settings['datamodule_dir']}")"
+        
+        for model in "${{MODELS[@]}}"; do
+            transfer_model "$model" &
+        done
     fi
-
-    echo "Data transfer complete"
+    
+    # Wait for all transfers to complete
+    wait
+    echo "All data transfers complete"
 else
-    echo "Data already exists in $TMPDIR, waiting to avoid conflicts"
-    sleep 0.15h
+    echo "Data already exists, waiting briefly to avoid conflicts"
+    sleep 9m
 fi
 
-# Start the training process
+# Start training
 export http_proxy=http://proxy.nhr.fau.de:80
 export https_proxy=http://proxy.nhr.fau.de:80
 export HTTP_PROXY=http://proxy.nhr.fau.de:80
@@ -277,22 +269,32 @@ def run_vpc():
         'cuda': '11.1.0',  # '10.0'
     }
 
-    datasets = ["{B3: ${datamodule.available_models.B3}}",
-                "{B4: ${datamodule.available_models.B4}}",
-                "{B5: ${datamodule.available_models.B5}}",
-                "{T8-5: ${datamodule.available_models.T8-5}}",
-                "{T12-5: ${datamodule.available_models.T12-5}}",
-                "{T25-1: ${datamodule.available_models.T25-1}}"
-                ]
-    experiments = ["vpc_amm", "vpc_amm_cyclic"]
+    datasets = [
+        "{librispeech: ${datamodule.available_models.librispeech}, B3: ${datamodule.available_models.B3}}",
+        "{librispeech: ${datamodule.available_models.librispeech}, B4: ${datamodule.available_models.B4}}",
+        "{librispeech: ${datamodule.available_models.librispeech}, B5: ${datamodule.available_models.B5}}",
+        "{librispeech: ${datamodule.available_models.librispeech}, T8-5: ${datamodule.available_models.T8-5}}",
+        "{librispeech: ${datamodule.available_models.librispeech}, T10-2: ${datamodule.available_models.T10-2}}",
+        "{librispeech: ${datamodule.available_models.librispeech}, T12-5: ${datamodule.available_models.T12-5}}",
+        "{librispeech: ${datamodule.available_models.librispeech}, T25-1: ${datamodule.available_models.T25-1}}",
+        "{librispeech: ${datamodule.available_models.librispeech}}"
+        ]
+    experiments = ["vpc_amm_cyclic"]
 
     for experiment in experiments:
         for dataset in datasets:
-
+            
+            # Parse dataset string like "{librispeech: ...}, {B4: ...}" or a single dataset
             if dataset.startswith("{") and ":" in dataset:
-                dataset_name = dataset.split(":")[0].strip("{").strip()
+                if ',' in dataset:
+                    # Multiple datasets
+                    dataset_name = '_'.join(item.split(':')[0].strip('{').strip() for item in dataset.split(','))
+                else:
+                    # Single dataset
+                    dataset_name = dataset.split(':')[0].strip('{').strip()
             else:
                 dataset_name = "available_models"
+
             job_name = experiment + '-' + dataset_name + '-' + 'max_dur' + str(max_duration) + '-' + 'bs' + str(BATCH_SIZE)
 
             # Defined this way to avoid re-training on different runs
@@ -336,7 +338,7 @@ def run_vpc():
 
             bash_script = create_bash_script(settings, script_arguments)
             run_bash_script(bash_script)
-            time.sleep(60.0)
+            time.sleep(1.0)
 
 @task
 def run_sv():

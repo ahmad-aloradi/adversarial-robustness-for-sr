@@ -60,10 +60,16 @@ class AnonLibriDataModule(pl.LightningDataModule):
 
     def prepare_data(self):
         if self.train_data is None:
-            # Concatenate all CSVs
+            # Concatenate all train CSVs
             df_train = self.csv_processor.concatenate_csvs([self.models[dire].train for dire in self.models.keys()])
-            df_dev = self.csv_processor.concatenate_csvs([self.models[dire].dev for dire in self.models.keys()])
-            df_test = self.csv_processor.concatenate_csvs([self.models[dire].test for dire in self.models.keys()])
+
+            # For dev and test, only include models that have these attributes
+            dev_paths = [self.models[dire].dev for dire in self.models.keys() if hasattr(self.models[dire], 'dev')]
+            test_paths = [self.models[dire].test for dire in self.models.keys() if hasattr(self.models[dire], 'test')]
+
+            # Concatenate if paths exist, otherwise create empty DataFrames with same columns as df_train
+            df_dev = self.csv_processor.concatenate_csvs(dev_paths) if dev_paths else pd.DataFrame(columns=df_train.columns)
+            df_test = self.csv_processor.concatenate_csvs(test_paths) if test_paths else pd.DataFrame(columns=df_train.columns)
 
             # generate training ids
             total_dataset_df = pd.concat([df_train, df_dev, df_test], ignore_index=True)
@@ -94,11 +100,21 @@ class AnonLibriDataModule(pl.LightningDataModule):
                     df_speakers_test = df_speakers_test.sort_values('total_dur/spk', ascending=False)
                     df_speakers_test = df_speakers_test.reset_index(drop=True)
 
-            # Handle enrolls and trials seprately
-            df_dev_enrolls = AnonLibriDataModule.concatenate_dfs([self.models[dire].dev_enrolls for dire in self.models.keys()])
-            df_dev_trials = AnonLibriDataModule.concatenate_dfs([self.models[dire].dev_trials for dire in self.models.keys()])
-            test_enrolls = AnonLibriDataModule.concatenate_dfs([self.models[dire].test_enrolls for dire in self.models.keys()])
-            df_test_trials = AnonLibriDataModule.concatenate_dfs([self.models[dire].test_trials for dire in self.models.keys()])
+            # Handle enrolls and trials separately
+            dev_enrolls_paths = [self.models[dire].dev_enrolls for dire in self.models.keys() 
+                                 if hasattr(self.models[dire], 'dev_enrolls')]
+            dev_trials_paths = [self.models[dire].dev_trials for dire in self.models.keys() 
+                                if hasattr(self.models[dire], 'dev_trials')]
+            test_enrolls_paths = [self.models[dire].test_enrolls for dire in self.models.keys() 
+                                  if hasattr(self.models[dire], 'test_enrolls')]
+            test_trials_paths = [self.models[dire].test_trials for dire in self.models.keys() 
+                                 if hasattr(self.models[dire], 'test_trials')]
+
+            # Create dataframes only if paths exist, otherwise create empty ones
+            df_dev_enrolls = AnonLibriDataModule.concatenate_dfs(dev_enrolls_paths) if dev_enrolls_paths else pd.DataFrame()
+            df_dev_trials = AnonLibriDataModule.concatenate_dfs(dev_trials_paths) if dev_trials_paths else pd.DataFrame()
+            test_enrolls = AnonLibriDataModule.concatenate_dfs(test_enrolls_paths) if test_enrolls_paths else pd.DataFrame()
+            df_test_trials = AnonLibriDataModule.concatenate_dfs(test_trials_paths) if test_trials_paths else pd.DataFrame()
             
             # Post-process the dfs
             df_dev_trials.enrollment_id = df_dev_trials.enrollment_id.apply(lambda x: DATASET_DEFAULTS.dataset_name + '_' + str(x))
