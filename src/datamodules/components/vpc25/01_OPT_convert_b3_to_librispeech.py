@@ -104,7 +104,7 @@ def process_metadata_file(input_file: Path, output_file: Path) -> None:
 
     # Add or modify the model column
     if 'model' in df.columns:
-        df['model'] = 'librispeech'
+        df['model'] = 'LibriSpeech'
 
     # Update source/split column
     source_col = 'split' if 'split' in df.columns else 'source'

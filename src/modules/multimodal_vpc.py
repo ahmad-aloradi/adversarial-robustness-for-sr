@@ -185,246 +185,6 @@ class FusionClassifierWithResiduals(nn.Module):
         }
     
 
-class AudioOnlyProcessor(nn.Module):
-    def __init__(self, audio_embedding_size, hidden_size):
-        super().__init__()
-        self.audio_proj = nn.Sequential(
-            nn.LayerNorm(audio_embedding_size),
-            nn.Linear(audio_embedding_size, hidden_size),
-        )
-
-    def forward(self, embeds):
-        audio_emb, _ = embeds  # Ignore text embedding
-        audio_emb = self.audio_proj(audio_emb)
-        
-        return {"fusion_emb": audio_emb,  # Fusion is just audio in this case
-                "audio_emb": audio_emb,
-                "text_emb": torch.zeros_like(audio_emb)}  # Empty placeholder
-
-
-class TextOnlyProcessor(nn.Module):
-    def __init__(self, text_embedding_size, hidden_size):
-        super().__init__()
-        self.text_proj = nn.Sequential(
-            nn.LayerNorm(text_embedding_size),
-            nn.Linear(text_embedding_size, hidden_size),
-        )
-
-    def forward(self, embeds):
-        _, text_emb = embeds  # Ignore audio embedding
-        text_emb = self.text_proj(text_emb)
-        
-        return {"fusion_emb": text_emb,  # Fusion is just text in this case
-                "audio_emb": torch.zeros_like(text_emb),  # Empty placeholder
-                "text_emb": text_emb}
-
-
-class AudioOnlyClassifier(nn.Module):
-    def __init__(
-        self,
-        fuse_model: nn.Module,
-        input_size: int, 
-        hidden_size: int, 
-        num_classes: int,
-        dropout_residual: float = 0.1,
-        num_residuals: int = 2,
-        norm_type: Literal['batch', 'layer'] = 'batch',
-        embedding_type: EmbeddingType = EmbeddingType.AUDIO
-    ):
-        super().__init__()
-        self.embedding_type = embedding_type
-
-        # define fuse_model
-        self.fuse_model = fuse_model
-        
-        # Factory for normalization layers
-        norm_factory: Callable = {
-            'batch': nn.BatchNorm1d,
-            'layer': nn.LayerNorm
-        }[norm_type]
-        
-        # Audio classifier
-        self.audio_classifier = nn.Linear(input_size, num_classes)
-        
-        # Audio processing path with residuals - same as in the fusion model
-        self.audio_norm = norm_factory(input_size)
-        self.residuals = nn.ModuleList([
-            self._create_residual_block(input_size, hidden_size, dropout_residual, norm_factory)
-            for _ in range(num_residuals)
-        ])
-
-        # Initialize weights
-        for block in self.residuals:
-            for m in block.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.xavier_uniform_(m.weight)
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
-
-        self.audio_final_classifier = nn.Linear(input_size, num_classes)
-        nn.init.xavier_uniform_(self.audio_final_classifier.weight)
-        nn.init.zeros_(self.audio_final_classifier.bias)
-
-    @staticmethod
-    def get_embedding(fused_feats: Dict[str, torch.Tensor], 
-                        last_hidden: torch.Tensor,
-                        embedding_type: EmbeddingType) -> torch.Tensor:
-        """Get the selected embedding type."""
-        embedding_map = {
-            EmbeddingType.AUDIO: fused_feats["audio_emb"],
-            EmbeddingType.LAST_HIDDEN: last_hidden
-        }
-        assert embedding_type in embedding_map, f"Invalid embedding type: {embedding_type}"
-        assert embedding_map[embedding_type].dim() == 2, f"Invalid embedding shape: {embedding_map[embedding_type].shape}"
-        normalized_embeds = torch.nn.functional.normalize(embedding_map[embedding_type], p=2, dim=-1)
-        return normalized_embeds
-
-    @staticmethod
-    def _create_residual_block(input_size: int, hidden_size: int, dropout: float, norm_factory: Callable
-                                ) -> nn.Sequential:
-        """Create a residual block with given specifications."""
-        return nn.Sequential(
-            nn.Linear(input_size, hidden_size),
-            norm_factory(hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout),
-            nn.Linear(hidden_size, input_size),
-            norm_factory(input_size)
-        )
-    
-    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
-        """Forward pass through the entire network."""
-        # fuse features (in this case, just process audio)
-        fused_feats = self.fuse_model(inputs)
-
-        # Audio classifier with residuals
-        x = self.audio_norm(fused_feats['audio_emb'])
-        for block in self.residuals:
-            x = torch.nn.functional.relu(x + block(x))
-        
-        audio_logits = self.audio_classifier(fused_feats["audio_emb"])
-        final_logits = self.audio_final_classifier(x)
-        class_prob = torch.nn.functional.softmax(final_logits, dim=1)
-        class_preds = torch.argmax(class_prob, dim=-1)
-
-        # Get selected embedding type
-        features = AudioOnlyClassifier.get_embedding(fused_feats, x, self.embedding_type)
-
-        return {
-            EMBEDS["TEXT"]: fused_feats["text_emb"],  # Zero tensor
-            EMBEDS["AUDIO"]: fused_feats["audio_emb"],
-            EMBEDS["FUSION"]: fused_feats["audio_emb"],  # Use audio as fusion
-            EMBEDS["ID"]: features,
-            EMBEDS["CLASS"]: class_preds,
-            f"fusion_logits": final_logits,
-            f"audio_logits": audio_logits,
-            f"text_logits": torch.zeros_like(audio_logits)  # Zero tensor
-        }
-
-
-class TextOnlyClassifier(nn.Module):
-    def __init__(
-        self,
-        fuse_model: nn.Module,
-        input_size: int, 
-        hidden_size: int, 
-        num_classes: int,
-        dropout_residual: float = 0.1,
-        num_residuals: int = 2,
-        norm_type: Literal['batch', 'layer'] = 'batch',
-        embedding_type: EmbeddingType = EmbeddingType.TEXT
-    ):
-        super().__init__()
-        self.embedding_type = embedding_type
-
-        # define fuse_model
-        self.fuse_model = fuse_model
-        
-        # Factory for normalization layers
-        norm_factory: Callable = {
-            'batch': nn.BatchNorm1d,
-            'layer': nn.LayerNorm
-        }[norm_type]
-        
-        # Text classifier
-        self.text_classifier = nn.Linear(input_size, num_classes)
-        
-        # Text processing path with residuals - same as in the fusion model
-        self.text_norm = norm_factory(input_size)
-        self.residuals = nn.ModuleList([
-            self._create_residual_block(input_size, hidden_size, dropout_residual, norm_factory)
-            for _ in range(num_residuals)
-        ])
-
-        # Initialize weights
-        for block in self.residuals:
-            for m in block.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.xavier_uniform_(m.weight)
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
-
-        self.text_final_classifier = nn.Linear(input_size, num_classes)
-        nn.init.xavier_uniform_(self.text_final_classifier.weight)
-        nn.init.zeros_(self.text_final_classifier.bias)
-
-    @staticmethod
-    def get_embedding(fused_feats: Dict[str, torch.Tensor], 
-                        last_hidden: torch.Tensor,
-                        embedding_type: EmbeddingType) -> torch.Tensor:
-        """Get the selected embedding type."""
-        embedding_map = {
-            EmbeddingType.TEXT: fused_feats["text_emb"],
-            EmbeddingType.LAST_HIDDEN: last_hidden
-        }
-        assert embedding_type in embedding_map, f"Invalid embedding type: {embedding_type}"
-        assert embedding_map[embedding_type].dim() == 2, f"Invalid embedding shape: {embedding_map[embedding_type].shape}"
-        normalized_embeds = torch.nn.functional.normalize(embedding_map[embedding_type], p=2, dim=-1)
-        return normalized_embeds
-
-    @staticmethod
-    def _create_residual_block(input_size: int, hidden_size: int, dropout: float, norm_factory: Callable
-                                ) -> nn.Sequential:
-        """Create a residual block with given specifications."""
-        return nn.Sequential(
-            nn.Linear(input_size, hidden_size),
-            norm_factory(hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout),
-            nn.Linear(hidden_size, input_size),
-            norm_factory(input_size)
-        )
-    
-    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
-        """Forward pass through the entire network."""
-        # fuse features (in this case, just process text)
-        fused_feats = self.fuse_model(inputs)
-
-        # Text classifier with residuals
-        x = self.text_norm(fused_feats['text_emb'])
-        for block in self.residuals:
-            x = torch.nn.functional.relu(x + block(x))
-        
-        text_logits = self.text_classifier(fused_feats["text_emb"])
-        final_logits = self.text_final_classifier(x)
-        class_prob = torch.nn.functional.softmax(final_logits, dim=1)
-        class_preds = torch.argmax(class_prob, dim=-1)
-
-        # Get selected embedding type
-        features = TextOnlyClassifier.get_embedding(fused_feats, x, self.embedding_type)
-
-        return {
-            EMBEDS["TEXT"]: fused_feats["text_emb"],
-            EMBEDS["AUDIO"]: fused_feats["audio_emb"],  # Zero tensor
-            EMBEDS["FUSION"]: fused_feats["text_emb"],  # Use text as fusion
-            EMBEDS["ID"]: features,
-            EMBEDS["CLASS"]: class_preds,
-            f"fusion_logits": final_logits,
-            f"audio_logits": torch.zeros_like(text_logits),  # Zero tensor
-            f"text_logits": text_logits
-        }
-
-
 class RobustFusionClassifier(nn.Module):
     """
     Classifier with:
@@ -452,25 +212,16 @@ class RobustFusionClassifier(nn.Module):
         fusion_dependent_hidden = 2 * hidden_size if accum_method == 'concat' else hidden_size
         self.accum_method = accum_method
         self.embedding_type = embedding_type
-        distortion_size = hidden_size // 4
         
         # Factory for normalization layers
         norm_factory: Callable = {
             'batch': nn.BatchNorm1d,
             'layer': nn.LayerNorm
         }[norm_type]
-
-        # Distortion estimator
-        self.distortion_estimator = nn.Sequential(
-            nn.Linear(audio_embedding_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_size // 2, distortion_size)  # Distortion vector
-        )
         
-        # Audio branch conditioned on distortion
         self.audio_branch = nn.Sequential(
-            norm_factory(audio_embedding_size + distortion_size),  # Input size includes distortion vector
-            nn.Linear(audio_embedding_size + distortion_size, hidden_size),
+            norm_factory(audio_embedding_size),
+            nn.Linear(audio_embedding_size, hidden_size),
             nn.GELU(),
             nn.Dropout(dropout_audio)
         )        
@@ -531,9 +282,7 @@ class RobustFusionClassifier(nn.Module):
         
         # Process modalities
         # 1. process audio
-        distortion_estimate = self.distortion_estimator(audio_emb)
-        audio_input = torch.cat([audio_emb, distortion_estimate], dim=-1)
-        audio_features = self.audio_branch(audio_input)        
+        audio_features = self.audio_branch(audio_emb)
         # 2. process text
         text_features = self.text_branch(text_emb)
         
@@ -600,7 +349,7 @@ class EmbeddingMetrics:
     def _cohort_indices(self, 
                         speaker_col: str = 'speaker_id',
                         model_col: str = 'model',
-                        model_extract_fn: callable = lambda x: x.split(os.sep)[0],
+                        model_extract_fn: callable = lambda x: x.split(os.sep)[0] if x.split(os.sep)[0] != 'librispeech' else 'LibriSpeech',
                         filepath_col: str = 'rel_filepath'):
         """
         Compute balanced cohort indices ensuring good coverage across models and speakers.
@@ -812,6 +561,8 @@ class MultiModalVPCModel(pl.LightningModule):
         self.audio_processor = instantiate(model.audio_processor)
         self.audio_encoder = instantiate(model.audio_encoder)
         self.audio_processor_kwargs = model.audio_processor_kwargs
+        if hasattr(model, "audio_processor_normalizer"):
+            self.audio_processor_normalizer = instantiate(model.audio_processor_normalizer)
         
         # Fusion and classification
         self.fusion_classifier = instantiate(model.fusion_classifier)
@@ -829,12 +580,10 @@ class MultiModalVPCModel(pl.LightningModule):
 
     def _freeze_pretrained_components(self, finetune_audioenc: bool = False) -> None:
         """Freeze pretrained components and enable training for others."""
-        if hasattr(self.audio_encoder, "encode_batch"):
-                self._finetune_audioenc = finetune_audioenc    # Finetune for speechbrain encoders (e.g., x-vector)
         for param in self.text_encoder.parameters():
             param.requires_grad = False
         for param in self.audio_encoder.parameters():
-            param.requires_grad = self._finetune_audioenc
+            param.requires_grad = finetune_audioenc
 
     def _log_step_metrics(self, results: Dict[str, Any], batch: VPC25Item, stage: str) -> None:
         criterion = getattr(self, f"{stage}_criterion")
@@ -936,18 +685,68 @@ class MultiModalVPCModel(pl.LightningModule):
 
     ############ Lightning ############
     def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
+        """Extract audio embeddings based on the encoder type.
+
+        Handles different types of audio encoders:
+        - SpeechBrain encoders (e.g., x-vector)
+        - Transformers-based encoders (e.g., wav2vec)
+        - Custom encoders requiring normalization
+
+        Args:
+            batch_audio: Batch of audio waveforms [batch_size, seq_len]
+            batch_audio_lens: Lengths of audio waveforms [batch_size]
+
+        Returns:
+            Audio embeddings [batch_size, embedding_dim]
+        """
+        # Move tensors to the correct device if needed
+        if self.device != batch_audio.device:
+            batch_audio = batch_audio.to(self.device)
+        if self.device != batch_audio_lens.device:
+            batch_audio_lens = batch_audio_lens.to(self.device)
+
+        # Normalize lengths
+        normalized_lens = batch_audio_lens / max(batch_audio_lens)
+
+        # SpeechBrain encoders
         if hasattr(self.audio_encoder, "encode_batch"):
-            # For speechbrain encoders (e.g., x-vector)
-            audio_emb = self.audio_encoder.encode_batch(wavs=batch_audio,
-                                                        wav_lens=batch_audio_lens/max(batch_audio_lens)
-                                                        ).squeeze(1)
-        else:
-            # For transformers-based encoders (e.g., wav2vec) 
-            input_values = self.audio_processor(
-                batch_audio, 
-                **self.audio_processor_kwargs).input_values.squeeze(0).to(self.device)
+            audio_emb = self.audio_encoder.encode_batch(wavs=batch_audio, wav_lens=normalized_lens).squeeze(1)
+
+        # Transformers Wav2Vec family encoders (using class name check)
+        elif "Wav2Vec2" in type(self.audio_encoder).__name__:
+            # Check if processor is compatible (optional but good practice)
+            if not hasattr(self.audio_processor, "__call__") or not hasattr(self.audio_processor, "sampling_rate"):
+                 log.warning("Audio encoder appears to be Wav2Vec2 family, but processor might be incompatible. Proceeding anyway.")
+
+            # Ensure processor is called correctly
+            processor_output = self.audio_processor(
+                batch_audio,
+                sampling_rate=self.audio_processor_kwargs.sampling_rate,
+                return_tensors="pt"
+            )
+            # Handle different processor output formats (dict vs object)
+            input_values = processor_output['input_values'] if isinstance(processor_output, dict) else processor_output.input_values
+            input_values = input_values.to(self.device)
             audio_outputs = self.audio_encoder(input_values)
+            # Standard way to get embeddings from base Wav2Vec2 models
             audio_emb = audio_outputs.last_hidden_state.mean(dim=1)
+
+        elif isinstance(self.audio_encoder, nn.Module):
+            # Process audio through processor
+            input_values = self.audio_processor(batch_audio)
+            
+            # Apply normalizer if it exists
+            if hasattr(self, "audio_processor_normalizer"):
+                input_values = self.audio_processor_normalizer(input_values, lengths=normalized_lens)
+            # Pass through the encoder
+            audio_emb = self.audio_encoder(input_values, lengths=normalized_lens).squeeze(1)
+
+        # Fallback for any other encoder types
+        else:
+            raise ValueError(
+                f"Unsupported audio encoder type: {type(self.audio_encoder)}. Expected SpeechBrain encoder (has encode_batch), "
+                "Transformers Wav2Vec2 family (contains 'Wav2Vec2' in class name), or custom encoder with normalizer."
+            )
 
         return audio_emb
 

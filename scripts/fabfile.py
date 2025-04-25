@@ -21,8 +21,9 @@ RESULTS_DIR = os.path.join(WOODY_DIR, 'results')
 DATA_DIR = os.path.join(WOODY_DIR, 'datasets')
 
 # sync_results paths
-SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, 'train/runs/*/vpc_amm_cyclic-*-max_dur10-bs32')  # remote results dir
-SYNC_DIR_LOCAL = '/dataHDD/ahmad/hpc_results/third_run/'  # local results dir
+# SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, 'train/runs/*/vpc_amm_cyclic-*-max_dur10-bs32')  # remote results dir
+SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, 'train/runs/available_models/*available_models**')  # remote results dir
+SYNC_DIR_LOCAL = '/dataHDD/ahmad/hpc_results/libri_augmented3/'  # local results dir
 
 
 def timestamp():
@@ -56,7 +57,7 @@ def create_bash_script(settings, script_arguments):
         str: A bash script as a string, ready to be submitted to SLURM.
     """
     is_available_models = "available_models" in settings['datamodule_dir']
-    is_multiple_models = "librispeech" in settings['datamodule_dir']
+    is_libri_included = "LibriSpeech" in settings['datamodule_dir']
     script_arguments_str = ' '.join([f'{k}={v}' for k, v in script_arguments.items()])
     
     job_string = f"""#!/bin/bash -l
@@ -108,13 +109,19 @@ if [[ ! -d "$DEST_DIR" ]]; then
         done
         
         # Transfer librispeech for multiple models
-        [[ "{is_multiple_models}" == "True" ]] && transfer_model "librispeech" &
+        [[ "{is_libri_included}" == "True" ]] && transfer_model "librispeech" &
+
     else
         # Extract model names from directory
         IFS='_' read -ra MODELS <<< "$(basename "{settings['datamodule_dir']}")"
         
         for model in "${{MODELS[@]}}"; do
-            transfer_model "$model" &
+            # Handle special case for LibriSpeech
+            if [[ "$model" == "LibriSpeech" ]]; then
+                transfer_model "librispeech" &
+            else
+                transfer_model "$model" &
+            fi
         done
     fi
     
@@ -270,21 +277,22 @@ def run_vpc():
     }
 
     datasets = [
-        "{librispeech: ${datamodule.available_models.librispeech}, B3: ${datamodule.available_models.B3}}",
-        "{librispeech: ${datamodule.available_models.librispeech}, B4: ${datamodule.available_models.B4}}",
-        "{librispeech: ${datamodule.available_models.librispeech}, B5: ${datamodule.available_models.B5}}",
-        "{librispeech: ${datamodule.available_models.librispeech}, T8-5: ${datamodule.available_models.T8-5}}",
-        "{librispeech: ${datamodule.available_models.librispeech}, T10-2: ${datamodule.available_models.T10-2}}",
-        "{librispeech: ${datamodule.available_models.librispeech}, T12-5: ${datamodule.available_models.T12-5}}",
-        "{librispeech: ${datamodule.available_models.librispeech}, T25-1: ${datamodule.available_models.T25-1}}",
-        "{librispeech: ${datamodule.available_models.librispeech}}"
+        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, B3: ${datamodule.available_models.B3}}",
+        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, B4: ${datamodule.available_models.B4}}",
+        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, B5: ${datamodule.available_models.B5}}",
+        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, T8-5: ${datamodule.available_models.T8-5}}",
+        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, T10-2: ${datamodule.available_models.T10-2}}",
+        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, T12-5: ${datamodule.available_models.T12-5}}",
+        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, T25-1: ${datamodule.available_models.T25-1}}",
+        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}}",
+        "${datamodule.available_models}"
         ]
     experiments = ["vpc_amm_cyclic"]
 
     for experiment in experiments:
         for dataset in datasets:
             
-            # Parse dataset string like "{librispeech: ...}, {B4: ...}" or a single dataset
+            # Parse dataset string like "{LibriSpeech: ...}, {B4: ...}" or a single dataset
             if dataset.startswith("{") and ":" in dataset:
                 if ',' in dataset:
                     # Multiple datasets
