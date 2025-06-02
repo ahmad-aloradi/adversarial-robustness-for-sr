@@ -364,6 +364,108 @@ class SpeakerVerification(pl.LightningModule):
         # resize the cache if it exceeds the max size
         if len(self._embedding_cache) > self._max_cache_size:
             self._embedding_cache.resize(self._max_cache_size)
+            
+        # Log sparsity information if pruning is being used
+        self._log_sparsity_info_if_pruning()
+
+    def _log_sparsity_info_if_pruning(self) -> None:
+        """Log sparsity information if model is being pruned."""
+        # Check if any parameters have pruning masks (indicating pruning is active)
+        has_pruning_masks = any(
+            hasattr(module, f"{param_name}_mask")
+            for module in self.modules()
+            for param_name, _ in module.named_parameters(recurse=False)
+        )
+        
+        if has_pruning_masks:
+            sparsity_info = self.get_model_sparsity_info()
+            
+            # Log basic sparsity metrics
+            self.log("pruning/overall_sparsity", sparsity_info['overall_sparsity'])
+            self.log("pruning/total_parameters", sparsity_info['total_parameters'])
+            self.log("pruning/pruned_parameters", sparsity_info['pruned_parameters'])
+            
+            # Log detailed info periodically
+            if self.current_epoch % 10 == 0:  # Every 10 epochs
+                log.info(f"Epoch {self.current_epoch} - Model Sparsity: {sparsity_info['overall_sparsity']:.4f} "
+                        f"({sparsity_info['pruned_parameters']}/{sparsity_info['total_parameters']} parameters)")
+
+    def get_model_sparsity_info(self) -> Dict[str, Any]:
+        """Get detailed sparsity information for debugging pruning callbacks.
+        
+        Returns:
+            Dictionary with sparsity statistics
+        """
+        total_params = 0
+        pruned_params = 0
+        masked_modules = 0
+        
+        sparsity_info = {
+            'modules_with_masks': [],
+            'modules_without_masks': [],
+            'total_parameters': 0,
+            'pruned_parameters': 0,
+            'overall_sparsity': 0.0,
+            'epoch': getattr(self, 'current_epoch', -1)  # Include current epoch for context
+        }
+        
+        for name, module in self.named_modules():
+            for param_name, param in module.named_parameters(recurse=False):
+                if not isinstance(param, torch.Tensor):
+                    continue
+                    
+                mask_name = f"{param_name}_mask"
+                param_count = param.numel()
+                total_params += param_count
+                
+                if hasattr(module, mask_name):
+                    mask = getattr(module, mask_name)
+                    pruned_count = param_count - mask.sum().item()
+                    pruned_params += pruned_count
+                    masked_modules += 1
+                    
+                    sparsity_info['modules_with_masks'].append({
+                        'module': f"{name}.{param_name}",
+                        'total': param_count,
+                        'pruned': pruned_count,
+                        'sparsity': float(pruned_count) / param_count
+                    })
+                else:
+                    sparsity_info['modules_without_masks'].append({
+                        'module': f"{name}.{param_name}",
+                        'total': param_count
+                    })
+        
+        sparsity_info['total_parameters'] = total_params
+        sparsity_info['pruned_parameters'] = pruned_params
+        sparsity_info['overall_sparsity'] = float(pruned_params) / max(1, total_params)
+        
+        return sparsity_info
+
+    def inspect_pruning_state(self, detailed: bool = False) -> None:
+        """Manual method to inspect current pruning state - useful for debugging.
+        
+        Args:
+            detailed: If True, shows detailed per-module information
+        """
+        sparsity_info = self.get_model_sparsity_info()
+        
+        print(f"\n=== PRUNING STATE INSPECTION (Epoch {sparsity_info['epoch']}) ===")
+        print(f"Overall Sparsity: {sparsity_info['overall_sparsity']:.4f}")
+        print(f"Total Parameters: {sparsity_info['total_parameters']:,}")
+        print(f"Pruned Parameters: {sparsity_info['pruned_parameters']:,}")
+        print(f"Modules with Masks: {len(sparsity_info['modules_with_masks'])}")
+        print(f"Modules without Masks: {len(sparsity_info['modules_without_masks'])}")
+        
+        if detailed and sparsity_info['modules_with_masks']:
+            print("\nDetailed Module Sparsity:")
+            sorted_modules = sorted(sparsity_info['modules_with_masks'], 
+                                  key=lambda x: x['sparsity'], reverse=True)
+            for module_info in sorted_modules:
+                print(f"  {module_info['module']}: {module_info['sparsity']:.4f} "
+                      f"({module_info['pruned']}/{module_info['total']})")
+        
+        print("=== END INSPECTION ===\n")
 
     def on_validation_start(self) -> None:
         pass

@@ -1,7 +1,7 @@
 model_pruning:
   _target_: src.callbacks.prune.SafeModelPruning
   pruning_fn: l1_unstructured  # Pruning function from torch.nn.utils.prune (e.g., 'l1_unstructured', 'random_unstructured') or a custom callable
-  amount: ${oc.eval:0.5 if not ${callbacks.model_pruning.final_amount} else ${callbacks.model_pruning.final_amount}} # Amount of parameters to prune: float (0-1) for fraction, int for absolute number
+  amount: 0.9 # Amount of parameters to prune: float (0-1) for fraction, int for absolute number
   use_global_unstructured: true  # If true, applies pruning globally across all parameters; if false, applies individually per parameter
   apply_pruning: true  # Controls whether to actually apply pruning or just create the pruning method
   make_pruning_permanent: true  # If true, permanently removes pruned weights after training by removing the mask
@@ -15,5 +15,5 @@ model_pruning:
   scheduled_pruning: true  # If true, gradually increases pruning amount from initial_amount to final_amount over epochs_to_ramp
   initial_amount: 0.1  # Starting pruning rate when using scheduled_pruning (must be between 0 and 1)
   final_amount: 0.9  # Final pruning amount when using scheduled_pruning (must be between 0 and 1)
-  epochs_to_ramp: ${oc.eval:${trainer.max_epochs} // 1.2}  # Number of epochs over which to linearly increase pruning from initial_amount to final_amount
+  epochs_to_ramp: ${oc.eval:${trainer.max_epochs} // 1.2} # Number of epochs over which to linearly increase pruning from initial_amount to final_amount
   collect_metrics: true  # If true, collects and logs detailed sparsity metrics during training for analysis
