@@ -7,14 +7,15 @@ defaults:
   - override /callbacks: default.yaml
   - override /datamodule: datasets/vpc.yaml
   - override /module: vpc.yaml
-  - override /module/model: residuals.yaml
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
+  - override /module/model: robust_audio.yaml
+
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["vpc25", "de-anonmyzation", "CrossEntropy", "Normalized"]
+tags: ["vpc25", "de-anonmyzation", "amm", "comprehensive"]
 seed: 42
 
 trainer:
@@ -50,26 +51,27 @@ datamodule:
       batch_size: 1
 
 module:
-  normalize_test_scores: True
+  _target_: src.modules.audio_vpc.AudioVPCModel
 
+  normalize_test_scores: True
+      
   criterion:
     train_criterion:
-      _target_: src.modules.losses.components.multi_modal_losses.EnhancedCriterion
-      temperature: 0.2
-      classification_loss:
-        _target_: torch.nn.CrossEntropyLoss
+      _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
+      loss_fn:
+        _target_: speechbrain.nnet.losses.AdditiveAngularMargin
+        margin: 0.15
+        scale: 30.0
 
-  lr_scheduler:
+  lr_scheduler: 
     scheduler:
-      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-      mode: "min"
-      factor: 0.25
-      min_lr: 1.0e-7
-      patience: 2
-      verbose: True
+        _target_: torch.optim.lr_scheduler.CyclicLR
+        base_lr: 1e-6
+        max_lr: ${module.optimizer.lr}
+        step_size_up: ${oc.eval:"int(2 * 104015 / ${datamodule.loaders.train.batch_size})"} # Full cycle every 4 epochs
     extras:
-      monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
-      interval: "epoch"
+      monitor: ${replace:"valid/__metric__"}
+      interval: step
       frequency: 1
 
 

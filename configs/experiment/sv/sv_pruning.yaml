@@ -21,7 +21,7 @@ seed: 42
 trainer:
   min_epochs: 10
   max_epochs: 15
-  gradient_clip_val: 5.0
+  gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 
 callbacks:
@@ -43,7 +43,7 @@ datamodule:
     valid:
       batch_size: 64
     test:
-      batch_size: 64
+      batch_size: 4
     enrollment:
       batch_size: 1
 
@@ -53,9 +53,9 @@ module:
   lr_scheduler: 
     scheduler:
         _target_: torch.optim.lr_scheduler.CyclicLR
-        base_lr: 0.00000001
+        base_lr: 1e-6
         max_lr: ${module.optimizer.lr}
-        step_size_up: 65000
+        step_size_up: ${oc.eval:"int(2 * 1176000 / ${datamodule.loaders.train.batch_size})"}
     extras:
       monitor: ${replace:"valid/__metric__"}
       interval: step

@@ -86,5 +86,5 @@ scores_norm:
   embeds_metric_params:
     cohort_per_model: 40000
   scores_norm_params:
-    topk: 10000
+    topk: 1000
     min_cohort_size: 3000

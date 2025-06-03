@@ -13,7 +13,7 @@ defaults:
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["vpc25", "de-anonmyzation", "CrossEntropy"]
+tags: ["vpc25", "de-anonmyzation", "amm", "comprehensive"]
 seed: 42
 
 trainer:
@@ -49,8 +49,37 @@ datamodule:
       batch_size: 1
 
 module:
+  model:
+    audio_processor:
+      _target_: speechbrain.lobes.features.Fbank
+      sample_rate: ${datamodule.dataset.sample_rate}
+      deltas: False
+      n_mels: 80
+      f_min: 0
+      f_max: null
+      n_fft: 512
+      win_length: 25
+      hop_length: 10
+      left_frames: 0
+      right_frames: 0
+
+    audio_processor_normalizer:
+      _target_: speechbrain.processing.features.InputNormalization
+      norm_type: sentence
+      std_norm: False
+
+    audio_encoder:
+      _target_: speechbrain.lobes.models.ECAPA_TDNN.ECAPA_TDNN
+      input_size: ${module.model.audio_processor.n_mels}
+      channels: [1024, 1024, 1024, 1024, 3072]
+      kernel_sizes: [5, 3, 3, 3, 1]
+      dilations: [1, 2, 3, 4, 1]
+      groups: [1, 1, 1, 1, 1]
+      attention_channels: 128
+      lin_neurons: 192  # ECAPA embedding size
+
   normalize_test_scores: True
-        
+      
   criterion:
     train_criterion:
       _target_: src.modules.losses.components.multi_modal_losses.MultiModalLoss
@@ -66,20 +95,23 @@ module:
         confidence: 0.0
       confidence_target: 0.9
       classification_loss: 
-        _target_: torch.nn.CrossEntropyLoss
+        _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
+        loss_fn:
+          _target_: speechbrain.nnet.losses.AdditiveAngularMargin
+          margin: 0.15
+          scale: 30.0
 
-  lr_scheduler:
+  lr_scheduler: 
     scheduler:
-      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-      mode: "min"
-      factor: 0.25
-      min_lr: 1.0e-7
-      patience: 2
-      verbose: True
+        _target_: torch.optim.lr_scheduler.CyclicLR
+        base_lr: 1e-6
+        max_lr: ${module.optimizer.lr}
+        step_size_up: ${oc.eval:"int(2 * 104015 / ${datamodule.loaders.train.batch_size})"} # Full cycle every 4 epochs
     extras:
-      monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
-      interval: "epoch"
+      monitor: ${replace:"valid/__metric__"}
+      interval: step
       frequency: 1
+
 
   optimizer:
     lr: 1.0e-4

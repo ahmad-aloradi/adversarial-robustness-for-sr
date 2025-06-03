@@ -19,8 +19,9 @@ seed: 42
 trainer:
   min_epochs: 10
   max_epochs: 25
-  gradient_clip_val: 5.0
+  gradient_clip_val: 1.0
   num_sanity_val_steps: 0
+  check_val_every_n_epoch: 1
 
 callbacks:
   model_checkpoint:
@@ -35,10 +36,7 @@ datamodule:
   dataset:
     max_duration: 10.0
 
-  models:
-    B3: ${datamodule.available_models.B3}
-    B5: ${datamodule.available_models.B5}
-    T8-5: ${datamodule.available_models.T8-5}
+  models: null
 
   loaders:
     train:
@@ -46,7 +44,7 @@ datamodule:
     valid:
       batch_size: 16
     test:
-      batch_size: 16
+      batch_size: 4
     enrollment:
       batch_size: 1
 
@@ -60,25 +58,25 @@ module:
       weights:
         _target_: src.modules.losses.components.multi_modal_losses.LossWeights
         ensemble: 1.0
-        fusion: 0.2
-        audio: 0.2
-        text: 0.2
-        contrastive: 0.1
-        consistency: 1.0
-        confidence: 0.1
+        fusion: 0.1
+        audio: 0.1
+        text: 0.1
+        contrastive: 0.0
+        consistency: 0.0
+        confidence: 0.0
       confidence_target: 0.9
       classification_loss: 
         _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
         loss_fn:
           _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-          margin: 0.2
+          margin: 0.15
           scale: 30.0
 
   lr_scheduler:
     scheduler:
       _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
       mode: "min"
-      factor: 0.3
+      factor: 0.25
       min_lr: 1.0e-7
       patience: 2
       verbose: True

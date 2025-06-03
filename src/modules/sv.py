@@ -288,7 +288,7 @@ class SpeakerVerification(pl.LightningModule):
                     pbar.update(len(batch_audios))
 
     ############ Lightning ############
-    def _get_uncached_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
+    def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
         if hasattr(self.audio_encoder, "encode_batch"):
             # For speechbrain encoders (e.g., x-vector)
             audio_emb = self.audio_encoder.encode_batch(
@@ -307,64 +307,11 @@ class SpeakerVerification(pl.LightningModule):
         
         return audio_emb
 
-    def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
-        """Get audio embeddings with caching optimization.
-        
-        Args:
-            batch_audio: Tensor of audio inputs to embed
-            batch_audio_lens: Tensor of audio lengths
-            
-        Returns:
-            torch.Tensor: Stacked tensor of embeddings for all audio inputs on the model's device
-        """
-        # Pre-allocate list for embeddings
-        audio_embeddings = [None] * len(batch_audio)
-        uncached_audio = []
-        uncached_lens = []
-        uncached_indices = []
-        
-        # Check cache for each audio input
-        for idx, (audio, length) in enumerate(zip(batch_audio, batch_audio_lens)):
-            audio_hash = hash((audio.cpu().numpy().tobytes(), length.item()))
-            audio_key = hash(audio_hash)
-            
-            cached_embedding = self._embedding_cache.get(audio_key)
-            if cached_embedding is not None:
-                # Move cached embedding to current device
-                audio_embeddings[idx] = cached_embedding.to(self.device)
-            else:
-                uncached_audio.append(audio)
-                uncached_lens.append(length)
-                uncached_indices.append(idx)
-        
-        # Process uncached audio in a single batch if any exist
-        if uncached_audio:
-            # Stack uncached audio into a batch
-            uncached_audio = torch.stack(uncached_audio)
-            uncached_lens = torch.stack(uncached_lens)
-            
-            # Get embeddings for uncached audio
-            with torch.no_grad():
-                new_embeddings = self._get_uncached_audio_embeddings(uncached_audio, uncached_lens)
-            
-            # Update cache and embeddings list
-            for idx, (audio, length, embedding) in enumerate(zip(uncached_audio, uncached_lens, new_embeddings)):
-                # Create key from audio tensor and length
-                audio_hash = hash((audio.cpu().numpy().tobytes(), length.item()))
-                audio_key = str(audio_hash)
-                # Store embedding in cache (detached and on CPU)
-                self._embedding_cache.update(audio_key, embedding.detach().cpu())
-                # Use the embedding directly from GPU for current forward pass
-                audio_embeddings[uncached_indices[idx]] = embedding
-        
-        # Stack all embeddings and ensure they're on the correct device
-        return torch.stack(audio_embeddings)
-
     def forward(self, batch: VoxcelebItem) -> Dict[str, torch.Tensor]:
         """Process text/audio inputs with optimized embedding caching."""
         # Add waveform augmentation if specified.
         if self.training and hasattr(self, "wav_augmenter"):
-            batch.audio, batch.audio_length = self.wav_augmenter(batch.audio, batch.audio_length)
+            batch.audio, batch.audio_length = self.wav_augmenter(batch.audio, batch.audio_length / max(batch.audio_length))
             batch.class_id = self.wav_augmenter.replicate_labels(batch.class_id)
             
         audio_emb = self._get_audio_embeddings(batch.audio, batch.audio_length)
@@ -417,6 +364,108 @@ class SpeakerVerification(pl.LightningModule):
         # resize the cache if it exceeds the max size
         if len(self._embedding_cache) > self._max_cache_size:
             self._embedding_cache.resize(self._max_cache_size)
+            
+        # Log sparsity information if pruning is being used
+        self._log_sparsity_info_if_pruning()
+
+    def _log_sparsity_info_if_pruning(self) -> None:
+        """Log sparsity information if model is being pruned."""
+        # Check if any parameters have pruning masks (indicating pruning is active)
+        has_pruning_masks = any(
+            hasattr(module, f"{param_name}_mask")
+            for module in self.modules()
+            for param_name, _ in module.named_parameters(recurse=False)
+        )
+        
+        if has_pruning_masks:
+            sparsity_info = self.get_model_sparsity_info()
+            
+            # Log basic sparsity metrics
+            self.log("pruning/overall_sparsity", sparsity_info['overall_sparsity'])
+            self.log("pruning/total_parameters", sparsity_info['total_parameters'])
+            self.log("pruning/pruned_parameters", sparsity_info['pruned_parameters'])
+            
+            # Log detailed info periodically
+            if self.current_epoch % 10 == 0:  # Every 10 epochs
+                log.info(f"Epoch {self.current_epoch} - Model Sparsity: {sparsity_info['overall_sparsity']:.4f} "
+                        f"({sparsity_info['pruned_parameters']}/{sparsity_info['total_parameters']} parameters)")
+
+    def get_model_sparsity_info(self) -> Dict[str, Any]:
+        """Get detailed sparsity information for debugging pruning callbacks.
+        
+        Returns:
+            Dictionary with sparsity statistics
+        """
+        total_params = 0
+        pruned_params = 0
+        masked_modules = 0
+        
+        sparsity_info = {
+            'modules_with_masks': [],
+            'modules_without_masks': [],
+            'total_parameters': 0,
+            'pruned_parameters': 0,
+            'overall_sparsity': 0.0,
+            'epoch': getattr(self, 'current_epoch', -1)  # Include current epoch for context
+        }
+        
+        for name, module in self.named_modules():
+            for param_name, param in module.named_parameters(recurse=False):
+                if not isinstance(param, torch.Tensor):
+                    continue
+                    
+                mask_name = f"{param_name}_mask"
+                param_count = param.numel()
+                total_params += param_count
+                
+                if hasattr(module, mask_name):
+                    mask = getattr(module, mask_name)
+                    pruned_count = param_count - mask.sum().item()
+                    pruned_params += pruned_count
+                    masked_modules += 1
+                    
+                    sparsity_info['modules_with_masks'].append({
+                        'module': f"{name}.{param_name}",
+                        'total': param_count,
+                        'pruned': pruned_count,
+                        'sparsity': float(pruned_count) / param_count
+                    })
+                else:
+                    sparsity_info['modules_without_masks'].append({
+                        'module': f"{name}.{param_name}",
+                        'total': param_count
+                    })
+        
+        sparsity_info['total_parameters'] = total_params
+        sparsity_info['pruned_parameters'] = pruned_params
+        sparsity_info['overall_sparsity'] = float(pruned_params) / max(1, total_params)
+        
+        return sparsity_info
+
+    def inspect_pruning_state(self, detailed: bool = False) -> None:
+        """Manual method to inspect current pruning state - useful for debugging.
+        
+        Args:
+            detailed: If True, shows detailed per-module information
+        """
+        sparsity_info = self.get_model_sparsity_info()
+        
+        print(f"\n=== PRUNING STATE INSPECTION (Epoch {sparsity_info['epoch']}) ===")
+        print(f"Overall Sparsity: {sparsity_info['overall_sparsity']:.4f}")
+        print(f"Total Parameters: {sparsity_info['total_parameters']:,}")
+        print(f"Pruned Parameters: {sparsity_info['pruned_parameters']:,}")
+        print(f"Modules with Masks: {len(sparsity_info['modules_with_masks'])}")
+        print(f"Modules without Masks: {len(sparsity_info['modules_without_masks'])}")
+        
+        if detailed and sparsity_info['modules_with_masks']:
+            print("\nDetailed Module Sparsity:")
+            sorted_modules = sorted(sparsity_info['modules_with_masks'], 
+                                  key=lambda x: x['sparsity'], reverse=True)
+            for module_info in sorted_modules:
+                print(f"  {module_info['module']}: {module_info['sparsity']:.4f} "
+                      f"({module_info['pruned']}/{module_info['total']})")
+        
+        print("=== END INSPECTION ===\n")
 
     def on_validation_start(self) -> None:
         pass

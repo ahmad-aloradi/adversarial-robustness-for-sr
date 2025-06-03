@@ -4,44 +4,46 @@
 # python train.py experiment=example
 
 defaults:
-  # - override /callbacks: default.yaml
-  - /callbacks/model_pruning
-  - override /datamodule: datasets/voxceleb.yaml
-  - override /module: sv.yaml
+  - override /callbacks: default.yaml
+  - override /datamodule: datasets/vpc.yaml
+  - override /module: vpc.yaml
+  - override /module/model: residuals.yaml
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
-
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["data_augmentation", "model_pruning", "voxceleb", "sv", "ecapa"]
+tags: ["vpc25", "de-anonmyzation", "CrossEntropy", "Normalized"]
 seed: 42
 
 trainer:
   min_epochs: 10
-  max_epochs: 15
+  max_epochs: 25
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
+  check_val_every_n_epoch: 1
 
 callbacks:
   model_checkpoint:
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
+    mode: min
+    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
   early_stopping:
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
-    patience: 8
+    mode: min
+    monitor: ${replace:"valid/__metric__"}/${module.metrics.valid_best.target_key}
+    patience: 10
 
 datamodule:
   dataset:
-    max_duration: 3.0
+    max_duration: 10.0
+
+  models: null
 
   loaders:
     train:
-      batch_size: 64
+      batch_size: 16
     valid:
-      batch_size: 64
+      batch_size: 16
     test:
       batch_size: 4
     enrollment:
@@ -50,23 +52,34 @@ datamodule:
 module:
   normalize_test_scores: True
 
+  criterion:
+    train_criterion:
+      _target_: src.modules.losses.components.multi_modal_losses.EnhancedCriterion
+      temperature: 0.2
+      classification_loss:
+        _target_: torch.nn.CrossEntropyLoss
+
   lr_scheduler: 
     scheduler:
         _target_: torch.optim.lr_scheduler.CyclicLR
-        base_lr: 1e-8
+        base_lr: 1e-6
         max_lr: ${module.optimizer.lr}
-        step_size_up: ${oc.eval:"int(2 * 1176000 / ${datamodule.loaders.train.batch_size})"}
+        step_size_up: ${oc.eval:"int(2 * 104015 / ${datamodule.loaders.train.batch_size})"} # Full cycle every 4 epochs
     extras:
       monitor: ${replace:"valid/__metric__"}
       interval: step
       frequency: 1
 
-  ### Data for augmentation ###
-  data_augemntation:
 
+  optimizer:
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
+
+
+  data_augemntation:
     noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
     rir_dataset_url: https://www.dropbox.com/scl/fi/linhy77c36mu10965a836/RIRs.zip?rlkey=pg9cu8vrpn2u173vhiqyu743u&dl=1
-    data_folder_rir_noises: ${datamodule.dataset.data_dir}/RIRS_NOISES
+    data_folder_rir_noises: ${paths.data_dir}/voxceleb/RIRS_NOISES
     noise_annotation: ${module.data_augemntation.data_folder_rir_noises}/noise.csv
     rir_annotation: ${module.data_augemntation.data_folder_rir_noises}/reverb.csv
 
@@ -106,31 +119,36 @@ module:
         drop_freq_low: 0
         drop_freq_high: 1
         drop_freq_count_low: 1
-        drop_freq_count_high: 3
+        drop_freq_count_high: 5
         drop_freq_width: 0.05
 
       drop_chunk:
         _target_: speechbrain.augment.time_domain.DropChunk
-        drop_length_low: 1000
-        drop_length_high: 2000
-        drop_count_low: 1
+        drop_length_low: 2000
+        drop_length_high: 8000
+        drop_count_low: 3
         drop_count_high: 5
+
+      speed_perturber:
+        _target_: speechbrain.augment.time_domain.SpeedPerturb
+        orig_freq: ${datamodule.dataset.sample_rate}
+        speeds: [90, 110]
+        device: cuda
 
       wav_augmenter:
         _target_: speechbrain.augment.augmenter.Augmenter
         parallel_augment: true
         concat_original: true
-        min_augmentations: 4
-        max_augmentations: 4
+        min_augmentations: 3
+        max_augmentations: 3
         augment_prob: 1.0
         augmentations:
-          - ${module.data_augemntation.augmentations.add_noise}
-          - ${module.data_augemntation.augmentations.add_reverb}
           - ${module.data_augemntation.augmentations.drop_freq}
           - ${module.data_augemntation.augmentations.drop_chunk}
+          - ${module.data_augemntation.augmentations.speed_perturber}
+
 
 # logger:
 #   wandb:
 #     tags: ${tags}
 #     group: "mnist"
-

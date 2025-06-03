@@ -30,7 +30,7 @@ log = utils.get_pylogger(__name__)
 
 
 # Which embedding to use for speaker ID; override when necessary
-EMBED_FEATS = "fusion"
+EMBED_FEATS = "audio"
 set_id_embedding(EMBED_FEATS)
 
 # Constants
@@ -50,141 +50,6 @@ class EmbeddingType(Enum):
 
 ###################################
 
-class NormalizedWeightedSum(nn.Module):
-    def __init__(self, audio_embedding_size, text_embedding_size, hidden_size):
-        super().__init__()
-        # Projection layers
-        self.audio_proj = nn.Sequential(
-            nn.LayerNorm(audio_embedding_size),
-            nn.Linear(audio_embedding_size, hidden_size),
-        )
-        self.text_proj = nn.Sequential(
-            nn.LayerNorm(text_embedding_size),
-            nn.Linear(text_embedding_size, hidden_size),
-        )
-        # Learnable weights for weighted sum
-        self.audio_weight = nn.Parameter(torch.tensor(1.0))
-        self.text_weight = nn.Parameter(torch.tensor(1.0))
-
-    def forward(self, emebds):
-        audio_emb, text_emb = emebds
-        audio_emb = self.audio_proj(audio_emb)
-        text_emb = self.text_proj(text_emb)
-    
-        return {"fusion_emb": self.audio_weight * audio_emb + self.text_weight * text_emb, 
-                "audio_emb": audio_emb,
-                "text_emb": text_emb}  
-
-
-class FusionClassifierWithResiduals(nn.Module):
-    def __init__(
-        self,
-        fuse_model: nn.Module,
-        input_size: int, 
-        hidden_size: int, 
-        num_classes: int,
-        dropout_residual: float = 0.1,
-        num_residuals: int = 2,
-        norm_type: Literal['batch', 'layer'] = 'batch',
-        embedding_type: EmbeddingType = EmbeddingType.LAST_HIDDEN
-    ):
-        super().__init__()
-        self.embedding_type = embedding_type
-
-        # define fuse_model
-        self.fuse_model = fuse_model
-        
-        # Factory for normalization layers
-        norm_factory: Callable = {
-            'batch': nn.BatchNorm1d,
-            'layer': nn.LayerNorm
-        }[norm_type]
-        
-        # Audio & Text classifiers
-        self.audio_classifier = nn.Linear(input_size, num_classes)
-        self.text_classifier = nn.Linear(input_size, num_classes)
-        
-        # fusion classifier
-        self.fusion_norm = norm_factory(input_size)
-        self.residuals = nn.ModuleList([
-            self._create_residual_block(input_size, hidden_size, dropout_residual, norm_factory)
-            for _ in range(num_residuals)
-        ])
-
-        # Initialize weights
-        for block in self.residuals:
-            for m in block.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.xavier_uniform_(m.weight)
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
-
-        self.fusion_classifier = nn.Linear(input_size, num_classes)
-        nn.init.xavier_uniform_(self.fusion_classifier.weight)
-        nn.init.zeros_(self.fusion_classifier.bias)
-
-    @staticmethod
-    def get_embedding(fused_feats: Dict[str, torch.Tensor], 
-                      last_hidden: torch.Tensor,
-                      embedding_type: EmbeddingType) -> torch.Tensor:
-        """Get the selected embedding type."""
-        embedding_map = {
-            EmbeddingType.TEXT: fused_feats["text_emb"],
-            EmbeddingType.AUDIO: fused_feats["audio_emb"],
-            EmbeddingType.FUSION: fused_feats["fusion_emb"],
-            EmbeddingType.LAST_HIDDEN: last_hidden
-        }
-        assert embedding_type in embedding_map, f"Invalid embedding type: {embedding_type}"
-        assert embedding_map[embedding_type].dim() == 2, f"Invalid embedding shape: {embedding_map[embedding_type].shape}"
-        normalized_embeds = torch.nn.functional.normalize(embedding_map[embedding_type], p=2, dim=-1)
-        return normalized_embeds
-
-    @staticmethod
-    def _create_residual_block(input_size: int, hidden_size: int, dropout: float, norm_factory: Callable
-                               ) -> nn.Sequential:
-        """Create a residual block with given specifications."""
-        return nn.Sequential(
-            nn.Linear(input_size, hidden_size),
-            norm_factory(hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout),
-            nn.Linear(hidden_size, input_size),
-            norm_factory(input_size)
-        )
-    
-    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
-        """Forward pass through the entire network."""
-        # fuse features
-        fused_feats = self.fuse_model(inputs)
-
-        # classify audio and text features
-        audio_logits = self.audio_classifier(fused_feats["audio_emb"])
-        text_logits = self.text_classifier(fused_feats["text_emb"])
-
-        # fusion classifier        
-        x = self.fusion_norm(fused_feats['fusion_emb'])
-        for block in self.residuals:
-            x = torch.nn.functional.relu(x + block(x))
-        
-        fusion_logits = self.fusion_classifier(x)
-        class_prob = torch.nn.functional.softmax(fusion_logits, dim=1)
-        class_preds = torch.argmax(class_prob, dim=-1)
-
-        # Get selected embedding type
-        features = FusionClassifierWithResiduals.get_embedding(fused_feats, x, self.embedding_type)
-
-        return {
-            EMBEDS["TEXT"]: fused_feats["text_emb"],
-            EMBEDS["AUDIO"]: fused_feats["audio_emb"],
-            EMBEDS["FUSION"]: fused_feats["fusion_emb"],
-            EMBEDS["ID"]: features,
-            EMBEDS["CLASS"]: class_preds,
-            f"fusion_logits": fusion_logits,
-            f"audio_logits": audio_logits,
-            f"text_logits": text_logits
-        }
-    
-
 class RobustFusionClassifier(nn.Module):
     """
     Classifier with:
@@ -203,7 +68,7 @@ class RobustFusionClassifier(nn.Module):
                  dropout_text: float = 0.1,
                  accum_method: Literal['sum', 'concat'] = 'sum',
                  norm_type: Literal['batch', 'layer'] = 'batch',
-                 embedding_type: EmbeddingType = EmbeddingType.FUSION
+                 embedding_type: EmbeddingType = EmbeddingType.AUDIO
                  ):
         super().__init__()
         
@@ -224,42 +89,10 @@ class RobustFusionClassifier(nn.Module):
             nn.Linear(audio_embedding_size, hidden_size),
             nn.GELU(),
             nn.Dropout(dropout_audio)
-        )        
-
-        # Text processing path
-        self.text_branch = nn.Sequential(
-            norm_factory(text_embedding_size),
-            nn.Linear(text_embedding_size, hidden_size),
-            nn.GELU(),
-            nn.Dropout(dropout_text)
-        )
-
-        # Confidence networks
-        self.audio_confidence = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_size // 2, 1),
-            nn.Sigmoid()
-        )
-        self.text_confidence = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size//2),
-            nn.ReLU(),
-            nn.Linear(hidden_size // 2, 1),
-            nn.Sigmoid()
         )
 
         # Classification heads
         self.audio_classifier = nn.Linear(hidden_size, num_classes)
-        self.text_classifier = nn.Linear(hidden_size, num_classes)
-        self.fusion_classifier = nn.Linear(fusion_dependent_hidden, num_classes)
-
-        # Adaptive fusion gating
-        self.adaptive_gate = nn.Sequential(
-            nn.Linear(2 * hidden_size + 2, hidden_size),  # *2 for text/audio,  +2 for confidences
-            nn.ReLU(),
-            nn.Linear(hidden_size, 3),
-            nn.Softmax(dim=-1)
-            )
 
     @staticmethod
     def get_embedding(fused_feats: Dict[str, torch.Tensor], 
@@ -267,10 +100,7 @@ class RobustFusionClassifier(nn.Module):
                       embedding_type: EmbeddingType) -> torch.Tensor:
         """Get the selected embedding type."""
         embedding_map = {
-            EmbeddingType.TEXT: fused_feats["text_emb"],
             EmbeddingType.AUDIO: fused_feats["audio_emb"],
-            EmbeddingType.FUSION: fused_feats["fusion_emb"],
-            EmbeddingType.LAST_HIDDEN: last_hidden
         }
         assert embedding_type in embedding_map, f"Invalid embedding type: {embedding_type}"
         assert embedding_map[embedding_type].dim() == 2, f"Invalid embedding shape: {embedding_map[embedding_type].shape}"
@@ -278,58 +108,26 @@ class RobustFusionClassifier(nn.Module):
         return normalized_embeds
 
     def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        audio_emb, text_emb = inputs
+        audio_emb = inputs
         
         # Process modalities
-        # 1. process audio
         audio_features = self.audio_branch(audio_emb)
-        # 2. process text
-        text_features = self.text_branch(text_emb)
-        
-        # Calculate confidences
-        audio_conf = self.audio_confidence(audio_features)
-        text_conf = self.text_confidence(text_features)
-                
-        # Confidence-weighted fusion
-        if self.accum_method == 'sum':
-            fusion_features = audio_features * audio_conf + text_features * text_conf
-        elif self.accum_method == 'concat':
-            fusion_features = torch.cat((audio_features * audio_conf, text_features * text_conf), dim=-1)
 
         # Predictions
         audio_logits = self.audio_classifier(audio_features)
-        text_logits = self.text_classifier(text_features)
-        fusion_logits = self.fusion_classifier(fusion_features)
         
-        # Adaptive ensemble weighting
-        gate_input = torch.cat([audio_features, text_features, audio_conf, text_conf], dim=-1)
-        ensemble_weights = self.adaptive_gate(gate_input)
-
-        # Final prediction with residual audio connection
-        final_logits = (ensemble_weights[:, 0:1] * audio_logits +
-                        ensemble_weights[:, 1:2] * text_logits +
-                        ensemble_weights[:, 2:3] * fusion_logits)
-
-        class_prob = torch.nn.functional.softmax(final_logits, dim=1)
+        class_prob = torch.nn.functional.softmax(audio_logits, dim=1)
         predicted_class = torch.argmax(class_prob, dim=-1)
 
         # get representation
-        fused_feats = {'text_emb': text_features, 'audio_emb': audio_features, 'fusion_emb': fusion_features}
-        features = RobustFusionClassifier.get_embedding(fused_feats, last_hidden=fusion_features, embedding_type=self.embedding_type)
+        fused_feats = {'audio_emb': audio_features}
+        features = RobustFusionClassifier.get_embedding(fused_feats, last_hidden=audio_features, embedding_type=self.embedding_type)
 
         return {
-            "ensemble_logits": final_logits,
             "audio_logits": audio_logits,
-            "text_logits": text_logits,
-            "fusion_logits": fusion_logits,
             EMBEDS["CLASS"]: predicted_class,
             EMBEDS["AUDIO"]: audio_features,
-            EMBEDS["TEXT"]: text_features,
-            EMBEDS["FUSION"]: fusion_features,
             EMBEDS["ID"]: features,
-            "audio_confidence": audio_conf,
-            "text_confidence": text_conf,
-            "ensemble_weights": ensemble_weights,
         }
 
 ###################################
@@ -496,7 +294,7 @@ class EmbeddingMetrics:
         if hasattr(self, '_embeddings'):
             delattr(self, '_embeddings')
 
-class MultiModalVPCModel(pl.LightningModule):
+class AudioVPCModel(pl.LightningModule):
     """Multi-modal Voice Print Classification Model.
     
     This model combines text and audio processing for speaker identification and gender classification.
@@ -530,12 +328,6 @@ class MultiModalVPCModel(pl.LightningModule):
         
         # Freeze pretrained components
         self._freeze_pretrained_components(finetune_audioenc=model.get("finetune_audioenc", True)) 
-
-        # Initialize text embedding cache with appropriate limits
-        self._text_embeds_cache_config = model.get("embedding_cache", {})
-        self._max_cache_size = self._text_embeds_cache_config.get("max_size", 500000)
-        self._bypass_text_warmup = self._text_embeds_cache_config.get("bypass_warmup", False)
-        self._text_embedding_cache = EmbeddingCache(max_size=self._max_cache_size)
         
         # Embeddings norm configs
         self.normalize_test_scores = kwargs.get("normalize_test_scores", False)
@@ -552,12 +344,6 @@ class MultiModalVPCModel(pl.LightningModule):
 
     def _setup_model_components(self, model: DictConfig) -> None:
         """Initialize encoders and classifiers."""
-        # Text processing
-        self.text_processor = instantiate(model.text_processor)
-        self.text_encoder = instantiate(model.text_encoder)
-        self.text_processor_kwargs = model.text_processor_kwargs
-
-        # Audio processing
         self.audio_processor = instantiate(model.audio_processor)
         self.audio_encoder = instantiate(model.audio_encoder)
         self.audio_processor_kwargs = model.audio_processor_kwargs
@@ -580,8 +366,8 @@ class MultiModalVPCModel(pl.LightningModule):
 
     def _freeze_pretrained_components(self, finetune_audioenc: bool = False) -> None:
         """Freeze pretrained components and enable training for others."""
-        for param in self.text_encoder.parameters():
-            param.requires_grad = False
+        # for param in self.text_encoder.parameters():
+        #     param.requires_grad = False
         for param in self.audio_encoder.parameters():
             param.requires_grad = finetune_audioenc
 
@@ -602,7 +388,7 @@ class MultiModalVPCModel(pl.LightningModule):
         # Log metrics
         metric = getattr(self, f"{stage}_metric")
         computed_metric = metric(
-            results["outputs"][f"{LOSS_TYPES['FUSION']}_logits"],
+            results["outputs"][f"{LOSS_TYPES['AUDIO']}_logits"],
             batch.class_id
         )
         
@@ -612,76 +398,6 @@ class MultiModalVPCModel(pl.LightningModule):
             batch_size=batch.audio.shape[0],
             **self.logging_params
         )
-
-    ############ Caching ############
-    def _warmup_cache(self):
-        """Pre-computes and caches text embeddings for unique training texts.
-        
-        Uses batched processing for memory efficiency and shows a progress bar.
-        """
-        # Get unique texts from training data
-        unique_texts = list(set(self.trainer.datamodule.train_data.dataset.text))
-        
-        # Define batch size for processing
-        batch_size = 384
-        
-        # Optional: Limit to subset of texts for faster startup
-        max_texts = batch_size * 10  # Uncomment to process only 2 batches
-        unique_texts = unique_texts[:max_texts]
-        
-        # Process texts in batches with progress bar
-        with torch.no_grad():
-            with tqdm(total=len(unique_texts), desc="Warming up cache", leave=False) as pbar:
-                for i in range(0, len(unique_texts), batch_size):
-                    batch_texts = unique_texts[i: i + batch_size]
-                    # Get embeddings and immediately delete the tensor since we only need the cached values
-                    _ = self.get_text_embeddings(batch_texts)
-                    pbar.update(len(batch_texts))
-
-    def get_text_embeddings(self, batch_texts: List[str]) -> torch.Tensor:
-        """Get text embeddings with caching optimization.
-        
-        Args:
-            batch_texts: List of text strings to embed
-            
-        Returns:
-            torch.Tensor: Stacked tensor of embeddings for all texts on the model's device
-        """
-        # Pre-allocate list for embeddings
-        text_embeddings = [None] * len(batch_texts)
-        uncached_texts = []
-        uncached_indices = []
-        
-        # Check cache for each text
-        for idx, text in enumerate(batch_texts):
-            cached_embedding = self._text_embedding_cache.get(text)
-            if cached_embedding is not None:
-                # Move cached embedding to current device
-                text_embeddings[idx] = cached_embedding.to(self.device)
-            else:
-                uncached_texts.append(text)
-                uncached_indices.append(idx)
-        
-        # Process uncached texts in a single batch
-        if uncached_texts:
-            # Process all uncached texts in a single batch
-            inputs_text = self.text_processor(uncached_texts, **self.text_processor_kwargs)
-            inputs_text.input_ids = inputs_text.input_ids.to(self.device)
-            inputs_text.attention_mask = inputs_text.attention_mask.to(self.device)
-            
-            with torch.no_grad():
-                text_outputs = self.text_encoder(inputs_text.input_ids, attention_mask=inputs_text.attention_mask)
-                new_embeddings = text_outputs.pooler_output
-            
-            # Update cache and embeddings list
-            for idx, (text, embedding) in enumerate(zip(uncached_texts, new_embeddings)):
-                # Store embedding in cache (detached and on CPU)
-                self._text_embedding_cache.update(text, embedding.detach().cpu())
-                # Use the embedding directly from GPU for current forward pass
-                text_embeddings[uncached_indices[idx]] = embedding
-        
-        # Stack all embeddings and ensure they're on the correct device
-        return torch.stack(text_embeddings)
 
     ############ Lightning ############
     def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
@@ -758,14 +474,11 @@ class MultiModalVPCModel(pl.LightningModule):
             batch.class_id = self.wav_augmenter.replicate_labels(batch.class_id)
             batch.text = batch.text * (len(self.wav_augmenter.augmentations) + self.wav_augmenter.concat_original)
 
-        # Process text (with cache optimization)
-        text_emb = self.get_text_embeddings(batch.text)
-
         # Process audio (no caching)
         audio_emb = self._get_audio_embeddings(batch.audio, batch.audio_length)
 
         # Fuse embeddings and classify
-        outputs = self.fusion_classifier((audio_emb, text_emb))
+        outputs = self.fusion_classifier(audio_emb)
 
         return outputs
 
@@ -782,7 +495,8 @@ class MultiModalVPCModel(pl.LightningModule):
         elif isinstance(criterion, torch.nn.CrossEntropyLoss):
             main_loss = criterion(outputs[f"fusion_logits"], batch.class_id)
         elif criterion.__class__.__name__ == 'LogSoftmaxWrapper':
-            main_loss = criterion(outputs[f"fusion_logits"].unsqueeze(1), batch.class_id.unsqueeze(1))
+            # main_loss = criterion(outputs[f"fusion_logits"].unsqueeze(1), batch.class_id.unsqueeze(1))
+            main_loss = criterion(outputs[f"audio_logits"].unsqueeze(1), batch.class_id.unsqueeze(1))
         else:
             raise ValueError("Invalid criterion")
         
@@ -794,8 +508,6 @@ class MultiModalVPCModel(pl.LightningModule):
         # accuracy from these checks
         self.valid_metric_best.reset()
         self.audio_encoder.train()
-        if self.global_step == 0 and not self._bypass_text_warmup:
-            self._warmup_cache()
 
     def training_step(self, batch: VPC25Item, batch_idx: int) -> Dict[str, torch.Tensor]:
         results = self.model_step(batch, self.train_criterion)
@@ -810,13 +522,6 @@ class MultiModalVPCModel(pl.LightningModule):
     def on_train_epoch_end(self) -> None:
         self.train_metric.reset()
 
-        # Cache processing
-        stats = self._text_embedding_cache.stats()
-        self.log("train/cache/cache_hit_rate", stats["hit_rate"])
-        self.log("train/cache/cache_size", len(self._text_embedding_cache))
-        # resize the cache if it exceeds the max size
-        if len(self._text_embedding_cache) > self._max_cache_size:
-            self._text_embedding_cache.resize(self._max_cache_size)
 
     @torch.inference_mode()
     def on_validation_start(self) -> None:
@@ -1212,46 +917,10 @@ class MultiModalVPCModel(pl.LightningModule):
 
     ############ Load and save ############
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Saves the text embedding cache state in the model checkpoint.
-        
-        Args:
-            checkpoint: Dictionary containing model checkpoint data
-        """
         # Call parent class's save checkpoint method if it exists
         super().on_save_checkpoint(checkpoint)
         
-        # Save cache contents and metadata
-        cache_state = {
-            'max_size': self._text_embedding_cache.max_size,
-            'hits': self._text_embedding_cache.hits,
-            'misses': self._text_embedding_cache.misses,
-            'contents': {
-                key: tensor.cpu() 
-                for key, tensor in self._text_embedding_cache._cache.items()
-            }
-        }
-        checkpoint['text_embedding_cache'] = cache_state
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Restores the text embedding cache state from the model checkpoint.
-        
-        Args:
-            checkpoint: Dictionary containing model checkpoint data
-        """
         # Call parent class's load checkpoint method if it exists
         super().on_load_checkpoint(checkpoint)
-        
-        # Restore cache if it exists in checkpoint
-        if 'text_embedding_cache' in checkpoint:
-            cache_state = checkpoint['text_embedding_cache']
-            
-            # Recreate cache with saved size
-            self._text_embedding_cache = EmbeddingCache(max_size=cache_state['max_size'])
-            
-            # Restore performance counters
-            self._text_embedding_cache.hits = cache_state['hits']
-            self._text_embedding_cache.misses = cache_state['misses']
-            
-            # Restore cached embeddings
-            for key, tensor in cache_state['contents'].items():
-                self._text_embedding_cache.update(key, tensor)

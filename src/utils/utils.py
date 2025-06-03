@@ -1,10 +1,10 @@
 import argparse
+import pickle
 import warnings
 from functools import wraps
 from importlib.util import find_spec
-from typing import Any, Callable, List, Optional, Union
-import pickle
 from pathlib import Path
+from typing import Any, Callable, List, Optional, Union
 
 import hydra
 from hydra import compose, initialize_config_dir
@@ -328,7 +328,10 @@ def get_args_parser() -> argparse.ArgumentParser:
 
 
 def register_custom_resolvers(
-    version_base: str, config_path: str, config_name: str, overrides: Optional[list] = None
+    version_base: str,
+    config_path: str,
+    config_name: str,
+    overrides: Optional[list] = None,
 ) -> Callable:
     """Optional decorator to register custom OmegaConf resolvers. It is
     expected to call before `hydra.main` decorator call.
@@ -340,10 +343,7 @@ def register_custom_resolvers(
     Use quotes for defining internal value in ${replace:"..."} to avoid grammar
     problems with hydra config parser.
 
-    2. mul resolver: To multiply two values. For example: ${mul:2:3}
-    3. add resolver: To add two values. For example: ${add:2:3}
-    4. sub resolver: To subtract two values. For example: ${sub:2:3}
-    5. int resolver: To convert value to integer. For example: ${int:2.5}
+    2. oc.eval resolver: eval function for evaluating expressions in OmegaConf
 
     Args:
         version_base (str): Hydra version base.
@@ -367,19 +367,8 @@ def register_custom_resolvers(
         config_name = args.config_name
 
     # register the arithmetic resolvers resolver
-    if not OmegaConf.has_resolver("mul"):
-        OmegaConf.register_new_resolver("mul", lambda a, b: float(a) * float(b))
-    if not OmegaConf.has_resolver("sum"):
-        OmegaConf.register_new_resolver("sum", lambda a, b: a + b)
-    if not OmegaConf.has_resolver("sub"):
-        OmegaConf.register_new_resolver("sub", lambda a, b: a - b)
-    # register the "int" resolver
-    if not OmegaConf.has_resolver("int"):
-        OmegaConf.register_new_resolver("int", lambda a: int(a))
-    # register the "map" resolver for conditional mapping
-    if not OmegaConf.has_resolver("map"):
-        OmegaConf.register_new_resolver(
-            "map", lambda value, target, true_val, false_val: true_val if value == target else false_val)
+    if not OmegaConf.has_resolver("oc.eval"):
+        OmegaConf.register_new_resolver("oc.eval", eval)
 
     # register the replace resolver
     if not OmegaConf.has_resolver("replace"):
@@ -387,7 +376,9 @@ def register_custom_resolvers(
             version_base=version_base, config_dir=config_path
         ):
             cfg = compose(
-                config_name=config_name, return_hydra_config=True, overrides=overrides if overrides else []
+                config_name=config_name,
+                return_hydra_config=True,
+                overrides=overrides if overrides else [],
             )
         cfg_tmp = cfg.copy()
         loss = load_loss(cfg_tmp.module.criterion.loss)
@@ -396,19 +387,16 @@ def register_custom_resolvers(
 
         OmegaConf.register_new_resolver(
             "replace",
-            lambda item: item.replace(
-                "__loss__", loss.__class__.__name__
-            ).replace(
-                "__metric__", metric.__class__.__name__
-            ).replace(
-                "__metric_best__", metric_best.__class__.__name__
-            ),
+            lambda item: item.replace("__loss__", loss.__class__.__name__)
+            .replace("__metric__", metric.__class__.__name__)
+            .replace("__metric_best__", metric_best.__class__.__name__),
         )
 
     def decorator(function: Callable) -> Callable:
         @wraps(function)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             return function(*args, **kwargs)
+
         return wrapper
 
     return decorator
@@ -416,36 +404,34 @@ def register_custom_resolvers(
 
 @rank_zero_only
 def dump_pickle(stats: dict, output_path: Union[str, Path]) -> None:
-    """
-    Dump statistics dictionary to a pickle file
-    
+    """Dump statistics dictionary to a pickle file.
+
     Args:
         stats: Dictionary containing statistics
         output_path: Path where pickle file will be saved
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_path, 'wb') as f:
+
+    with open(output_path, "wb") as f:
         pickle.dump(stats, f)
     print(f"Pickle saved to {output_path}")
 
 
 def load_pickle(pickle_path: Union[str, Path]) -> dict:
-    """
-    Load dictionary from a pickle file
-    
+    """Load dictionary from a pickle file.
+
     Args:
         pickle_path: Path to pickle file
-    
+
     Returns:
         Dictionary
     """
     pickle_path = Path(pickle_path)
     if not pickle_path.exists():
         raise FileNotFoundError(f"Pickle file not found: {pickle_path}")
-        
-    with open(pickle_path, 'rb') as f:
+
+    with open(pickle_path, "rb") as f:
         stats = pickle.load(f)
     print(f"Statistics loaded from {pickle_path}")
     return stats
