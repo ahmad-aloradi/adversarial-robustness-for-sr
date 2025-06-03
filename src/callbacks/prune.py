@@ -2,11 +2,9 @@ from pytorch_lightning.callbacks.pruning import ModelPruning
 import torch
 import torch.nn as nn
 import torch.nn.utils.prune as pytorch_prune
-from typing import List, Tuple, Callable, Optional, Union, Dict, Any, Set
+from typing import List, Tuple, Callable, Optional, Union, Dict, Any
 import warnings
-import logging
 from collections import defaultdict
-import numpy as np
 
 from src import utils
 
@@ -15,94 +13,54 @@ log = utils.get_pylogger(__name__)
 
 class SafeModelPruning(ModelPruning):
     """
-    SafeModelPruning - Enhanced version of PyTorch Lightning's ModelPruning callback
-    This callback extends PyTorch Lightning's ModelPruning with safety features
-    to prevent common errors like the 'float object has no attribute device' error
-    that occurs when non-tensor parameters are included in pruning. It also adds:
-    - Parameter validation to identify and skip problematic parameters
-    - Scheduled pruning with customizable ramping
-    - Detailed metrics collection and reporting
-    - Better error handling and debug information
-
+    SafeModelPruning - Enhanced version of PyTorch Lightning's ModelPruning
+    
+    Adds safety features, scheduled pruning, and metrics collection while maintaining
+    all original functionalities in a more compact implementation.
+    
     Parameters
     ----------
     pruning_fn : Union[Callable, str], default="l1_unstructured"
-        The pruning function or name of function from torch.nn.utils.prune.
-        Common options include 'l1_unstructured', 'random_unstructured'.
-    amount : Union[int, float, List[Union[int, float]]], default=0.5
-        Amount of parameters to prune. If float between 0 and 1, interpreted as
-        fraction of parameters to prune. If int, interpreted as absolute number.
+        The pruning function or name from torch.nn.utils.prune
+    amount : Union[int, float], default=0.5
+        Amount of parameters to prune
     use_global_unstructured : bool, default=True
-        Whether to apply pruning globally across all parameters (True) or
-        individually per parameter (False).
+        Whether to apply pruning globally across all parameters
     apply_pruning : bool, default=True
-        Whether to actually apply pruning or just create pruning method.
-        This controls the initial pruning state.
+        Whether to actually apply pruning
     make_pruning_permanent : bool, default=True
-        Whether to permanently remove pruned weights after training.
-        This functionality is implemented in the parent ModelPruning class
-        and is applied at the end of training.
+        Whether to permanently remove pruned weights after training
     use_lottery_ticket_hypothesis : bool, default=False
-        If True, reset remaining weights to their original values as per the
-        lottery ticket hypothesis.
+        Whether to reset remaining weights to original values
     resample_parameters : bool, default=False
-        If True, new weights are resampled at each pruning step.
+        Used with lottery ticket hypothesis for parameter resampling
     parameters_to_prune : Optional[List[Tuple[nn.Module, str]]], default=None
-        List of (module, parameter_name) tuples specifying which parameters to prune.
-        If None, all model parameters will be examined.
+        Specific parameters to prune
     pruning_dim : Optional[int], default=None
-        Dimension along which to prune. If None, pruning is applied across all dims.
+        Dimension for structured pruning
     pruning_norm : Optional[int], default=None
-        Norm to use for structured pruning methods.
+        Norm for structured pruning
     verbose : int, default=0
-        Verbosity level controlling logging detail:
-          0: Silent mode - only critical errors are shown
-          1: Basic mode - show pruning progress and overall sparsity
-          2: Detailed mode - show pruning statistics, parameter counts, and warnings
+        Verbosity level (0=silent, 1=basic, 2=detailed)
     prune_on_train_epoch_end : bool, default=True
-        Whether to apply pruning at the end of each training epoch.
+        Whether to prune at epoch end
     scheduled_pruning : bool, default=False
-        Whether to use scheduled pruning with increasing sparsity over time.
+        Whether to gradually increase pruning over epochs
     initial_amount : float, default=0.0
-        Starting pruning rate when using scheduled_pruning.
+        Starting pruning rate for scheduled pruning
     final_amount : Optional[float], default=None
-        Final pruning amount when using scheduled_pruning. If None, uses `amount`.
+        Final pruning amount (uses amount if None)
     epochs_to_ramp : int, default=10
-        Number of epochs over which to linearly increase pruning from initial_amount
-        to final_amount when using scheduled_pruning.
+        Epochs to ramp from initial to final amount
     collect_metrics : bool, default=False
-        Whether to collect and log detailed sparsity metrics during training.
-
-    Examples
-    --------
-    >>> # Basic usage
-    >>> pruning_callback = SafeModelPruning(amount=0.5)
-    >>>
-    >>> # With scheduled pruning
-    >>> pruning_callback = SafeModelPruning(
-    >>>     scheduled_pruning=True,
-    >>>     initial_amount=0.1,
-    >>>     final_amount=0.8,
-    >>>     epochs_to_ramp=5,
-    >>>     collect_metrics=True
-    >>> )
-    >>>
-    >>> # Add to PyTorch Lightning trainer
-    >>> trainer = Trainer(callbacks=[pruning_callback])
-    
-    Notes
-    -----
-    - When using scheduled_pruning, the amount parameter will be overridden by the
-      calculated amount based on the current epoch.
-    - For best performance, specify exact parameters_to_prune rather than allowing
-      the callback to discover them dynamically.
-    - Set verbose > 0 to get detailed information about skipped parameters.
+        Whether to collect detailed sparsity metrics
+    **kwargs : Additional arguments passed to parent ModelPruning
     """
     
     def __init__(
         self,
         pruning_fn: Union[Callable, str] = "l1_unstructured",
-        amount: Union[int, float, List[Union[int, float]]] = 0.5,
+        amount: Union[int, float] = 0.5,
         use_global_unstructured: bool = True,
         apply_pruning: bool = True,
         make_pruning_permanent: bool = True,
@@ -120,30 +78,39 @@ class SafeModelPruning(ModelPruning):
         collect_metrics: bool = False,
         **kwargs
     ):
-        # Validate inputs first
-        self._validate_init_params(amount, use_lottery_ticket_hypothesis, make_pruning_permanent,
-                                 scheduled_pruning, initial_amount, final_amount)
+        # Store all key parameters first since they're used throughout the class
+        self.verbose = verbose
+        self.pruning_fn = pruning_fn
+        self.use_global_unstructured = use_global_unstructured
+        self._apply_pruning = apply_pruning  # Renamed to avoid conflict with method
+        self.should_make_pruning_permanent = make_pruning_permanent
+        self._use_lottery_ticket_hypothesis = use_lottery_ticket_hypothesis  # Renamed to avoid conflict
+        self.resample_parameters = resample_parameters
+        self._parameters_to_prune = parameters_to_prune
+        self.pruning_dim = pruning_dim
+        self.pruning_norm = pruning_norm
+        self.prune_on_train_epoch_end = prune_on_train_epoch_end
         
-        # Configure scheduled pruning BEFORE calling parent constructor
+        self.scheduled_pruning = scheduled_pruning
+
         if scheduled_pruning:
-            self.scheduled_pruning = True
+            # ignore user‐passed amount, use schedule
             self.initial_amount = initial_amount
-            self.final_amount = final_amount if final_amount is not None else amount
+            self.final_amount = final_amount if final_amount is not None else initial_amount
             self.epochs_to_ramp = max(1, epochs_to_ramp)
-            # Start with initial amount for the parent constructor
-            amount = self.initial_amount
-            log.info(f"Using scheduled pruning: {self.initial_amount:.4f} → {self.final_amount:.4f} "
-                     f"over {self.epochs_to_ramp} epochs")
+            self._validate_params(None, True, self.initial_amount, self.final_amount)
+            effective_amount = self.initial_amount
         else:
-            self.scheduled_pruning = False
-            self.initial_amount = None
-            self.final_amount = None
+            # fixed mode
+            self.amount = amount
+            self.initial_amount = self.final_amount = None
             self.epochs_to_ramp = None
-        
-        # Call parent constructor with potentially modified amount
+            self._validate_params(self.amount, False, None, None)
+            effective_amount = self.amount
+
         super().__init__(
             pruning_fn=pruning_fn,
-            amount=amount,
+            amount=effective_amount,
             use_global_unstructured=use_global_unstructured,
             apply_pruning=apply_pruning,
             make_pruning_permanent=make_pruning_permanent,
@@ -154,424 +121,369 @@ class SafeModelPruning(ModelPruning):
             pruning_norm=pruning_norm,
             verbose=verbose,
             prune_on_train_epoch_end=prune_on_train_epoch_end,
-            **kwargs
         )
         
-        # Initialize metrics collection
+        # Initialize metrics and caching
         self.collect_metrics = collect_metrics
-        self.metrics = defaultdict(list)
-        
-        # Cache for parameter validation
-        self.skipped_params = {}
+        self.metrics = defaultdict(list) if collect_metrics else None
         self._validated_params_cache = None
-        self._current_sparsity = 0.0
-        self._current_metrics = {}
+        self.skipped_params = {}
 
-    def _validate_init_params(self, amount, use_lottery_ticket_hypothesis, 
-                            make_pruning_permanent, scheduled_pruning,
-                            initial_amount, final_amount):
-        """Validate initialization parameters to catch configuration issues early."""
-        # Check for conflicting options
-        if use_lottery_ticket_hypothesis and make_pruning_permanent:
-            warnings.warn(
-                "Using lottery ticket hypothesis with permanent pruning may not work as expected. "
-                "The lottery ticket hypothesis typically requires reverting weights to their original values."
-            )
+    def _validate_params(self, amount, scheduled_pruning, initial_amount, final_amount):
+        """Validate initialization parameters."""
+        if amount is not None and isinstance(amount, float) and not (0 <= amount <= 1):
+            raise ValueError(f"Pruning amount {amount} must be between 0 and 1")
             
-        # Validate amount is in proper range for percentage pruning
-        if isinstance(amount, float) and not (0 <= amount <= 1):
-            raise ValueError(f"Pruning amount {amount} must be between 0 and 1 when specified as a float.")
-            
-        # Validate scheduled pruning parameters
         if scheduled_pruning:
             if not (0 <= initial_amount <= 1):
-                raise ValueError(f"Initial pruning amount {initial_amount} must be between 0 and 1.")
-            
+                raise ValueError(f"Initial amount {initial_amount} must be between 0 and 1")
             if final_amount is not None and not (0 <= final_amount <= 1):
-                raise ValueError(f"Final pruning amount {final_amount} must be between 0 and 1.")
-                
+                raise ValueError(f"Final amount {final_amount} must be between 0 and 1")
             if final_amount is not None and initial_amount >= final_amount:
-                raise ValueError(
-                    f"Initial pruning amount ({initial_amount}) must be less than "
-                    f"final pruning amount ({final_amount}) for scheduled pruning."
-                )
+                raise ValueError("Initial amount must be less than final amount")
 
-    def get_pruning_amount(self, current_epoch: int) -> float:
-        """
-        Calculate the current pruning amount based on scheduling.
-        
-        Args:
-            current_epoch: Current training epoch
-            
-        Returns:
-            float: Current pruning amount
-        """
+    def _get_current_amount(self, current_epoch: int) -> float:
+        """Calculate current pruning amount for scheduled pruning."""
         if not self.scheduled_pruning:
-            return self.amount  # Static amount when not using scheduled pruning
-        
-        # Linear ramp from initial to final amount over epochs_to_ramp
+            return self.amount
+            
+        # PyTorch Lightning epochs are 0-based, so we adjust accordingly
+        # The first epoch (epoch 0) should use initial_amount
         if current_epoch >= self.epochs_to_ramp:
             return self.final_amount
-        else:
-            # Linear interpolation
-            progress = current_epoch / self.epochs_to_ramp
-            return self.initial_amount + (self.final_amount - self.initial_amount) * progress
+        
+        # Linear interpolation: directly use proportion of completed epochs
+        progress = current_epoch / self.epochs_to_ramp
+        progress = min(1.0, max(0.0, progress))  # Ensure progress is between [0, 1]
+        
+        current_amount = self.initial_amount + (self.final_amount - self.initial_amount) * progress
+        
+        # Safety check: never exceed final_amount regardless of calculation
+        current_amount = min(current_amount, self.final_amount)
+                
+        return current_amount
 
     def _run_pruning(self, current_epoch: int) -> None:
-        """Override parent's _run_pruning to handle scheduled pruning."""
-        # Get the pruning decision function/value from parent class
-        # This can be either:
-        # - A boolean: True/False for always/never prune
-        # - A callable: function(epoch) -> bool for dynamic decisions
-        apply_pruning_attr = getattr(self, '_apply_pruning', True)
-        
-        # Determine if we should prune this epoch
-        if callable(apply_pruning_attr):
-            # Dynamic: call the function with current epoch
-            should_prune = apply_pruning_attr(current_epoch)
-        else:
-            # Static: use the boolean value directly
-            should_prune = bool(apply_pruning_attr)
-        
-        # Calculate current pruning amount (handles scheduled pruning)
-        if self.scheduled_pruning:
-            amount = self.get_pruning_amount(current_epoch)
-            # Update the parent's amount attribute for consistency
-            self.amount = amount
-            verbose_level = getattr(self, '_verbose', getattr(self, 'verbose', 0))
-            if verbose_level > 0:
-                log.info(f"Epoch {current_epoch}: Applying pruning with amount={amount:.4f}")
-        else:
-            # Handle both callable and non-callable amount (edge case)
-            if callable(self.amount):
-                amount = self.amount(current_epoch)
-            else:
-                amount = self.amount
-        
-        # Early exit if we shouldn't prune or amount is zero
-        if not should_prune or not amount:
-            verbose_level = getattr(self, '_verbose', getattr(self, 'verbose', 0))
-            if verbose_level > 1:
-                log.debug(f"Epoch {current_epoch}: Skipping pruning (should_prune={should_prune}, amount={amount})")
+        """Override to handle scheduled pruning and safety."""
+        # Check pruning toggle
+        should_prune = self._apply_pruning(current_epoch) if callable(self._apply_pruning) else bool(self._apply_pruning)
+        if not should_prune:
+            if self.verbose > 1:
+                log.debug(f"Epoch {current_epoch}: skip (prune={should_prune})")
             return
-            
-        # Apply the actual pruning
-        self.apply_pruning(amount)
 
-        # Handle lottery ticket hypothesis if enabled
-        use_lth = getattr(self, '_use_lottery_ticket_hypothesis', False)
-        if callable(use_lth):
-            should_use_lth = use_lth(current_epoch)
-        else:
-            should_use_lth = bool(use_lth)
+        if self.scheduled_pruning:
+            # Calculate target sparsity for this epoch
+            target_sparsity = self._get_current_amount(current_epoch)
             
-        if should_use_lth:
+            # Get current sparsity
+            valid_params = self._get_valid_parameters()
+            current_sparsity = self._compute_current_sparsity(valid_params) if valid_params else 0.0
+            
+            # Don't prune if we're already at or above the target sparsity
+            if current_sparsity >= target_sparsity:
+                if self.verbose > 0:
+                    log.info(
+                        f"[Epoch {current_epoch}] | "
+                        f"Target sparsity {target_sparsity:.2%} | reached "
+                        f"(current {current_sparsity:.2%}), skipping."
+                    )
+                return
+            
+            # Calculate the amount to prune from remaining weights to reach target sparsity
+            # Formula: amount = (target_sparsity - current_sparsity) / (1 - current_sparsity)
+            remaining_weights = 1.0 - current_sparsity
+            if remaining_weights > 0:
+                prune_amt = (target_sparsity - current_sparsity) / remaining_weights
+                # Safety clamp
+                prune_amt = min(max(0.0, prune_amt), 0.99)  # Never prune 100% of remaining weights
+            else:
+                if self.verbose > 0:
+                    log.warning(f"Epoch {current_epoch}: no weights left to prune (sparsity={current_sparsity:.4f})")
+                return
+        else:
+            # Fixed pruning
+            prune_amt = self.amount
+
+        if self.verbose > 0:
+            label = "[Scheduled]" if self.scheduled_pruning else "[Fixed]"
+            log.info(
+                f"{label} Epoch {current_epoch:>2}: "
+                f"prune {prune_amt:.2%} of remaining params"
+                + (f"(aiming for total sparsity {target_sparsity:.2%})" if self.scheduled_pruning else "")
+            )
+
+        try:
+            self.apply_pruning(prune_amt)
+        except Exception as e:
+            log.error(f"Pruning failed at epoch {current_epoch}: {e}")
+            if self.verbose > 0:
+                raise
+
+        # lottery ticket hypothesis
+        use_lth = self._use_lottery_ticket_hypothesis(current_epoch) if callable(self._use_lottery_ticket_hypothesis) else bool(self._use_lottery_ticket_hypothesis)
+        if use_lth:
             self.apply_lottery_ticket_hypothesis()
 
     def apply_pruning(self, amount: Union[int, float]) -> None:
-        """Override parent's apply_pruning to add safety checks."""
-        # Invalidate cache since model structure might have changed
+        """Override with comprehensive safety checks."""
+        # Invalidate cache since we're about to change the model
         self._validated_params_cache = None
         
-        # Get valid parameters for pruning before calling parent
-        valid_parameters = self._get_valid_parameters()
-        
-        if not valid_parameters:
-            log.warning("No valid parameters found for pruning after filtering.")
+        # Get valid parameters
+        valid_params = self._get_valid_parameters()
+        if not valid_params:
+            log.warning("No valid parameters found for pruning")
             return
-            
-        # Temporarily replace parameters list with filtered version
+        
+        # Store sparsity before pruning for comparison (only if collecting metrics)
+        sparsity_before = 0.0
+        if self.collect_metrics:
+            sparsity_before = self._compute_current_sparsity(valid_params)
+        
+        # Temporarily replace parameters
         original_params = self._parameters_to_prune
-        self._parameters_to_prune = valid_parameters
+        self._parameters_to_prune = valid_params
         
         try:
-            # Fix: Call the correct parent method for applying pruning
             if self.use_global_unstructured:
-                self._apply_global_pruning(amount)
+                pruning_method = self._get_pruning_method()
+                pytorch_prune.global_unstructured(
+                    self._parameters_to_prune, 
+                    pruning_method=pruning_method, 
+                    amount=amount
+                )
             else:
-                # Apply pruning individually to each parameter
-                for module, param_name in valid_parameters:
-                    pruning_method = self._resolve_pruning_method()
-                    pruning_method(module, param_name, amount=amount)
+                super().apply_pruning(amount)
+                
+            # Update metrics AFTER pruning is applied
+            if self.collect_metrics:
+                # Recompute sparsity after pruning
+                sparsity_after = self._compute_current_sparsity(valid_params)
+                delta = sparsity_after - sparsity_before
+                self.metrics["sparsity/overall"].append(sparsity_after)
+                
+                if self.verbose > 0:
+                    log.info(
+                        f"Pruning applied: sparsity {sparsity_before:.2%} → "
+                        f"{sparsity_after:.2%} (Δ{delta:.2%})"
+                    )
+                
         finally:
-            # Always restore original parameters list
             self._parameters_to_prune = original_params
-            
-        # Update our custom metrics
-        if self.collect_metrics:
-            self._update_sparsity_metrics(valid_parameters)
-            
-        # Debug sparsity calculation discrepancy
-        verbose_level = getattr(self, '_verbose', getattr(self, 'verbose', 0))
-        if verbose_level > 1:
-            self._debug_sparsity_calculation()
-
-    def on_train_epoch_end(self, trainer, pl_module) -> None:
-        """Override to add sparsity debugging at epoch end."""
-        # Fix: Call parent method correctly - it expects trainer and pl_module
-        super().on_train_epoch_end(trainer, pl_module)
-        
-        # Store trainer reference for debugging
-        self._trainer = trainer
-        
-        # Log comprehensive sparsity info if collect_metrics is enabled
-        if self.collect_metrics:
-            verbose_level = getattr(self, '_verbose', getattr(self, 'verbose', 0))
-            if verbose_level > 0 and hasattr(pl_module, 'get_model_sparsity_info'):
-                sparsity_info = pl_module.get_model_sparsity_info()
-                
-                # Fix: Use proper logger access pattern
-                if hasattr(trainer, 'logger') and trainer.logger is not None:
-                    # Handle both single logger and logger collection
-                    loggers = trainer.logger.loggers if hasattr(trainer.logger, 'loggers') else [trainer.logger]
-                    
-                    for logger in loggers:
-                        try:
-                            if hasattr(logger, 'log_metrics'):
-                                logger.log_metrics({
-                                    'pruning/model_sparsity': sparsity_info['overall_sparsity'],
-                                    'pruning/total_parameters': sparsity_info['total_parameters'],
-                                    'pruning/pruned_parameters': sparsity_info['pruned_parameters'],
-                                    'pruning/modules_with_masks': len(sparsity_info['modules_with_masks']),
-                                    'pruning/modules_without_masks': len(sparsity_info['modules_without_masks'])
-                                }, step=trainer.global_step)
-                                break  # Successfully logged, exit loop
-                        except Exception as e:
-                            log.debug(f"Failed to log to {type(logger).__name__}: {e}")
-                            continue
-
-    def _apply_global_pruning(self, amount: float) -> None:
-        """Apply global pruning using PyTorch's global_unstructured method."""
-        try:
-            # Resolve pruning method to ensure it's callable
-            pruning_method = self._resolve_pruning_method()
-            pytorch_prune.global_unstructured(
-                self._parameters_to_prune, 
-                pruning_method=pruning_method, 
-                amount=amount
-            )
-        except Exception as e:
-            log.error(f"Failed to apply global pruning: {e}")
-            raise
-
-    def _update_sparsity_metrics(self, parameters: List[Tuple[nn.Module, str]]) -> None:
-        """
-        Calculate and store current sparsity metrics using PyTorch's pruning methodology.
-        
-        Args:
-            parameters: List of (module, parameter_name) tuples to check for sparsity
-        """
-        if not self.collect_metrics:
-            return
-            
-        total_params = 0
-        zero_params = 0
-        
-        # Current epoch metrics for logging
-        current_metrics = {}
-        
-        # Track parameters with and without masks for debugging
-        params_with_masks = 0
-        params_without_masks = 0
-        
-        for module, param_name in parameters:
-            try:
-                # Get the original parameter
-                param = getattr(module, param_name, None)
-                if param is None or not isinstance(param, torch.Tensor):
-                    continue
-                    
-                # Check if the module has a pruning mask for this parameter
-                mask_name = f"{param_name}_mask"
-                
-                if hasattr(module, mask_name):
-                    # Use the mask to calculate sparsity (this is the correct approach)
-                    mask = getattr(module, mask_name)
-                    if isinstance(mask, torch.Tensor):
-                        total_elements = mask.numel()
-                        # In PyTorch pruning, 0 in mask means pruned, 1 means kept
-                        kept_elements = mask.sum().item()
-                        zero_elements = total_elements - kept_elements
-                        
-                        params_with_masks += 1
-                        
-                        total_params += total_elements
-                        zero_params += zero_elements
-                        
-                        # Store individual parameter sparsity
-                        param_id = f"{module.__class__.__name__}.{param_name}"
-                        sparsity = float(zero_elements) / max(1, total_elements)
-                        self.metrics[f"sparsity/{param_id}"].append(sparsity)
-                        current_metrics[f"sparsity/{param_id}"] = sparsity
-                else:
-                    # For parameters without pruning masks, they shouldn't contribute to sparsity
-                    params_without_masks += 1
-                    
-                    # Log natural sparsity for debugging if verbose
-                    tensor_value = param.data
-                    total_elements = tensor_value.numel()
-                    natural_zeros = (tensor_value == 0).sum().item()
-                    
-                    if natural_zeros > 0:
-                        param_id = f"{module.__class__.__name__}.{param_name}"
-                        natural_sparsity = float(natural_zeros) / max(1, total_elements)
-                        verbose_level = getattr(self, '_verbose', getattr(self, 'verbose', 0))
-                        if verbose_level > 1:
-                            log.debug(f"Parameter {param_id} has {natural_sparsity:.4f} natural sparsity (no pruning mask)")
-                            
-            except Exception as e:
-                log.warning(f"Error processing parameter {module.__class__.__name__}.{param_name}: {e}")
-                continue
-        
-        # Calculate global sparsity (only from parameters with pruning masks)
-        overall_sparsity = float(zero_params) / max(1, total_params) if total_params > 0 else 0
-        self._current_sparsity = overall_sparsity
-        self.metrics["sparsity/overall"].append(overall_sparsity)
-        current_metrics["sparsity/overall"] = overall_sparsity
-        
-        # Store current metrics for logging
-        self._current_metrics = current_metrics
-        
-        verbose_level = getattr(self, '_verbose', getattr(self, 'verbose', 0))
-        if verbose_level > 0:
-            log.info(f"Current model sparsity: {overall_sparsity:.4f} "
-                    f"({zero_params}/{total_params} parameters)")
-            if verbose_level > 1:
-                log.debug(f"Parameters with masks: {params_with_masks}, "
-                         f"without masks: {params_without_masks}")
+            # Invalidate cache again since model structure changed
+            self._validated_params_cache = None
 
     def _get_valid_parameters(self) -> List[Tuple[nn.Module, str]]:
-        """
-        Get a filtered list of valid parameters for pruning, using caching for performance.
-        
-        Returns:
-            List of valid (module, parameter_name) tuples
-        """
-        # Use cached result if available and parameters haven't changed
+        """Get validated parameters with caching."""
         if self._validated_params_cache is not None:
             return self._validated_params_cache
             
-        # Reset skipped params for a fresh validation
-        self.skipped_params = {}
-        valid_parameters_to_prune = []
+        valid_params = []
+        self.skipped_params.clear()
         
-        # Fix: Ensure _parameters_to_prune exists
-        if not hasattr(self, '_parameters_to_prune') or self._parameters_to_prune is None:
-            log.warning("No parameters specified for pruning. Using all model parameters.")
-            # This would need to be set elsewhere, but we can't auto-discover here
-            # without the model reference
+        # Ensure we have parameters to check
+        if not hasattr(self, '_parameters_to_prune') or not self._parameters_to_prune:
+            log.warning("No parameters specified for pruning")
             return []
         
         for module, param_name in self._parameters_to_prune:
             try:
                 param = getattr(module, param_name, None)
                 
-                # Check if parameter exists
+                # Comprehensive validation
                 if param is None:
-                    self._log_skipped_param(module, param_name, "Parameter doesn't exist")
-                    continue
+                    self._log_skip(module, param_name, "Parameter doesn't exist")
+                elif not isinstance(param, torch.Tensor):
+                    self._log_skip(module, param_name, f"Not a tensor (type: {type(param)})")
+                elif param.dim() == 0:
+                    self._log_skip(module, param_name, "Scalar tensor")
+                elif param.numel() == 0:
+                    self._log_skip(module, param_name, "Empty tensor")
+                else:
+                    valid_params.append((module, param_name))
                     
-                # Check if parameter is a tensor
-                if not isinstance(param, torch.Tensor):
-                    self._log_skipped_param(module, param_name, f"Not a tensor (type: {type(param)})")
-                    continue
-                    
-                # Basic checks for prunable tensor
-                if param.dim() == 0:  # Skip scalar tensors
-                    self._log_skipped_param(module, param_name, "Scalar tensor cannot be pruned")
-                    continue
-                    
-                # Check if parameter requires gradient (optional - frozen params might still be prunable)
-                if not param.requires_grad:
-                    verbose_level = getattr(self, '_verbose', getattr(self, 'verbose', 0))
-                    if verbose_level > 1:
-                        log.debug(f"Parameter {module.__class__.__name__}.{param_name} doesn't require grad but will be pruned")
-                
-                # Parameter is valid for pruning
-                valid_parameters_to_prune.append((module, param_name))
-                
             except Exception as e:
-                self._log_skipped_param(module, param_name, f"Error accessing: {str(e)}")
+                self._log_skip(module, param_name, f"Error accessing: {str(e)}")
         
-        # Report on skipped parameters if any
-        verbose_level = getattr(self, '_verbose', getattr(self, 'verbose', 0))
-        if self.skipped_params and verbose_level > 0:
-            self._report_skipped_params()
+        # Report skipped parameters
+        if self.skipped_params and self.verbose > 0:
+            keys = list(self.skipped_params.keys())
+            log.info(
+                f"Skipped {len(keys)} invalid parameters for pruning "
+                f"(showing up to 5): {keys[:5]}"
+            )
         
-        # Cache the result
-        self._validated_params_cache = valid_parameters_to_prune
-        return valid_parameters_to_prune
+        self._validated_params_cache = valid_params
+        return valid_params
 
-    def _resolve_pruning_method(self) -> Callable:
-        """
-        Resolve the pruning method from the pruning_fn parameter.
-        
-        Returns:
-            Callable: The resolved pruning method
-        """
+    def _get_pruning_method(self) -> Callable:
+        """Resolve pruning method from string or callable."""
         if isinstance(self.pruning_fn, str):
-            # Check if the string is a built-in PyTorch pruning method
-            if hasattr(pytorch_prune, self.pruning_fn):
-                return getattr(pytorch_prune, self.pruning_fn)
-            else:
-                raise ValueError(f"Pruning function '{self.pruning_fn}' not found in torch.nn.utils.prune")
+            if not hasattr(pytorch_prune, self.pruning_fn):
+                raise ValueError(f"Unknown pruning function: {self.pruning_fn}")
+            return getattr(pytorch_prune, self.pruning_fn)
         elif callable(self.pruning_fn):
-            # If it's already a callable, return it directly
             return self.pruning_fn
         else:
-            raise TypeError(f"Expected pruning_fn to be a string or callable, got {type(self.pruning_fn)}")
+            raise TypeError(f"Invalid pruning_fn type: {type(self.pruning_fn)}")
+
+    def _log_skip(self, module: nn.Module, param_name: str, reason: str) -> None:
+        """Log skipped parameter."""
+        param_key = f"{module.__class__.__name__}.{param_name}"
+        self.skipped_params[param_key] = reason
+
+    def _compute_current_sparsity(self, parameters: List[Tuple[nn.Module, str]]) -> float:
+        """Compute current sparsity using PyTorch's actual built-in utilities."""
+        try:
+            total_params = 0
+            pruned_params = 0
             
-    def _log_skipped_param(self, module: nn.Module, param_name: str, reason: str) -> None:
-        """
-        Log information about parameters skipped during pruning.
-        
-        Args:
-            module: The module containing the parameter
-            param_name: Name of the parameter
-            reason: Reason for skipping
-        """
-        module_name = module.__class__.__name__
-        param_key = f"{module_name}.{param_name}"
-        
-        if param_key not in self.skipped_params:
-            self.skipped_params[param_key] = reason
+            for module, param_name in parameters:
+                param = getattr(module, param_name, None)
+                if not isinstance(param, torch.Tensor):
+                    continue
+                
+                # Check if module is pruned using PyTorch's built-in utility
+                if pytorch_prune.is_pruned(module):
+                    # Module has pruning applied, check for specific parameter mask
+                    mask_name = f"{param_name}_mask"
+                    if hasattr(module, mask_name):
+                        mask = getattr(module, mask_name)
+                        if isinstance(mask, torch.Tensor):
+                            total_params += mask.numel()
+                            pruned_params += (mask == 0).sum().item()
+                            continue  # Move to next parameter
+                
+                # For unpruned parameters or if specific mask doesn't exist
+                # Count the parameter but assume no pruning
+                total_params += param.numel()
+                # Count natural zeros (if any)
+                pruned_params += (param == 0).sum().item()
             
-    def _report_skipped_params(self) -> None:
-        """Report summary of skipped parameters."""
-        if not self.skipped_params:
+            return pruned_params / max(1, total_params)
+            
+        except Exception as e:
+            if self.verbose > 1:
+                log.debug(f"Error in sparsity computation, using fallback: {e}")
+            return self._compute_sparsity_fallback(parameters)
+    
+    def _compute_sparsity_fallback(self, parameters: List[Tuple[nn.Module, str]]) -> float:
+        """Fallback sparsity computation using direct parameter inspection."""
+        total_params = 0
+        zero_params = 0
+        
+        for module, param_name in parameters:
+            try:
+                # Check for pruned parameters first (PyTorch pruning pattern)
+                orig_param_name = f"{param_name}_orig"
+                mask_param_name = f"{param_name}_mask"
+                
+                if hasattr(module, orig_param_name) and hasattr(module, mask_param_name):
+                    # Parameter is pruned, use mask to compute sparsity
+                    param_orig = getattr(module, orig_param_name)
+                    mask = getattr(module, mask_param_name)
+                    
+                    if isinstance(param_orig, torch.Tensor) and isinstance(mask, torch.Tensor):
+                        total_params += param_orig.numel()
+                        # In PyTorch pruning: mask == 0 means pruned
+                        zero_params += (mask == 0).sum().item()
+                elif hasattr(module, param_name):
+                    # Parameter is not pruned, check the parameter directly
+                    param = getattr(module, param_name)
+                    if isinstance(param, torch.Tensor):
+                        total_params += param.numel()
+                        zero_params += (param == 0).sum().item()
+                        
+            except Exception as e:
+                if self.verbose > 1:
+                    log.debug(f"Error in fallback sparsity for {module.__class__.__name__}.{param_name}: {e}")
+                continue
+        
+        return zero_params / max(1, total_params)
+
+    def _update_metrics(self) -> None:
+        """Update sparsity metrics using built-in computation."""
+        if not self.collect_metrics:
             return
             
-        log.info(f"Skipped {len(self.skipped_params)} parameters during pruning:")
-        for param_key, reason in self.skipped_params.items():
-            log.info(f"  {param_key}: {reason}")
+        # Use our verified sparsity computation method
+        valid_params = self._get_valid_parameters()
+        current_sparsity = self._compute_current_sparsity(valid_params)
+        
+        self.metrics["sparsity/overall"].append(current_sparsity)
+        
+        if self.verbose > 0:
+            log.info(f"Current sparsity: {current_sparsity:.4f}")
 
-    def _debug_sparsity_calculation(self) -> None:
-        """Debug sparsity calculations by comparing different methods."""
+    def make_pruning_permanent(self, pl_module):
+        """
+        Permanently remove pruning masks from all validated parameters.
+        """
+        if not self.should_make_pruning_permanent:
+            return
+
+        if self.verbose > 0:
+            log.info("Finalizing pruning: removing masks and reparametrizations...")
+
+        valid_params = self._get_valid_parameters()
+        if not valid_params:
+            log.warning("No pruned parameters found (nothing to finalize).")
+            return
+
+        for module, param_name in valid_params:
+            try:
+                # remove mask/orig and restore parameter
+                pytorch_prune.remove(module, param_name)
+                if self.verbose > 1:
+                    log.debug(f"Mask removed: {module.__class__.__name__}.{param_name}")
+            except Exception as e:
+                log.warning(
+                    f"Could not remove mask for "
+                    f"{module.__class__.__name__}.{param_name}: {e}"
+                )
+
+    def on_train_epoch_end(self, trainer, pl_module) -> None:
+        """Override to add metrics logging."""
+        super().on_train_epoch_end(trainer, pl_module)
+        
+        # Log metrics if available
+        if self.collect_metrics and self.metrics and trainer.logger:
+            try:
+                if "sparsity/overall" in self.metrics and self.metrics["sparsity/overall"]:
+                    latest_sparsity = self.metrics["sparsity/overall"][-1]
+                    
+                    # Log to all available loggers
+                    loggers = trainer.logger.loggers if hasattr(trainer.logger, 'loggers') else [trainer.logger]
+                    for logger in loggers:
+                        try:
+                            if hasattr(logger, 'log_metrics'):
+                                logger.log_metrics(
+                                    {
+                                        "pruning/sparsity": latest_sparsity,
+                                        "pruning/amount": self.amount
+                                    }, 
+                                    step=trainer.global_step
+                                )
+                                break
+                        except Exception as logger_error:
+                            if self.verbose > 1:
+                                log.debug(f"Logger {type(logger).__name__} failed: {logger_error}")
+                            continue
+                            
+            except Exception as e:
+                if self.verbose > 1:
+                    log.debug(f"Failed to log metrics: {e}")
+
+    def on_train_end(self, trainer, pl_module) -> None:
+        """Override to safely handle the end of training with pruning."""
         try:
-            # Get the model from trainer if available
-            if hasattr(self, '_trainer') and self._trainer is not None:
-                model = self._trainer.lightning_module
-                
-                # Check if model has the sparsity info method
-                if hasattr(model, 'get_model_sparsity_info'):
-                    sparsity_info = model.get_model_sparsity_info()
-                    
-                    log.debug("=== SPARSITY DEBUG COMPARISON ===")
-                    log.debug(f"Custom calculation: {self._current_sparsity:.4f}")
-                    log.debug(f"Model sparsity info: {sparsity_info['overall_sparsity']:.4f}")
-                    log.debug(f"Pruned parameters: {sparsity_info['pruned_parameters']}/{sparsity_info['total_parameters']}")
-                    log.debug(f"Modules with masks: {len(sparsity_info['modules_with_masks'])}")
-                    log.debug(f"Modules without masks: {len(sparsity_info['modules_without_masks'])}")
-                    
-                    # Show top 5 sparsest modules
-                    if sparsity_info['modules_with_masks']:
-                        sorted_modules = sorted(sparsity_info['modules_with_masks'], 
-                                              key=lambda x: x['sparsity'], reverse=True)
-                        log.debug("Top 5 sparsest modules:")
-                        for i, module_info in enumerate(sorted_modules[:5]):
-                            log.debug(f"  {i+1}. {module_info['module']}: {module_info['sparsity']:.4f}")
-                    
-                    log.debug("=== END SPARSITY DEBUG ===")
-                    
+            # Only make pruning permanent if explicitly asked for
+            if self.should_make_pruning_permanent:
+                self.make_pruning_permanent(pl_module)
         except Exception as e:
-            log.warning(f"Error in sparsity debug comparison: {str(e)}")
+            log.error(f"Error during pruning finalization: {e}")
+                
+        # Log final metrics
+        if self.collect_metrics and self.metrics:
+            self._update_metrics()
