@@ -4,8 +4,7 @@
 # python train.py experiment=example
 
 defaults:
-  # - override /callbacks: default.yaml
-  - /callbacks/model_pruning
+  - override /callbacks: default.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml
   - override /trainer: gpu.yaml
@@ -17,6 +16,7 @@ defaults:
 
 tags: ["data_augmentation", "model_pruning", "voxceleb", "sv", "ecapa"]
 seed: 42
+
 
 trainer:
   min_epochs: 10

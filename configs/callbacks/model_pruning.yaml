@@ -1,20 +1,4 @@
-model_pruning:
-  _target_: src.callbacks.prune.SafeModelPruning
-  pruning_fn: l1_unstructured  # Pruning function from torch.nn.utils.prune (e.g., 'l1_unstructured', 'random_unstructured') or a custom callable
-  amount: 0.9 # Amount of parameters to prune: float (0-1) for fraction, int for absolute number
-  use_global_unstructured: true  # If true, applies pruning globally across all parameters; if false, applies individually per parameter
-  apply_pruning: true  # Controls whether to actually apply pruning or just create the pruning method
-  make_pruning_permanent: true  # If true, permanently removes pruned weights after training by removing the mask
-  use_lottery_ticket_hypothesis: false  # If true, resets remaining weights to their original values as per lottery ticket hypothesis
-  resample_parameters: false  # If true, new weights are resampled at each pruning step instead of keeping original values
-  parameters_to_prune: null  # Optional list of (module, name) tuples specifying which parameters to prune; if null, all eligible parameters are examined
-  pruning_dim: null  # Dimension along which to prune for structured pruning methods; if null, pruning is applied across all dimensions
-  pruning_norm: null  # Norm to use for structured pruning methods (e.g., 1 for L1 norm)
-  verbose: 2  # Verbosity level: 0=silent, 1=basic progress, 2=detailed statistics and warnings
-  prune_on_train_epoch_end: true  # If true, applies pruning at the end of each training epoch
-  scheduled_pruning: true  # If true, gradually increases pruning amount from initial_amount to final_amount over epochs_to_ramp
-  initial_amount: 0.1  # Starting pruning rate when using scheduled_pruning (must be between 0 and 1)
-  final_amount: 0.9  # Final pruning amount when using scheduled_pruning (must be between 0 and 1)
-  # epochs_to_ramp: ${oc.eval:${trainer.max_epochs} // 1.5} # Number of epochs over which to linearly increase pruning from initial_amount to final_amount
-  epochs_to_ramp: 10 # Number of epochs over which to linearly increase pruning from initial_amount to final_amount
-  collect_metrics: true  # If true, collects and logs detailed sparsity metrics during training for analysis
+# Configuration for model pruning callbacks
+# Includes Bregman pruning configuration by default
+defaults:
+  - model_pruning/bregman_agressive

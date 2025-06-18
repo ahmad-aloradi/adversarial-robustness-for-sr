@@ -1,0 +1,24 @@
+# Example configuration showing how to easily switch between methods
+model_pruning:
+  _target_: src.callbacks.pruning.pruning_selector.PruningSelector
+  method: "magnitude"  # Change to "bregman" to use Bregman learning
+  method_config:
+    # SafeModelPruning config
+    amount: 0.3
+    scheduled_pruning: true
+    initial_amount: 0.1
+    final_amount: 0.5
+    epochs_to_ramp: 20
+    collect_metrics: true
+    verbose: 1
+  # magnitude:
+    # Uncomment below and comment above when using method: "bregman"
+    # optimizer_name: "adabreg"  # Use AdaBreg for better convergence
+    # regularizer_name: "l1"
+    # lr: 1e-3
+    # lamda: 1e-3
+    # sparse_init: true
+    # init_sparsity: 0.9
+    # collect_metrics: true
+    # verbose: 1
+  verbose: 1

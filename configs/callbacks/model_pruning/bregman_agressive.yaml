@@ -1,0 +1,27 @@
+# Aggressive Bregman pruning configuration for high sparsity
+model_pruning:
+  _target_: src.callbacks.pruning.pruning_selector.PruningSelector
+  method: "bregman"
+  method_config:
+    # Use AdaBreg for better convergence with high sparsity
+    optimizer_name: "adabreg"
+    lr: 5e-4
+    delta: 0.5
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    
+    # Group LASSO for structured sparsity
+    regularizer_name: "l1_l2"
+    lamda: 5e-3
+    
+    # Very sparse initialization
+    sparse_init: true
+    init_sparsity: 0.95
+    
+    # Target high sparsity with adaptive regularization
+    target_sparsity: 0.9
+    
+    parameter_selection: "weights_only"
+    collect_metrics: true
+    verbose: 2
+  verbose: 1

@@ -4,12 +4,11 @@
 # python train.py experiment=example
 
 defaults:
-  # - override /callbacks: default.yaml
-  - /callbacks/model_pruning
+  - override /callbacks: default.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml
   - override /trainer: gpu.yaml
-  - override /logger: tensorboard.yaml
+  - override /logger: wandb.yaml
 
 
 # all parameters below will be merged with parameters from default configurations set above
@@ -32,18 +31,43 @@ callbacks:
     mode: max
     monitor: ${replace:"valid/__metric__"}
     patience: 8
+  model_pruning:
+    _target_: src.callbacks.pruning.pruning_selector.PruningSelector
+    method: "bregman"
+    method_config:
+      # Optimizer configuration
+      optimizer_name: "linbreg" # adabreg linbreg
+      lr: 1e-3
+      delta: 1.0
+      momentum: 0.0
+      betas: [0.9, 0.999]
+      eps: 1e-8
+      # Regularization configuration - start with higher regularization
+      regularizer_name: "l1"
+      lamda: 5e-3
+      # Sparse initialization - ensure this happens correctly
+      sparse_init: true
+      init_sparsity: 0.95
+      # Target sparsity with better control
+      target_sparsity: 0.8
+      # Parameter selection
+      parameter_selection: "weights_only"
+      custom_parameter_fn: null
+      # Monitoring and verbosity
+      collect_metrics: true
+      verbose: 2
 
 datamodule:
   dataset:
-    max_duration: 3.0
+    max_duration: 2.0
 
   loaders:
     train:
-      batch_size: 64
+      batch_size: 2
     valid:
-      batch_size: 64
+      batch_size: 2
     test:
-      batch_size: 4
+      batch_size: 8
     enrollment:
       batch_size: 1
 
@@ -70,4 +94,3 @@ module:
 #   wandb:
 #     tags: ${tags}
 #     group: "mnist"
-

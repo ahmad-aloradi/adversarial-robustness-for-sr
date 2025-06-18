@@ -58,6 +58,9 @@ class VoxCelebDataModule(LightningDataModule):
                 spks_metadata_paths=[self.dataset.metadata_csv_file],
                 verbose=self.dataset.verbose)
             
+            # sample the dataset
+            updated_dev_csv = updated_dev_csv.sample(3000)
+
             # save the updated csv
             VoxCelebProcessor.save_csv(updated_dev_csv, self.dataset.dev_csv_file)
             VoxCelebProcessor.save_csv(speaker_lookup_csv, self.dataset.speaker_lookup)

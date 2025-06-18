@@ -372,12 +372,13 @@ def run_sv():
         'cuda': '11.1.0',  # '10.0'
     }
 
-    experiments = ["sv_vanilla_plateau", "sv_vanilla"]
+    experiments = ["sv_aug_prune", "sv_vanilla"]
 
     for experiment in experiments:
 
         dataset_name = "voxceleb"
-        batch_size = BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // NUM_AUG
+        # batch_size = BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // NUM_AUG
+        batch_size = BATCH_SIZE
         job_name = experiment + '-' + dataset_name + '-' + 'max_dur' + str(max_duration) + '-' + 'bs' + str(BATCH_SIZE)
 
         # Defined this way to avoid re-training on different runs

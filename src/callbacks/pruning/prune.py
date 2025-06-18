@@ -11,9 +11,9 @@ from src import utils
 log = utils.get_pylogger(__name__)
 
 
-class SafeModelPruning(ModelPruning):
+class MagnitudePruner(ModelPruning):
     """
-    SafeModelPruning - Enhanced version of PyTorch Lightning's ModelPruning
+    MagnitudePruner - Enhanced version of PyTorch Lightning's ModelPruning
     
     Adds safety features, scheduled pruning, and metrics collection while maintaining
     all original functionalities in a more compact implementation.
@@ -96,7 +96,7 @@ class SafeModelPruning(ModelPruning):
         if scheduled_pruning:
             # ignore user‐passed amount, use schedule
             self.initial_amount = initial_amount
-            self.final_amount = final_amount if final_amount is not None else initial_amount
+            self.final_amount = final_amount if final_amount is not None else amount  # Changed: use amount if final_amount is None
             self.epochs_to_ramp = max(1, epochs_to_ramp)
             self._validate_params(None, True, self.initial_amount, self.final_amount)
             effective_amount = self.initial_amount
@@ -453,6 +453,11 @@ class SafeModelPruning(ModelPruning):
                 if "sparsity/overall" in self.metrics and self.metrics["sparsity/overall"]:
                     latest_sparsity = self.metrics["sparsity/overall"][-1]
                     
+                    # Determine the current pruning amount to log
+                    current_pruning_target_amount = self.amount
+                    if self.scheduled_pruning:
+                        current_pruning_target_amount = self._get_current_amount(trainer.current_epoch)
+
                     # Log to all available loggers
                     loggers = trainer.logger.loggers if hasattr(trainer.logger, 'loggers') else [trainer.logger]
                     for logger in loggers:
@@ -461,7 +466,7 @@ class SafeModelPruning(ModelPruning):
                                 logger.log_metrics(
                                     {
                                         "pruning/sparsity": latest_sparsity,
-                                        "pruning/amount": self.amount
+                                        "pruning/amount": current_pruning_target_amount  # Changed: log current target amount
                                     }, 
                                     step=trainer.global_step
                                 )
