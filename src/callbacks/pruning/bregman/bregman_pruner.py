@@ -17,9 +17,9 @@ log = utils.get_pylogger(__name__)
 
 class LambdaScheduler:
     """
-    Scheduler for the regularization parameter 'mu' in the optimizer's regularizer.
+    Scheduler for the regularization parameter 'lamda' in the optimizer's regularizer.
     """
-    def __init__(self, optimizer, warmup=0, increment=0.05, cooldown=0, target_sparsity=1.0, reg_param="mu"):
+    def __init__(self, optimizer, warmup=0, increment=0.05, cooldown=0, target_sparsity=1.0, reg_param="lamda"):
         self.optimizer = optimizer
         self.warmup = warmup
         self.increment = increment
@@ -32,45 +32,45 @@ class LambdaScheduler:
         # Warmup phase: do nothing but decrement the counter
         if self.warmup > 0:
             self.warmup -= 1
-            return self._get_current_mu()
+            return self._get_current_param()
 
         elif self.warmup == 0:
             self.warmup = -1
-            return self._get_current_mu()
+            return self._get_current_param()
 
         else:
             # Cooldown phase: wait before next update
             if self.cooldown_val > 0:
                 self.cooldown_val -= 1
-                return self._get_current_mu()
+                return self._get_current_param()
             else:
                 self.cooldown_val = self.cooldown
-                new_mu = None
+                new_param = None
                 
                 for group in self.optimizer.param_groups:
                     reg = group['reg']
 
-                    # FIXED LOGIC: Update the 'mu' parameter according to target sparsity
+                    # Update the regularization parameter according to target sparsity
                     if current_sparsity < self.target_sparse:
                         # Not sparse enough - increase regularization strength
-                        new_mu = getattr(reg, self.reg_param) + self.increment
-                        setattr(reg, self.reg_param, new_mu)
+                        new_param = getattr(reg, self.reg_param) + self.increment
+                        setattr(reg, self.reg_param, new_param)
                     else:
                         # Too sparse - decrease regularization strength
-                        new_mu = max(getattr(reg, self.reg_param) - self.increment, 0.0)
-                        setattr(reg, self.reg_param, new_mu)
+                        new_param = max(getattr(reg, self.reg_param) - self.increment, 0.0)
+                        setattr(reg, self.reg_param, new_param)
                         
-                    # For Bregman optimizers, reinitialize subgradients when mu changes
+                    # For Bregman optimizers, reinitialize subgradients when regularization changes
                     if hasattr(self.optimizer, 'initialize_sub_grad'):
                         for p in group['params']:
                             if p in self.optimizer.state:
                                 state = self.optimizer.state[p]
                                 state['sub_grad'] = self.optimizer.initialize_sub_grad(p, reg, group['delta'])
                 
-                return new_mu
+                return new_param
                 
-    def _get_current_mu(self):
-        """Get current mu value from first parameter group."""
+    def _get_current_param(self):
+        """Get current regularization parameter value from first parameter group."""
         if self.optimizer.param_groups:
             reg = self.optimizer.param_groups[0]['reg']
             return getattr(reg, self.reg_param, 1.0)
@@ -264,7 +264,7 @@ class BregmanPruner(Callback):
             opt_reg = optimizer.param_groups[0].get('reg')
             if opt_reg is not None:
                 self.regularizer = opt_reg
-                log.info(f"Using optimizer's regularizer: lambda={getattr(opt_reg, 'lamda', 'N/A')}, mu={getattr(opt_reg, 'mu', 'N/A')}")
+                log.info(f"Using optimizer's regularizer: lambda={getattr(opt_reg, 'lamda', 'N/A')}")
                 if getattr(opt_reg, 'lamda', 0) == 0:
                     log.warning(
                         "Regularizer's lambda is 0. No sparsity will be enforced by the Bregman proximal step. "
@@ -282,7 +282,7 @@ class BregmanPruner(Callback):
                 increment=self.scheduler_increment,
                 cooldown=self.scheduler_cooldown,
                 target_sparsity=self.target_sparsity,
-                reg_param="mu"
+                reg_param="lamda"
             )
         
         log.info(f"Bregman learning initialized. Sparsity of pruned modules: {self._compute_sparsity():.2%}")
@@ -323,13 +323,13 @@ class BregmanPruner(Callback):
             return
         
         # Update regularization strength if scheduler is configured
-        current_mu = getattr(self.regularizer, 'mu', 1.0)  # Get current mu from regularizer
+        current_lamda = getattr(self.regularizer, 'lamda', 1.0)  # Get current lambda from regularizer
         if hasattr(self, 'lamda_scheduler'):
-            current_mu = self._update_regularization_strength(trainer)
+            current_lamda = self._update_regularization_strength(trainer)
         
         # Log metrics periodically
         if self.collect_metrics and (trainer.global_step % 100 == 0):
-             self._log_metrics(trainer, mu=current_mu)
+             self._log_metrics(trainer, lamda=current_lamda)
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
         if not self._initialized or not self.selected_parameters: return
@@ -344,25 +344,23 @@ class BregmanPruner(Callback):
     
     def _update_regularization_strength(self, trainer: Trainer) -> None:
         current_sparsity = self._compute_sparsity()
-        new_mu = self.lamda_scheduler.step(current_sparsity)
-        return new_mu
+        new_lamda = self.lamda_scheduler.step(current_sparsity)
+        return new_lamda
 
     @rank_zero_only
-    def _log_metrics(self, trainer: Trainer, mu: float) -> None:
+    def _log_metrics(self, trainer: Trainer, lamda: float) -> None:
         sparsity = self._compute_sparsity()
         
-        # Access lambda and mu from the regularizer
+        # Access lambda from the regularizer
         lamda = getattr(self.regularizer, 'lamda', 0)
-        mu = getattr(self.regularizer, 'mu', 1.0)
         
         metrics_to_log = {
             "bregman/pruned_module_sparsity": sparsity,
-            "bregman/mu": mu,
             "bregman/lambda": lamda,
         }
         trainer.logger.log_metrics(metrics_to_log, step=trainer.global_step)
         
-        log.info(f"Step {trainer.global_step}: Sparsity={sparsity:.3%}, mu={mu:.4f}, lambda={lamda:.4f}")
+        log.info(f"Step {trainer.global_step}: Sparsity={sparsity:.3%}, lambda={lamda:.4f}")
 
     def get_sparsity_info(self) -> dict:
         """Returns information about the current sparsity of the pruned modules."""
@@ -370,5 +368,4 @@ class BregmanPruner(Callback):
             "current_sparsity": self._compute_sparsity(),
             "target_sparsity": self.target_sparsity,
             "lamda": getattr(self.regularizer, 'lamda', 0),
-            "mu": getattr(self.regularizer, 'mu', 1.0)
         }

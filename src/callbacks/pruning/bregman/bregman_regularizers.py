@@ -4,9 +4,8 @@ Bregman Regularizers for sparse neural network training.
 This module provides various regularizers compatible with the BregmanPruner,
 replicating the implementations from the `TimRoith/BregmanLearning` repository.
 
-Each regularizer is initialized with a base strength `lamda` and an internal
-dynamic multiplier `mu` (defaulting to 1.0), which is adjusted by the LamdaScheduler.
-The effective regularization strength used in calculations is the product `mu * lamda`.
+Each regularizer is initialized with a base strength `lamda`. The `delta` parameter
+is passed to the `prox` method during optimization steps.
 """
 import torch
 import torch.nn as nn
@@ -17,7 +16,8 @@ class BregmanRegularizer:
     """Base class for Bregman regularizers."""
     def __init__(self, lamda: float = 1.0, delta: float = 1.0):
         self.lamda = lamda
-        self.mu = delta
+        # Note: delta parameter is kept for compatibility but not stored
+        # It's passed directly to prox() method during optimization
 
     def __call__(self, x: torch.Tensor) -> float:
         raise NotImplementedError
@@ -44,38 +44,38 @@ class RegNone(BregmanRegularizer):
 class RegL1(BregmanRegularizer):
     """L1 norm regularizer."""
     def __call__(self, x: torch.Tensor) -> float:
-        return self.mu * self.lamda * torch.norm(x, p=1).item()
+        return self.lamda * torch.norm(x, p=1).item()
         
     def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
-        return torch.sign(x) * torch.clamp(torch.abs(x) - (delta * self.mu * self.lamda), min=0)
+        return torch.sign(x) * torch.clamp(torch.abs(x) - (delta * self.lamda), min=0)
         
     def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
-        return self.mu * self.lamda * torch.sign(v)
+        return self.lamda * torch.sign(v)
 
 
 class RegL1Pos(BregmanRegularizer):
     """L1 norm regularizer with positivity constraint."""
     def __call__(self, x: torch.Tensor) -> float:
-        return self.mu * self.lamda * torch.norm(x, p=1).item()
+        return self.lamda * torch.norm(x, p=1).item()
         
     def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
         # Apply soft thresholding first, then clamp to ensure positivity
-        soft_thresholded = torch.sign(x) * torch.clamp(torch.abs(x) - (delta * self.mu * self.lamda), min=0)
+        soft_thresholded = torch.sign(x) * torch.clamp(torch.abs(x) - (delta * self.lamda), min=0)
         return torch.clamp(soft_thresholded, min=0)
         
     def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
-        return self.mu * self.lamda * torch.sign(v)
+        return self.lamda * torch.sign(v)
 
 
 class RegL1L2(BregmanRegularizer):
     """L1-L2 group sparsity regularizer (group lasso)."""
     def __call__(self, x: torch.Tensor) -> float:
         if x.dim() < 2: return 0.0 # Not applicable for vectors
-        return self.mu * self.lamda * math.sqrt(x.shape[-1]) * torch.norm(torch.norm(x, p=2, dim=1), p=1).item()
+        return self.lamda * math.sqrt(x.shape[-1]) * torch.norm(torch.norm(x, p=2, dim=1), p=1).item()
         
     def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
         if x.dim() < 2: return x # Not applicable for vectors
-        thresh = delta * self.mu * self.lamda * math.sqrt(x.shape[-1])
+        thresh = delta * self.lamda * math.sqrt(x.shape[-1])
         
         nx = torch.norm(x, p=2, dim=1, keepdim=True)
         # Avoid division by zero by adding a small epsilon where the norm is zero
@@ -86,7 +86,7 @@ class RegL1L2(BregmanRegularizer):
 
     def sub_grad(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() < 2: return torch.zeros_like(x) # Not applicable for vectors
-        thresh = self.mu * self.lamda * math.sqrt(x.shape[-1])
+        thresh = self.lamda * math.sqrt(x.shape[-1])
         
         nx = torch.norm(x, p=2, dim=1, keepdim=True)
         # Avoid division by zero
@@ -117,16 +117,16 @@ class RegL1L2Conv(RegL1L2):
 class RegSoftBernoulli(BregmanRegularizer):
     """Soft Bernoulli regularizer for encouraging sparsity with noise."""
     def __call__(self, x: torch.Tensor) -> float:
-        return self.mu * self.lamda * torch.norm(x, p=1).item()
+        return self.lamda * torch.norm(x, p=1).item()
     
     def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
         return torch.sign(x) * torch.max(
-            torch.clamp(torch.abs(x) - (delta * self.mu * self.lamda), min=0), 
+            torch.clamp(torch.abs(x) - (delta * self.lamda), min=0), 
             torch.bernoulli(0.01 * torch.ones_like(x))
         )
 
     def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
-        return self.mu * self.lamda * torch.sign(v)
+        return self.lamda * torch.sign(v)
 
 
 # Dictionary to easily access regularizers by name
