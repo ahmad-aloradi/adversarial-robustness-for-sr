@@ -492,3 +492,14 @@ class MagnitudePruner(ModelPruning):
         # Log final metrics
         if self.collect_metrics and self.metrics:
             self._update_metrics()
+
+    def get_sparsity_info(self) -> dict:
+        """Returns information about the current sparsity of the pruned modules."""
+        valid_params = self._get_valid_parameters()
+        current_sparsity = self._compute_current_sparsity(valid_params) if valid_params else 0.0
+        
+        return {
+            "current_sparsity": current_sparsity,
+            "target_sparsity": self.final_amount if self.scheduled_pruning else self.amount,
+            "scheduled_pruning": self.scheduled_pruning
+        }
