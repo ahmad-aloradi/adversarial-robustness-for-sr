@@ -37,19 +37,22 @@ callbacks:
     method_config:
       # Optimizer configuration
       optimizer_name: "linbreg" # adabreg linbreg
-      lr: 1e-3
+      lr: 1e-4
       delta: 1.0
       momentum: 0.0
       betas: [0.9, 0.999]
       eps: 1e-8
-      # Regularization configuration - start with higher regularization
+      # Regularization configuration
       regularizer_name: "l1"
-      lamda: 5e-3
-      # Sparse initialization - ensure this happens correctly
+      lamda: 1e-3
+      # scheduler configuration
+      scheduler_warmup: 0
+      scheduler_cooldown: 0
+      scheduler_increment: 1e-3
+      target_sparsity: 0.8
+      # Sparse initialization
       sparse_init: true
       init_sparsity: 0.95
-      # Target sparsity with better control
-      target_sparsity: 0.8
       # Parameter selection
       parameter_selection: "weights_only"
       custom_parameter_fn: null
@@ -63,22 +66,30 @@ datamodule:
 
   loaders:
     train:
-      batch_size: 2
+      batch_size: 16
     valid:
-      batch_size: 2
+      batch_size: 16
     test:
       batch_size: 8
     enrollment:
       batch_size: 1
 
+### score normalization ###
 module:
   normalize_test_scores: True
+  scores_norm:
+    embeds_metric_params:
+      num_speakers_in_cohort: 6
+      min_utts_per_speaker: 7
+    scores_norm_params:
+      topk: 10
+      min_cohort_size: 300
 
   lr_scheduler: 
     scheduler:
         _target_: torch.optim.lr_scheduler.CyclicLR
         base_lr: 1e-6
-        max_lr: ${module.optimizer.lr}
+        max_lr:  1e-4 #${module.optimizer.lr}
         step_size_up: ${oc.eval:"int(2 * 1176000 / ${datamodule.loaders.train.batch_size})"}
     extras:
       monitor: ${replace:"valid/__metric__"}
@@ -86,8 +97,18 @@ module:
       frequency: 1
 
   optimizer:
-    lr: 1.0e-4
-    weight_decay: 1.0e-5
+    _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
+    _partial_: True
+    reg:
+      _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+      lamda: 1e-3
+      delta: 1.0
+    lr: 1e-4
+    momentum: 0.0
+
+  # optimizer:
+  #   lr: 1.0e-4
+  #   weight_decay: 1.0e-5
 
 
 # logger:

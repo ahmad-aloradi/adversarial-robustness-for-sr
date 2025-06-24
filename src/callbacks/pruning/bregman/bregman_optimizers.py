@@ -7,6 +7,7 @@ import math
 from typing import Optional, Union
 from .bregman_regularizers import BregmanRegularizer, RegNone
 
+
 class LinBreg(torch.optim.Optimizer):
     """Linearized Bregman optimizer.
     
@@ -74,9 +75,7 @@ class LinBreg(torch.optim.Optimizer):
                     sub_grad.add_(-step_size * grad)
                 
                 # Update parameters using proximal operator
-                # p.data = reg.prox(delta * sub_grad, delta)
-                # p.data.copy_(reg.prox(delta * sub_grad, delta))
-                p.data.copy_(reg.prox(delta * sub_grad, delta * reg.lamda))
+                p.data = reg.prox(delta * sub_grad, delta)
         
         return loss
         
@@ -180,9 +179,7 @@ class AdaBreg(torch.optim.Optimizer):
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
                 
                 # Update parameters using proximal operator
-                # p.data = reg.prox(delta * sub_grad, delta)
-                # p.data.copy_(reg.prox(delta * sub_grad, delta))
-                p.data.copy_(reg.prox(delta * sub_grad, delta * reg.lamda))
+                p.data = reg.prox(delta * sub_grad, delta)
         
         return loss
         
@@ -253,9 +250,7 @@ class ProxSGD(torch.optim.Optimizer):
                 # Gradient step
                 p.data.add_(-step_size * grad)
                 # Proximal step
-                # p.data = reg.prox(p.data, step_size)
-                # p.data.copy_(reg.prox(p.data, step_size))
-                p.data.copy_(reg.prox(p.data, step_size * reg.lamda))
+                p.data = reg.prox(p.data, step_size)
         
         return loss
                 
