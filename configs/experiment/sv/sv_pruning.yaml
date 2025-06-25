@@ -34,14 +34,9 @@ callbacks:
     
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
-    # Scheduler configuration
-    scheduler_warmup: 0
-    scheduler_cooldown: 0
-    scheduler_increment: 0
-    target_sparsity: 0.6
     # Sparse initialization
     sparse_init: true
-    init_sparsity: 0.8
+    init_sparsity: 0.95
     # Parameter selection options:
     # "weights_only" - all parameters of modules with learnable params
     # "weights_no_bias" - only weight parameters, excluding biases (basic layers)
@@ -51,6 +46,15 @@ callbacks:
     # Monitoring and verbosity
     collect_metrics: true
     verbose: 2
+    # Lambda scheduler configuration (optional). Set to null to disable adaptive regularization scheduling
+    lambda_scheduler:
+      _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
+      _partial_: true  # Creates partial function - completed in BregmanPruner with optimizer
+      warmup: 0
+      increment: 0.05
+      cooldown: 0
+      target_sparsity: 0.8
+      reg_param: "lamda"
 
 datamodule:
   dataset:
@@ -68,20 +72,13 @@ datamodule:
 
 ### score normalization ###
 module:
-  normalize_test_scores: True
-  scores_norm:
-    embeds_metric_params:
-      num_speakers_in_cohort: 6
-      min_utts_per_speaker: 7
-    scores_norm_params:
-      topk: 1
-      min_cohort_size: 2
+  normalize_test_scores: False
 
   lr_scheduler: 
     scheduler:
         _target_: torch.optim.lr_scheduler.CyclicLR
         base_lr: 1e-6
-        max_lr:  1e-4 #${module.optimizer.lr}
+        max_lr: ${module.optimizer.lr}
         step_size_up: ${oc.eval:"int(2 * 1176000 / ${datamodule.loaders.train.batch_size})"}
     extras:
       monitor: ${replace:"valid/__metric__"}
@@ -89,19 +86,26 @@ module:
       frequency: 1
 
   optimizer:
-    # _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
+  # Option1 Linbreg  
+  #   _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
+  #   _partial_: True
+  #   reg:
+  #     _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+  #     lamda: 1e-6  # Adjusted to a more reasonable value
+  #     delta: 1.0  # This should match the callback's delta
+  #   lr: 1e-4
+  #   momentum: 0.0
+
+  # Option2 Adabreg
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
-    _partial_: True
+    _partial_: true
     reg:
       _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-      lamda: 1e-8  # This should match the callback's lamda
+      lamda: 1e-8  # Adjusted to a more reasonable value
       delta: 1.0  # This should match the callback's delta
     lr: 1e-4
-    # momentum: 0.0
-
-  # optimizer:
-  #   lr: 1.0e-4
-  #   weight_decay: 1.0e-5
+    delta: 1.0
+    eps: 1e-8
 
 
 # logger:

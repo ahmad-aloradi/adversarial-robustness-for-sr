@@ -10,71 +10,10 @@ from pytorch_lightning.utilities import rank_zero_only
 from typing import List, Optional, Any
 
 from .bregman_regularizers import get_regularizer
+from .lambda_scheduler import LambdaScheduler
 from src import utils
 
 log = utils.get_pylogger(__name__)
-
-
-class LambdaScheduler:
-    """
-    Scheduler for the regularization parameter 'lamda' in the optimizer's regularizer.
-    """
-    def __init__(self, optimizer, warmup=0, increment=0.05, cooldown=0, target_sparsity=1.0, reg_param="lamda"):
-        self.optimizer = optimizer
-        self.warmup = warmup
-        self.increment = increment
-        self.cooldown = cooldown
-        self.cooldown_val = cooldown
-        self.target_sparse = target_sparsity
-        self.reg_param = reg_param
-
-    def step(self, current_sparsity):
-        # Warmup phase: do nothing but decrement the counter
-        if self.warmup > 0:
-            self.warmup -= 1
-            return self._get_current_param()
-
-        elif self.warmup == 0:
-            self.warmup = -1
-            return self._get_current_param()
-
-        else:
-            # Cooldown phase: wait before next update
-            if self.cooldown_val > 0:
-                self.cooldown_val -= 1
-                return self._get_current_param()
-            else:
-                self.cooldown_val = self.cooldown
-                new_param = None
-                
-                for group in self.optimizer.param_groups:
-                    reg = group['reg']
-
-                    # Update the regularization parameter according to target sparsity
-                    if current_sparsity < self.target_sparse:
-                        # Not sparse enough - increase regularization strength
-                        new_param = getattr(reg, self.reg_param) + self.increment
-                        setattr(reg, self.reg_param, new_param)
-                    else:
-                        # Too sparse - decrease regularization strength
-                        new_param = max(getattr(reg, self.reg_param) - self.increment, 0.0)
-                        setattr(reg, self.reg_param, new_param)
-                        
-                    # For Bregman optimizers, reinitialize subgradients when regularization changes
-                    if hasattr(self.optimizer, 'initialize_sub_grad'):
-                        for p in group['params']:
-                            if p in self.optimizer.state:
-                                state = self.optimizer.state[p]
-                                state['sub_grad'] = self.optimizer.initialize_sub_grad(p, reg, group['delta'])
-                
-                return new_param
-                
-    def _get_current_param(self):
-        """Get current regularization parameter value from first parameter group."""
-        if self.optimizer.param_groups:
-            reg = self.optimizer.param_groups[0]['reg']
-            return getattr(reg, self.reg_param, 1.0)
-        return 1.0
 
 
 class BregmanPruner(Callback):
@@ -87,31 +26,25 @@ class BregmanPruner(Callback):
         self,
         sparse_init: bool = True,
         init_sparsity: float = 0.9,
-        target_sparsity: Optional[float] = None,
         sparsity_threshold: float = 1e-30,
-        scheduler_warmup: int = 0,
-        scheduler_increment: float = 0.05,
-        scheduler_cooldown: int = 0,
         prune_module_names: Optional[List[str]] = None,
         parameter_selection: Optional[str] = None,
         custom_parameter_fn: Optional[Any] = None,
         collect_metrics: bool = True,
         verbose: int = 1,
+        lambda_scheduler: Optional[LambdaScheduler] = None,
         ):
         super().__init__()
         
         self.sparse_init = sparse_init
         self.init_sparsity = init_sparsity
-        self.target_sparsity = target_sparsity
         self.sparsity_threshold = sparsity_threshold
-        self.scheduler_warmup = scheduler_warmup
-        self.scheduler_increment = scheduler_increment
-        self.scheduler_cooldown = scheduler_cooldown
         self.prune_module_names = prune_module_names
         self.parameter_selection = parameter_selection
         self.custom_parameter_fn = custom_parameter_fn
         self.collect_metrics = collect_metrics
         self.verbose = verbose
+        self.lambda_scheduler = lambda_scheduler
         
         self.selected_parameters = []
         self.pruned_params_ids = set()
@@ -275,18 +208,36 @@ class BregmanPruner(Callback):
         else:
             raise ValueError("Invalid optimizer configuration!")
         
-        if self.target_sparsity is not None:
-            self.lamda_scheduler = LambdaScheduler(
-                optimizer=optimizer,
-                warmup=self.scheduler_warmup,
-                increment=self.scheduler_increment,
-                cooldown=self.scheduler_cooldown,
-                target_sparsity=self.target_sparsity,
-                reg_param="lamda"
-            )
+        # Initialize lambda scheduler if provided
+        self._setup_lambda_scheduler(optimizer)
         
         log.info(f"Bregman learning initialized. Sparsity of pruned modules: {self._compute_sparsity():.2%}")
     
+    def _setup_lambda_scheduler(self, optimizer) -> None:
+        """
+        Set up the lambda scheduler, handling both partial functions and pre-instantiated schedulers.
+        
+        Args:
+            optimizer: The optimizer to use with the scheduler
+        """
+        if self.lambda_scheduler is None:
+            return
+            
+        # Check if lambda_scheduler is a partial function (from _partial_: true)
+        if callable(self.lambda_scheduler) and not hasattr(self.lambda_scheduler, 'step'):
+            # It's a partial function, complete the instantiation with the optimizer
+            try:
+                self.lambda_scheduler = self.lambda_scheduler(optimizer=optimizer)
+                log.info(f"Lambda scheduler instantiated with target sparsity: {self.lambda_scheduler.target_sparse}")
+            except Exception as e:
+                log.error(f"Failed to instantiate lambda scheduler: {e}")
+                log.error(f"Scheduler type: {type(self.lambda_scheduler)}")
+                # Disable scheduler on error
+                self.lambda_scheduler = None
+        else:
+            # It's already an instantiated scheduler
+            log.info(f"Lambda scheduler already instantiated with target sparsity: {self.lambda_scheduler.target_sparse}")
+
     def _select_parameters(self, pl_module: LightningModule) -> None:
         # Skip if parameters were already selected in _configure_pruning_modules
         if self.selected_parameters:
@@ -324,7 +275,7 @@ class BregmanPruner(Callback):
         
         # Update regularization strength if scheduler is configured
         current_lamda = getattr(self.regularizer, 'lamda', 1.0)  # Get current lambda from regularizer
-        if hasattr(self, 'lamda_scheduler'):
+        if self.lambda_scheduler is not None:
             current_lamda = self._update_regularization_strength(trainer)
         
         # Log metrics periodically
@@ -342,9 +293,9 @@ class BregmanPruner(Callback):
         zero_params = sum((p.abs() <= self.sparsity_threshold).sum().item() for p in self.selected_parameters if p.requires_grad)
         return zero_params / max(1, total_params)
     
-    def _update_regularization_strength(self, trainer: Trainer) -> None:
+    def _update_regularization_strength(self, trainer: Trainer) -> float:
         current_sparsity = self._compute_sparsity()
-        new_lamda = self.lamda_scheduler.step(current_sparsity)
+        new_lamda = self.lambda_scheduler.step(current_sparsity)
         return new_lamda
 
     @rank_zero_only
@@ -366,6 +317,6 @@ class BregmanPruner(Callback):
         """Returns information about the current sparsity of the pruned modules."""
         return {
             "current_sparsity": self._compute_sparsity(),
-            "target_sparsity": self.target_sparsity,
+            "target_sparsity": getattr(self.lambda_scheduler, 'target_sparse', None) if self.lambda_scheduler else None,
             "lamda": getattr(self.regularizer, 'lamda', 0),
         }
