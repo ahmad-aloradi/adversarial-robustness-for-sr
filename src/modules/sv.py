@@ -23,6 +23,7 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
     VoxCelebVerificationItem,
     TrainCollate)
 from src import utils
+from src.callbacks.pruning.utils.pruning_manager import PruningManager
 from src.modules.components.utils import EmbeddingCache
 from src.modules.metrics.metrics import AS_norm 
 from datetime import datetime
@@ -505,24 +506,61 @@ class SpeakerVerification(pl.LightningModule):
     def on_test_epoch_end(self) -> None:
         self._epoch_end_common(is_test=True)
 
-    def configure_optimizers(self) -> Dict:
-        """Configure optimizers and learning rate schedulers."""
-        optimizer: torch.optim = instantiate(self.optimizer)(params=self.parameters())
+    def configure_optimizers(self) -> Dict[str, Any]:
+        """
+        Configures optimizers and learning rate schedulers.
+
+        This method dynamically adapts its behavior based on the configured optimizer:
         
-        if self.slr_params.get("scheduler"):
-            scheduler: torch.optim.lr_scheduler = instantiate(
-                self.slr_params.scheduler,
-                optimizer=optimizer,
-                _convert_="partial",
+        1.  If a Bregman-type optimizer (AdaBreg, LinBreg, ProxSGD) is used,
+            it initializes the PruningManager to handle parameter groups with
+            specific regularization settings defined in the config.
+
+        2.  For any standard optimizer (e.g., Adam, SGD), it applies the
+            optimizer to all model parameters uniformly.
+        """
+        BREGMAN_OPTIMIZERS = {"AdaBreg", "LinBreg", "ProxSGD"}
+        optimizer_class_name = self.hparams.optimizer._target_.split('.')[-1]
+
+        # Use the two-step partial instantiation pattern for the optimizer
+        optimizer_partial = instantiate(self.hparams.optimizer)
+
+        if optimizer_class_name in BREGMAN_OPTIMIZERS:
+            # --- Pruning-Aware Optimizer Logic ---
+            self.pruning_manager = PruningManager(
+                pl_module=self,
+                group_configs=self.hparams.model.pruning_groups
+            )
+            optimizer_param_groups = self.pruning_manager.get_optimizer_param_groups()
+            
+            # Manually instantiate the regularization object for each group
+            for group in optimizer_param_groups:
+                if 'reg' in group and isinstance(group.get('reg'), (dict, DictConfig)):
+                    group['reg'] = instantiate(group['reg'])
+            
+            optimizer = optimizer_partial(params=optimizer_param_groups)
+
+        else:
+            # --- Standard Optimizer Logic ---
+            optimizer = optimizer_partial(params=self.parameters())
+
+        # --- Common Scheduler Logic ---
+        if self.hparams.get("lr_scheduler"):
+            # Instantiate the scheduler, which now receives a fully formed optimizer
+            scheduler = instantiate(
+                self.hparams.lr_scheduler.scheduler,
+                optimizer=optimizer
             )
             
             lr_scheduler_dict = {"scheduler": scheduler}
-            if self.slr_params.get("extras"):
-                for key, value in self.slr_params.get("extras").items():
+            if self.hparams.lr_scheduler.get("extras"):
+                for key, value in self.hparams.lr_scheduler.get("extras").items():
                     lr_scheduler_dict[key] = value
             return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_dict}
         
         return {"optimizer": optimizer}
+
+
 
     ############ Dev and eval utils ############
     def _compute_embeddings(self, dataloader, mode: str = 'test') -> dict:

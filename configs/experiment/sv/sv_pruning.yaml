@@ -34,25 +34,16 @@ callbacks:
     
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
-    # Sparse initialization
-    sparse_init: true
-    init_sparsity: 0.95
-    # Parameter selection options:
-    # "weights_only" - all parameters of modules with learnable params
-    # "weights_no_bias" - only weight parameters, excluding biases (basic layers)
-    # "comprehensive" - smart selection for modern architectures (LSTM, Transformers)
-    # null - prune all model parameters
-    parameter_selection: weights_only  # Best for modern architectures
-    # Monitoring and verbosity
+    sparsity_threshold: 1e-30
     collect_metrics: true
     verbose: 2
-    # Lambda scheduler configuration (optional). Set to null to disable adaptive regularization scheduling
+    # Lambda scheduler configuration remains here, as it's part of the callback's orchestration role.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true  # Creates partial function - completed in BregmanPruner with optimizer
-      warmup: 0
+      warmup: 2
       increment: 0.05
-      cooldown: 0
+      cooldown: 2
       target_sparsity: 0.8
       reg_param: "lamda"
 
@@ -99,14 +90,51 @@ module:
   # Option2 Adabreg
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
     _partial_: true
-    reg:
-      _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-      lamda: 1e-8  # Adjusted to a more reasonable value
-      delta: 1.0  # This should match the callback's delta
-    lr: 1e-4
-    delta: 1.0
-    eps: 1e-8
 
+  model:
+    pruning_groups:
+      - name: "convolutional_weights"
+        # ECAPA-TDNN models use Conv1d layers.
+        layer_types: ["torch.nn.Conv1d"]
+        param_names: ["weight"]
+        pruning_config:
+          pruning_type: "structured"
+          sparsity_rate: 0.80 # Initial sparsity: Prune 80% of conv channels
+          structured_method: "channel"
+        optimizer_settings:
+          lr: 1e-4
+          delta: 1.0
+          eps: 1e-8
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1L2Conv
+            lamda: 1e-8
+
+      - name: "linear_weights"
+        layer_types: ["torch.nn.Linear"]
+        param_names: ["weight"]
+        pruning_config:
+          pruning_type: "unstructured"
+          sparsity_rate: 0.95 # Initial sparsity: Prune 95% of linear weights
+        optimizer_settings:
+          lr: 1e-4
+          delta: 1.0
+          eps: 1e-8
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            lamda: 1e-8
+
+      # This is a crucial fallback group. It catches all parameters not matched above
+      # (e.g., all biases, batchnorm params, etc.) and applies no sparsity or regularization.
+      - name: "fallback_group"
+        is_fallback: True
+        pruning_config:
+          sparsity_rate: 0.0 # No initial sparsity
+        optimizer_settings:
+          lr: 1e-4
+          delta: 1.0
+          eps: 1e-8
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone # No regularization
 
 # logger:
 #   wandb:

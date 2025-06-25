@@ -12,7 +12,7 @@ class LambdaScheduler:
     """
     Scheduler for the regularization parameter 'lamda' in the optimizer's regularizer.
     """
-    def __init__(self, optimizer, warmup=0, increment=0.05, cooldown=0, target_sparsity=0.9, reg_param="lamda"):
+    def __init__(self, optimizer, warmup=0, increment=0.05, cooldown=0, target_sparsity=0.9, reg_param="lamda", log_frequency=100):
         self.optimizer = optimizer
         self.warmup = warmup
         self.increment = increment
@@ -20,6 +20,8 @@ class LambdaScheduler:
         self.cooldown_val = cooldown
         self.target_sparse = target_sparsity
         self.reg_param = reg_param
+        self.log_frequency = log_frequency
+        self._log_counter = 0
         
         # Validate optimizer on initialization
         self._validate_optimizer()
@@ -70,6 +72,8 @@ class LambdaScheduler:
             else:
                 self.cooldown_val = self.cooldown
                 new_param = None
+                self._log_counter += 1
+                should_log = self._log_counter % self.log_frequency == 0
                 
                 for group in self.optimizer.param_groups:
                     reg = group['reg']
@@ -80,12 +84,14 @@ class LambdaScheduler:
                         # Not sparse enough - increase regularization strength
                         new_param = old_param + self.increment
                         setattr(reg, self.reg_param, new_param)
-                        log.info(f"Sparsity {current_sparsity:.3%} < target {self.target_sparse:.1%} → Lambda {old_param:.8f} → {new_param:.8f}")
+                        if should_log:
+                            log.info(f"Sparsity {current_sparsity:.3%} < target {self.target_sparse:.1%} → Lambda {old_param:.8f} → {new_param:.8f}")
                     else:
                         # Too sparse - decrease regularization strength
                         new_param = max(old_param - self.increment, 0.0)
                         setattr(reg, self.reg_param, new_param)
-                        log.info(f"Sparsity {current_sparsity:.3%} ≥ target {self.target_sparse:.1%} → Lambda {old_param:.8f} → {new_param:.8f}")
+                        if should_log:
+                            log.info(f"Sparsity {current_sparsity:.3%} ≥ target {self.target_sparse:.1%} → Lambda {old_param:.8f} → {new_param:.8f}")
                         
                     # For Bregman optimizers, reinitialize subgradients when regularization changes
                     if hasattr(self.optimizer, 'initialize_sub_grad'):
