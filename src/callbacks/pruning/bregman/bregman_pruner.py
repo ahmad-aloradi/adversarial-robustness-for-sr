@@ -273,14 +273,17 @@ class BregmanPruner(Callback):
         if not self._initialized or not self.selected_parameters: 
             return
         
-        # Update regularization strength if scheduler is configured
-        current_lamda = getattr(self.regularizer, 'lamda', 1.0)  # Get current lambda from regularizer
-        if self.lambda_scheduler is not None:
-            current_lamda = self._update_regularization_strength(trainer)
-        
-        # Log metrics periodically
+        # Log metrics periodically with current state BEFORE scheduler update
         if self.collect_metrics and (trainer.global_step % 100 == 0):
-             self._log_metrics(trainer, lamda=current_lamda)
+            current_sparsity = self._compute_sparsity()
+            current_lamda = getattr(self.regularizer, 'lamda', 1.0)
+            self._log_metrics(trainer, sparsity=current_sparsity, lamda=current_lamda)
+            
+            # Update regularization strength AFTER logging current state
+            if self.lambda_scheduler is not None:
+                new_lamda = self._update_regularization_strength(current_sparsity)
+                if new_lamda != current_lamda:
+                    log.info(f"Step {trainer.global_step}: Lambda updated from {current_lamda:.4f} to {new_lamda:.4f} (target sparsity: {self.lambda_scheduler.target_sparse:.1%})")
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
         if not self._initialized or not self.selected_parameters: return
@@ -293,18 +296,12 @@ class BregmanPruner(Callback):
         zero_params = sum((p.abs() <= self.sparsity_threshold).sum().item() for p in self.selected_parameters if p.requires_grad)
         return zero_params / max(1, total_params)
     
-    def _update_regularization_strength(self, trainer: Trainer) -> float:
-        current_sparsity = self._compute_sparsity()
+    def _update_regularization_strength(self, current_sparsity: float) -> float:
         new_lamda = self.lambda_scheduler.step(current_sparsity)
         return new_lamda
 
     @rank_zero_only
-    def _log_metrics(self, trainer: Trainer, lamda: float) -> None:
-        sparsity = self._compute_sparsity()
-        
-        # Access lambda from the regularizer
-        lamda = getattr(self.regularizer, 'lamda', 0)
-        
+    def _log_metrics(self, trainer: Trainer, sparsity: float, lamda: float) -> None:
         metrics_to_log = {
             "bregman/pruned_module_sparsity": sparsity,
             "bregman/lambda": lamda,

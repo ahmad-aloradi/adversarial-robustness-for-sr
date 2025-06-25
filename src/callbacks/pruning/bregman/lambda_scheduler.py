@@ -3,6 +3,9 @@ Lambda scheduler for Bregman regularization parameter adjustment.
 """
 import torch
 from typing import Optional
+from src import utils
+
+log = utils.get_pylogger(__name__)
 
 
 class LambdaScheduler:
@@ -70,16 +73,19 @@ class LambdaScheduler:
                 
                 for group in self.optimizer.param_groups:
                     reg = group['reg']
+                    old_param = getattr(reg, self.reg_param)
 
                     # Update the regularization parameter according to target sparsity
                     if current_sparsity < self.target_sparse:
                         # Not sparse enough - increase regularization strength
-                        new_param = getattr(reg, self.reg_param) + self.increment
+                        new_param = old_param + self.increment
                         setattr(reg, self.reg_param, new_param)
+                        log.info(f"Sparsity {current_sparsity:.3%} < target {self.target_sparse:.1%} → Lambda {old_param:.8f} → {new_param:.8f}")
                     else:
                         # Too sparse - decrease regularization strength
-                        new_param = max(getattr(reg, self.reg_param) - self.increment, 0.0)
+                        new_param = max(old_param - self.increment, 0.0)
                         setattr(reg, self.reg_param, new_param)
+                        log.info(f"Sparsity {current_sparsity:.3%} ≥ target {self.target_sparse:.1%} → Lambda {old_param:.8f} → {new_param:.8f}")
                         
                     # For Bregman optimizers, reinitialize subgradients when regularization changes
                     if hasattr(self.optimizer, 'initialize_sub_grad'):
