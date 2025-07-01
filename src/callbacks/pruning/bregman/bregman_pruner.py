@@ -164,7 +164,7 @@ class BregmanPruner(Callback):
         if self.verbose > 0 and abs(new_lambda - self.current_lambda) > 1e-6:
             direction = "↗" if new_lambda > self.current_lambda else "↘"
             log.info(
-                f"Sparsity {current_sparsity:.3f}% vs target {self.target_sparsity:.1f}% → "
+                f"Sparsity {current_sparsity*100:.3f}% vs target {self.target_sparsity*100:.1f}% → "
                 f"Lambda {direction} {self.current_lambda:.8f} → {new_lambda:.8f}"
             )
         
@@ -225,7 +225,7 @@ class BregmanPruner(Callback):
             
             # Log detailed metrics
             if self.verbose > 0:
-                log.info(f"Step {self._step_count}: Sparsity={current_sparsity:.3f}%, lambda={self.current_lambda:.4f}")
+                log.info(f"Step {self._step_count}: Sparsity={current_sparsity*100:.3f}%, lambda={self.current_lambda:.4f}")
             
             # Log to trainer if available
             if trainer.logger is not None:
@@ -241,7 +241,7 @@ class BregmanPruner(Callback):
         self._last_computed_sparsity = current_sparsity
         
         if self.verbose > 0:
-            log.info(f"Epoch {trainer.current_epoch}: Sparsity of pruned modules = {current_sparsity:.3f}%")
+            log.info(f"Epoch {trainer.current_epoch}: Sparsity of pruned modules = {current_sparsity*100:.3f}%")
     
     def get_regularization_loss(self, pl_module) -> torch.Tensor:
         """
