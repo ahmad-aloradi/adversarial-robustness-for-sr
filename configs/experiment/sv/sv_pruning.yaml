@@ -6,6 +6,7 @@
 defaults:
   # - override /callbacks: default.yaml
   - /callbacks/model_pruning
+  - /callbacks/bregman_pruner
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml
   - override /trainer: gpu.yaml

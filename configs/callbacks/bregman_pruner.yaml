@@ -1,0 +1,8 @@
+bregman_pruner:
+  _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
+  target_sparsity: 0.8  # Target sparsity ratio (80%)
+  initial_lambda: 1.0  # Initial regularization strength
+  lambda_update_rate: 0.001  # Rate at which lambda is updated
+  update_frequency: 100  # Number of steps between lambda updates
+  parameters_to_prune: null  # Optional list of (module, name) tuples; if null, auto-discovers parameters
+  verbose: 1  # Verbosity level: 0=silent, 1=basic progress, 2=detailed statistics
