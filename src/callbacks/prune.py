@@ -6,9 +6,9 @@ from typing import List, Tuple, Callable, Optional, Union, Dict, Any
 import warnings
 from collections import defaultdict
 
-from src import utils
+import logging
 
-log = utils.get_pylogger(__name__)
+log = logging.getLogger(__name__)
 
 
 class SafeModelPruning(ModelPruning):
