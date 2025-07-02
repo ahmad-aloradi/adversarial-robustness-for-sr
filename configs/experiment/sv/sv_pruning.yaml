@@ -4,12 +4,13 @@
 # python train.py experiment=example
 
 defaults:
+  # This MUST be first. It tells Hydra to start building the config from this file.
+  - _self_  
   - override /callbacks: default.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml
   - override /trainer: gpu.yaml
   - override /logger: wandb.yaml
-
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
@@ -40,12 +41,17 @@ callbacks:
     # Lambda scheduler configuration remains here, as it's part of the callback's orchestration role.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
-      _partial_: true  # Creates partial function - completed in BregmanPruner with optimizer
-      warmup: 2
-      increment: 0.05
-      cooldown: 2
-      target_sparsity: 0.8
-      reg_param: "lamda"
+      # _partial_: true  # Creates partial function - completed in BregmanPruner with optimizer
+      # # warmup: 0
+      # increment: 0.05
+      # cooldown: 0
+      # target_sparsity: 0.8
+      # reg_param: "lamda"
+      initial_lambda: 1e-6
+      target_sparsity: 0.9
+      adjustment_factor: 1.05
+      min_lambda: 1e-9
+      max_lambda: 1e-2
 
 datamodule:
   dataset:
@@ -78,63 +84,71 @@ module:
 
   optimizer:
   # Option1 Linbreg  
-  #   _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
-  #   _partial_: True
-  #   reg:
-  #     _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-  #     lamda: 1e-6  # Adjusted to a more reasonable value
-  #     delta: 1.0  # This should match the callback's delta
-  #   lr: 1e-4
-  #   momentum: 0.0
+    _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
+    _partial_: True
+    momentum: 0.0
+    lr: 1e-4
 
   # Option2 Adabreg
-    _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
-    _partial_: true
+    # _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
+    # _partial_: true
+    # lr: 1e-4
 
   model:
     pruning_groups:
-      - name: "convolutional_weights"
-        # ECAPA-TDNN models use Conv1d layers.
-        layer_types: ["torch.nn.Conv1d"]
-        param_names: ["weight"]
-        pruning_config:
-          pruning_type: "structured"
-          sparsity_rate: 0.80 # Initial sparsity: Prune 80% of conv channels
-          structured_method: "channel"
+      # Group 1: Prunable Convolutional Layers
+      # Adheres to the code's requirements by specifying both `layer_types`
+      # and a valid regular expression pattern.
+      - name: prunable_weights
+        # MANDATORY: The code requires this key to be present.
+        layer_types:
+          - 'torch.nn.Conv1d'
+          - 'torch.nn.Conv2d'
+        # REGEX: This pattern matches module names ending in '.conv.conv'.
+        # '.*' matches any character.
+        # '\.' matches a literal dot.
+        # '$' asserts this is the end of the string.
+        module_name_patterns:
+          - '.*\.conv\.conv$'
+          - '.*\.conv1\.conv$'
+          - '.*\.conv2\.conv$'
+          - 'fc.conv'
         optimizer_settings:
-          lr: 1e-4
-          delta: 1.0
-          eps: 1e-8
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1L2Conv
-            lamda: 1e-8
+            lamda: 0.001
 
-      - name: "linear_weights"
-        layer_types: ["torch.nn.Linear"]
-        param_names: ["weight"]
         pruning_config:
-          pruning_type: "unstructured"
-          sparsity_rate: 0.95 # Initial sparsity: Prune 95% of linear weights
+          sparsity_rate: 0.90
+
+      # Group 2: BatchNorm Layers (Not Pruned)
+      # Explicitly matches BatchNorm layers to assign them no regularization.
+      - name: batchnorm_params
+        layer_types:
+          - 'torch.nn.BatchNorm1d'
+        module_name_patterns:
+          - '.*\.norm\.norm$'
+          - 'asp_bn.norm'
         optimizer_settings:
-          lr: 1e-4
-          delta: 1.0
-          eps: 1e-8
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
+
+      # Group 3: Unpruned Fallback (MUST BE LAST)
+      # This group does not need layer_types because the logic to select it
+      # should be separate (i.e., it catches what's left over).
+      - name: unpruned_fallback
+        # Mark this as the fallback so your logic can handle it.
+        is_fallback: True
+        module_name_patterns:
+          - ".*" # Regex for "match anything"
+        optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1e-8
+            lamda: 0.001
 
-      # This is a crucial fallback group. It catches all parameters not matched above
-      # (e.g., all biases, batchnorm params, etc.) and applies no sparsity or regularization.
-      - name: "fallback_group"
-        is_fallback: True
         pruning_config:
-          sparsity_rate: 0.0 # No initial sparsity
-        optimizer_settings:
-          lr: 1e-4
-          delta: 1.0
-          eps: 1e-8
-          reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone # No regularization
+          sparsity_rate: 0.90
+
 
 # logger:
 #   wandb:

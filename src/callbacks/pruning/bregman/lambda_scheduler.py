@@ -1,7 +1,3 @@
-"""
-Lambda scheduler for Bregman regularization parameter adjustment.
-"""
-import torch
 from typing import Optional
 from src import utils
 
@@ -10,110 +6,115 @@ log = utils.get_pylogger(__name__)
 
 class LambdaScheduler:
     """
-    Scheduler for the regularization parameter 'lamda' in the optimizer's regularizer.
+    Lambda scheduler with sparsity smoothing mechanism.
+    
+    This scheduler implements a simple smoothing mechanism to handle spurious
+    zero sparsity readings that can occur during training when sparsity is
+    computed before applying masks.
+    
+    Parameters
+    ----------
+    initial_lambda : float
+        Initial lambda value for regularization
+    target_sparsity : float
+        Target sparsity level to achieve
+    adjustment_factor : float, default=1.1
+        Factor by which to adjust lambda when sparsity is below target
+    min_lambda : float, default=1e-6
+        Minimum lambda value
+    max_lambda : float, default=1e3
+        Maximum lambda value
     """
-    def __init__(self, optimizer, warmup=0, increment=0.05, cooldown=0, target_sparsity=0.9, reg_param="lamda", log_frequency=100):
-        self.optimizer = optimizer
-        self.warmup = warmup
-        self.increment = increment
-        self.cooldown = cooldown
-        self.cooldown_val = cooldown
-        self.target_sparse = target_sparsity
-        self.reg_param = reg_param
-        self.log_frequency = log_frequency
-        self._log_counter = 0
-        
-        # Validate optimizer on initialization
-        self._validate_optimizer()
 
-    def _validate_optimizer(self):
-        """Validate that the optimizer is compatible with this scheduler."""
-        if self.optimizer is None:
-            raise ValueError("No optimizer provided to LambdaScheduler")
-            
-        if not hasattr(self.optimizer, 'param_groups') or not self.optimizer.param_groups:
-            raise ValueError("Optimizer must have param_groups")
-            
-        # Check that all parameter groups have regularizers
-        for i, group in enumerate(self.optimizer.param_groups):
-            if 'reg' not in group or group['reg'] is None:
-                raise ValueError(f"Parameter group {i} has no regularizer ('reg' field)")
-                
-            reg = group['reg']
-            if not hasattr(reg, self.reg_param):
-                raise ValueError(
-                    f"Regularizer in parameter group {i} does not have parameter '{self.reg_param}'"
-                )
+    def __init__(
+        self,
+        initial_lambda: float = 1e-3,
+        target_sparsity: float = 0.9,
+        adjustment_factor: float = 1.1,
+        min_lambda: float = 1e-6,
+        max_lambda: float = 1e3
+    ):
+        self.lambda_value = initial_lambda
+        self.target_sparsity = target_sparsity
+        self.adjustment_factor = adjustment_factor
+        self.min_lambda = min_lambda
+        self.max_lambda = max_lambda
 
-    def step(self, current_sparsity):
+        # Sparsity smoothing mechanism
+        self._last_sparsity: Optional[float] = None
+
+    def step(self, current_sparsity: float) -> float:
         """
-        Perform a scheduling step.
+        Update lambda based on current sparsity with smoothing.
         
-        Args:
-            current_sparsity: Current sparsity level
+        If current_sparsity is exactly 0.0 but we have a valid last sparsity
+        reading, use the last sparsity instead to avoid spurious zero readings.
+        
+        Parameters
+        ----------
+        current_sparsity : float
+            Current model sparsity (may contain spurious zeros)
             
-        Returns:
-            Updated regularization parameter value
+        Returns
+        -------
+        float
+            Updated lambda value
         """
-        # Warmup phase: do nothing but decrement the counter
-        if self.warmup > 0:
-            self.warmup -= 1
-            return self._get_current_param()
+        effective_sparsity = self._get_sparsity(current_sparsity)
 
-        elif self.warmup == 0:
-            self.warmup = -1
-            return self._get_current_param()
+        # Update lambda based on effective sparsity
+        if effective_sparsity < self.target_sparsity:
+            # Increase lambda to encourage more sparsity
+            self.lambda_value *= self.adjustment_factor
+        elif effective_sparsity > self.target_sparsity:
+            # Decrease lambda since we're above target
+            self.lambda_value /= self.adjustment_factor
 
-        else:
-            # Cooldown phase: wait before next update
-            if self.cooldown_val > 0:
-                self.cooldown_val -= 1
-                return self._get_current_param()
-            else:
-                self.cooldown_val = self.cooldown
-                new_param = None
-                self._log_counter += 1
-                should_log = self._log_counter % self.log_frequency == 0
-                
-                for group in self.optimizer.param_groups:
-                    reg = group['reg']
-                    old_param = getattr(reg, self.reg_param)
+        # Clamp lambda to valid range
+        self.lambda_value = max(self.min_lambda, min(self.max_lambda, self.lambda_value))
 
-                    # Update the regularization parameter according to target sparsity
-                    if current_sparsity < self.target_sparse:
-                        # Not sparse enough - increase regularization strength
-                        new_param = old_param + self.increment
-                        setattr(reg, self.reg_param, new_param)
-                        if should_log:
-                            log.info(f"Sparsity {current_sparsity:.3%} < target {self.target_sparse:.1%} → Lambda {old_param:.8f} → {new_param:.8f}")
-                    else:
-                        # Too sparse - decrease regularization strength
-                        new_param = max(old_param - self.increment, 0.0)
-                        setattr(reg, self.reg_param, new_param)
-                        if should_log:
-                            log.info(f"Sparsity {current_sparsity:.3%} ≥ target {self.target_sparse:.1%} → Lambda {old_param:.8f} → {new_param:.8f}")
-                        
-                    # For Bregman optimizers, reinitialize subgradients when regularization changes
-                    if hasattr(self.optimizer, 'initialize_sub_grad'):
-                        for p in group['params']:
-                            if p in self.optimizer.state:
-                                state = self.optimizer.state[p]
-                                state['sub_grad'] = self.optimizer.initialize_sub_grad(p, reg, group['delta'])
-                
-                return new_param
-                
-    def _get_current_param(self):
-        """Get current regularization parameter value from first parameter group."""
-        if self.optimizer and self.optimizer.param_groups:
-            reg = self.optimizer.param_groups[0]['reg']
-            return getattr(reg, self.reg_param, 1.0)
-        return 1.0
+        # Store this sparsity reading if it's valid (not a spurious zero)
+        if current_sparsity > 0.0:
+            self._last_sparsity = current_sparsity
 
-    def get_state(self):
-        """Get scheduler state for debugging/monitoring."""
+        return self.lambda_value
+
+    def _get_sparsity(self, current_sparsity: float) -> float:
+        """
+        Get model sparsity whith safety mechanism.
+        
+        Parameters
+        ----------
+        current_sparsity : float
+            Raw sparsity reading
+            
+        Returns
+        -------
+        float
+            Effective sparsity after smoothing
+        """
+        # If current reading is exactly 0.0 and we have a valid last reading,
+        # use the last reading to avoid spurious zeros
+        if current_sparsity == 0.0 and self._last_sparsity is not None:
+            log.warning(
+                f"Spurious zero sparsity detected, using last valid reading: "
+                f"{self._last_sparsity:.4f}"
+            )
+            return self._last_sparsity
+
+        return current_sparsity
+
+    def get_lambda(self) -> float:
+        """Get current lambda value."""
+        return self.lambda_value
+
+    def get_state(self) -> dict:
+        """Get scheduler state for debugging."""
         return {
-            'warmup': self.warmup,
-            'cooldown_val': self.cooldown_val,
-            'target_sparsity': self.target_sparse,
-            'current_param': self._get_current_param(),
+            'lambda_value': self.lambda_value,
+            'target_sparsity': self.target_sparsity,
+            'last_sparsity': self._last_sparsity,
+            'adjustment_factor': self.adjustment_factor,
+            'min_lambda': self.min_lambda,
+            'max_lambda': self.max_lambda
         }

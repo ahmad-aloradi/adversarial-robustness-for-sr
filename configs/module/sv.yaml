@@ -83,12 +83,7 @@ metrics:
     _target_: src.modules.metrics.metrics.VerificationMetrics
 
 ### optimizer and lr_scheduler ###
-optimizer:
-  _target_: torch.optim.AdamW
-  _partial_: True
-  lr: 1.0e-3
-  weight_decay: 1.0e-5
-
+optimizer: ???
 lr_scheduler: ???
 
 ### extras and callbacks ###

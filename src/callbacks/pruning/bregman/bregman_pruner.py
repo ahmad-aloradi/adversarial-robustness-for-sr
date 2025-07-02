@@ -1,10 +1,10 @@
 """
 BregmanPruner: A callback for orchestrating sparsity in Bregman-based training.
 """
-import torch
+
 from pytorch_lightning import Callback, LightningModule, Trainer
 from pytorch_lightning.utilities import rank_zero_only
-from typing import List, Any, Dict
+from typing import Any
 
 from .lambda_scheduler import LambdaScheduler
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
@@ -16,31 +16,6 @@ log = utils.get_pylogger(__name__)
 class BregmanPruner(Callback):
     """
     Orchestrates sparsity-related operations during Bregman-based training.
-
-    This callback acts as a high-level orchestrator that hooks into the PyTorch
-    Lightning training loop. It delegates all complex logic for parameter grouping,
-    sparsity application, and regularization to a `PruningManager` instance.
-
-    Its primary responsibilities are:
-    - Triggering the application of initial sparsity at the start of training.
-    - Logging sparsity metrics and other relevant information periodically.
-    - Managing the `lambda_scheduler` to update regularization strength.
-
-    The `PruningManager` must be instantiated and attached to the LightningModule
-    (as `pl_module.pruning_manager`) within the `configure_optimizers` method to
-    ensure a single, unified source of truth for all pruning configurations.
-
-    Args:
-        sparsity_threshold (float): The numerical threshold below which a weight
-            is considered zero for sparsity calculations.
-        collect_metrics (bool): If True, logs metrics like sparsity and lambda
-            to the PyTorch Lightning logger.
-        verbose (int): Controls the verbosity of logging.
-            - 0: Silent.
-            - 1: Logs key events like epoch-end sparsity.
-            - 2: Logs detailed step-level metrics.
-        lambda_scheduler (LambdaScheduler, optional): An optional scheduler for
-            dynamically adjusting the regularization strength (lambda) during training.
     """
     
     def __init__(
@@ -63,10 +38,6 @@ class BregmanPruner(Callback):
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         """
         Called at the beginning of training to initialize the pruner.
-
-        This method retrieves the `PruningManager` from the LightningModule,
-        triggers the application of initial sparsity, and sets up the lambda
-        scheduler.
         """
         if not hasattr(pl_module, 'pruning_manager') or not isinstance(pl_module.pruning_manager, PruningManager):
             raise AttributeError(
@@ -76,13 +47,85 @@ class BregmanPruner(Callback):
         self.manager = pl_module.pruning_manager
         
         if not self._initialized:
+            if not trainer.optimizers:
+                log.warning("BregmanPruner: No optimizers found. Skipping initialization.")
+                return
+
+            if len(trainer.optimizers) > 1:
+                raise ValueError(
+                    f"BregmanPruner supports only a single optimizer, but found {len(trainer.optimizers)}. "
+                    "Please ensure only one optimizer is configured."
+                )
+                
+            self._log_group_assignments(pl_module)
+            
             log.info("BregmanPruner: Applying initial sparsity as defined by the PruningManager...")
             self.manager.apply_initial_sparsity()
             self._initialized = True
             
-            # Setup the lambda scheduler with the configured optimizer
             self._setup_lambda_scheduler(trainer.optimizers[0])
             log.info(f"Initial sparsity of pruned modules: {self._compute_sparsity():.3%}")
+
+    @rank_zero_only
+    def _log_group_assignments(self, pl_module: LightningModule):
+        """
+        Logs the assignment of modules to pruning groups by inspecting the
+        final parameter groups passed to the optimizer. This provides a definitive
+        verification of the configuration's outcome.
+        """
+        if self.verbose == 0:
+            return
+
+        log.info("--- Pruning Group Configuration Verification ---")
+        if not self.manager or not hasattr(self.manager, 'processed_groups'):
+            log.warning("Could not verify pruning groups: PruningManager is not set up or has no 'processed_groups' attribute.")
+            return
+
+        # Create lookup maps for module names and types from the LightningModule.
+        # This is the ground truth for linking parameters back to their parent modules.
+        param_to_module_name = {
+            id(p): '.'.join(name.split('.')[:-1])
+            for name, p in pl_module.named_parameters()
+        }
+        module_name_to_type = {
+            name: module.__class__.__name__
+            for name, module in pl_module.named_modules()
+        }
+
+        # Use the final, processed groups that are sent to the optimizer.
+        for group in self.manager.processed_groups:
+            group_config = group.get('config', {})
+            group_name = group_config.get('name', 'Unnamed Group')
+            optimizer_settings = group_config.get('optimizer_settings', {})
+            reg_config = optimizer_settings.get('reg')
+
+            log.info(f"Group '{group_name}':")
+
+            if reg_config:
+                log.info(f"  - Regularizer: {getattr(reg_config, '_target_', 'N/A')}")
+                if hasattr(reg_config, 'lamda'):
+                    log.info(f"  - Initial Lambda: {reg_config.lamda}")
+            else:
+                log.info("  - Regularizer: None")
+
+            log.info("  - Assigned Modules:")
+
+            # Deduce unique module names from the parameters present in each group.
+            assigned_modules = set()
+            for param in group['params']:
+                module_name = param_to_module_name.get(id(param))
+                if module_name:
+                    assigned_modules.add(module_name)
+
+            if not assigned_modules:
+                log.info("    - (No modules assigned to this group)")
+                continue
+
+            for module_name in sorted(list(assigned_modules)):
+                module_type = module_name_to_type.get(module_name, "N/A")
+                log.info(f"    - {module_name} (type: {module_type})")
+        
+        log.info("--- End Verification ---")
 
     def _compute_sparsity(self) -> float:
         """
@@ -109,7 +152,7 @@ class BregmanPruner(Callback):
         if self.lambda_scheduler is not None:
             self._update_regularization_strength(trainer)
         
-        if self.collect_metrics and (trainer.global_step % 100 == 0):
+        if self.collect_metrics and (trainer.global_step > 0 and trainer.global_step % 100 == 0):
              self._log_metrics(trainer)
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
@@ -128,7 +171,6 @@ class BregmanPruner(Callback):
         current_sparsity = self._compute_sparsity()
         new_lamda = self.lambda_scheduler.step(current_sparsity)
 
-        # Apply the new lambda to all parameter groups that have a regularizer
         for group in trainer.optimizers[0].param_groups:
             if 'reg' in group and hasattr(group['reg'], 'lamda'):
                 group['reg'].lamda = new_lamda
@@ -140,12 +182,8 @@ class BregmanPruner(Callback):
         """
         sparsity = self._compute_sparsity()
         
-        # For logging purposes, find the lambda from the first group that has one
-        lamda = 0
-        for group in trainer.optimizers[0].param_groups:
-            if 'reg' in group and hasattr(group['reg'], 'lamda'):
-                lamda = group['reg'].lamda
-                break
+        # Get lambda directly from the scheduler to ensure we log the controlled value.
+        lamda = self.lambda_scheduler.get_lambda() if self.lambda_scheduler is not None else 0
         
         metrics_to_log = {
             "bregman/pruned_module_sparsity": sparsity,
@@ -163,7 +201,6 @@ class BregmanPruner(Callback):
         if self.lambda_scheduler is None:
             return
         
-        # If scheduler is a partial function (common with Hydra configs), instantiate it
         if callable(self.lambda_scheduler) and not hasattr(self.lambda_scheduler, 'step'):
             try:
                 self.lambda_scheduler = self.lambda_scheduler(optimizer=optimizer)
