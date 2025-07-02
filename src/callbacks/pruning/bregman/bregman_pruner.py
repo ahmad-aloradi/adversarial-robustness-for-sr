@@ -64,7 +64,7 @@ class BregmanPruner(Callback):
             self._initialized = True
             
             self._setup_lambda_scheduler(trainer.optimizers[0])
-            log.info(f"Initial sparsity of pruned modules: {self._compute_sparsity():.3%}")
+            log.info(f"Initial sparsity of pruned modules: {self._compute_overall_sparsity():.3%}")
 
     @rank_zero_only
     def _log_group_assignments(self, pl_module: LightningModule):
@@ -105,6 +105,9 @@ class BregmanPruner(Callback):
                 log.info(f"  - Regularizer: {getattr(reg_config, '_target_', 'N/A')}")
                 if hasattr(reg_config, 'lamda'):
                     log.info(f"  - Initial Lambda: {reg_config.lamda}")
+                    log.info(f"  - Lambda scale: {optimizer_settings.lambda_scale}")
+                else:
+                    log.info(f"   - Regularizer has no lamda -> Initial Lambda: 0.0")
             else:
                 log.info("  - Regularizer: None")
 
@@ -125,9 +128,9 @@ class BregmanPruner(Callback):
                 module_type = module_name_to_type.get(module_name, "N/A")
                 log.info(f"    - {module_name} (type: {module_type})")
         
-        log.info("--- End Verification ---")
+        log.info("--- End of Parameters Groups Verification ---")
 
-    def _compute_sparsity(self) -> float:
+    def _compute_overall_sparsity(self) -> float:
         """
         Computes the current sparsity of all parameters targeted by the PruningManager.
         """
@@ -162,37 +165,51 @@ class BregmanPruner(Callback):
         if not self._initialized:
             return
         if self.verbose > 0:
-            log.info(f"Epoch {trainer.current_epoch}: Sparsity of pruned modules = {self._compute_sparsity():.3%}")
+            log.info(f"Epoch {trainer.current_epoch}: Sparsity of pruned modules = {self._compute_overall_sparsity():.3%}")
 
     def _update_regularization_strength(self, trainer: Trainer):
         """
-        Steps the lambda scheduler to compute and apply a new regularization strength.
+        Steps the lambda scheduler to compute and apply a new regularization strength,
+        scaled per parameter group.
         """
-        current_sparsity = self._compute_sparsity()
-        new_lamda = self.lambda_scheduler.step(current_sparsity)
+        current_sparsity = self._compute_overall_sparsity()
+        new_global_lamda = self.lambda_scheduler.step(current_sparsity)
 
         for group in trainer.optimizers[0].param_groups:
             if 'reg' in group and hasattr(group['reg'], 'lamda'):
-                group['reg'].lamda = new_lamda
+                lambda_scale = group.get('lambda_scale', 1.0)
+                group['reg'].lamda = new_global_lamda * lambda_scale
 
     @rank_zero_only
     def _log_metrics(self, trainer: Trainer) -> None:
         """
-        Logs the current sparsity and lambda value to the logger.
+        Logs the current overall sparsity and the effective lambda for each relevant group.
         """
-        sparsity = self._compute_sparsity()
-        
-        # Get lambda directly from the scheduler to ensure we log the controlled value.
-        lamda = self.lambda_scheduler.get_lambda() if self.lambda_scheduler is not None else 0
+        sparsity = self._compute_overall_sparsity()
+        global_lambda = self.lambda_scheduler.get_lambda() if self.lambda_scheduler is not None else 0
         
         metrics_to_log = {
             "bregman/pruned_module_sparsity": sparsity,
-            "bregman/lambda": lamda,
+            "bregman/global_lambda": global_lambda,
         }
+
+        log_msgs = [f"Step {trainer.global_step}: Sparsity={sparsity:.3%}, Global Lambda={global_lambda:.4f}"]
+
+        for group in trainer.optimizers[0].param_groups:
+            # Only log lambda for groups that are actively managed by the scheduler.
+            # This is indicated by the presence of 'lambda_scale'.
+            if 'reg' in group and hasattr(group['reg'], 'lamda') and 'lambda_scale' in group:
+                group_name = group.get('name', 'unnamed_group')
+                effective_lambda = group['reg'].lamda
+                
+                metrics_to_log[f"bregman/lambda_{group_name}"] = effective_lambda
+                if self.verbose > 1:
+                    log_msgs.append(f"| {group_name}_lambda={effective_lambda:.4f}")
+
         trainer.logger.log_metrics(metrics_to_log, step=trainer.global_step)
         
         if self.verbose > 1:
-            log.info(f"Step {trainer.global_step}: Sparsity={sparsity:.3%}, lambda={lamda:.4f}")
+            log.info(" ".join(log_msgs))
 
     def _setup_lambda_scheduler(self, optimizer) -> None:
         """
@@ -204,7 +221,7 @@ class BregmanPruner(Callback):
         if callable(self.lambda_scheduler) and not hasattr(self.lambda_scheduler, 'step'):
             try:
                 self.lambda_scheduler = self.lambda_scheduler(optimizer=optimizer)
-                log.info(f"Lambda scheduler instantiated with target sparsity: {getattr(self.lambda_scheduler, 'target_sparse', 'N/A')}")
+                log.info(f"Lambda scheduler instantiated with target sparsity: {getattr(self.lambda_scheduler, 'target_sparsity', 'N/A')}")
             except Exception as e:
                 log.error(f"Failed to instantiate lambda scheduler: {e}")
                 self.lambda_scheduler = None

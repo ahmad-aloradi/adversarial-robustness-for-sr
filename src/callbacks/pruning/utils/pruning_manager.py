@@ -125,6 +125,7 @@ class PruningManager:
             opt_settings = group["config"].get("optimizer_settings", {}).copy()
 
             optimizer_groups.append({
+                "name": group["config"].get("name"),
                 "params": group["params"],
                 **opt_settings,
             })

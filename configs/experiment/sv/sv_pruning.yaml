@@ -38,15 +38,9 @@ callbacks:
     sparsity_threshold: 1e-30
     collect_metrics: true
     verbose: 2
-    # Lambda scheduler configuration remains here, as it's part of the callback's orchestration role.
+    # Global lambda scheduler configuration.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
-      # _partial_: true  # Creates partial function - completed in BregmanPruner with optimizer
-      # # warmup: 0
-      # increment: 0.05
-      # cooldown: 0
-      # target_sparsity: 0.8
-      # reg_param: "lamda"
       initial_lambda: 1e-6
       target_sparsity: 0.9
       adjustment_factor: 1.05
@@ -116,7 +110,8 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1L2Conv
-            lamda: 0.001
+            lamda: 0.001 # This is the initial lambda
+          lambda_scale: 1.0 # Scale factor for the global lambda
 
         pruning_config:
           sparsity_rate: 0.90
@@ -132,6 +127,7 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
+          lambda_scale: 0.0 # Scale factor for the global lambda
 
       # Group 3: Unpruned Fallback (MUST BE LAST)
       # This group does not need layer_types because the logic to select it
@@ -145,6 +141,7 @@ module:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
             lamda: 0.001
+          lambda_scale: .2 # Scale factor for the global lambda
 
         pruning_config:
           sparsity_rate: 0.90
