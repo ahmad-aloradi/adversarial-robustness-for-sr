@@ -1,0 +1,99 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  # This MUST be first. It tells Hydra to start building the config from this file.
+  - _self_  
+  - override /callbacks: default.yaml
+  - override /datamodule: datasets/voxceleb.yaml
+  - override /module: sv.yaml
+  - override /trainer: gpu.yaml
+  - override /logger: wandb.yaml
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+tags: ["voxceleb", "pruning",  "sv", "ecapa", "cyclicLR"]
+seed: 42
+
+trainer:
+  min_epochs: 10
+  max_epochs: 25
+  gradient_clip_val: 1.0
+  num_sanity_val_steps: 0
+
+callbacks:
+  model_checkpoint:
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+  early_stopping:
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: 8
+    
+  model_pruning:
+    _target_: src.callbacks.pruning.prune.MagnitudePruner
+    pruning_fn: l1_unstructured # Pruning from torch.nn.utils.prunefunctions: ['ln_structured', 'l1_unstructured', 'random_structured', 'random_unstructured'] or a custom callable
+    amount: 0.9 # Amount of parameters to prune: float (0-1) for fraction, int for absolute number
+    use_global_unstructured: true  # If true, applies pruning globally across all parameters; if false, applies individually per parameter
+    apply_pruning: true  # Controls whether to actually apply pruning or just create the pruning method
+    make_pruning_permanent: true  # If true, permanently removes pruned weights after training by removing the mask
+    use_lottery_ticket_hypothesis: false  # If true, resets remaining weights to their original values as per lottery ticket hypothesis
+    resample_parameters: false  # If true, new weights are resampled at each pruning step instead of keeping original values
+    parameters_to_prune: null  # Optional list of (module, name) tuples specifying which parameters to prune; if null, all eligible parameters are examined
+    pruning_dim: null  # Dimension along which to prune for structured pruning methods; Mandatory for structured pruning
+    pruning_norm: 1  # Norm to use for structured pruning methods (e.g., 1 for L1 norm)
+    verbose: 2  # Verbosity level: 0=silent, 1=basic progress, 2=detailed statistics and warnings
+    prune_on_train_epoch_end: true  # If true, applies pruning at the end of each training epoch
+    scheduled_pruning: false  # If true, gradually increases pruning amount from initial_amount to final_amount over epochs_to_ramp
+    initial_amount: 0.1  # Starting pruning rate when using scheduled_pruning (must be between 0 and 1)
+    final_amount: 0.9  # Final pruning amount when using scheduled_pruning (must be between 0 and 1)
+    # epochs_to_ramp: ${oc.eval:${trainer.max_epochs} // 1.5} # Number of epochs over which to linearly increase pruning from initial_amount to final_amount
+    epochs_to_ramp: 10 # Number of epochs over which to linearly increase pruning from initial_amount to final_amount
+    collect_metrics: true  # If true, collects and logs detailed sparsity metrics during training for analysis
+
+
+datamodule:
+  dataset:
+    max_duration: 3.0
+
+  loaders:
+    train:
+      batch_size: 64
+    valid:
+      batch_size: 32
+    test:
+      batch_size: 8
+    enrollment:
+      batch_size: 1
+
+### score normalization ###
+module:
+  normalize_test_scores: False
+
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: "max"
+      factor: 0.25
+      min_lr: 1.0e-6
+      patience: 2
+      verbose: True
+    extras:
+      monitor: ${replace:"valid/__metric__"}
+      interval: "epoch"
+      frequency: 1
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: True
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
+
+
+# logger:
+#   wandb:
+#     tags: ${tags}
+#     group: "mnist"

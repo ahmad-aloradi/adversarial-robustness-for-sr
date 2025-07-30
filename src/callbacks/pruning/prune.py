@@ -261,7 +261,7 @@ class MagnitudePruner(ModelPruning):
                 # Recompute sparsity after pruning
                 sparsity_after = self._compute_current_sparsity(valid_params)
                 delta = sparsity_after - sparsity_before
-                self.metrics["sparsity/overall"].append(sparsity_after)
+                self.metrics["magnitude_pruner/overall_sparsity"].append(sparsity_after)
                 
                 if self.verbose > 0:
                     log.info(
@@ -411,7 +411,7 @@ class MagnitudePruner(ModelPruning):
         valid_params = self._get_valid_parameters()
         current_sparsity = self._compute_current_sparsity(valid_params)
         
-        self.metrics["sparsity/overall"].append(current_sparsity)
+        self.metrics["magnitude_pruner/overall_sparsity"].append(current_sparsity)
         
         if self.verbose > 0:
             log.info(f"Current sparsity: {current_sparsity:.4f}")
@@ -450,8 +450,8 @@ class MagnitudePruner(ModelPruning):
         # Log metrics if available
         if self.collect_metrics and self.metrics and trainer.logger:
             try:
-                if "sparsity/overall" in self.metrics and self.metrics["sparsity/overall"]:
-                    latest_sparsity = self.metrics["sparsity/overall"][-1]
+                if "magnitude_pruner/overall_sparsity" in self.metrics and self.metrics["magnitude_pruner/overall_sparsity"]:
+                    latest_sparsity = self.metrics["magnitude_pruner/overall_sparsity"][-1]
                     
                     # Determine the current pruning amount to log
                     current_pruning_target_amount = self.amount
@@ -465,8 +465,8 @@ class MagnitudePruner(ModelPruning):
                             if hasattr(logger, 'log_metrics'):
                                 logger.log_metrics(
                                     {
-                                        "pruning/sparsity": latest_sparsity,
-                                        "pruning/amount": current_pruning_target_amount  # Changed: log current target amount
+                                        "magnitude_pruning/sparsity": latest_sparsity,
+                                        "magnitude_pruning/amount": current_pruning_target_amount  # Changed: log current target amount
                                     }, 
                                     step=trainer.global_step
                                 )

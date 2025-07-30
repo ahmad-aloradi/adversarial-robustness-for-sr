@@ -57,7 +57,10 @@ class LinBreg(torch.optim.Optimizer):
                     state['step'] = 0
                     state['sub_grad'] = self.initialize_sub_grad(p, reg, delta)
                     state['momentum_buffer'] = None
-                
+
+                # Update step
+                state['step'] += 1
+
                 # Get current subgradient
                 sub_grad = state['sub_grad']
                 
