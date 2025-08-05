@@ -20,7 +20,7 @@ seed: 42
 
 trainer:
   min_epochs: 10
-  max_epochs: 25
+  max_epochs: 20
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 
@@ -43,7 +43,7 @@ callbacks:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       initial_lambda: 1e-2
       target_sparsity: 0.9
-      adjustment_factor: 1.025
+      acceleration_factor: .25
       min_lambda: 1e-6
       max_lambda: 1e1 # This value caps the sparsity rate reached, may not reach target sprsity!
 
@@ -159,16 +159,17 @@ module:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
           lambda_scale: 0.0 # Scale factor for the global lambda
 
-      # Group 4: Biases (Not Pruned!)
+      # Group 4: Biases
       - name: bias_params
         layer_types: ['torch.nn.Linear', 'torch.nn.Conv1d','torch.nn.Conv2d']
         module_name_patterns: [".*"]
         param_names: ["bias"]
         optimizer_settings:
           reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
-          lambda_scale: 0.0 # Scale factor for the global lambda
-
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            lamda: 1e-2  # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
+          lambda_scale: 1.0 # Scale factor for the global lambda
+          
       # Group 5: Fallback  (i.e., it catches what's left over) (MUST BE LAST)
       - name: fallback
         # Mark this as the fallback "other" layers types.

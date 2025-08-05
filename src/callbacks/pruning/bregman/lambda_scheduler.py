@@ -18,8 +18,9 @@ class LambdaScheduler:
         Initial lambda value for regularization
     target_sparsity : float
         Target sparsity level to achieve
-    adjustment_factor : float, default=1.1
-        Factor by which to adjust lambda when sparsity is below target
+    acceleration_factor : float, default=1.1
+        Factor multiplied by the sparsity difference between current and target 
+        to control how agressively to update lamda
     min_lambda : float, default=1e-6
         Minimum lambda value
     max_lambda : float, default=1e3
@@ -30,13 +31,13 @@ class LambdaScheduler:
         self,
         initial_lambda: float = 1e-3,
         target_sparsity: float = 0.9,
-        adjustment_factor: float = 1.1,
+        acceleration_factor: float = 0.25,
         min_lambda: float = 1e-6,
         max_lambda: float = 1e3
     ):
         self.lambda_value = initial_lambda
         self.target_sparsity = target_sparsity
-        self.adjustment_factor = adjustment_factor
+        self.acceleration_factor = acceleration_factor
         self.min_lambda = min_lambda
         self.max_lambda = max_lambda
 
@@ -61,14 +62,15 @@ class LambdaScheduler:
             Updated lambda value
         """
         effective_sparsity = self._get_sparsity(current_sparsity)
-
+        sparsity_difference = effective_sparsity - self.target_sparsity
+        
         # Update lambda based on effective sparsity
         if effective_sparsity < self.target_sparsity:
             # Increase lambda to encourage more sparsity
-            self.lambda_value *= self.adjustment_factor
+            self.lambda_value *= 1 + self.acceleration_factor * abs(sparsity_difference)
         elif effective_sparsity > self.target_sparsity:
             # Decrease lambda since we're above target
-            self.lambda_value /= self.adjustment_factor
+            self.lambda_value /= 1 + self.acceleration_factor * abs(sparsity_difference)
 
         # Clamp lambda to valid range
         self.lambda_value = max(self.min_lambda, min(self.max_lambda, self.lambda_value))
@@ -114,7 +116,7 @@ class LambdaScheduler:
             'lambda_value': self.lambda_value,
             'target_sparsity': self.target_sparsity,
             'last_sparsity': self._last_sparsity,
-            'adjustment_factor': self.adjustment_factor,
+            'acceleration_factor': self.acceleration_factor,
             'min_lambda': self.min_lambda,
             'max_lambda': self.max_lambda
         }
