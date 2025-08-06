@@ -4,7 +4,7 @@ BregmanPruner: A callback for orchestrating sparsity in Bregman-based training.
 
 from pytorch_lightning import Callback, LightningModule, Trainer
 from pytorch_lightning.utilities import rank_zero_only
-from typing import Any, Annotated
+from typing import Any, Annotated, Optional
 
 from .lambda_scheduler import LambdaScheduler
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
@@ -36,6 +36,8 @@ class BregmanPruner(Callback):
         self.manager: PruningManager = None
         self._initialized = False
         self.log_frequency: Annotated[int, "Log frequency for metrics"] = log_frequency
+        self._last_known_sparsity_from_ckpt: Optional[float] = None
+        self._scheduler_state_from_ckpt: Optional[dict] = None
     
     def on_fit_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         """
@@ -59,13 +61,24 @@ class BregmanPruner(Callback):
                     "Please ensure only one optimizer is configured."
                 )
                 
-            self._log_group_assignments(pl_module)
-            
-            log.info("BregmanPruner: Applying initial sparsity as defined by the PruningManager...")
-            self.manager.apply_initial_sparsity()
+            if trainer.ckpt_path:
+                log.info("BregmanPruner: Resuming from checkpoint. Skipping initial sparsity application.")
+            else:
+                log.info("BregmanPruner: Applying initial sparsity as defined by the PruningManager...")
+                self.manager.apply_initial_sparsity()
+
             self._initialized = True
             
             self._setup_lambda_scheduler(trainer.optimizers[0])
+            
+            # If resuming, synchronize the optimizer param groups with the restored scheduler state
+            if self._scheduler_state_from_ckpt:
+                self._synchronize_regularization_strength(trainer)
+                log.info("Restored lambda values to optimizer parameter groups.")
+
+            # Log group assignments after all setup and restoration is complete.
+            self._log_group_assignments(pl_module)
+
             log.info(f"Initial sparsity of pruned modules: {self._compute_overall_sparsity():.3%}")
 
     @rank_zero_only
@@ -94,22 +107,37 @@ class BregmanPruner(Callback):
             for name, module in pl_module.named_modules()
         }
 
-        # Use the final, processed groups that are sent to the optimizer.
-        for group in self.manager.processed_groups:
-            group_config = group.get('config', {})
+        # Create a map from a frozenset of param IDs to the corresponding optimizer group.
+        # This allows us to find the optimizer group that matches a manager group.
+        opt_groups_map = {
+            frozenset(id(p) for p in group['params']): group
+            for group in pl_module.trainer.optimizers[0].param_groups
+        }
+
+        # Use the manager's processed_groups to get the original configuration (name, etc.).
+        for manager_group in self.manager.processed_groups:
+            group_config = manager_group.get('config', {})
             group_name = group_config.get('name', 'Unnamed Group')
-            optimizer_settings = group_config.get('optimizer_settings', {})
-            reg_config = optimizer_settings.get('reg')
+            
+            # Find the corresponding group in the optimizer to get the correct lambda value.
+            manager_param_ids = frozenset(id(p) for p in manager_group['params'])
+            opt_group = opt_groups_map.get(manager_param_ids)
 
             log.info(f"Group '{group_name}':")
+            
+            current_group_sparsity = self._compute_group_sparsity(manager_group['params'])
+            log.info(f"  - Current Sparsity: {current_group_sparsity:.3%}")
 
-            if reg_config:
-                log.info(f"  - Regularizer: {getattr(reg_config, '_target_', 'N/A')}")
-                if hasattr(reg_config, 'lamda'):
-                    log.info(f"  - Initial Lambda: {reg_config.lamda}")
-                    log.info(f"  - Lambda scale: {optimizer_settings.lambda_scale}")
-                else:
-                    log.info(f"   - Regularizer has no lamda -> Initial Lambda: 0.0")
+            # Get regularizer config from the manager_group for the name
+            reg_config_from_manager = group_config.get('optimizer_settings', {}).get('reg')
+
+            if opt_group and 'reg' in opt_group and hasattr(opt_group['reg'], 'lamda'):
+                # Get live regularizer object from the optimizer group for the lambda value
+                reg_from_opt = opt_group['reg']
+                
+                log.info(f"  - Regularizer: {getattr(reg_config_from_manager, '_target_', 'N/A')}")
+                log.info(f"  - Initial Lambda: {reg_from_opt.lamda}")
+                log.info(f"  - Lambda scale: {opt_group.get('lambda_scale', 1.0)}")
             else:
                 log.info("  - Regularizer: None")
 
@@ -120,7 +148,7 @@ class BregmanPruner(Callback):
             module_param_counts = {}
             total_group_params = 0
 
-            for param in group['params']:
+            for param in manager_group['params']:
                 module_name = param_to_module_name.get(id(param))
                 if module_name:
                     assigned_modules.add(module_name)
@@ -140,6 +168,22 @@ class BregmanPruner(Callback):
             log.info(f"  - Total number of weights in group: {total_group_params}")
 
         log.info("--- End of Parameters Groups Verification ---")
+
+    def _compute_group_sparsity(self, params: list) -> float:
+        """Computes sparsity for a specific list of parameters."""
+        if not params:
+            return 0.0
+        
+        params_to_consider = [p for p in params if p.requires_grad]
+        if not params_to_consider:
+            return 0.0
+            
+        total_params = sum(p.numel() for p in params_to_consider)
+        zero_params = sum(
+            (p.abs() <= self.sparsity_threshold).sum().item()
+            for p in params_to_consider
+        )
+        return zero_params / max(1, total_params)
 
     def _compute_overall_sparsity(self) -> float:
         """
@@ -184,7 +228,13 @@ class BregmanPruner(Callback):
         scaled per parameter group. Only updates groups with lambda_scale > 0.
         """
         current_sparsity = self._compute_overall_sparsity()
-        new_global_lamda = self.lambda_scheduler.step(current_sparsity)
+        
+        # If exists, pass the last cached sparsity ckpt on the first step after resuming
+        last_sparsity = self._last_known_sparsity_from_ckpt
+        if last_sparsity is not None:
+            self._last_known_sparsity_from_ckpt = None # Use only once
+
+        new_global_lamda = self.lambda_scheduler.step(current_sparsity, last_sparsity)
 
         for group in trainer.optimizers[0].param_groups:
             if ('reg' in group and hasattr(group['reg'], 'lamda') and 
@@ -243,6 +293,40 @@ class BregmanPruner(Callback):
         if self.verbose > 1 and trainer.global_step % self.log_frequency == 0:
             log.info(" ".join(log_msgs))
 
+    def _synchronize_regularization_strength(self, trainer: Trainer):
+        """
+        Applies the current global lambda from the scheduler to the optimizer groups
+        without stepping the scheduler. Used for synchronization after loading a checkpoint.
+        """
+        if self.lambda_scheduler is None:
+            return
+            
+        current_global_lamda = self.lambda_scheduler.get_lambda()
+
+        for group in trainer.optimizers[0].param_groups:
+            if ('reg' in group and hasattr(group['reg'], 'lamda') and 
+                group.get('lambda_scale', 0.0) > 0.0):
+                lambda_scale = group.get('lambda_scale', 1.0)
+                group['reg'].lamda = current_global_lamda * lambda_scale
+
+    def on_save_checkpoint(self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict) -> None:
+        """Save lambda scheduler state to the checkpoint."""
+        if self.lambda_scheduler and hasattr(self.lambda_scheduler, 'get_state'):
+            checkpoint['lambda_scheduler_state'] = self.lambda_scheduler.get_state()
+            # Save the current sparsity, which will be needed as `last_sparsity` on resume
+            checkpoint['bregman_pruner_last_sparsity'] = self._compute_overall_sparsity()
+
+    def on_load_checkpoint(self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict) -> None:
+        """
+        Load lambda scheduler state from the checkpoint.
+        This hook is called before `on_fit_start`, so we temporarily store the state.
+        """
+        if 'lambda_scheduler_state' in checkpoint:
+            self._scheduler_state_from_ckpt = checkpoint['lambda_scheduler_state']
+
+        if 'bregman_pruner_last_sparsity' in checkpoint:
+            self._last_known_sparsity_from_ckpt = checkpoint['bregman_pruner_last_sparsity']
+
     def _setup_lambda_scheduler(self, optimizer) -> None:
         """
         Instantiates the lambda scheduler if it was passed as a partial function.
@@ -253,9 +337,11 @@ class BregmanPruner(Callback):
             self._validate_static_lambda_configuration(optimizer)
             return
         
+        # Instantiate the scheduler from the partial config
         if callable(self.lambda_scheduler) and not hasattr(self.lambda_scheduler, 'step'):
             try:
-                self.lambda_scheduler = self.lambda_scheduler(optimizer=optimizer)
+                # The optimizer argument is not used by LambdaScheduler but kept for compatibility
+                self.lambda_scheduler = self.lambda_scheduler()
                 log.info(f"Lambda scheduler instantiated with target sparsity: {getattr(self.lambda_scheduler, 'target_sparsity', 'N/A')}")
             except Exception as e:
                 log.error(f"Failed to instantiate lambda scheduler: {e}")
@@ -264,6 +350,13 @@ class BregmanPruner(Callback):
                 return
         else:
             log.info("Lambda scheduler already instantiated.")
+
+        # If we are resuming, load the state into the newly created scheduler
+        if self._scheduler_state_from_ckpt:
+            if hasattr(self.lambda_scheduler, 'load_state'):
+                self.lambda_scheduler.load_state(self._scheduler_state_from_ckpt)
+            else:
+                log.warning("Found lambda_scheduler_state in checkpoint, but scheduler has no `load_state` method.")
             
         # Validate configuration consistency
         self._validate_lambda_configuration(optimizer)
@@ -276,11 +369,11 @@ class BregmanPruner(Callback):
         if not self.lambda_scheduler:
             return
             
-        scheduler_initial_lambda = getattr(self.lambda_scheduler, 'lambda_value', None)
+        scheduler_initial_lambda = self.lambda_scheduler.get_lambda()
         scheduler_target_sparsity = getattr(self.lambda_scheduler, 'target_sparsity', None)
         
         log.info("=== Lambda Configuration Validation ===")
-        log.info(f"Lambda Scheduler - initial_lambda: {scheduler_initial_lambda}, target_sparsity: {scheduler_target_sparsity}")
+        log.info(f"Lambda Scheduler - initial_lambda: {scheduler_initial_lambda:.4f}, target_sparsity: {scheduler_target_sparsity}")
         
         # Check regularizer lambda values only for groups that will be managed by the scheduler
         mismatched_lambdas = []
@@ -294,8 +387,9 @@ class BregmanPruner(Callback):
                 
                 # Only check lambda consistency for groups that will be managed by the scheduler
                 # (i.e., groups with lambda_scale > 0.0)
-                if lambda_scale > 0.0 and abs(reg_lambda - scheduler_initial_lambda) > 1e-10:
-                    mismatched_lambdas.append((group_name, reg_lambda, scheduler_initial_lambda))
+                if self._scheduler_state_from_ckpt is None: # Only check on initial run
+                    if lambda_scale > 0.0 and abs(reg_lambda - scheduler_initial_lambda) > 1e-10:
+                        mismatched_lambdas.append((group_name, reg_lambda, scheduler_initial_lambda))
         
         if mismatched_lambdas:
             log.warning("Lambda value mismatches detected:")
@@ -303,18 +397,12 @@ class BregmanPruner(Callback):
                 log.warning(f"  Group '{group_name}': regularizer lamda={reg_lambda} != scheduler initial_lambda={sched_lambda}")
             log.warning("Regularizer lamda values will be overridden by the scheduler during training.")
             
-        # Check sparsity configuration
-        initial_sparsity_rates = []
+        # Report current sparsity for each group
+        log.info("Current sparsity rates by group:")
         for group in self.manager.processed_groups:
-            applier = group["applier"]
-            if applier.sparsity_rate > 0:
-                group_name = group["config"].get("name", "unnamed")
-                initial_sparsity_rates.append((group_name, applier.sparsity_rate))
-                
-        if initial_sparsity_rates:
-            log.info("Initial sparsity rates by group:")
-            for group_name, rate in initial_sparsity_rates:
-                log.info(f"  Group '{group_name}': {rate:.1%}")
+            group_name = group["config"].get("name", "unnamed")
+            current_sparsity = self._compute_group_sparsity(group['params'])
+            log.info(f"  Group '{group_name}': {current_sparsity:.3%}")
                 
         log.info("=== End Lambda Configuration Validation ===")
 
@@ -346,17 +434,11 @@ class BregmanPruner(Callback):
         else:
             log.warning("No regularized groups found - no regularization will be applied")
             
-        # Show sparsity configuration
-        initial_sparsity_rates = []
+        # Report current sparsity for each group
+        log.info("Current sparsity rates by group:")
         for group in self.manager.processed_groups:
-            applier = group["applier"]
-            if applier.sparsity_rate > 0:
-                group_name = group["config"].get("name", "unnamed")
-                initial_sparsity_rates.append((group_name, applier.sparsity_rate))
-                
-        if initial_sparsity_rates:
-            log.info("Initial sparsity rates by group:")
-            for group_name, rate in initial_sparsity_rates:
-                log.info(f"  Group '{group_name}': {rate:.1%}")
+            group_name = group["config"].get("name", "unnamed")
+            current_sparsity = self._compute_group_sparsity(group['params'])
+            log.info(f"  Group '{group_name}': {current_sparsity:.3%}")
         
         log.info("=== End Static Lambda Configuration Validation ===")

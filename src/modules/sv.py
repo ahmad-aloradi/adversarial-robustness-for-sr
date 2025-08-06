@@ -24,7 +24,6 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
     TrainCollate)
 from src import utils
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
-from src.modules.components.utils import EmbeddingCache
 from src.modules.metrics.metrics import AS_norm 
 from datetime import datetime
 
@@ -193,7 +192,6 @@ class SpeakerVerification(pl.LightningModule):
         self._embeds_cache_config = model.get("embedding_cache", {})
         self._max_cache_size = self._embeds_cache_config.get("max_size", 500000)
         self._bypass_warmup = self._embeds_cache_config.get("bypass_warmup", False)
-        self._embedding_cache = EmbeddingCache(max_size=self._max_cache_size)
         
         # Embeddings norm configs
         self.normalize_test_scores = kwargs.get("normalize_test_scores", False)
@@ -358,14 +356,6 @@ class SpeakerVerification(pl.LightningModule):
     def on_train_epoch_end(self) -> None:
         self.train_metric.reset()
 
-        # Cache processing
-        stats = self._embedding_cache.stats()
-        self.log("train/cache/cache_hit_rate", stats["hit_rate"])
-        self.log("train/cache/cache_size", len(self._embedding_cache))
-        # resize the cache if it exceeds the max size
-        if len(self._embedding_cache) > self._max_cache_size:
-            self._embedding_cache.resize(self._max_cache_size)
-            
         # Log sparsity information if pruning is being used
         self._log_sparsity_info_if_pruning()
 
@@ -792,49 +782,3 @@ class SpeakerVerification(pl.LightningModule):
         
         # Always close the figure to prevent memory leaks
         plt.close(fig)
-
-    ############ Load and save ############
-    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Saves the text embedding cache state in the model checkpoint.
-        
-        Args:
-            checkpoint: Dictionary containing model checkpoint data
-        """
-        # Call parent class's save checkpoint method if it exists
-        super().on_save_checkpoint(checkpoint)
-        
-        # Save cache contents and metadata
-        cache_state = {
-            'max_size': self._embedding_cache.max_size,
-            'hits': self._embedding_cache.hits,
-            'misses': self._embedding_cache.misses,
-            'contents': {
-                key: tensor.cpu() 
-                for key, tensor in self._embedding_cache._cache.items()
-            }
-        }
-        checkpoint['text_embedding_cache'] = cache_state
-
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Restores the text embedding cache state from the model checkpoint.
-        
-        Args:
-            checkpoint: Dictionary containing model checkpoint data
-        """
-        # Call parent class's load checkpoint method if it exists
-        super().on_load_checkpoint(checkpoint)
-        
-        # Restore cache if it exists in checkpoint
-        if 'text_embedding_cache' in checkpoint:
-            cache_state = checkpoint['text_embedding_cache']
-            
-            # Recreate cache with saved size
-            self._embedding_cache = EmbeddingCache(max_size=cache_state['max_size'])
-            
-            # Restore performance counters
-            self._embedding_cache.hits = cache_state['hits']
-            self._embedding_cache.misses = cache_state['misses']
-            
-            # Restore cached embeddings
-            for key, tensor in cache_state['contents'].items():
-                self._embedding_cache.update(key, tensor)

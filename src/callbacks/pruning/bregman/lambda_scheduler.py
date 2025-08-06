@@ -7,11 +7,11 @@ log = utils.get_pylogger(__name__)
 class LambdaScheduler:
     """
     Lambda scheduler with sparsity smoothing mechanism.
-    
+
     This scheduler implements a simple smoothing mechanism to handle spurious
     zero sparsity readings that can occur during training when sparsity is
     computed before applying masks.
-    
+
     Parameters
     ----------
     initial_lambda : float
@@ -19,7 +19,7 @@ class LambdaScheduler:
     target_sparsity : float
         Target sparsity level to achieve
     acceleration_factor : float, default=1.1
-        Factor multiplied by the sparsity difference between current and target 
+        Factor multiplied by the sparsity difference between current and target
         to control how agressively to update lamda
     min_lambda : float, default=1e-6
         Minimum lambda value
@@ -44,26 +44,34 @@ class LambdaScheduler:
         # Sparsity smoothing mechanism
         self._last_sparsity: Optional[float] = None
 
-    def step(self, current_sparsity: float) -> float:
+    def step(self, current_sparsity: float, last_sparsity: Optional[float] = None) -> float:
         """
         Update lambda based on current sparsity with smoothing.
-        
+
         If current_sparsity is exactly 0.0 but we have a valid last sparsity
         reading, use the last sparsity instead to avoid spurious zero readings.
-        
+
         Parameters
         ----------
         current_sparsity : float
             Current model sparsity (may contain spurious zeros)
-            
+        last_sparsity : float, optional
+            If provided, this value is used as the last known sparsity,
+            bypassing the internal `_last_sparsity`. Useful for resuming.
+
         Returns
         -------
         float
             Updated lambda value
         """
+        # If resuming from a checkpoint, `last_sparsity` is provided.
+        # We should use it and update our internal state to match.
+        if last_sparsity is not None:
+            self._last_sparsity = last_sparsity
+
         effective_sparsity = self._get_sparsity(current_sparsity)
         sparsity_difference = effective_sparsity - self.target_sparsity
-        
+
         # Update lambda based on effective sparsity
         if effective_sparsity < self.target_sparsity:
             # Increase lambda to encourage more sparsity
@@ -84,12 +92,12 @@ class LambdaScheduler:
     def _get_sparsity(self, current_sparsity: float) -> float:
         """
         Get model sparsity whith safety mechanism.
-        
+
         Parameters
         ----------
         current_sparsity : float
             Raw sparsity reading
-            
+
         Returns
         -------
         float
@@ -111,12 +119,22 @@ class LambdaScheduler:
         return self.lambda_value
 
     def get_state(self) -> dict:
-        """Get scheduler state for debugging."""
+        """Get scheduler state for checkpointing."""
         return {
             'lambda_value': self.lambda_value,
             'target_sparsity': self.target_sparsity,
-            'last_sparsity': self._last_sparsity,
+            '_last_sparsity': self._last_sparsity,
             'acceleration_factor': self.acceleration_factor,
             'min_lambda': self.min_lambda,
             'max_lambda': self.max_lambda
         }
+
+    def load_state(self, state: dict) -> None:
+        """Load scheduler state from a checkpoint."""
+        self.lambda_value = state['lambda_value']
+        self.target_sparsity = state['target_sparsity']
+        self._last_sparsity = state.get('_last_sparsity') # Use .get for backward compatibility
+        self.acceleration_factor = state['acceleration_factor']
+        self.min_lambda = state['min_lambda']
+        self.max_lambda = state['max_lambda']
+        log.info(f"LambdaScheduler state restored. Current lambda: {self.lambda_value:.4f}")

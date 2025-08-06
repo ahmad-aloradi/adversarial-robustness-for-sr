@@ -41,6 +41,7 @@ callbacks:
     # Global lambda scheduler configuration.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
+      _partial_: true
       initial_lambda: 1e-2
       target_sparsity: 0.9
       acceleration_factor: .25
