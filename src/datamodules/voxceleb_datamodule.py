@@ -41,10 +41,12 @@ class VoxCelebDataModule(LightningDataModule):
 
     def prepare_data(self):
         if self.train_data is None:
-            voxceleb_processor = VoxCelebProcessor(root_dir=self.dataset.data_dir,
-                                                verbose=self.dataset.verbose,
-                                                artifcats_dir=self.dataset.voxceleb_artifacts_dir,
-                                                sep=self.dataset.sep)
+            voxceleb_processor = VoxCelebProcessor(
+                root_dir=self.dataset.data_dir,
+                test_file=self.dataset.veri_test_filename,
+                verbose=self.dataset.verbose,
+                artifcats_dir=self.dataset.voxceleb_artifacts_dir,
+                sep=self.dataset.sep)
             
             _, _ = voxceleb_processor.generate_metadata(
                 base_search_dir=self.dataset.base_search_dir,
@@ -54,12 +56,12 @@ class VoxCelebDataModule(LightningDataModule):
 
             # Get class id and speaker stats
             updated_dev_csv, speaker_lookup_csv = self.csv_processor.process(
-                dataset_files=[self.dataset.dev_csv_file],
+                dataset_files=[str(voxceleb_processor.dev_metadata_file)],
                 spks_metadata_paths=[self.dataset.metadata_csv_file],
                 verbose=self.dataset.verbose)
 
             # save the updated csv
-            VoxCelebProcessor.save_csv(updated_dev_csv, self.dataset.dev_csv_file)
+            VoxCelebProcessor.save_csv(updated_dev_csv, str(voxceleb_processor.dev_metadata_file))
             VoxCelebProcessor.save_csv(speaker_lookup_csv, self.dataset.speaker_lookup)
             
             # split the dataset into train and validation
@@ -88,33 +90,41 @@ class VoxCelebDataModule(LightningDataModule):
 
     @staticmethod
     def _extract_enroll_test(df: pd.DataFrame, mode: Literal['enroll', 'test']):
-        # Get unique enroll_paths
-        unique_enroll_paths = df[f'{mode}_path'].unique()        
-        results_list = []
-        enroll_columns = [col for col in df.columns if col.startswith(f'{mode}_')]
-        
-        for path in unique_enroll_paths:
-            path_df = df[df[f'{mode}_path'] == path]
+        """
+        Vectorized pandas implementation with speaker consistency validation.
+        """
+        path_col = f'{mode}_path'
+        enroll_columns = [col for col in df.columns if col.startswith(f'{mode}_') and col != path_col]
 
-            # Initialize dictionary for this path's results
-            path_result = {f'{mode}_path': path}
-            
-            # Check each enroll column to see if it's constant
-            for column in enroll_columns:
-                if column != f'{mode}_path':  # Skip the enroll_path/test_path column itself
-                    unique_values = path_df[column].unique()
-                    
-                    # If there's only one unique value, this column is constant for this path
-                    if len(unique_values) == 1:
-                        path_result[column] = unique_values[0]
-            
-            # Add this path's results to our list
-            results_list.append(path_result)
+        if not enroll_columns:
+            return df[[path_col]].drop_duplicates().reset_index(drop=True)
+
+        grouped = df.groupby(path_col)
         
-        # Convert results to DataFrame
-        results_df = pd.DataFrame(results_list)
+        # Check which columns are constant within each group (nunique == 1)
+        nunique_per_group = grouped[enroll_columns].nunique()
+        is_constant = nunique_per_group == 1
+        
+        # Find paths where any column is not constant
+        non_constant_mask = ~is_constant.all(axis=1)
+        if non_constant_mask.any():
+            problematic_paths = non_constant_mask[non_constant_mask].index.tolist()
+            # Get details about which columns are inconsistent for the first problematic path
+            first_path = problematic_paths[0]
+            inconsistent_cols = nunique_per_group.loc[first_path][nunique_per_group.loc[first_path] > 1].index.tolist()
+            
+            raise ValueError(
+                f"Inconsistent data found for {mode}_path '{first_path}'. "
+                f"Expected all rows with the same path to have identical values, "
+                f"but found multiple values in columns: {inconsistent_cols}. "
+                f"This violates the assumption that same path = same speaker."
+            )
+        
+        # Get the first value for each column in each group (all values are the same due to validation)
+        results_df = grouped[enroll_columns].first().reset_index()
         
         return results_df
+
 
     def setup(self, stage: Optional[str] = None):
         if stage == 'fit' or stage is None:

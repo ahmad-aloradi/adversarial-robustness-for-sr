@@ -45,13 +45,11 @@ class VoxCelebProcessor:
     METADATA_URLS = {
         'vox1': 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/vox1_meta.csv',
         'vox2': 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/vox2_meta.csv',
-        'test_file': 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test.txt'
     }
     DATASET_PATHS = {
         'wav_dir': 'voxceleb1_2',
         'downloaded_metadata_dir': 'voxceleb_metadata/downloaded',
         'vox_metadata': 'vox_meta.csv',
-        'dev_metadata_file': 'voxceleb_dev.csv',
         'speaker_lookup': 'speaker_lookup.csv',
         'preprocess_stats_file': 'preprocess_stats.csv'
     }
@@ -59,6 +57,7 @@ class VoxCelebProcessor:
     def __init__(self, 
                  root_dir: Union[str, Path], 
                  artifcats_dir: Union[str, Path],
+                 test_file: str,
                  verbose: bool = True, 
                  sep: str = '|'):
         """
@@ -72,6 +71,13 @@ class VoxCelebProcessor:
         
         self.sep = sep
         self.verbose = verbose
+        assert os.path.basename(test_file) in ['veri_test2', 'veri_test_extended2', 'veri_test_hard2'], f'Unexpected test file name {test_file}'
+        if os.path.basename(test_file) == 'veri_test2':
+            self.METADATA_URLS['test_file'] = 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test2.txt'
+        elif os.path.basename(test_file) == 'veri_test_extended2':
+            self.METADATA_URLS['test_file'] = 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/list_test_all2.txt'
+        elif os.path.basename(test_file) == 'veri_test_hard2':
+            self.METADATA_URLS['test_file'] = 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/list_test_hard2.txt'
 
         self.root_dir = Path(root_dir)
         self.artifcats_dir = Path(artifcats_dir)
@@ -85,8 +91,8 @@ class VoxCelebProcessor:
         
         # Created files
         self.vox_metadata = self.artifcats_dir / self.DATASET_PATHS['vox_metadata']
-        self.preprocess_stats_file = self.artifcats_dir / self.DATASET_PATHS['preprocess_stats_file']
-        self.dev_metadata_file = self.artifcats_dir / self.DATASET_PATHS['dev_metadata_file']
+        self.preprocess_stats_file = self.artifcats_dir / f"{self.DATASET_PATHS['preprocess_stats_file'].split('.')[0]}_{os.path.basename(test_file)}.csv"
+        self.dev_metadata_file = self.artifcats_dir / f"voxceleb_dev_{os.path.basename(test_file)}.csv"
 
         # Validate wav directory
         if not self.wav_dir.exists():
@@ -113,7 +119,7 @@ class VoxCelebProcessor:
         try:
             log.info(f"Downloading {url} to {target_path}")
             wget.download(url, str(target_path))
-            log.info()  # New line after wget progress bar
+            log.info('\n\n')  # New line after wget progress bar
         except Exception as e:
             raise RuntimeError(f"Failed to download {url}: {e}")
 
@@ -150,7 +156,6 @@ class VoxCelebProcessor:
         # Add source column
         df['source'] = 'voxceleb1'
         return self._remove_white_spaces(df)
-
 
 
     def _process_vox2_metadata(self) -> pd.DataFrame:
@@ -221,7 +226,6 @@ class VoxCelebProcessor:
         return test_spks, veri_df
 
 
-
     def _init_tqdm_worker(self):
         """Disable internal tqdm bars in worker processes"""
         tqdm.set_lock(None)
@@ -274,10 +278,11 @@ class VoxCelebProcessor:
     def _process_single_voxceleb_utterance(self, wav_path, min_duration):
         info = sf.info(wav_path)
         rel_path = wav_path.relative_to(self.wav_dir)
-        speaker_id = DATASET_DEFAULTS.dataset_name + '_' + rel_path.parts[0]
+        speaker_id_raw = rel_path.parts[0]
+        speaker_id = DATASET_DEFAULTS.dataset_name + '_' + speaker_id_raw
 
         excluded_for_duration = info.duration < min_duration
-        excluded_for_test_set = rel_path.parts[0] in self.test_speakers
+        excluded_for_test_set = speaker_id_raw in self.test_speakers
 
         local_stats = {
             'total': {'count': 0},
@@ -300,7 +305,6 @@ class VoxCelebProcessor:
                                           recording_duration=info.duration, 
                                           **self.speaker_metadata.get(speaker_id, {}))
             return utterance, local_stats
-
 
 
     def generate_metadata(self,
@@ -333,11 +337,10 @@ class VoxCelebProcessor:
         """        
 
         base_search_dir = Path(base_search_dir)
-        dev_file_location = base_search_dir / self.DATASET_PATHS['dev_metadata_file']
         vox_metadata_file = base_search_dir / self.DATASET_PATHS['vox_metadata']
-        dev_metadata_file = base_search_dir / self.DATASET_PATHS['dev_metadata_file']
+        dev_metadata_file_search_path = base_search_dir / self.dev_metadata_file.name
 
-        if not dev_file_location.is_file():
+        if not dev_metadata_file_search_path.is_file():
             wav_paths = list(self.wav_dir.rglob("*.wav"))
 
             if self.verbose:
@@ -366,14 +369,14 @@ class VoxCelebProcessor:
             VoxCelebProcessor.print_utts_statistics(utterances)
 
         else:
-            dev_metadata = pd.read_csv(dev_metadata_file, sep=self.sep)
+            dev_metadata = pd.read_csv(dev_metadata_file_search_path, sep=self.sep)
             assert vox_metadata_file.is_file(), f"Vox metadata file not found: {vox_metadata_file}"
 
             vox_metadata = pd.read_csv(vox_metadata_file, sep=self.sep)
             if not self.speaker_metadata_df.equals(vox_metadata):
                 log.warning("Speaker metadata has changed since last run")
             if self.verbose:
-                log.info(f"Loading existing metadata file {dev_metadata_file} with {len(dev_metadata)} total files")
+                log.info(f"Loading existing metadata file {dev_metadata_file_search_path} with {len(dev_metadata)} total files")
 
             if save_df:
                 VoxCelebProcessor.save_csv(vox_metadata, self.vox_metadata, sep=self.sep)
@@ -502,33 +505,72 @@ if __name__ == "__main__":
                         type=str,
                         default="data/voxceleb",
                         help="Root directory containing both VoxCeleb1 and VoxCeleb2")
-    parser.add_argument("--artifacts_dir", 
-                    type=str,
-                    default="data/voxceleb/voxceleb_metadata/metadata",
-                    help="Root directory containing both VoxCeleb1 and VoxCeleb2")
-    parser.add_argument("--verbose",
-                        action="store_true",
-                        help="Print verbose output")
-    parser.add_argument("--preprocess_stats_file", 
-                        type=str,
-                        default="data/voxceleb/voxceleb_metadata/preprocess_metadata/preprocess_stats.csv")
-    parser.add_argument("--min_duration",
-                        type=float,
-                        default=0.5, 
-                        help="Minimum duration in seconds. Utterances shorter than this will be excluded")
-    parser.add_argument("--sep", 
-                        type=str,
-                        default="|",
-                        help="Separator used for the metadata file")
-    
+    parser.add_argument(
+        "--artifacts_dir",
+        type=str,
+        default="data/voxceleb/voxceleb_metadata/metadata",
+        help="Root directory containing both VoxCeleb1 and VoxCeleb2"
+        )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print verbose output"
+        )
+    parser.add_argument(
+        "--preprocess_stats_file",
+        type=str,
+        default="data/voxceleb/voxceleb_metadata/preprocess_metadata/preprocess_stats.csv"
+        )
+    parser.add_argument(
+        "--min_duration",
+        type=float,
+        default=0.5,
+        help="Minimum duration in seconds. Utterances shorter than this will be excluded"
+        )
+    parser.add_argument(
+        "--sep",
+        type=str,
+        default="|",
+        help="Separator used for the metadata file"
+        )
+    parser.add_argument(
+        "--test_file",
+        type=str,
+        choices=["veri_test2", "veri_test_extended2", "veri_test_hard2"],
+        default="veri_test_hard2",
+        help="Test file name. Options: veri_test2, veri_test_extended2, veri_test_hard2",
+    )
+
     args = parser.parse_args()
+
+    # Normalize paths and ensure artifact directory exists
+    args.root_dir = Path(args.root_dir).expanduser().resolve()
+    if not args.root_dir.exists():
+        raise FileNotFoundError(f"Root directory does not exist: {args.root_dir}")
+    if not args.root_dir.is_dir():
+        raise NotADirectoryError(f"Root directory is not a directory: {args.root_dir}")
     
-    with initialize(version_base=None, config_path='../../../../configs/datamodule/datasets'):
-            cfg = compose(config_name='voxceleb.yaml')
+    args.artifacts_dir = Path(args.artifacts_dir) / args.test_file
+    os.makedirs(args.artifacts_dir, exist_ok=True)
+
+    args.artifacts_dir = args.artifacts_dir.expanduser().resolve()
+    args.artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    with initialize(version_base=None, config_path="../../../../configs/datamodule/datasets"):
+        cfg = compose(config_name="voxceleb.yaml")
 
     # Run Voxceleb Processor
-    voxceleb_processor = VoxCelebProcessor(args.root_dir, artifcats_dir=args.artifacts_dir, verbose=args.verbose, sep=args.sep)
-    dev_metadata, speaker_metadata = voxceleb_processor.generate_metadata(base_search_dir='.', min_duration=args.min_duration)
+    voxceleb_processor = VoxCelebProcessor(
+        root_dir=args.root_dir,
+        artifcats_dir=args.artifacts_dir,
+        test_file=args.test_file,
+        verbose=args.verbose,
+        sep=args.sep,
+    )
+    dev_metadata, speaker_metadata = voxceleb_processor.generate_metadata(
+        base_search_dir=args.artifacts_dir, 
+        min_duration=args.min_duration
+        )
 
     # Identify language of an audio file
     dev_metadata = pd.read_csv(str(voxceleb_processor.dev_metadata_file.resolve()), sep=args.sep)
@@ -539,7 +581,7 @@ if __name__ == "__main__":
     VoxCelebProcessor.save_csv(dev_metadata, str(voxceleb_processor.dev_metadata_file.resolve()), sep=args.sep)
 
     # Run veri_test.txt enricher
-    output_path = Path(args.artifacts_dir) / 'veri_test_rich.csv' 
+    output_path = Path(args.artifacts_dir) / (args.test_file + '.csv')
     if os.path.exists(output_path):
         log.info(f"Output file already exists: {output_path}")
         enriched_df = pd.read_csv(output_path, sep=args.sep)
