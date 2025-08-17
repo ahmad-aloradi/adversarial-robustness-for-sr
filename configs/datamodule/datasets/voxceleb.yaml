@@ -3,11 +3,10 @@ _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
 dataset:
   data_dir: ${paths.data_dir}/voxceleb
   wav_dir: ${datamodule.dataset.data_dir}/voxceleb1_2
-  veri_test_filename: veri_test2 # options: veri_test2  veri_test_extended2  veri_test_hard2
+  veri_test_filename: veri_test_extended2 # options: veri_test2  veri_test_extended2  veri_test_hard2
   voxceleb_metadata: ${datamodule.dataset.data_dir}/voxceleb_metadata
-  # For copying the metadata files to the preprocessed directory
-  veri_test_path: ${datamodule.dataset.voxceleb_metadata}/downloaded/${datamodule.dataset.veri_test_filename}.txt
-  base_search_dir: ${datamodule.dataset.voxceleb_metadata}/metadata/${datamodule.dataset.veri_test_filename}
+  # Base search directory is now generic (not test-specific)
+  base_search_dir: ${datamodule.dataset.voxceleb_metadata}/metadata
 
   voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
   veri_test_output_path: ${datamodule.dataset.voxceleb_artifacts_dir}/${datamodule.dataset.veri_test_filename}.csv

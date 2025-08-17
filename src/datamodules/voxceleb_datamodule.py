@@ -12,7 +12,7 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
     VerificationCollate,
     VoxCelebEnroll,
     EnrollCoallate)
-from src.datamodules.components.voxceleb.voxceleb_prep import VoxCelebProcessor
+from src.datamodules.components.voxceleb.voxceleb_prep import VoxCelebProcessor, VoxCelebTestFilter
 from src import utils
 from src.datamodules.components.utils import CsvProcessor
 from src.datamodules.components.common import VoxcelebDefaults, get_dataset_class
@@ -41,9 +41,9 @@ class VoxCelebDataModule(LightningDataModule):
 
     def prepare_data(self):
         if self.train_data is None:
+            # Step 1: Generate all VoxCeleb metadata (no test speaker exclusion yet)
             voxceleb_processor = VoxCelebProcessor(
                 root_dir=self.dataset.data_dir,
-                test_file=self.dataset.veri_test_filename,
                 verbose=self.dataset.verbose,
                 artifcats_dir=self.dataset.voxceleb_artifacts_dir,
                 sep=self.dataset.sep)
@@ -54,7 +54,19 @@ class VoxCelebDataModule(LightningDataModule):
                 save_df=self.dataset.save_csv
                 )
 
-            # Get class id and speaker stats
+            # Step 2: Handle test speaker exclusion separately
+            test_filter = VoxCelebTestFilter(root_dir=self.dataset.data_dir, verbose=self.dataset.verbose)
+            
+            test_speakers, veri_df = test_filter.get_test_speakers(self.dataset.veri_test_filename)
+            
+            # Load the generated dev metadata and filter out test speakers
+            dev_metadata = pd.read_csv(str(voxceleb_processor.dev_metadata_file), sep=self.dataset.sep)
+            filtered_dev_metadata = test_filter.filter_dev_metadata(dev_metadata, test_speakers)
+            
+            # Save the filtered dev metadata to the expected location
+            VoxCelebProcessor.save_csv(filtered_dev_metadata, str(voxceleb_processor.dev_metadata_file), sep=self.dataset.sep)
+
+            # Step 3: Get class id and speaker stats
             updated_dev_csv, speaker_lookup_csv = self.csv_processor.process(
                 dataset_files=[str(voxceleb_processor.dev_metadata_file)],
                 spks_metadata_paths=[self.dataset.metadata_csv_file],
@@ -64,7 +76,7 @@ class VoxCelebDataModule(LightningDataModule):
             VoxCelebProcessor.save_csv(updated_dev_csv, str(voxceleb_processor.dev_metadata_file))
             VoxCelebProcessor.save_csv(speaker_lookup_csv, self.dataset.speaker_lookup)
             
-            # split the dataset into train and validation
+            # Step 4: split the dataset into train and validation
             CsvProcessor.split_dataset(
                 df=updated_dev_csv,
                 train_ratio = self.dataset.train_ratio,
@@ -77,9 +89,10 @@ class VoxCelebDataModule(LightningDataModule):
                 seed=self.dataset.seed
                 )
             
-            # enrich the verification file
-            test_df = voxceleb_processor.enrich_verification_file(
-                veri_test_path=self.dataset.veri_test_path,
+            # Step 5: enrich the verification file
+            veri_test_path = test_filter.download_test_file(self.dataset.veri_test_filename)
+            test_df = VoxCelebProcessor.enrich_verification_file(
+                veri_test_path=veri_test_path,
                 metadata_path=self.dataset.metadata_csv_file,
                 output_path=self.dataset.veri_test_output_path,
                 sep=self.dataset.sep,

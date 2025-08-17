@@ -21,6 +21,39 @@ SPEAKER_CLS, _ = get_speaker_class(DATASET_DEFAULTS.dataset_name)
 
 log = utils.get_pylogger(__name__)
 
+# Add: lightweight worker state for multiprocessing
+_WORKER_WAV_DIR = None
+_WORKER_SPEAKER_META = None
+_WORKER_DATASET_NAME = None
+_WORKER_MIN_DURATION = None
+
+def _init_vox_worker(wav_dir, speaker_metadata, dataset_name, min_duration):
+    # Disable tqdm lock in workers and set globals once per process
+    tqdm.set_lock(None)
+    global _WORKER_WAV_DIR, _WORKER_SPEAKER_META, _WORKER_DATASET_NAME, _WORKER_MIN_DURATION
+    _WORKER_WAV_DIR = Path(wav_dir)
+    _WORKER_SPEAKER_META = speaker_metadata
+    _WORKER_DATASET_NAME = dataset_name
+    _WORKER_MIN_DURATION = float(min_duration)
+
+def _process_vox_wav(wav_path_str: str):
+    # Stateless task function (picklable on all platforms)
+    wav_path = Path(wav_path_str)
+    info = sf.info(wav_path)
+    rel_path = wav_path.relative_to(_WORKER_WAV_DIR)
+    speaker_id_raw = rel_path.parts[0]
+    speaker_id = f"{_WORKER_DATASET_NAME}_{speaker_id_raw}"
+
+    if info.duration < _WORKER_MIN_DURATION:
+        return None, {'total': {'count': 0}, 'duration': {'count': 1, 'paths': [str(wav_path)]}}
+
+    utt = VoxCelebUtterance(
+        speaker_id=speaker_id,
+        rel_filepath=str(rel_path),
+        recording_duration=info.duration,
+        **_WORKER_SPEAKER_META.get(speaker_id, {})
+    )
+    return utt, {'total': {'count': 1}, 'duration': {'count': 0, 'paths': []}}
 
 @dataclass
 class VoxCelebUtterance:
@@ -57,7 +90,6 @@ class VoxCelebProcessor:
     def __init__(self, 
                  root_dir: Union[str, Path], 
                  artifcats_dir: Union[str, Path],
-                 test_file: str,
                  verbose: bool = True, 
                  sep: str = '|'):
         """
@@ -65,19 +97,13 @@ class VoxCelebProcessor:
         
         Args:
             root_dir: Root directory containing 'wav' and 'meta' subdirectories
+            artifcats_dir: Directory for generated artifacts
             verbose: Print verbose output
             sep: Separator for metadata files
         """
         
         self.sep = sep
         self.verbose = verbose
-        assert os.path.basename(test_file) in ['veri_test2', 'veri_test_extended2', 'veri_test_hard2'], f'Unexpected test file name {test_file}'
-        if os.path.basename(test_file) == 'veri_test2':
-            self.METADATA_URLS['test_file'] = 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test2.txt'
-        elif os.path.basename(test_file) == 'veri_test_extended2':
-            self.METADATA_URLS['test_file'] = 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/list_test_all2.txt'
-        elif os.path.basename(test_file) == 'veri_test_hard2':
-            self.METADATA_URLS['test_file'] = 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/list_test_hard2.txt'
 
         self.root_dir = Path(root_dir)
         self.artifcats_dir = Path(artifcats_dir)
@@ -87,28 +113,22 @@ class VoxCelebProcessor:
         # Downloaded metadata files
         self.vox1_metadata = self.downloaded_metadata_dir / os.path.basename(self.METADATA_URLS['vox1'])
         self.vox2_metadata = self.downloaded_metadata_dir / os.path.basename(self.METADATA_URLS['vox2'])
-        self.veri_test = self.downloaded_metadata_dir / os.path.basename(self.METADATA_URLS['test_file'])
         
-        # Created files
+        # Created files - now generic (not test-specific)
         self.vox_metadata = self.artifcats_dir / self.DATASET_PATHS['vox_metadata']
-        self.preprocess_stats_file = self.artifcats_dir / f"{self.DATASET_PATHS['preprocess_stats_file'].split('.')[0]}_{os.path.basename(test_file)}.csv"
-        self.dev_metadata_file = self.artifcats_dir / f"voxceleb_dev_{os.path.basename(test_file)}.csv"
+        self.preprocess_stats_file = self.artifcats_dir / self.DATASET_PATHS['preprocess_stats_file']
+        self.dev_metadata_file = self.artifcats_dir / "voxceleb_total.csv"
 
         # Validate wav directory
         if not self.wav_dir.exists():
             raise FileNotFoundError(f"WAV directory not found: {self.wav_dir}")
         
         # Ensure metadata directories exists
-        self.downloaded_metadata_dir.mkdir(exist_ok=True)
-        self.artifcats_dir.mkdir(exist_ok=True)
+        self.downloaded_metadata_dir.mkdir(parents=True, exist_ok=True)
+        self.artifcats_dir.mkdir(parents=True, exist_ok=True)
         
-        # Download metadata files if needed
+        # Download basic metadata files if needed
         self._ensure_metadata_files()
-
-        # Load test files and speakers
-        self.test_speakers, self.test_df = self._load_test_files_and_spks()
-        if self.verbose:
-            log.info(f"Number of test files {len(self.test_df )} and test speakers {len(self.test_speakers)}")
 
         # Create or load metadata
         self.speaker_metadata, self.speaker_metadata_df = self.load_speaker_metadata()
@@ -125,12 +145,9 @@ class VoxCelebProcessor:
 
 
     def _ensure_metadata_files(self) -> None:
-        """Download metadata files if they don't exist"""
+        """Download basic metadata files if they don't exist"""
         for dataset, url in self.METADATA_URLS.items():
-            if dataset == 'test_file':
-                target_path = self.veri_test
-            else:
-                target_path = self.downloaded_metadata_dir / os.path.basename(self.METADATA_URLS[dataset])
+            target_path = self.downloaded_metadata_dir / os.path.basename(url)
             
             if not target_path.exists():
                 try:
@@ -211,19 +228,6 @@ class VoxCelebProcessor:
         return metadata, df
 
 
-    def _load_test_files_and_spks(self) -> set:
-        """Load verification test files to exclude"""
-        if not self.veri_test.exists():
-            raise FileNotFoundError(f"veri_test.txt file not found: {self.veri_test}")
-        
-        # Read verification file
-        veri_df = pd.read_csv(self.veri_test, sep=' ', header=None, names=['label', 'enrollment', 'test'])
-        
-        enrollment_spks = set(veri_df.enrollment.apply(lambda x: x.split(os.sep)[0]))
-        test_spks = set(veri_df.test.apply(lambda x: x.split(os.sep)[0]))
-        assert test_spks == enrollment_spks, "Enrollment and test speakers don't match"
-
-        return test_spks, veri_df
 
 
     def _init_tqdm_worker(self):
@@ -233,45 +237,35 @@ class VoxCelebProcessor:
 
     def _get_voxceleb_utterances(self, wav_paths: List[str], min_duration: float) -> Tuple[List['VoxCelebUtterance'], Dict]:
         total_files = len(wav_paths)
-        pbar = tqdm(total=total_files, desc="Processing WAV files")  # Create a progress bar
+        pbar = tqdm(total=total_files, desc="Processing WAV files")
 
-        # Create pool and process files
-        with Pool(processes=cpu_count(), initializer=self._init_tqdm_worker) as pool:
-            # Create async results
-            async_results = [
-                pool.apply_async(
-                    self._process_single_voxceleb_utterance,
-                    args=(wav_path, min_duration)
-                )
-                for wav_path in wav_paths
-            ]
+        # Prepare for lower serialization overhead
+        wav_path_strs = [str(p) for p in wav_paths]
 
-            utterances = []
-            local_stats_list = []
-
-            for result in async_results:
-                utterance, local_stats = result.get()
-                if utterance is not None:
-                    utterances.append(utterance)
-                local_stats_list.append(local_stats)
-                pbar.update()
-
-            pbar.close()
-
-        # Accumulate stats from all processes
+        utterances: List[VoxCelebUtterance] = []
         final_stats = {
             'total': {'count': 0},
-            'duration': {'count': 0, 'paths': []},
-            'test': {'count': 0, 'paths': []}
+            'duration': {'count': 0, 'paths': []}
         }
 
-        for local_stats in local_stats_list:
-            final_stats['total']['count'] += local_stats['total']['count']
-            final_stats['duration']['count'] += local_stats['duration']['count']
-            final_stats['duration']['paths'].extend(local_stats['duration']['paths'])
-            final_stats['test']['count'] += local_stats['test']['count']
-            final_stats['test']['paths'].extend(local_stats['test']['paths'])
+        # Choose a reasonable chunksize to reduce scheduling overhead
+        procs = cpu_count()
+        chunksize = max(1, total_files // (procs * 8) or 1)
 
+        with Pool(
+            processes=procs,
+            initializer=_init_vox_worker,
+            initargs=(self.wav_dir, self.speaker_metadata, DATASET_DEFAULTS.dataset_name, min_duration),
+        ) as pool:
+            for utterance, local_stats in pool.imap_unordered(_process_vox_wav, wav_path_strs, chunksize=chunksize):
+                if utterance is not None:
+                    utterances.append(utterance)
+                final_stats['total']['count'] += local_stats['total']['count']
+                final_stats['duration']['count'] += local_stats['duration']['count']
+                final_stats['duration']['paths'].extend(local_stats['duration']['paths'])
+                pbar.update(1)
+
+        pbar.close()
         return utterances, final_stats
 
 
@@ -282,21 +276,15 @@ class VoxCelebProcessor:
         speaker_id = DATASET_DEFAULTS.dataset_name + '_' + speaker_id_raw
 
         excluded_for_duration = info.duration < min_duration
-        excluded_for_test_set = speaker_id_raw in self.test_speakers
 
         local_stats = {
             'total': {'count': 0},
-            'duration': {'count': 0, 'paths': []},
-            'test': {'count': 0, 'paths': []}
+            'duration': {'count': 0, 'paths': []}
         }
 
         if excluded_for_duration:
             local_stats['duration']['count'] += 1
             local_stats['duration']['paths'].append(str(wav_path))
-            return None, local_stats
-        elif excluded_for_test_set:
-            local_stats['test']['count'] += 1
-            local_stats['test']['paths'].append(str(wav_path))
             return None, local_stats
         else:
             local_stats['total']['count'] += 1
@@ -344,7 +332,7 @@ class VoxCelebProcessor:
             wav_paths = list(self.wav_dir.rglob("*.wav"))
 
             if self.verbose:
-                log.info(f"Iterating over {len(wav_paths)} audio files ...")
+                log.info(f"Iterating over {len(wav_paths)} audio filxes ...")
 
             # Process files with progress bar
             utterances, utterances_stats = self._get_voxceleb_utterances(wav_paths, min_duration)
@@ -499,6 +487,92 @@ class VoxCelebProcessor:
         log.info(f"Same nationality trials: {df[f'same_{DATESET_CLS.NATIONALITY}'].sum()}")
 
 
+class VoxCelebTestFilter:
+    """Handle test speaker exclusion after main metadata processing"""
+    
+    def __init__(self, root_dir: Union[str, Path], verbose: bool = True):
+        """
+        Initialize test filter
+        
+        Args:
+            root_dir: Root directory containing metadata
+            verbose: Print verbose output
+        """
+        self.root_dir = Path(root_dir)
+        self.downloaded_metadata_dir = self.root_dir / VoxCelebProcessor.DATASET_PATHS['downloaded_metadata_dir']
+        self.verbose = verbose
+    
+    def download_test_file(self, test_file: str) -> Path:
+        """Download verification test file if it doesn't exist"""
+        test_urls = {
+            'veri_test2': 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test2.txt',
+            'veri_test_extended2': 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/list_test_all2.txt', 
+            'veri_test_hard2': 'https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/list_test_hard2.txt'
+        }
+        
+        if test_file not in test_urls:
+            raise ValueError(f"Unsupported test file: {test_file}. Supported options: {list(test_urls.keys())}")
+        
+        url = test_urls[test_file]
+        target_path = self.downloaded_metadata_dir / os.path.basename(url)
+        
+        # Ensure the downloaded metadata directory exists
+        self.downloaded_metadata_dir.mkdir(parents=True, exist_ok=True)
+        
+        if not target_path.exists():
+            if self.verbose:
+                log.info(f"Downloading test file {test_file} from {url}")
+                log.info(f"Saving to: {target_path}")
+            
+            try:
+                wget.download(url, str(target_path))
+                if self.verbose:
+                    log.info('\n✓ Download completed successfully\n')
+            except Exception as e:
+                raise RuntimeError(f"Failed to download test file {test_file} from {url}: {e}")
+        else:
+            if self.verbose:
+                log.info(f"Test file {test_file} already exists at: {target_path}")
+                
+        return target_path
+    
+    def get_test_speakers(self, test_file: str) -> Tuple[set, pd.DataFrame]:
+        """Get test speakers from verification file"""
+        veri_test_path = self.download_test_file(test_file)
+        
+        # Read verification file
+        veri_df = pd.read_csv(veri_test_path, sep=' ', header=None, names=['label', 'enrollment', 'test'])
+        
+        enrollment_spks = set(veri_df.enrollment.apply(lambda x: x.split(os.sep)[0]))
+        test_spks = set(veri_df.test.apply(lambda x: x.split(os.sep)[0]))
+        assert test_spks == enrollment_spks, "Enrollment and test speakers don't match"
+
+        if self.verbose:
+            log.info(f"Found {len(test_spks)} test speakers in {test_file}")
+            
+        return test_spks, veri_df
+    
+    def filter_dev_metadata(self, dev_metadata_df: pd.DataFrame, test_speakers: set) -> pd.DataFrame:
+        """Filter out test speakers from development metadata"""
+        # Extract speaker ID without dataset prefix for comparison
+        dev_metadata_df['raw_speaker_id'] = dev_metadata_df[DATESET_CLS.SPEAKER_ID].apply(
+            lambda x: x.replace(DATASET_DEFAULTS.dataset_name + '_', '')
+        )
+        
+        before_count = len(dev_metadata_df)
+        filtered_df = dev_metadata_df[~dev_metadata_df['raw_speaker_id'].isin(test_speakers)].copy()
+        filtered_df = filtered_df.drop('raw_speaker_id', axis=1)
+        
+        after_count = len(filtered_df)
+        excluded_count = before_count - after_count
+        
+        if self.verbose:
+            log.info(f"Filtered out {excluded_count} utterances from {len(test_speakers)} test speakers")
+            log.info(f"Remaining utterances: {after_count} (from {before_count})")
+            
+        return filtered_df
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate VoxCeleb metadata")
     parser.add_argument("--root_dir", 
@@ -509,17 +583,12 @@ if __name__ == "__main__":
         "--artifacts_dir",
         type=str,
         default="data/voxceleb/voxceleb_metadata/metadata",
-        help="Root directory containing both VoxCeleb1 and VoxCeleb2"
+        help="Artifacts directory for generated files"
         )
     parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print verbose output"
-        )
-    parser.add_argument(
-        "--preprocess_stats_file",
-        type=str,
-        default="data/voxceleb/voxceleb_metadata/preprocess_metadata/preprocess_stats.csv"
         )
     parser.add_argument(
         "--min_duration",
@@ -537,8 +606,14 @@ if __name__ == "__main__":
         "--test_file",
         type=str,
         choices=["veri_test2", "veri_test_extended2", "veri_test_hard2"],
-        default="veri_test_hard2",
-        help="Test file name. Options: veri_test2, veri_test_extended2, veri_test_hard2",
+        default="veri_test2",
+        help="Test file name for generating test-specific files. Options: veri_test2, veri_test_extended2, veri_test_hard2",
+    )
+    parser.add_argument(
+        "--predict_lang",
+        type=bool,
+        default=True,
+        help="Whether to predict language for utterances"
     )
 
     args = parser.parse_args()
@@ -550,44 +625,53 @@ if __name__ == "__main__":
     if not args.root_dir.is_dir():
         raise NotADirectoryError(f"Root directory is not a directory: {args.root_dir}")
     
-    args.artifacts_dir = Path(args.artifacts_dir) / args.test_file
-    os.makedirs(args.artifacts_dir, exist_ok=True)
-
-    args.artifacts_dir = args.artifacts_dir.expanduser().resolve()
+    args.artifacts_dir = Path(args.artifacts_dir).expanduser().resolve()
     args.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    with initialize(version_base=None, config_path="../../../../configs/datamodule/datasets"):
-        cfg = compose(config_name="voxceleb.yaml")
-
-    # Run Voxceleb Processor
+    # Run VoxCeleb Processor (now generic, no test-specific processing)
     voxceleb_processor = VoxCelebProcessor(
         root_dir=args.root_dir,
         artifcats_dir=args.artifacts_dir,
-        test_file=args.test_file,
         verbose=args.verbose,
         sep=args.sep,
     )
-    dev_metadata, speaker_metadata = voxceleb_processor.generate_metadata(
-        base_search_dir=args.artifacts_dir, 
-        min_duration=args.min_duration
-        )
 
-    # Identify language of an audio file
-    dev_metadata = pd.read_csv(str(voxceleb_processor.dev_metadata_file.resolve()), sep=args.sep)
-    lang_id_cfg = {'batch_size': 16, 'num_workers': 4, 'shuffle': False, 'drop_last': False}
-    lang_id_model = LanguagePredictionModel(wav_dir=voxceleb_processor.wav_dir, crop_len=8)
-
-    dev_metadata = lang_id_model.forward(df=dev_metadata, cfg=lang_id_cfg)
-    VoxCelebProcessor.save_csv(dev_metadata, str(voxceleb_processor.dev_metadata_file.resolve()), sep=args.sep)
-
-    # Run veri_test.txt enricher
-    output_path = Path(args.artifacts_dir) / (args.test_file + '.csv')
-    if os.path.exists(output_path):
-        log.info(f"Output file already exists: {output_path}")
-        enriched_df = pd.read_csv(output_path, sep=args.sep)
-    else:
-        enriched_df = VoxCelebProcessor.enrich_verification_file(
-            str(voxceleb_processor.veri_test),
-            str(voxceleb_processor.vox_metadata),
-            output_path=None
+    if not voxceleb_processor.dev_metadata_file.resolve().is_file():
+        dev_metadata, speaker_metadata = voxceleb_processor.generate_metadata(
+            base_search_dir=args.artifacts_dir, 
+            min_duration=args.min_duration
             )
+
+    dev_metadata = pd.read_csv(str(voxceleb_processor.dev_metadata_file.resolve()), sep=args.sep)
+
+    if args.predict_lang:
+        # Identify language of an audio file
+        lang_id_cfg = {'batch_size': 64, 'num_workers': 8, 'shuffle': False, 'drop_last': False}
+        lang_id_model = LanguagePredictionModel(wav_dir=voxceleb_processor.wav_dir, crop_len=8)
+
+        dev_metadata = lang_id_model.forward(df=dev_metadata, cfg=lang_id_cfg)
+        VoxCelebProcessor.save_csv(dev_metadata, str(voxceleb_processor.dev_metadata_file.resolve()), sep=args.sep)
+
+    # Now handle test speaker exclusion separately
+    test_filter = VoxCelebTestFilter(root_dir=args.root_dir, verbose=args.verbose)
+    test_speakers, veri_df = test_filter.get_test_speakers(args.test_file)
+    
+    # Filter dev metadata to exclude test speakers
+    filtered_dev_metadata = test_filter.filter_dev_metadata(dev_metadata, test_speakers)
+    
+    # Save filtered metadata with test-specific naming
+    test_specific_dir = args.artifacts_dir / args.test_file
+    test_specific_dir.mkdir(parents=True, exist_ok=True)
+    
+    filtered_dev_file = test_specific_dir / f"voxceleb_dev_{args.test_file}.csv"
+    VoxCelebProcessor.save_csv(filtered_dev_metadata, filtered_dev_file, sep=args.sep)
+    
+    # Run veri_test.txt enricher
+    veri_test_path = test_filter.download_test_file(args.test_file)
+    output_path = test_specific_dir / f"{args.test_file}.csv"
+    enriched_df = VoxCelebProcessor.enrich_verification_file(
+        veri_test_path,
+        voxceleb_processor.vox_metadata,
+        output_path=output_path,
+        sep=args.sep
+        )
