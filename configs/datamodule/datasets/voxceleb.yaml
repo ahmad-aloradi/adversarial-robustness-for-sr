@@ -3,13 +3,21 @@ _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
 dataset:
   data_dir: ${paths.data_dir}/voxceleb
   wav_dir: ${datamodule.dataset.data_dir}/voxceleb1_2
-  veri_test_filename: veri_test_extended2 # options: veri_test2  veri_test_extended2  veri_test_hard2
+  # Support for multiple test sets
+  veri_test_filenames: 
+    - veri_test2
+    - veri_test_extended2  
+    - veri_test_hard2
   voxceleb_metadata: ${datamodule.dataset.data_dir}/voxceleb_metadata
   # Base search directory is now generic (not test-specific)
   base_search_dir: ${datamodule.dataset.voxceleb_metadata}/metadata
 
   voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
-  veri_test_output_path: ${datamodule.dataset.voxceleb_artifacts_dir}/${datamodule.dataset.veri_test_filename}.csv
+  # Multiple output paths for different test sets
+  veri_test_output_paths:
+    veri_test2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test2.csv
+    veri_test_extended2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test_extended2.csv
+    veri_test_hard2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test_hard2.csv
   metadata_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/vox_meta.csv
   train_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/train_csv.csv
   val_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/val_csv.csv
