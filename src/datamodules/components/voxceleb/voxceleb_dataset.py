@@ -88,8 +88,6 @@ class EnrollCoallate(BaseCollate):
         lengths = torch.tensor([wav.shape[0] for wav in audios])
         # pad the audio sequences
         padded_audio = pad_sequence(audios, batch_first=True, padding_value=self.pad_value)
-
-        assert len(spk_ids) == 1, 'Only 1 per enrollment is supported at the moment'
         
         return VoxCelebEnrollItem(
             audio=padded_audio,

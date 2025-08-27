@@ -3,9 +3,9 @@ import io
 import json
 from typing import Any, Dict, Optional, Tuple, Union
 from collections import defaultdict
-import random
 from pathlib import Path
 
+import random
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
@@ -96,16 +96,6 @@ class EmbeddingMetrics:
             self._indices = all_indices
         
         return self._indices
-
-    def get_loaders(self) -> Tuple[DataLoader, DataLoader]:
-        """Get enrollment and unique utterance loaders for testing.
-
-        Returns:
-            Tuple of DataLoader for enrollment and unique utterances.
-        """
-        assert self.stage == 'test'
-        enroll_loader, unique_loader = self.trainer.datamodule.enrolling_dataloader()
-        return enroll_loader, unique_loader
 
     def get_cohort_loader(self) -> DataLoader:
         """Get DataLoader for the cohort subset.
@@ -472,69 +462,105 @@ class SpeakerVerification(pl.LightningModule):
 
     @torch.inference_mode()
     def on_test_start(self) -> None:
-        """Compute embeddings for all test sets."""
-        # Initialize metric tracker for cohort embeddings
-        self.base_metric_tracker = EmbeddingMetrics(self.trainer,
-                                                   stage='test',
-                                                   **self.scores_norm.embeds_metric_params)
+        """Pre-computes embeddings and prepares for per-dataloader metric logging."""
+        # Get all configured test dataloaders from the datamodule
+        test_dataloaders = self.trainer.datamodule.test_dataloader()
+        test_filenames = list(test_dataloaders.keys())
         
-        # Compute cohort embeddings once (shared across all test sets)
+        log.info(f"Found {len(test_filenames)} test set(s): {', '.join(test_filenames)}")
+        
+        # Compute cohort embeddings once from training data (if needed for AS-Norm)
+        cohort_embeddings = None
         if self.normalize_test_scores:
-            cohort_loader = self.base_metric_tracker.get_cohort_loader()
+            log.info("Computing shared cohort embeddings for AS-Norm...")
+            # Use training loader params for cohort loader.
+            train_dm = self.trainer.datamodule
+            cohort_loader = DataLoader(
+                train_dm.train_data,
+                batch_size=getattr(train_dm.loaders.train, 'batch_size', 256),
+                num_workers=getattr(train_dm.loaders.train, 'num_workers', 0),
+                shuffle=False,
+                pin_memory=getattr(train_dm.loaders.train, 'pin_memory', False),
+                collate_fn=TrainCollate()
+            )
             cohort_embeddings = self._compute_cohort_embeddings(cohort_loader)
-        else:
-            cohort_embeddings = None
+            log.info(f"Computed cohort embeddings of shape: {cohort_embeddings.shape}")
 
-        # Get all test sets and compute embeddings for each
         self.test_sets_data = {}
-        test_filenames = self.trainer.datamodule.dataset.veri_test_filenames
-        
-        log.info(f"Computing embeddings for {len(test_filenames)} test sets: {test_filenames}")
-        
-        for test_filename in test_filenames:
-            log.info(f"Processing test set: {test_filename}")
+        self.last_batch_indices = {}
+
+        for test_filename, dataloader in test_dataloaders.items():
+            log.info(f"Processing '{test_filename}'...")
             
-            # Get dataloaders for this specific test set
-            test_dataloader, enroll_dataloader, trial_unique_dataloader = \
-                self.trainer.datamodule.get_test_dataloaders(test_filename)
+            # Determine the index of the last batch for this dataloader
+            # This is needed for triggering metric computation at the right time
+            try:
+                num_batches = len(dataloader)
+                if num_batches > 0:
+                    self.last_batch_indices[test_filename] = num_batches - 1
+                    log.info(f"Registered '{test_filename}' with {num_batches} batches. Last batch index: {num_batches - 1}.")
+            except TypeError:
+                log.warning(f"Could not determine the number of batches for '{test_filename}'. "
+                            "Metric computation will fall back to on_test_epoch_end.")
+                self.last_batch_indices[test_filename] = -1 # Fallback
+
+            # Get unique utterances for enrollment and trials
+            enroll_dataloader, trial_unique_dataloader = self.trainer.datamodule.get_enroll_and_trial_dataloaders(test_filename)
             
             # Compute embeddings for enrollment and test utterances
             enrol_embeds = self._compute_embeddings(enroll_dataloader, mode='enrollment')
             test_embeds = self._compute_embeddings(trial_unique_dataloader, mode='test')
             
-            # Create metric tracker for this test set
-            metric_tracker = EmbeddingMetrics(self.trainer,
-                                             stage='test',
-                                             **self.scores_norm.embeds_metric_params)
-            metric_tracker.set_cohort_embeddings(cohort_embeddings)
-            
-            # Store all data for this test set
+            # Store all data for this test set (sharing the same cohort embeddings)
             self.test_sets_data[test_filename] = {
-                'test_dataloader': test_dataloader,
                 'enrol_embeds': enrol_embeds,
                 'test_embeds': test_embeds,
-                'metric_tracker': metric_tracker,
+                'cohort_embeddings': cohort_embeddings,
                 'trial_results': []
             }
             
         log.info(f"Finished computing embeddings for all test sets")
-        
-        # Process all test sets during on_test_start since we bypass standard test loop
-        log.info("Starting evaluation for all test sets...")
-        for test_filename in test_filenames:
-            log.info(f"Evaluating test set: {test_filename}")
-            self._evaluate_single_test_set(test_filename)
-        
-        log.info("Finished evaluation for all test sets")
 
     @torch.inference_mode()
-    def test_step(self, batch: VoxCelebVerificationItem, batch_idx: int) -> None:
-        """No-op since we handle all testing in on_test_start()"""        
-        pass
+    def test_step(self, batch: VoxCelebVerificationItem, batch_idx: int, dataloader_idx: int = 0) -> None:
+        """Handle test step and trigger logging on the last batch of each dataloader."""
+        # Move batch to device (needed for some weird device error)
+        batch = self._move_batch_to_device(batch)
+        
+        # Get test set name from dataloader index
+        test_filenames = list(self.trainer.datamodule.test_dataloader().keys())
+        test_filename = test_filenames[dataloader_idx]
+        test_data = self.test_sets_data[test_filename]
+        
+        # Run trial evaluation for this test set
+        self._trials_eval_step_multi_test(batch, test_data)
+
+        # Check if this is the last batch for the current dataloader
+        is_last_batch = (batch_idx == self.last_batch_indices.get(test_filename, -1))
+
+        if is_last_batch:
+            log.info(f"Last batch for '{test_filename}' (idx: {batch_idx}) reached. Finalizing and logging metrics.")
+            self._epoch_end_common_multi_test(test_filename)
 
     def on_test_epoch_end(self) -> None:
-        """No-op since we handle all testing in on_test_start()"""
-        log.info("Test evaluation completed in on_test_start() - all test sets processed")
+        """Callback at the end of the test epoch.
+        
+        This is now primarily a cleanup step. It also handles any test sets
+        where the number of batches could not be determined.
+        """
+        # Process any test sets that were not handled in test_step (fallback)
+        if hasattr(self, 'last_batch_indices'):
+            for test_filename, last_idx in self.last_batch_indices.items():
+                if last_idx == -1:
+                    log.warning(f"Running fallback metric computation for '{test_filename}' at epoch end.")
+                    self._epoch_end_common_multi_test(test_filename)
+
+        log.info("Test epoch finished. All test sets have been processed.")
+        # Clean up stored data to free memory
+        if hasattr(self, 'test_sets_data'):
+            del self.test_sets_data
+        if hasattr(self, 'last_batch_indices'):
+            del self.last_batch_indices
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """
@@ -590,8 +616,6 @@ class SpeakerVerification(pl.LightningModule):
         
         return {"optimizer": optimizer}
 
-
-
     ############ Dev and eval utils ############
     def _compute_embeddings(self, dataloader, mode: str = 'test') -> dict:
         embeddings_dict = {}
@@ -602,8 +626,8 @@ class SpeakerVerification(pl.LightningModule):
                 outputs = self(batch)
                 embed = outputs['embeds']
                 # Handle frame-level embeddings (if applicable)
-                if len(embed.shape) == 3:  # [1, num_frames, embedding_dim]
-                    embed = embed.mean(dim=1)  # [num_frames, embedding_dim]
+                if len(embed.shape) == 3:  # [B, num_frames, embedding_dim]
+                    embed = embed.mean(dim=1)  # [B, embedding_dim]
 
                 embeddings_dict.update({path: emb for path, emb in zip(batch.audio_path, embed)})
 
@@ -625,99 +649,13 @@ class SpeakerVerification(pl.LightningModule):
                 cohort = outputs['embeds']
 
                 # Handle frame-level embeddings (if applicable)
-                if len(cohort.shape) == 3:  # [1, num_frames, embedding_dim]
-                    cohort = cohort.mean(dim=1)  # [num_frames, embedding_dim]
+                if len(cohort.shape) == 3:  # [B, num_frames, embedding_dim]
+                    cohort = cohort.mean(dim=1)  # [B, embedding_dim]
 
                 embeddings_list.append(cohort)
         
         cohort_embeds = torch.cat(embeddings_list, dim=0)
         return cohort_embeds
-
-    def _trials_eval_step(self, batch, is_test: bool):
-        """Common logic for test and validation steps."""
-        embeds = self.test_embeds if is_test else self.dev_embeds
-        enrol = self.enrol_embeds if is_test else self.enrol_dev_embeds
-        metric = self.test_metric if is_test else self.valid_metric
-        
-        trial_embeddings = torch.stack([embeds[path] for path in batch.test_path])
-        enroll_embeddings = torch.stack([enrol[path] for path in batch.enroll_path])
-        cohort_embeddings = metric.cohort_embeddings
-
-        # Compute raw cosine similarity scores
-        raw_scores = torch.nn.functional.cosine_similarity(enroll_embeddings, trial_embeddings)
-        
-        # Apply AS-Norm
-        if cohort_embeddings is not None:
-            normalized_scores = []
-            for i in range(trial_embeddings.shape[0]):
-                norm_score = AS_norm(score=raw_scores[i],
-                                     enroll_embedding=enroll_embeddings[i, ...],
-                                     test_embedding=trial_embeddings[i, ...], 
-                                     cohort_embeddings=cohort_embeddings,
-                                     **self.scores_norm.scores_norm_params)
-                normalized_scores.append(norm_score)
-            normalized_scores = torch.tensor(normalized_scores, device=raw_scores.device)
-        else:
-            normalized_scores = raw_scores.clone()
-
-        # Update metric with normalized scores
-        metric.update(scores=normalized_scores, labels=torch.tensor(batch.trial_label))
-        
-        batch_dict = {
-            "enroll_path": batch.enroll_path,
-            "test_path": batch.test_path,
-            "enroll_length": batch.enroll_length,
-            "test_length": batch.test_length,
-            "trial_label": batch.trial_label,
-            "same_country_label": batch.same_country_label,
-            "same_gender_label": batch.same_gender_label,
-            "score": raw_scores.detach().cpu().tolist(),
-            "norm_score": normalized_scores.detach().cpu().tolist(),
-        }
-        self.metric_tracker._trial_results.append(batch_dict)
-
-    def _epoch_end_common(self, is_test: bool) -> None:
-        """Common logic for test and validation epoch end."""
-        metric = self.test_metric if is_test else self.valid_metric
-        enrol_embeds = self.enrol_embeds if is_test else self.enrol_dev_embeds
-        trials_embeds = self.test_embeds if is_test else self.dev_embeds
-
-        scores = pd.DataFrame([
-            {
-                "enroll_path": enroll_path,
-                "test_path": test_path,
-                "enroll_length": enroll_length,
-                "test_length": test_length,
-                "trial_label": trial_label,
-                "same_country_label": same_country_label,
-                "same_gender_label": same_gender_label,
-                "score": score,
-                "norm_score": norm_score,
-            }
-            for batch in self.metric_tracker._trial_results
-            for enroll_path, test_path, enroll_length, test_length, 
-            trial_label, same_country_label, same_gender_label, score, norm_score in zip(
-                batch["enroll_path"],
-                batch["test_path"],
-                batch["enroll_length"],
-                batch["test_length"],
-                batch["trial_label"],
-                batch["same_country_label"],
-                batch["same_gender_label"],
-                batch["score"],
-                batch["norm_score"],
-            )
-        ])
-
-        self._end_of_epoch_metrics(
-            enrol_embeds=enrol_embeds,
-            trials_embeds=trials_embeds,
-            scores=scores,
-            metric=metric,
-            is_test=is_test
-        )
-
-        self.metric_tracker.cleanup()
 
     def _move_batch_to_device(self, batch: VoxCelebVerificationItem) -> VoxCelebVerificationItem:
         """Move batch tensors to the model's device."""
@@ -727,20 +665,19 @@ class SpeakerVerification(pl.LightningModule):
         batch.test_length = batch.test_length.to(self.device)
         return batch
         
-    def _trials_eval_step_multi_test(self, batch: VoxCelebVerificationItem, test_data: Dict, is_test: bool):
+    def _trials_eval_step_multi_test(self, batch: VoxCelebVerificationItem, test_data: Dict):
         """Evaluation step for a specific test set."""
         embeds = test_data['test_embeds']
         enrol_embeds = test_data['enrol_embeds']
-        metric_tracker = test_data['metric_tracker']
+        cohort_embeddings = test_data['cohort_embeddings']
         
         trial_embeddings = torch.stack([embeds[path] for path in batch.test_path])
         enroll_embeddings = torch.stack([enrol_embeds[path] for path in batch.enroll_path])
-        cohort_embeddings = metric_tracker.cohort_embeddings
 
         # Compute raw cosine similarity scores
         raw_scores = torch.nn.functional.cosine_similarity(enroll_embeddings, trial_embeddings)
         
-        # Apply AS-Norm if cohort embeddings are available
+        # Apply AS-Norm if cohort embeddings are available (same cohort for all test sets)
         if cohort_embeddings is not None:
             normalized_scores = []
             for i in range(trial_embeddings.shape[0]):
@@ -754,8 +691,8 @@ class SpeakerVerification(pl.LightningModule):
         else:
             normalized_scores = raw_scores.clone()
 
-        # Update metric with normalized scores - use self.test_metric for consistency
-        self.test_metric.update(scores=normalized_scores, labels=torch.tensor(batch.trial_label))
+        # Don't update the shared metric - we'll compute metrics separately per test set
+        # self.test_metric.update(scores=normalized_scores, labels=torch.tensor(batch.trial_label))
         
         batch_dict = {
             "enroll_path": batch.enroll_path,
@@ -770,7 +707,7 @@ class SpeakerVerification(pl.LightningModule):
         }
         test_data['trial_results'].append(batch_dict)
         
-    def _epoch_end_common_multi_test(self, test_filename: str, is_test: bool) -> None:
+    def _epoch_end_common_multi_test(self, test_filename: str) -> None:
         """Handle epoch end for a specific test set."""
         test_data = self.test_sets_data[test_filename]
         enrol_embeds = test_data['enrol_embeds']
@@ -805,100 +742,59 @@ class SpeakerVerification(pl.LightningModule):
             )
         ])
 
-        # Compute metrics (EER, minDCF, etc.)
-        metrics = self.test_metric.compute()
+        # Create a temporary metric instance for this specific test set
+        temp_metric = instantiate(self.hparams.metrics.test)
         
-        # Log metrics with test set suffix
-        stage = 'test' if is_test else 'valid'
-        prefixed_metrics = {f"{stage}_{test_filename}/{self.test_metric.__class__.__name__}/{key}": value for key, value in metrics.items()}
-        self.log_dict(prefixed_metrics, **self.logging_params)
+        # Update the temporary metric with this test set's data
+        all_norm_scores = []
+        all_labels = []
+        for batch in trial_results:
+            all_norm_scores.extend(batch["norm_score"])
+            all_labels.extend(batch["trial_label"])
+        
+        temp_metric.update(scores=torch.tensor(all_norm_scores), labels=torch.tensor(all_labels))
+        
+        # Compute metrics for this specific test set
+        metrics = temp_metric.compute()
+        
+        # Log metrics with a clear prefix for each test set
+        temp_metric_class_name = temp_metric.__class__.__name__
+        prefixed_metrics = {f"test/{test_filename}/{temp_metric_class_name}/{key}": value for key, value in metrics.items()}
+        self.log_dict(prefixed_metrics, on_step=False, on_epoch=True, sync_dist=True)
+
+        # Minimal console log to confirm completion
+        main_metric_key = next(iter(metrics))
+        main_metric_val = metrics[main_metric_key].item() if torch.is_tensor(metrics[main_metric_key]) else metrics[main_metric_key]
+        log.info(f"Logged {test_filename} results. Main metric ({main_metric_key}): {main_metric_val:.4f}")
 
         # Update scores DataFrame with computed metrics
         scores.loc[:, metrics.keys()] = [v.item() if torch.is_tensor(v) else v for v in metrics.values()]
         
-        # Set up directory for saving artifacts (with test set name)
-        dir_suffix = f"_{test_filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if is_test else f"_{test_filename}"
-        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"{stage}_artifacts{dir_suffix}")
+        # Set up directory for saving test artifacts (with test set name)
+        dir_suffix = f"_{test_filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"test_artifacts{dir_suffix}")
         os.makedirs(artifacts_dir, exist_ok=True)
 
         # Save scores as CSV
-        scores.to_csv(os.path.join(artifacts_dir, f"{stage}_{test_filename}_scores.csv"), index=False)
+        scores.to_csv(os.path.join(artifacts_dir, f"{test_filename}_scores.csv"), index=False)
         
         # Save embeddings
-        torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{stage}_{test_filename}_enrol_embeds.pt"))
-        torch.save(trials_embeds, os.path.join(artifacts_dir, f"{stage}_{test_filename}_embeds.pt"))
-        if test_data['metric_tracker'].cohort_embeddings is not None:
-            torch.save(test_data['metric_tracker'].cohort_embeddings, os.path.join(artifacts_dir, f"{stage}_{test_filename}_cohort_embeds.pt"))
+        torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{test_filename}_enrol_embeds.pt"))
+        torch.save(trials_embeds, os.path.join(artifacts_dir, f"{test_filename}_embeds.pt"))
+        if test_data['cohort_embeddings'] is not None:
+            torch.save(test_data['cohort_embeddings'], os.path.join(artifacts_dir, f"test_cohort_embeds.pt"))  # Same cohort for all test sets
 
         # Plot and log figures for this test set
-        figures = self.test_metric.plot_curves() or {}
+        figures = temp_metric.plot_curves() or {}
         for name, fig in figures.items():
-            self.log_figure_with_fallback(f"{stage}_{test_filename}/binary_metrics_plots/{name}_scores", fig)
+            self.log_figure_with_fallback(f"{test_filename}/binary_metrics_plots/{name}_scores", fig)
 
         # Save test metrics as a JSON file 
-        if is_test:
-            metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
-            metrics_for_save['test_set'] = test_filename  # Add test set identifier
-            with open(os.path.join(artifacts_dir, f"test_{test_filename}_metrics.json"), "w") as f:
-                json.dump(metrics_for_save, f, indent=4)
-                
-        # Reset metric for next test set
-        self.test_metric.reset()
+        metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
+        metrics_for_save['test_set'] = test_filename  # Add test set identifier
+        with open(os.path.join(artifacts_dir, f"{test_filename}_metrics.json"), "w") as f:
+            json.dump(metrics_for_save, f, indent=4)
 
-    def _evaluate_single_test_set(self, test_filename: str) -> None:
-        """Evaluate a single test set completely."""
-        test_data = self.test_sets_data[test_filename]
-        test_dataloader = test_data['test_dataloader']
-        
-        # Process all batches for this test set
-        for batch in tqdm(test_dataloader, desc=f"Evaluating {test_filename}", leave=False):
-            # Move batch to device
-            batch = self._move_batch_to_device(batch)
-            
-            # Run trial evaluation for this test set
-            self._trials_eval_step_multi_test(batch, test_data, is_test=True)
-        
-        # Finalize results for this test set
-        self._epoch_end_common_multi_test(test_filename, is_test=True)
-
-    def _end_of_epoch_metrics(self, enrol_embeds: Dict, trials_embeds: Dict, scores: pd.DataFrame, metric, is_test: bool) -> None:
-        """Compute EER and minDCF, handle logging and saving of artifacts."""
-        # Compute metrics (EER, minDCF, etc.)
-        metrics = metric.compute()
-        
-        # Log metrics with appropriate prefix (test or valid)
-        stage = 'test' if is_test else 'valid'
-        prefixed_metrics = {f"{stage}/{metric.__class__.__name__}/{key}": value for key, value in metrics.items()}
-        self.log_dict(prefixed_metrics, **self.logging_params)
-
-        # Update scores DataFrame with computed metrics
-        scores.loc[:, metrics.keys()] = [v.item() if torch.is_tensor(v) else v for v in metrics.values()]
-        
-        # Set up directory for saving artifacts
-        dir_suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if is_test else ""
-        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"{stage}_artifacts{dir_suffix}")
-        os.makedirs(artifacts_dir, exist_ok=True)
-
-        # Save scores as CSV
-        scores.to_csv(os.path.join(artifacts_dir, f"{stage}_scores.csv"), index=False)
-        
-        # Save embeddings
-        torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{stage}_enrol_embeds.pt"))
-        torch.save(trials_embeds, os.path.join(artifacts_dir, f"{stage}_embeds.pt"))
-        if metric.cohort_embeddings is not None:
-            torch.save(metric.cohort_embeddings, os.path.join(artifacts_dir, f"{stage}_cohort_embeds.pt"))
-
-        # Plot and log figures for the current epoch
-        figures = metric.plot_curves() or {}
-        for name, fig in figures.items():
-            self.log_figure_with_fallback(f"{stage}/binary_metrics_plots/{name}_scores", fig)
-
-        # Save test metrics as a JSON file during the test phase
-        if is_test:
-            metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
-            with open(os.path.join(artifacts_dir, "test_metrics.json"), "w") as f:
-                json.dump(metrics_for_save, f, indent=4)
- 
     def log_figure_with_fallback(self, name: str, fig: plt.Figure) -> None:
         """Log figure with fallback for loggers that don't support figure logging.
         

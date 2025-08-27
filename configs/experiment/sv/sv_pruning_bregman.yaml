@@ -60,7 +60,7 @@ datamodule:
     test:
       batch_size: 8
     enrollment:
-      batch_size: 1
+      batch_size: 8
 
 ### score normalization ###
 module:

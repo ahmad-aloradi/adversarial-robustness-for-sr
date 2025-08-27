@@ -42,9 +42,9 @@ datamodule:
     valid:
       batch_size: 32
     test:
-      batch_size: 4
+      batch_size: 8
     enrollment:
-      batch_size: 1
+      batch_size: 8
 
 module:
   normalize_test_scores: True

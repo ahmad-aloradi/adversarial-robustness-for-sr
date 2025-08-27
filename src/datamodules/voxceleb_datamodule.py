@@ -33,7 +33,6 @@ class VoxCelebDataModule(LightningDataModule):
         super().__init__()
         self.train_data = None
         self.val_data = None
-        self.test_data = None
         self.dataset = dataset
         self.transforms = transforms
         self.loaders = loaders
@@ -72,23 +71,24 @@ class VoxCelebDataModule(LightningDataModule):
             # Load the generated dev metadata and filter out all test speakers
             dev_metadata = pd.read_csv(str(voxceleb_processor.dev_metadata_file), sep=self.dataset.sep)
             filtered_dev_metadata = test_filter.filter_dev_metadata(dev_metadata, all_test_speakers)
-            
-            # Save the filtered dev metadata to the expected location
+
+            # This is temporary setting and will be overwritten by the next save command
+            # This is step is needed for compliance csv_processor. So not resetting the indices is ok
             VoxCelebProcessor.save_csv(filtered_dev_metadata, str(voxceleb_processor.dev_metadata_file), sep=self.dataset.sep)
 
-            # Step 3: Get class id and speaker stats
-            updated_dev_csv, speaker_lookup_csv = self.csv_processor.process(
+            # Step 3: Get class id and speaker stats (df is loaded from filtered_dev_metadata!)
+            updated_filtered_dev_metadata, speaker_lookup_csv = self.csv_processor.process(
                 dataset_files=[str(voxceleb_processor.dev_metadata_file)],
                 spks_metadata_paths=[self.dataset.metadata_csv_file],
                 verbose=self.dataset.verbose)
 
             # save the updated csv
-            VoxCelebProcessor.save_csv(updated_dev_csv, str(voxceleb_processor.dev_metadata_file))
+            VoxCelebProcessor.save_csv(updated_filtered_dev_metadata, str(voxceleb_processor.dev_metadata_file))
             VoxCelebProcessor.save_csv(speaker_lookup_csv, self.dataset.speaker_lookup)
             
             # Step 4: split the dataset into train and validation
             CsvProcessor.split_dataset(
-                df=updated_dev_csv,
+                df=updated_filtered_dev_metadata,
                 train_ratio = self.dataset.train_ratio,
                 save_csv=self.dataset.save_csv,
                 speaker_overlap=self.dataset.speaker_overlap,
@@ -114,10 +114,6 @@ class VoxCelebDataModule(LightningDataModule):
                 
                 self.enroll_data_dict[test_filename] = VoxCelebDataModule._extract_enroll_test(test_df, mode='enroll')
                 self.unique_trial_data_dict[test_filename] = VoxCelebDataModule._extract_enroll_test(test_df, mode='test')
-            
-            # For backward compatibility, set the first test set as default
-            self.enroll_data = self.enroll_data_dict[self.dataset.veri_test_filenames[0]]
-            self.unique_trial_data = self.unique_trial_data_dict[self.dataset.veri_test_filenames[0]]
 
     @staticmethod
     def _extract_enroll_test(df: pd.DataFrame, mode: Literal['enroll', 'test']):
@@ -156,7 +152,6 @@ class VoxCelebDataModule(LightningDataModule):
         
         return results_df
 
-
     def setup(self, stage: Optional[str] = None):
         if stage == 'fit' or stage is None:
             self.train_data = VoxCelebDataset(
@@ -173,7 +168,7 @@ class VoxCelebDataModule(LightningDataModule):
             )
         
         if stage == 'test' or stage is None:
-            # Setup test datasets for all test sets
+            # Setup test datasets for all configured test sets
             self.test_data_dict = {}
             self.enrollment_data_dict = {}
             self.test_unique_data_dict = {}
@@ -201,9 +196,9 @@ class VoxCelebDataModule(LightningDataModule):
                     sample_rate=self.dataset.sample_rate,
                     dataset=self.unique_trial_data_dict[test_filename]
                 )
-            
-            # Note: We no longer set default test_data, enrollment_data, test_unique_data
-            # The model will use get_test_dataloaders() and get_all_test_dataloaders() methods instead
+                log.info(f"Test set '{test_filename}' has {len(self.test_data_dict[test_filename])} trials, "
+                         f"enrollment set has {len(self.enrollment_data_dict[test_filename])} trials, "
+                         f"unique set has {len(self.test_unique_data_dict[test_filename])} trials.")
 
     def train_dataloader(self):
         return DataLoader(
@@ -228,59 +223,31 @@ class VoxCelebDataModule(LightningDataModule):
         )
 
     def test_dataloader(self):
-        return DataLoader(
-            self.test_data,
-            batch_size=self.loaders.test.batch_size,
-            num_workers=self.loaders.test.num_workers,
-            shuffle=self.loaders.test.shuffle,
-            pin_memory=self.loaders.test.pin_memory,
-            drop_last=self.loaders.test.drop_last,
-            collate_fn=VerificationCollate()
-        )
-
-    def enrolling_dataloader(self) -> DataLoader:
-        trial_unique = DataLoader(
-            self.test_unique_data,
-            batch_size=self.loaders.enrollment.batch_size,
-            shuffle=self.loaders.enrollment.shuffle,
-            num_workers=self.loaders.enrollment.num_workers,
-            pin_memory=self.loaders.enrollment.pin_memory,
-            collate_fn=EnrollCoallate()
+        """Return dictionary of test dataloaders for all configured test sets."""
+        test_dataloaders = {}
+        for test_filename in self.dataset.veri_test_filenames:
+            test_dataloaders[test_filename] = DataLoader(
+                self.test_data_dict[test_filename],
+                batch_size=self.loaders.test.batch_size,
+                num_workers=self.loaders.test.num_workers,
+                shuffle=self.loaders.test.shuffle,
+                pin_memory=self.loaders.test.pin_memory,
+                drop_last=self.loaders.test.drop_last,
+                collate_fn=VerificationCollate()
             )
+        return test_dataloaders
 
-        enroll_loader = DataLoader(
-            self.enrollment_data,
-            batch_size=self.loaders.enrollment.batch_size,
-            shuffle=self.loaders.enrollment.shuffle,
-            num_workers=self.loaders.enrollment.num_workers,
-            pin_memory=self.loaders.enrollment.pin_memory,
-            collate_fn=EnrollCoallate()
-            )
-        return enroll_loader, trial_unique
-
-    def get_test_dataloaders(self, test_filename: str) -> tuple:
+    def get_enroll_and_trial_dataloaders(self, test_filename: str) -> tuple:
         """Get dataloaders for a specific test set.
-        
+
         Args:
             test_filename: Name of the test set (e.g., 'veri_test2', 'veri_test_extended2', 'veri_test_hard2')
-            
         Returns:
-            Tuple of (test_dataloader, enroll_dataloader, trial_unique_dataloader)
+            Tuple of (enroll_dataloader, trial_unique_dataloader)
         """
         if test_filename not in self.dataset.veri_test_filenames:
             raise ValueError(f"Unknown test set: {test_filename}. Available test sets: {self.dataset.veri_test_filenames}")
-            
-        # Test dataloader for verification trials
-        test_dataloader = DataLoader(
-            self.test_data_dict[test_filename],
-            batch_size=self.loaders.test.batch_size,
-            num_workers=self.loaders.test.num_workers,
-            shuffle=self.loaders.test.shuffle,
-            pin_memory=self.loaders.test.pin_memory,
-            drop_last=self.loaders.test.drop_last,
-            collate_fn=VerificationCollate()
-        )
-        
+
         # Enrollment dataloader
         enroll_dataloader = DataLoader(
             self.enrollment_data_dict[test_filename],
@@ -290,8 +257,8 @@ class VoxCelebDataModule(LightningDataModule):
             pin_memory=self.loaders.enrollment.pin_memory,
             collate_fn=EnrollCoallate()
         )
-        
-        # Trial unique dataloader  
+
+        # Trial unique dataloader (to compute test embeddings per unique utterance, not per trial)
         trial_unique_dataloader = DataLoader(
             self.test_unique_data_dict[test_filename],
             batch_size=self.loaders.enrollment.batch_size,
@@ -300,19 +267,8 @@ class VoxCelebDataModule(LightningDataModule):
             pin_memory=self.loaders.enrollment.pin_memory,
             collate_fn=EnrollCoallate()
         )
-        
-        return test_dataloader, enroll_dataloader, trial_unique_dataloader
-        
-    def get_all_test_dataloaders(self) -> Dict[str, tuple]:
-        """Get dataloaders for all test sets.
-        
-        Returns:
-            Dictionary mapping test set names to their respective dataloaders
-        """
-        all_dataloaders = {}
-        for test_filename in self.dataset.veri_test_filenames:
-            all_dataloaders[test_filename] = self.get_test_dataloaders(test_filename)
-        return all_dataloaders
+
+        return enroll_dataloader, trial_unique_dataloader
 
 
 if __name__ == "__main__":
@@ -331,13 +287,13 @@ if __name__ == "__main__":
 
         assert not datamodule.train_data
         assert not datamodule.val_data
-        assert not datamodule.test_data
+        assert not hasattr(datamodule, 'test_data') or datamodule.test_data is None
         # assert not datamodule.predict_set
 
         datamodule.setup()
         assert datamodule.train_data
         assert datamodule.val_data
-        assert datamodule.test_data
+        assert datamodule.test_data_dict  # Now we have test_data_dict instead of test_data
 
         assert datamodule.train_dataloader()
         assert datamodule.val_dataloader()

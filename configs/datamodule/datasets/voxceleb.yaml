@@ -3,13 +3,12 @@ _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
 dataset:
   data_dir: ${paths.data_dir}/voxceleb
   wav_dir: ${datamodule.dataset.data_dir}/voxceleb1_2
-  # Support for multiple test sets
   veri_test_filenames: 
     - veri_test2
-    - veri_test_extended2  
+    - veri_test_extended2
     - veri_test_hard2
   voxceleb_metadata: ${datamodule.dataset.data_dir}/voxceleb_metadata
-  # Base search directory is now generic (not test-specific)
+  # Base search directory (not test-specific)
   base_search_dir: ${datamodule.dataset.voxceleb_metadata}/metadata
 
   voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
@@ -56,13 +55,13 @@ loaders:
   test:
     batch_size: 8
     shuffle: False
-    num_workers: 0
+    num_workers: 4
     drop_last: False
     pin_memory: False
 
   enrollment:
-    batch_size: 1 # 1 for enrollment
+    batch_size: 8
     shuffle: False
-    num_workers: 0
+    num_workers: 4
     drop_last: False
     pin_memory: False
