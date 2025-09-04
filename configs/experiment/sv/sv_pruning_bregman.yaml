@@ -94,7 +94,7 @@ module:
   #   _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
   #   _partial_: True
   #   momentum: 0.0
-  #   lr: 1e-3
+  #   lr: 1e-4
 
   # Option2 Adabreg
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
