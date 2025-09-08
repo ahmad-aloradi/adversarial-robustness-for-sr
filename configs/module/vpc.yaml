@@ -2,45 +2,11 @@ _target_: src.modules.multimodal_vpc.MultiModalVPCModel
 
 defaults:
   - _self_
-  - model: robust.yaml  # Reference to a config group
 
 model:
-  audio_processor:
-    _target_: torch.nn.Identity
 
-  audio_encoder:
-    _target_: speechbrain.inference.EncoderClassifier.from_hparams
-    source: "speechbrain/spkrec-ecapa-voxceleb"
-    savedir: "local/.pretrained_models/spkrec-ecapa-voxceleb"
-    run_opts:
-      device: "cuda"
-
-  audio_processor_kwargs:
-    return_tensors: "pt"
-    sampling_rate: 16000
-
-  text_processor:
-    _target_: transformers.BertTokenizer.from_pretrained
-    pretrained_model_name_or_path: "bert-base-uncased"
-
-  text_encoder:
-    _target_: transformers.BertModel.from_pretrained
-    pretrained_model_name_or_path: ${module.model.text_processor.pretrained_model_name_or_path}
-    num_labels: ${datamodule.num_classes}
-
-  text_processor_kwargs:
-    return_tensors: "pt"
-    padding: "max_length"
-    truncation: True
-    max_length: 512
-
-### classifier ###
-  # fusion_classifier: ${module.fusion_classifier}
-
-### caching ###
-  embedding_cache:
-    max_size: 500000
-    bypass_warmup: True
+  audio_processor: ???
+  audio_encoder: ???
 
 ### criteria and metrics ###
 criterion:

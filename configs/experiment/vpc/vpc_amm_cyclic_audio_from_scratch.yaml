@@ -3,12 +3,12 @@
 # to execute this experiment run:
 # python train.py experiment=example
 defaults:
+  - /module/fusion_classifier: robust_audio.yaml
   - override /callbacks: default.yaml
   - override /datamodule: datasets/vpc.yaml
   - override /module: vpc.yaml
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
-  - override /module/model: robust_audio.yaml
 
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
@@ -35,7 +35,7 @@ callbacks:
 datamodule:
   dataset:
     max_duration: 10.0
-  
+
   models: null
 
   loaders:
@@ -52,6 +52,9 @@ module:
   _target_: src.modules.audio_vpc.AudioVPCModel
 
   model:
+  ############################
+  ### main model structure ###
+  ############################
     audio_processor:
       _target_: speechbrain.lobes.features.Fbank
       sample_rate: ${datamodule.dataset.sample_rate}
@@ -79,6 +82,8 @@ module:
       groups: [1, 1, 1, 1, 1]
       attention_channels: 128
       lin_neurons: 192  # ECAPA embedding size
+
+  ############################
 
   normalize_test_scores: True
       

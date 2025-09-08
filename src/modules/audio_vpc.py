@@ -51,78 +51,56 @@ class EmbeddingType(Enum):
 ###################################
 
 class RobustFusionClassifier(nn.Module):
+    """Despite the confusing name, this is an audio-only classifier based on the speaker embeddings.
     """
-    Classifier with:
-    - Adaptive denoising with learned residual mixing
-    - Modality-specific confidence estimation
-    - Dynamic fusion gating
-    - Simplified loss with stability enhancements
-    """
-    
+
     def __init__(self,
-                 audio_embedding_size: int, 
-                 text_embedding_size: int, 
+                 audio_embedding_size: int,
                  hidden_size: int,
                  num_classes: int,
                  dropout_audio: float = 0.3,
-                 dropout_text: float = 0.1,
-                 accum_method: Literal['sum', 'concat'] = 'sum',
-                 norm_type: Literal['batch', 'layer'] = 'batch',
-                 embedding_type: EmbeddingType = EmbeddingType.AUDIO
-                 ):
+                 norm_type: Literal['batch', 'layer'] = 'batch'):
         super().__init__()
-        
-        # Setup hidden_size based off accumulation method
-        assert accum_method in ['sum', 'concat'], f"Invalid accumulation method: {accum_method}"
-        fusion_dependent_hidden = 2 * hidden_size if accum_method == 'concat' else hidden_size
-        self.accum_method = accum_method
-        self.embedding_type = embedding_type
-        
-        # Factory for normalization layers
+
         norm_factory: Callable = {
             'batch': nn.BatchNorm1d,
             'layer': nn.LayerNorm
         }[norm_type]
-        
+
         self.audio_branch = nn.Sequential(
             norm_factory(audio_embedding_size),
             nn.Linear(audio_embedding_size, hidden_size),
             nn.GELU(),
             nn.Dropout(dropout_audio)
         )
-
-        # Classification heads
         self.audio_classifier = nn.Linear(hidden_size, num_classes)
 
     @staticmethod
-    def get_embedding(fused_feats: Dict[str, torch.Tensor], 
-                      last_hidden: torch.Tensor,
-                      embedding_type: EmbeddingType) -> torch.Tensor:
-        """Get the selected embedding type."""
+    def get_embedding(
+        fused_feats: Dict[str, torch.Tensor],
+        last_hidden: torch.Tensor,
+        embedding_type: EmbeddingType = EmbeddingType.AUDIO,
+    ) -> torch.Tensor:
+        """Return normalized embedding selected by embedding_type.
+
+        Retained for backward compatibility with earlier interfaces that
+        expected a modality selection step. Currently only AUDIO is supported.
+        """
         embedding_map = {
             EmbeddingType.AUDIO: fused_feats["audio_emb"],
         }
         assert embedding_type in embedding_map, f"Invalid embedding type: {embedding_type}"
-        assert embedding_map[embedding_type].dim() == 2, f"Invalid embedding shape: {embedding_map[embedding_type].shape}"
-        normalized_embeds = torch.nn.functional.normalize(embedding_map[embedding_type], p=2, dim=-1)
-        return normalized_embeds
+        emb = embedding_map[embedding_type]
+        assert emb.dim() == 2, f"Invalid embedding shape: {emb.shape}"
+        return torch.nn.functional.normalize(emb, p=2, dim=-1)
 
-    def forward(self, inputs: Tuple[torch.Tensor, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        audio_emb = inputs
-        
-        # Process modalities
+    def forward(self, audio_emb: torch.Tensor) -> Dict[str, torch.Tensor]:
         audio_features = self.audio_branch(audio_emb)
-
-        # Predictions
         audio_logits = self.audio_classifier(audio_features)
-        
         class_prob = torch.nn.functional.softmax(audio_logits, dim=1)
         predicted_class = torch.argmax(class_prob, dim=-1)
-
-        # get representation
-        fused_feats = {'audio_emb': audio_features}
-        features = RobustFusionClassifier.get_embedding(fused_feats, last_hidden=audio_features, embedding_type=self.embedding_type)
-
+        fused_feats = {"audio_emb": audio_features}
+        features = RobustFusionClassifier.get_embedding(fused_feats, last_hidden=audio_features)
         return {
             "audio_logits": audio_logits,
             EMBEDS["CLASS"]: predicted_class,
@@ -346,7 +324,8 @@ class AudioVPCModel(pl.LightningModule):
         """Initialize encoders and classifiers."""
         self.audio_processor = instantiate(model.audio_processor)
         self.audio_encoder = instantiate(model.audio_encoder)
-        self.audio_processor_kwargs = model.audio_processor_kwargs
+        if model.get("audio_processor_kwargs", None) is not None:
+            self.audio_processor_kwargs = model.audio_processor_kwargs
         if hasattr(model, "audio_processor_normalizer"):
             self.audio_processor_normalizer = instantiate(model.audio_processor_normalizer)
         
