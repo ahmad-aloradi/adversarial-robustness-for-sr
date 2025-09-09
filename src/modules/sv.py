@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, Optional, Tuple, Union
 from collections import defaultdict
 from pathlib import Path
+import inspect
 
 import random
 import torch
@@ -29,6 +30,37 @@ from datetime import datetime
 
 
 log = utils.get_pylogger(__name__)
+
+
+###################################
+
+def load_pretrained_model(
+    filename: str,
+    repo_id: str,
+    cache_dir: Optional[str] = None,
+    map_location: str = 'cuda',
+    *args,
+    **kwargs
+) -> nn.Module:
+    """Hydra factory that returns a loaded TorchScript model directly.
+
+    This mirrors the behavior of ``PretrainedModelLoader.__call__`` but allows
+    Hydra's ``instantiate`` to yield the final ``nn.Module`` in a single step.
+
+    Args:
+        filename: Name of the file in the Hugging Face repo (e.g. 'ecapa2.pt').
+        repo_id: Hugging Face repository ID (e.g. 'user/repo').
+        cache_dir: Optional local cache directory.
+        map_location: Device mapping for ``torch.jit.load``.
+        *args, **kwargs: Ignored extra arguments for forward compatibility.
+
+    Returns:
+        Loaded ``nn.Module`` (TorchScript) ready for inference.
+    """
+    from huggingface_hub import hf_hub_download
+    model_file = hf_hub_download(repo_id=repo_id, filename=filename, cache_dir=cache_dir)
+    model = torch.jit.load(model_file, map_location=map_location)
+    return model
 
 
 ###################################
@@ -203,7 +235,7 @@ class SpeakerVerification(pl.LightningModule):
         self.audio_processor_normalizer = instantiate(model.audio_processor_normalizer)
         self.audio_encoder = instantiate(model.audio_encoder)
         self.classifier = instantiate(model.classifier)
-        
+
         # Setup wav augmentation if configured
         if self.data_augemntation is not None:
             assert "wav_augmenter" in self.data_augemntation.augmentations, 'Expected augmentations.wav_augmenter when passing data_augemntation'
@@ -290,14 +322,28 @@ class SpeakerVerification(pl.LightningModule):
                 batch_audio = batch_audio.to(self.device)
             if self.device != batch_audio_lens.device:
                 batch_audio_lens = batch_audio_lens.to(self.device)
+
             input_values = self.audio_processor(batch_audio)
-            input_values = self.audio_processor_normalizer(input_values, lengths=batch_audio_lens/max(batch_audio_lens))
-            audio_emb = self.audio_encoder(input_values, lengths=batch_audio_lens/max(batch_audio_lens)).squeeze(1)
-        
+            if not isinstance(self.audio_processor_normalizer, nn.Identity) and self.audio_processor_normalizer is not None:
+                input_values = self.audio_processor_normalizer(input_values, lengths=batch_audio_lens/max(batch_audio_lens))
+            
+            # Check if the encoder's forward method accepts a 'lengths' argument
+            if hasattr(self.audio_encoder, 'code'):
+                # 1. Check for torch.jit models
+                with torch.jit.optimized_execution(False):
+                    audio_emb = self.audio_encoder(input_values).squeeze(1)
+            else:
+                # 2. For regular PyTorch models, inspect the signature
+                sig = inspect.signature(self.audio_encoder.forward)
+                if 'lengths' in sig.parameters:
+                    audio_emb = self.audio_encoder(input_values, lengths=batch_audio_lens/max(batch_audio_lens)).squeeze(1)
+                else:
+                    audio_emb = self.audio_encoder(input_values).squeeze(1)
+
         return audio_emb
 
     def forward(self, batch: VoxcelebItem) -> Dict[str, torch.Tensor]:
-        """Process text/audio inputs with optimized embedding caching."""
+        """Process audio inputs with optimized embedding caching."""
         # Add waveform augmentation if specified.
         if self.training and hasattr(self, "wav_augmenter"):
             batch.audio, batch.audio_length = self.wav_augmenter(batch.audio, batch.audio_length / max(batch.audio_length))
@@ -330,7 +376,7 @@ class SpeakerVerification(pl.LightningModule):
         # accuracy from these checks
         self.valid_metric_best.reset()
         self.audio_encoder.train()
-        if self.global_step == 0 and not self._bypass_warmup:
+        if bool(len(self._embeds_cache_config)) and (self.global_step == 0) and (not self._bypass_warmup):
             self._warmup_cache()
 
     def training_step(self, batch: VoxcelebItem, batch_idx: int) -> Dict[str, torch.Tensor]:

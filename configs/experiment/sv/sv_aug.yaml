@@ -4,6 +4,8 @@
 # python train.py experiment=example
 
 defaults:
+  - /module/sv_model: from_scratch_ecapa_tdnn.yaml
+  # - /module/sv_model: pretrained_titanet.yaml
   - override /callbacks: default.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml
@@ -14,7 +16,7 @@ defaults:
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["data_augmentation", "voxceleb", "sv", "ecapa"]
+tags: ["data_augmentation", "voxceleb", "sv"]
 seed: 42
 
 trainer:
@@ -38,9 +40,9 @@ datamodule:
 
   loaders:
     train:
-      batch_size: 64
+      batch_size: 16
     valid:
-      batch_size: 64
+      batch_size: 16
     test:
       batch_size: 8
     enrollment:
@@ -49,16 +51,24 @@ datamodule:
 module:
   normalize_test_scores: True
 
-  lr_scheduler: 
+  lr_scheduler:
     scheduler:
-        _target_: torch.optim.lr_scheduler.CyclicLR
-        base_lr: 1e-8
-        max_lr: ${module.optimizer.lr}
-        step_size_up: ${oc.eval:"int(2 * 1176000 / ${datamodule.loaders.train.batch_size})"}
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: "max"
+      factor: 0.25
+      min_lr: 1.0e-6
+      patience: 2
+      verbose: True
     extras:
       monitor: ${replace:"valid/__metric__"}
-      interval: step
+      interval: "epoch"
       frequency: 1
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: True
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
 
   ### Data for augmentation ###
   data_augemntation:
@@ -128,8 +138,7 @@ module:
           - ${module.data_augemntation.augmentations.drop_freq}
           - ${module.data_augemntation.augmentations.drop_chunk}
 
-# logger:
-#   wandb:
-#     tags: ${tags}
-#     group: "mnist"
-
+logger:
+  wandb:
+    tags: ${tags}
+    group: "voxceleb"

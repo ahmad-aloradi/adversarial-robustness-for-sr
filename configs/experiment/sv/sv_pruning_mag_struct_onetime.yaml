@@ -18,7 +18,7 @@ defaults:
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["voxceleb", "l1_unstructured_pruning", "onetime_pruning", "sv"]
+tags: ["voxceleb", "ln_structured_pruning", "onetime_pruning", "sv"]
 seed: 42
 
 trainer:
@@ -38,15 +38,16 @@ callbacks:
     
   model_pruning:
     _target_: src.callbacks.pruning.prune.MagnitudePruner
-    pruning_fn: l1_unstructured
+    pruning_fn: ln_structured
     amount: 0.9  # 90% pruning applied before fine-tuning
-    use_global_unstructured: true
+    use_global_unstructured: false
     apply_pruning: true
     make_pruning_permanent: true
     use_lottery_ticket_hypothesis: false
     resample_parameters: false
     parameters_to_prune: null
-    pruning_dim: null
+    pruning_dim: 1  # Dimension along which to prune for structured pruning methods (0 = channels, 1 = filters)
+    pruning_norm: 1  # Norm to use for structured pruning methods (e.g., 1 for L1 norm)
     verbose: 2
     prune_on_train_epoch_start: false  # Don't prune during training
     prune_on_train_start: true  # Apply pruning before fine-tuning starts

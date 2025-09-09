@@ -145,9 +145,7 @@ class MagnitudePruner(ModelPruning):
         self.skipped_params = {}
         self.save_when_sparser_than = save_when_sparser_than
         self._checkpoint_callbacks = []
-        self._removed_checkpoint_callbacks = [] # To store temporarily removed callbacks
-        self._checkpoint_original_save_on_train_epoch_end = {}
-        self._original_update_best_and_save = {}
+        self._checkpoint_original_settings = {}
         self._has_reset_checkpoint_best_score = False
 
         
@@ -880,8 +878,11 @@ class MagnitudePruner(ModelPruning):
                 )
             else:
                 for i, cb in enumerate(self._checkpoint_callbacks):
-                    if hasattr(cb, '_save_on_train_epoch_end'):
-                        self._checkpoint_original_save_on_train_epoch_end[i] = cb._save_on_train_epoch_end
+                    self._checkpoint_original_settings[i] = {
+                        "monitor": getattr(cb, 'monitor', None),
+                        "save_top_k": getattr(cb, 'save_top_k', 1),
+                        "save_last": getattr(cb, 'save_last', None),
+                    }
             
         if self.prune_on_train_start:
             if self.verbose > 0:
@@ -934,6 +935,31 @@ class MagnitudePruner(ModelPruning):
                 if self.verbose > 1:
                     log.debug(f"Failed to log metrics: {e}")
 
+    def on_sanity_check_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Conditionally disable checkpointing before sanity check runs."""
+        if self.save_when_sparser_than is None or not self._checkpoint_callbacks:
+            return
+
+        if self.save_when_sparser_than > 0:
+            if trainer.is_global_zero:
+                log.info("Disabling checkpointing for sanity check.")
+            for i, cb in enumerate(self._checkpoint_callbacks):
+                cb.save_top_k = 0
+                cb.save_last = False
+
+    def on_sanity_check_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Restore checkpointing settings after sanity check."""
+        if self.save_when_sparser_than is None or not self._checkpoint_callbacks:
+            return
+        
+        if trainer.is_global_zero:
+            log.info("Restoring checkpointing settings after sanity check.")
+        for i, cb in enumerate(self._checkpoint_callbacks):
+            original_settings = self._checkpoint_original_settings.get(i)
+            if original_settings:
+                cb.save_top_k = original_settings["save_top_k"]
+                cb.save_last = original_settings["save_last"]
+
     def on_validation_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         """Conditionally disable checkpointing before validation runs."""
         if self.save_when_sparser_than is None or not self._checkpoint_callbacks:
@@ -943,61 +969,37 @@ class MagnitudePruner(ModelPruning):
         current_sparsity = self._compute_current_sparsity(valid_params)
         should_save = current_sparsity >= self.save_when_sparser_than - 0.01 # 1% threshold for saving
 
+        for i, cb in enumerate(self._checkpoint_callbacks):
+            original_settings = self._checkpoint_original_settings.get(i)
+            if not original_settings:
+                continue
+
+            if should_save:
+                # Restore original settings
+                cb.save_top_k = original_settings["save_top_k"]
+                cb.save_last = original_settings["save_last"]
+            else:
+                # Disable checkpointing
+                cb.save_top_k = 0
+                cb.save_last = False
+
         if not should_save:
-            # Sparsity is below threshold. Disable saving for this validation run.
-            for i, cb in enumerate(self._checkpoint_callbacks):
-                if hasattr(cb, '_save_on_train_epoch_end'):
-                    cb._save_on_train_epoch_end = False
-                
-                # Also prevent the callback from updating its best score.
-                if hasattr(cb, '_update_best_and_save'):
-                    if i not in self._original_update_best_and_save:
-                        self._original_update_best_and_save[i] = cb._update_best_and_save
-                    cb._update_best_and_save = lambda *args, **kwargs: None # No-op
-            
             if trainer.is_global_zero:
                 log.info(
                     f"Epoch {trainer.current_epoch}: Sparsity {current_sparsity:.2%} < {self.save_when_sparser_than:.2%}. "
                     "Disabling checkpoint saving for this validation run."
                 )
         elif not self._has_reset_checkpoint_best_score:
-            # This is the first epoch where sparsity is >= threshold.
-            # Reset the best_model_score to start tracking from a clean slate.
             for cb in self._checkpoint_callbacks:
-                if hasattr(cb, 'best_model_score') and hasattr(cb, 'mode'):
-                    if cb.mode == "min":
-                        cb.best_model_score = torch.tensor(float("inf"))
-                    else:
-                        cb.best_model_score = torch.tensor(float("-inf"))
-                    
+                if hasattr(cb, 'best_model_score'):
+                    cb.best_model_score = torch.tensor(float("inf")) if cb.mode == "min" else torch.tensor(float("-inf"))
                     if trainer.is_global_zero:
-                        log.info(f"Epoch {trainer.current_epoch}: Sparsity threshold reached. Resetting best_model_score for ModelCheckpoint to start tracking.")
+                        log.info(f"Epoch {trainer.current_epoch}: Sparsity threshold reached. Resetting best_model_score for ModelCheckpoint.")
             self._has_reset_checkpoint_best_score = True
 
     def on_validation_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        """Restore checkpointing callbacks after validation."""
-        # Restore the original behavior of the checkpoint callbacks, but only if saving should be enabled.
-        if self.save_when_sparser_than is None or not self._checkpoint_callbacks:
-            return
-
-        valid_params = self._get_valid_parameters()
-        current_sparsity = self._compute_current_sparsity(valid_params)
-        should_save = current_sparsity >= self.save_when_sparser_than
-
-        # Only re-enable the checkpoint's internal save flag if the sparsity threshold has been met.
-        if should_save:
-            for i, cb in enumerate(self._checkpoint_callbacks):
-                # Restore the original value. If not found, default to True.
-                original_state = self._checkpoint_original_save_on_train_epoch_end.get(i, True)
-                if hasattr(cb, '_save_on_train_epoch_end'):
-                    cb._save_on_train_epoch_end = original_state
-                
-                # Restore the original update method if it was replaced
-                if i in self._original_update_best_and_save:
-                    cb._update_best_and_save = self._original_update_best_and_save[i]
-            
-            if trainer.is_global_zero:
-                 log.info(f"Epoch {trainer.current_epoch}: Re-enabled ModelCheckpoint saving for subsequent runs.")
+        """No longer needed for restoration, but kept for potential future use."""
+        pass
 
     def on_train_end(self, trainer, pl_module) -> None:
         """Override to safely handle the end of training with pruning."""
@@ -1015,7 +1017,11 @@ class MagnitudePruner(ModelPruning):
         # Restore original checkpointing behavior
         if self._checkpoint_callbacks:
             for i, cb in enumerate(self._checkpoint_callbacks):
-                cb._save_on_train_epoch_end = self._checkpoint_original_save_on_train_epoch_end.get(i, True)
+                original_settings = self._checkpoint_original_settings.get(i)
+                if original_settings:
+                    cb.monitor = original_settings["monitor"]
+                    cb.save_top_k = original_settings["save_top_k"]
+                    cb.save_last = original_settings["save_last"]
 
     def get_state(self) -> dict:
         """Returns information about the current sparsity of the pruned modules."""

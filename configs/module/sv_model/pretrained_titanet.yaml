@@ -1,0 +1,15 @@
+# @package module.model
+audio_processor:
+  _target_: torch.nn.Identity
+
+audio_processor_normalizer:
+  _target_: torch.nn.Identity
+
+audio_encoder:
+  _target_: nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained
+  model_name: nvidia/speakerverification_en_titanet_large
+
+classifier:
+  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  input_size: 192
+  out_neurons: ${datamodule.num_classes}

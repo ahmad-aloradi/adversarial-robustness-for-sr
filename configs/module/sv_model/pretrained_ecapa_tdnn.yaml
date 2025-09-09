@@ -1,0 +1,18 @@
+# @package module.model
+audio_processor:
+  _target_: torch.nn.Identity
+
+audio_processor_normalizer:
+  _target_: torch.nn.Identity
+
+audio_encoder:
+  _target_: speechbrain.inference.EncoderClassifier.from_hparams
+  source: "speechbrain/spkrec-ecapa-voxceleb"
+  savedir: "local/.pretrained_models/spkrec-ecapa-voxceleb"
+  run_opts:
+    device: "cuda"
+
+classifier: 
+  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  input_size: 192
+  out_neurons:  ${datamodule.num_classes}
