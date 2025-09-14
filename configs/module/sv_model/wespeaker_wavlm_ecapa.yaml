@@ -1,0 +1,37 @@
+# @package module.model
+# This configuration creates a sequential model that first extracts features using
+# a pretrained WavLM model and then passes them to an ECAPA-TDNN speaker encoder.
+
+audio_processor:
+  _target_: torch.nn.Identity
+
+audio_processor_normalizer:
+  _target_: torch.nn.Identity
+
+audio_encoder:
+  _target_: src.modules.encoder_wrappers.SequentialEncoder
+  # 1. Feature Extractor: Pretrained WavLM model loaded directly from HuggingFace.
+  # This model is frozen by default in the SequentialEncoder.
+  feature_extractor:
+    _target_: src.utils.hf_utils.load_huggingface_model
+    model_name: "microsoft/wavlm-base-plus"
+
+  # 2. Speaker Encoder: ECAPA-TDNN model that takes the WavLM features as input.
+  speaker_encoder:
+    _target_: speechbrain.lobes.models.ECAPA_TDNN.ECAPA_TDNN
+    # WavLM-base produces features of size 768.
+    # We need to adapt the ECAPA-TDNN input layer to accept this.
+    # The original ECAPA model expects MFCCs (e.g., size 80). We will add a
+    # linear layer to project the WavLM features to the size ECAPA expects.
+    input_size: 768
+    channels: [512, 512, 512, 512, 1536]
+    kernel_sizes: [5, 3, 3, 3, 1]
+    dilations: [1, 2, 3, 4, 1]
+    attention_channels: 128
+    lin_neurons: 192
+
+# 3. Classifier: Standard ECAPA-TDNN classifier head.
+classifier:
+  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  input_size: 192
+  out_neurons:  ${datamodule.num_classes}

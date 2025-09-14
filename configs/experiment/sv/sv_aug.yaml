@@ -5,7 +5,6 @@
 
 defaults:
   - /module/sv_model: from_scratch_ecapa_tdnn.yaml
-  # - /module/sv_model: pretrained_titanet.yaml
   - override /callbacks: default.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml

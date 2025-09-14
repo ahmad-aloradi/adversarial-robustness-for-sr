@@ -6,8 +6,9 @@ audio_processor_normalizer:
   _target_: torch.nn.Identity
 
 audio_encoder:
-  _target_: nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained
+  _target_: src.utils.hf_utils.load_nemo_model
   model_name: nvidia/speakerverification_en_titanet_large
+  map_location: "cuda"
 
 classifier:
   _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier

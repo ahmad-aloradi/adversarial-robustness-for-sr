@@ -1,14 +1,12 @@
 import os
 import io
 import json
-from typing import Any, Dict, Optional, Tuple, Union
-from collections import defaultdict
+from typing import Any, Dict, Optional
 from pathlib import Path
-import inspect
+from datetime import datetime
 
 import random
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 import pytorch_lightning as pl
@@ -24,46 +22,14 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
     VoxCelebVerificationItem,
     TrainCollate)
 from src import utils
+from src.modules.encoder_wrappers import EncoderWrapper
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 from src.modules.metrics.metrics import AS_norm 
-from datetime import datetime
 
 
 log = utils.get_pylogger(__name__)
 
 
-###################################
-
-def load_pretrained_model(
-    filename: str,
-    repo_id: str,
-    cache_dir: Optional[str] = None,
-    map_location: str = 'cuda',
-    *args,
-    **kwargs
-) -> nn.Module:
-    """Hydra factory that returns a loaded TorchScript model directly.
-
-    This mirrors the behavior of ``PretrainedModelLoader.__call__`` but allows
-    Hydra's ``instantiate`` to yield the final ``nn.Module`` in a single step.
-
-    Args:
-        filename: Name of the file in the Hugging Face repo (e.g. 'ecapa2.pt').
-        repo_id: Hugging Face repository ID (e.g. 'user/repo').
-        cache_dir: Optional local cache directory.
-        map_location: Device mapping for ``torch.jit.load``.
-        *args, **kwargs: Ignored extra arguments for forward compatibility.
-
-    Returns:
-        Loaded ``nn.Module`` (TorchScript) ready for inference.
-    """
-    from huggingface_hub import hf_hub_download
-    model_file = hf_hub_download(repo_id=repo_id, filename=filename, cache_dir=cache_dir)
-    model = torch.jit.load(model_file, map_location=map_location)
-    return model
-
-
-###################################
 class EmbeddingMetrics:
     def __init__(
         self,
@@ -207,8 +173,7 @@ class SpeakerVerification(pl.LightningModule):
         # Setup training components
         self._setup_training_components(criterion, optimizer, lr_scheduler)
         
-        # Freeze pretrained components
-        self._freeze_pretrained_components()
+        # Freeze pretrained components (Ignore for now)
 
         # Initialize text embedding cache with appropriate limits
         self._embeds_cache_config = model.get("embedding_cache", {})
@@ -229,11 +194,21 @@ class SpeakerVerification(pl.LightningModule):
         self.valid_metric_best = instantiate(metrics.valid_best)
 
     def _setup_model_components(self, model: DictConfig) -> None:
-        """Initialize encoders and classifiers."""
+        """Initialize encoders and classifiers, wrapping the encoder for a unified interface."""
         # Audio processing
         self.audio_processor = instantiate(model.audio_processor)
         self.audio_processor_normalizer = instantiate(model.audio_processor_normalizer)
-        self.audio_encoder = instantiate(model.audio_encoder)
+        
+        # Instantiate the raw encoder
+        raw_audio_encoder = instantiate(model.audio_encoder)
+        
+        # Wrap the encoder and its pre-processing steps
+        self.audio_encoder = EncoderWrapper(
+            encoder=raw_audio_encoder,
+            audio_processor=self.audio_processor,
+            audio_processor_normalizer=self.audio_processor_normalizer
+        )
+        
         self.classifier = instantiate(model.classifier)
 
         # Setup wav augmentation if configured
@@ -250,9 +225,12 @@ class SpeakerVerification(pl.LightningModule):
 
     def _freeze_pretrained_components(self) -> None:
         """Freeze pretrained components and enable training for others."""
-        if hasattr(self.audio_encoder, "encode_batch"):
-            for param in self.audio_encoder.parameters():
-                param.requires_grad = False
+        # Access the original encoder through the wrapper
+        original_encoder = self.audio_encoder.encoder
+
+        # if hasattr(self.audio_encoder, "encode_batch"):  Define what to freeze -- IGNORE ---  
+        for param in original_encoder.parameters():
+            param.requires_grad = False
 
     def _log_step_metrics(self, results: Dict[str, Any], batch: VoxcelebItem, stage: str) -> None:
         criterion = getattr(self, f"{stage}_criterion")
@@ -310,37 +288,17 @@ class SpeakerVerification(pl.LightningModule):
 
     ############ Lightning ############
     def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
-        if hasattr(self.audio_encoder, "encode_batch"):
-            # For speechbrain encoders (e.g., x-vector)
-            audio_emb = self.audio_encoder.encode_batch(
-                wavs=batch_audio,
-                wav_lens=batch_audio_lens/max(batch_audio_lens)
-                ).squeeze(1)
-        else:
-            # TODO: strange mismatch during testing 
-            if self.device != batch_audio.device:
-                batch_audio = batch_audio.to(self.device)
-            if self.device != batch_audio_lens.device:
-                batch_audio_lens = batch_audio_lens.to(self.device)
+        """
+        Computes audio embeddings using the wrapped encoder, which handles the full pipeline.
+        """
+        # Move tensors to the correct device.
+        if self.device != batch_audio.device:
+            batch_audio = batch_audio.to(self.device)
+        if self.device != batch_audio_lens.device:
+            batch_audio_lens = batch_audio_lens.to(self.device)
 
-            input_values = self.audio_processor(batch_audio)
-            if not isinstance(self.audio_processor_normalizer, nn.Identity) and self.audio_processor_normalizer is not None:
-                input_values = self.audio_processor_normalizer(input_values, lengths=batch_audio_lens/max(batch_audio_lens))
-            
-            # Check if the encoder's forward method accepts a 'lengths' argument
-            if hasattr(self.audio_encoder, 'code'):
-                # 1. Check for torch.jit models
-                with torch.jit.optimized_execution(False):
-                    audio_emb = self.audio_encoder(input_values).squeeze(1)
-            else:
-                # 2. For regular PyTorch models, inspect the signature
-                sig = inspect.signature(self.audio_encoder.forward)
-                if 'lengths' in sig.parameters:
-                    audio_emb = self.audio_encoder(input_values, lengths=batch_audio_lens/max(batch_audio_lens)).squeeze(1)
-                else:
-                    audio_emb = self.audio_encoder(input_values).squeeze(1)
-
-        return audio_emb
+        # The wrapper now handles the entire pipeline from raw audio to embeddings.
+        return self.audio_encoder(wavs=batch_audio, wav_lens=batch_audio_lens)
 
     def forward(self, batch: VoxcelebItem) -> Dict[str, torch.Tensor]:
         """Process audio inputs with optimized embedding caching."""

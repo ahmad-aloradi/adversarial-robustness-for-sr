@@ -6,7 +6,7 @@ audio_processor_normalizer:
   _target_: torch.nn.Identity
 
 audio_encoder:
-  _target_: src.modules.sv.load_pretrained_model
+  _target_: src.utils.hf_utils.load_pretrained_model
   filename: "ecapa2.pt"
   repo_id: "Jenthe/ECAPA2"
   map_location: "cuda"

@@ -1,0 +1,34 @@
+# @package module.model
+audio_processor:
+  _target_: speechbrain.lobes.features.Fbank
+  sample_rate: ${datamodule.dataset.sample_rate}
+  deltas: False
+  n_mels: 80
+  f_min: 0
+  f_max: null
+  n_fft: 512
+  win_length: 25
+  hop_length: 10
+  left_frames: 0
+  right_frames: 0
+
+audio_processor_normalizer:
+  _target_: speechbrain.processing.features.InputNormalization
+  norm_type: sentence
+  std_norm: False
+
+# --- Refactored Section ---
+audio_encoder:
+  _target_: torch.nn.Sequential
+  _args_:
+  - _target_: wespeaker.models.ecapa_tdnn.ECAPA_TDNN_GLOB_c1024
+    feat_dim: ${module.model.audio_processor.n_mels}
+    embed_dim: 192
+    pooling_func: "ASTP"
+  - _target_: src.utils.torch_utils.SelectFromTuple
+    _args_: [1]
+
+classifier: 
+  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  input_size: ${module.model.audio_encoder._args_[0].embed_dim}
+  out_neurons:  ${datamodule.num_classes}

@@ -1,0 +1,20 @@
+# @package module.model
+audio_processor:
+  _target_: torch.nn.Identity
+
+audio_processor_normalizer:
+  _target_: torch.nn.Identity
+
+audio_encoder:
+  _target_: src.utils.hf_utils.load_wespeaker_model
+  model_name: "resnet293"
+  repo_id: "Wespeaker/wespeaker-voxceleb-resnet293-LM"
+  checkpoint_filename: "avg_model.pt"
+  model_args:
+    feat_dim: 80
+    embed_dim: 256
+
+classifier:
+  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  input_size: 256
+  out_neurons:  ${datamodule.num_classes}

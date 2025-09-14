@@ -1,0 +1,20 @@
+# @package module.model
+audio_processor:
+  _target_: torch.nn.Identity
+
+audio_processor_normalizer:
+  _target_: torch.nn.Identity
+
+audio_encoder:
+  _target_: src.utils.hf_utils.load_wespeaker_model
+  model_name: "campplus"
+  repo_id: "Wespeaker/wespeaker-voxceleb-campplus-LM"
+  checkpoint_filename: "avg_model.pt"
+  model_args:
+    feat_dim: 80
+    embed_dim: 512
+
+classifier:
+  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  input_size: 512 # This remains correct for CAM++
+  out_neurons:  ${datamodule.num_classes}
