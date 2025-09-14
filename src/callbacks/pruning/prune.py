@@ -1,15 +1,42 @@
+from typing import List, Tuple, Callable, Optional, Union, Type
+import warnings
+from collections import defaultdict
+
 from pytorch_lightning.callbacks.pruning import ModelPruning
 import torch
 import torch.nn as nn
 import torch.nn.utils.prune as pytorch_prune
-from typing import List, Tuple, Callable, Optional, Union, Dict, Any
-import warnings
-from collections import defaultdict
 from pytorch_lightning import LightningModule, Trainer
 
 from src import utils
 
+# Constants are defined at the module level for clarity and reusability.
 log = utils.get_pylogger(__name__)
+WEIGHT_PARAM_NAME = 'weight'
+BIAS_PARAM_NAME = 'bias'
+DEFAULT_PRUNABLE_LAYER_TYPES: Tuple[Type[nn.Module], ...] = (
+    # Core Layers
+    nn.Linear,
+    nn.Embedding,
+    
+    # Convolutional Layers
+    nn.Conv1d,
+    nn.Conv2d,
+    nn.Conv3d,
+    nn.ConvTranspose1d,
+    nn.ConvTranspose2d,
+    nn.ConvTranspose3d,
+    
+    # Normalization Layers
+    nn.BatchNorm1d,
+    nn.BatchNorm2d,
+    nn.BatchNorm3d,
+    nn.LayerNorm,
+    
+    # Recurrent Layers
+    nn.LSTM,
+    nn.GRU,
+)
 
 
 class MagnitudePruner(ModelPruning):
@@ -148,7 +175,6 @@ class MagnitudePruner(ModelPruning):
         self._checkpoint_original_settings = {}
         self._has_reset_checkpoint_best_score = False
 
-        
     def _validate_params(self, amount, scheduled_pruning, initial_amount, final_amount):
         """Validate initialization parameters."""
         if amount is not None and isinstance(amount, float) and not (0 <= amount <= 1):
@@ -260,12 +286,6 @@ class MagnitudePruner(ModelPruning):
         
         self._validated_params_cache = valid_params
         return valid_params
-
-    def _get_default_parameters_to_prune(self) -> List[Tuple[nn.Module, str]]:
-        """Get default parameters to prune with better filtering."""
-        # This method should only be called from within _get_valid_parameters or on_fit_start
-        # We need access to pl_module, so we'll defer this logic
-        return []
 
     def make_pruning_permanent(self, pl_module):
         """
@@ -405,34 +425,89 @@ class MagnitudePruner(ModelPruning):
             # Clean up
             delattr(self, '_saved_state')
 
-    def _collect_default_prunable_parameters(self, pl_module) -> List[Tuple[nn.Module, str]]:
-        """Collect default parameters for pruning with intelligent filtering."""
-        default_params = []
-        
-        # Focus on weight parameters from major layer types
-        for name, module in pl_module.named_modules():
-            # Primary targets: weight parameters from major layer types
-            if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.Linear)):
-                if hasattr(module, 'weight') and isinstance(module.weight, torch.Tensor):
-                    # Only include weight parameters that are substantial enough for pruning
-                    if module.weight.numel() >= 10:  # Minimum threshold
-                        default_params.append((module, 'weight'))
-                        
-                # For bias, only include if it's from a linear layer and substantial
-                if (hasattr(module, 'bias') and module.bias is not None and 
-                    isinstance(module, nn.Linear) and module.bias.numel() >= 10):
-                    default_params.append((module, 'bias'))
+    def _collect_default_prunable_parameters(
+            self,
+            module: nn.Module,
+            min_param_elements: int = 100
+            ) -> List[Tuple[nn.Module, str]]:
+        """
+        Collects default prunable parameters from a PyTorch module.
+
+        This function implements a comprehensive strategy for identifying parameters
+        suitable for pruning by iterating through all submodules.
+
+        ### Key Design Choices:
+        1.  **Target Layers**: It identifies candidate layers based on the extensive
+            `DEFAULT_PRUNABLE_LAYER_TYPES` tuple, which can be easily modified.
+
+        2.  **Handling Transformers**: `nn.MultiheadAttention` is handled implicitly.
+            This function iterates with `module.modules()`, which automatically traverses
+            into the `nn.Linear` submodules (e.g., `in_proj`, `out_proj`) within a
+            transformer block. Since `nn.Linear` is a target layer, these crucial
+            parameters are correctly collected without needing to specify
+            `nn.MultiheadAttention` itself.
+
+        3.  **Handling RNNs**: Special logic is included for `nn.LSTM` and `nn.GRU`.
+            Unlike other layers, their main weight matrices are not named 'weight'
+            but follow a `weight_ih_l[k]` and `weight_hh_l[k]` pattern. This function
+            explicitly finds and includes these parameters.
+
+        4.  **Parameter-Specific Rules**:
+            - **Weights**: The 'weight' parameter is targeted for all layers in the list
+            (except RNNs, which have special handling).
+            - **Biases**: Only biases of `nn.Linear` layers are targeted, a common
+            heuristic for stable and effective pruning.
+
+        5.  **Size Threshold**: A parameter is only collected if it has at least
+            `min_param_elements` to avoid pruning very small tensors.
+
+        Args:
+            module (nn.Module): The PyTorch model to inspect.
+            min_param_elements (int): The minimum number of elements a parameter must have.
+
+        Returns:
+            List[Tuple[nn.Module, str]]: A list of tuples, where each tuple contains
+            the submodule instance and the name of the parameter to be pruned.
+        """
+        prunable_params = []
+
+        for sub_module in module.modules():
+            if isinstance(sub_module, torch.jit.ScriptModule):
+                raise ValueError("ScriptModules are not supported. Please convert to a standard nn.Module.")
+            if not isinstance(sub_module, DEFAULT_PRUNABLE_LAYER_TYPES):
+                continue
             
-            # Additional targets: BatchNorm and LayerNorm weight parameters (but not bias)
-            elif isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.LayerNorm)):
-                if (hasattr(module, 'weight') and module.weight is not None and 
-                    isinstance(module.weight, torch.Tensor) and module.weight.numel() >= 10):
-                    default_params.append((module, 'weight'))
-        
-        if self.verbose > 1:
-            log.debug(f"Collected {len(default_params)} default parameters for pruning")
+            # --- Special Handling for RNN Layers ---
+            if isinstance(sub_module, (nn.LSTM, nn.GRU)):
+                # RNNs have multiple weight parameters (e.g., 'weight_ih_l0', 'weight_hh_l0')
+                for param_name, param in sub_module.named_parameters():
+                    # Target only the main weight matrices, not the biases
+                    if 'weight_' in param_name and param.numel() >= min_param_elements:
+                        prunable_params.append((sub_module, param_name))
+                # Skip the standard checks below for this module
+                continue
+
+            # --- Standard 'weight' Parameter Check ---
+            weight_param = getattr(sub_module, WEIGHT_PARAM_NAME, None)
+            if (
+                isinstance(weight_param, nn.Parameter) and 
+                weight_param.numel() >= min_param_elements
+            ):
+                prunable_params.append((sub_module, WEIGHT_PARAM_NAME))
             
-        return default_params
+            # --- Standard 'bias' Parameter Check (Linear layers only) ---
+            if isinstance(sub_module, nn.Linear):
+                bias_param = getattr(sub_module, BIAS_PARAM_NAME, None)
+                if (
+                    isinstance(bias_param, nn.Parameter) and 
+                    bias_param.numel() >= min_param_elements
+                ):
+                    prunable_params.append((sub_module, BIAS_PARAM_NAME))
+
+        # To avoid duplicates if a module is listed in another, we create a final unique list.
+        # The list comprehension with a set provides an efficient way to get unique tuples.
+        unique_params = list(set(prunable_params))
+        return unique_params
 
     def setup(self, trainer, pl_module, stage):
         """Setup for training stage - collect default parameters if needed."""
