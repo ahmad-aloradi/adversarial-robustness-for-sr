@@ -18,8 +18,8 @@ dataset:
     veri_test_extended2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test_extended2.csv
     veri_test_hard2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test_hard2.csv
   metadata_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/vox_meta.csv
-  train_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/train_csv.csv
-  val_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/val_csv.csv
+  train_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/train.csv
+  val_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/val.csv
   speaker_lookup: ${datamodule.dataset.voxceleb_artifacts_dir}/speaker_lookup.csv
 
   seed: ${seed}
