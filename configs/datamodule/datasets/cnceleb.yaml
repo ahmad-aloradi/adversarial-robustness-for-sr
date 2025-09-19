@@ -1,0 +1,70 @@
+_target_: src.datamodules.cnceleb_datamodule.CNCelebDataModule
+
+dataset:
+  # Base directory for the combined CNCeleb datasets
+  data_dir: data/cnceleb
+  # CNCeleb1 is mandatory, CNCeleb2 is optional
+  cnceleb1: "CN-Celeb_flac"
+  cnceleb2: "CN-Celeb2_flac"  # Set to null to use only CNCeleb1
+  
+  # Base search directory where pre-generated metadata files can be found
+  base_search_dir: ${datamodule.dataset.data_dir}/metadata
+  
+  # Directory where artifacts like CSVs will be stored for this experiment
+  artifacts_dir: ${hydra:runtime.output_dir}/cnceleb_artifacts
+
+  # Specific artifact file paths
+  dev_metadata_file: ${datamodule.dataset.artifacts_dir}/cnceleb_dev.csv
+  enroll_csv_path: ${datamodule.dataset.artifacts_dir}/enroll.csv
+  test_unique_csv_path: ${datamodule.dataset.artifacts_dir}/test_unique.csv
+  train_csv_file: ${datamodule.dataset.artifacts_dir}/train.csv
+  val_csv_file: ${datamodule.dataset.artifacts_dir}/val.csv
+  speaker_lookup: ${datamodule.dataset.artifacts_dir}/speaker_lookup.csv
+  veri_test_output_path: ${datamodule.dataset.artifacts_dir}/verification_trials.csv
+  dev_spk_file: ${datamodule.dataset.artifacts_dir}/dev_speakers.txt
+  test_spk_file: ${datamodule.dataset.artifacts_dir}/test_speakers.txt
+
+  # --- Data Preparation Settings ---
+  # Set to true to skip prepare_data step if data is already processed
+  train_ratio: 0.95
+  speaker_overlap: false
+  seed: {seed}
+  sep: "|"
+  verbose: true
+  sample_rate: 16000
+  min_duration: 0.5
+  max_duration: 4.0 # Used during dataset instantiation
+
+transforms: null
+
+# Placeholder, will be determined automatically by the CsvProcessor during data preparation
+num_classes: 2793
+
+loaders:
+  train:
+    batch_size: 32
+    shuffle: True
+    num_workers: 4
+    drop_last: True
+    pin_memory: False
+
+  val:
+    batch_size: 32
+    shuffle: False
+    num_workers: 4
+    drop_last: False
+    pin_memory: False
+
+  test:
+    batch_size: 8
+    shuffle: False
+    num_workers: 4
+    drop_last: False
+    pin_memory: False
+
+  enrollment:
+    batch_size: 8
+    shuffle: False
+    num_workers: 4
+    drop_last: False
+    pin_memory: False

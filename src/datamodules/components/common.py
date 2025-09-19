@@ -80,6 +80,24 @@ class LibriSpeechDefaults(NamedTuple):
   country: str = 'us'
   sample_rate: float = 16000
 
+#########   CNCeleb dataclasses   #########
+
+@dataclass(frozen=True)
+class CNCeleb(BaseDatasetCols):
+    pass
+
+@dataclass(frozen=True)
+class CNCelebSpeaker:
+    speaker_id: Literal['speaker_id'] = 'speaker_id'
+    gender: Literal['gender'] = 'gender'
+    split: Literal['split'] = 'split'
+
+class CNCelebDefaults(NamedTuple):
+  dataset_name: str = 'cnceleb'
+  language: str = 'zh'
+  country: str = 'cn'
+  sample_rate: float = 16000
+
 #########   Common functions   #########
 
 def get_dataset_class(dataset: str):
@@ -95,6 +113,8 @@ def get_dataset_class(dataset: str):
         dataclass_instance =  Voxceleb()
     elif dataset == 'librispeech':
         dataclass_instance = Librispeech()
+    elif dataset == 'cnceleb':
+        dataclass_instance = CNCeleb()
     else:
         dataclass_instance =  BaseDatasetCols()    
     return dataclass_instance, list(astuple(dataclass_instance))
@@ -112,6 +132,8 @@ def get_speaker_class(dataset: str):
         dataclass_instance = LibrispeechSpeaker()
     elif dataset == 'voxceleb':
         dataclass_instance = VoxcelebSpeaker()
+    elif dataset == 'cnceleb':
+        dataclass_instance = CNCelebSpeaker()
     else:
         raise NotImplementedError(f"Speaker dataclass not implemented for {dataset}")
     return dataclass_instance, list(astuple(dataclass_instance))
