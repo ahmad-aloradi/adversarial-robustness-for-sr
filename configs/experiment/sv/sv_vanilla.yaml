@@ -1,0 +1,75 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=example
+
+defaults:
+  - /module/sv_model: wespeaker_ecapa_tdnn.yaml
+  - override /callbacks: default.yaml
+  - override /datamodule: datasets/voxceleb.yaml
+  - override /module: sv.yaml
+  - override /trainer: gpu.yaml
+  - override /logger: tensorboard.yaml
+
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+tags: ["voxceleb", "sv"]
+seed: 42
+
+trainer:
+  min_epochs: 10
+  max_epochs: 15
+  gradient_clip_val: 1.0
+  num_sanity_val_steps: 0
+
+callbacks:
+  model_checkpoint:
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+  early_stopping:
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: 8
+
+datamodule:
+  dataset:
+    max_duration: 3.0
+
+  loaders:
+    train:
+      batch_size: 16
+    valid:
+      batch_size: 16
+    test:
+      batch_size: 8
+    enrollment:
+      batch_size: 8
+
+module:
+  normalize_test_scores: True
+
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: "max"
+      factor: 0.25
+      min_lr: 1.0e-6
+      patience: 2
+      verbose: True
+    extras:
+      monitor: ${replace:"valid/__metric__"}
+      interval: "epoch"
+      frequency: 1
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: True
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
+  
+logger:
+  wandb:
+    tags: ${tags}
+    group: "voxceleb"

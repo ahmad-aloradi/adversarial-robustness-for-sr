@@ -1,0 +1,157 @@
+defaults:
+  - _self_
+
+_target_: src.datamodules.multi_sv_datamodule.MultiSVDataModule
+
+# Stage participation and dataset-specific configuration blocks.
+datasets:
+  voxceleb:
+    enabled: true
+    stages:
+      train: true
+      val: true
+      test: true
+    datamodule:
+      _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
+      dataset:
+        data_dir: data/voxceleb
+        wav_dir: ${datamodule.datasets.voxceleb.datamodule.dataset.data_dir}/voxceleb1_2
+        veri_test_filenames:
+          - veri_test2
+          - veri_test_extended2
+          - veri_test_hard2
+        voxceleb_metadata: ${datamodule.datasets.voxceleb.datamodule.dataset.data_dir}/voxceleb_metadata
+        base_search_dir: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_metadata}/metadata
+        voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
+        veri_test_output_paths:
+          veri_test2: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/veri_test2.csv
+          veri_test_extended2: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/veri_test_extended2.csv
+          veri_test_hard2: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/veri_test_hard2.csv
+        metadata_csv_file: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/vox_meta.csv
+        train_csv_file: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/train.csv
+        val_csv_file: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/val.csv
+        speaker_lookup: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/speaker_lookup.csv
+        seed: ${seed}
+        sep: "|"
+        verbose: true
+        save_csv: true
+        sample_rate: 16000
+        min_duration: 0.5
+        max_duration: 10.0
+        speaker_overlap: true
+        train_ratio: 0.95
+      transforms: null
+      num_classes: 7205
+      loaders:
+        train:
+          batch_size: 32
+          shuffle: true
+          num_workers: 4
+          drop_last: true
+          pin_memory: false
+        valid:
+          batch_size: 32
+          shuffle: false
+          num_workers: 4
+          drop_last: false
+          pin_memory: false
+        test:
+          batch_size: 8
+          shuffle: false
+          num_workers: 4
+          drop_last: false
+          pin_memory: false
+        enrollment:
+          batch_size: 8
+          shuffle: false
+          num_workers: 4
+          drop_last: false
+          pin_memory: false
+
+  cnceleb:
+    enabled: true
+    stages:
+      train: false
+      val: false
+      test: true
+    datamodule:
+      _target_: src.datamodules.cnceleb_datamodule.CNCelebDataModule
+      dataset:
+        data_dir: data/cnceleb
+        cnceleb1: "CN-Celeb_flac"
+        cnceleb2: "CN-Celeb2_flac"
+        base_search_dir: ${datamodule.datasets.cnceleb.datamodule.dataset.data_dir}/metadata
+        artifacts_dir: ${hydra:runtime.output_dir}/cnceleb_artifacts
+        dev_metadata_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/cnceleb_dev.csv
+        enroll_csv_path: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/enroll.csv
+        test_unique_csv_path: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/test_unique.csv
+        train_csv_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/train.csv
+        val_csv_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/val.csv
+        speaker_lookup: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/speaker_lookup.csv
+        veri_test_output_path: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/verification_trials.csv
+        dev_spk_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/dev_speakers.txt
+        test_spk_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/test_speakers.txt
+        train_ratio: 0.95
+        speaker_overlap: false
+        seed: ${seed}
+        sep: "|"
+        verbose: true
+        sample_rate: 16000
+        min_duration: 0.5
+        max_duration: 4.0
+      transforms: null
+      num_classes: 2793
+      loaders:
+        train:
+          batch_size: 32
+          shuffle: true
+          num_workers: 4
+          drop_last: true
+          pin_memory: false
+        val:
+          batch_size: 32
+          shuffle: false
+          num_workers: 4
+          drop_last: false
+          pin_memory: false
+        test:
+          batch_size: 8
+          shuffle: false
+          num_workers: 4
+          drop_last: false
+          pin_memory: false
+        enrollment:
+          batch_size: 8
+          shuffle: false
+          num_workers: 4
+          drop_last: false
+          pin_memory: false
+
+loaders:
+  train:
+    batch_size: 32
+    shuffle: true
+    num_workers: 4
+    drop_last: true
+    pin_memory: false
+
+  valid:
+    batch_size: 32
+    shuffle: false
+    num_workers: 4
+    drop_last: false
+    pin_memory: false
+
+  test:
+    batch_size: 8
+    shuffle: false
+    num_workers: 4
+    drop_last: false
+    pin_memory: false
+
+  enrollment:
+    batch_size: 8
+    shuffle: false
+    num_workers: 4
+    drop_last: false
+    pin_memory: false

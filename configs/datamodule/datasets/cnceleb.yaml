@@ -2,7 +2,7 @@ _target_: src.datamodules.cnceleb_datamodule.CNCelebDataModule
 
 dataset:
   # Base directory for the combined CNCeleb datasets
-  data_dir: data/cnceleb
+  data_dir: ${paths.data_dir}/cnceleb
   # CNCeleb1 is mandatory, CNCeleb2 is optional
   cnceleb1: "CN-Celeb_flac"
   cnceleb2: "CN-Celeb2_flac"  # Set to null to use only CNCeleb1
@@ -28,7 +28,7 @@ dataset:
   # Set to true to skip prepare_data step if data is already processed
   train_ratio: 0.95
   speaker_overlap: false
-  seed: {seed}
+  seed: ${seed}
   sep: "|"
   verbose: true
   sample_rate: 16000

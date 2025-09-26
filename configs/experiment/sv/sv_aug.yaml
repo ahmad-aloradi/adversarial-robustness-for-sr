@@ -4,7 +4,7 @@
 # python train.py experiment=example
 
 defaults:
-  - /module/sv_model: from_scratch_ecapa_tdnn.yaml
+  - /module/sv_model: wespeaker_ecapa_tdnn.yaml
   - override /callbacks: default.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml
