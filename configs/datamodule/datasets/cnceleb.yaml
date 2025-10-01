@@ -25,7 +25,6 @@ dataset:
   test_spk_file: ${datamodule.dataset.artifacts_dir}/test_speakers.txt
 
   # --- Data Preparation Settings ---
-  # Set to true to skip prepare_data step if data is already processed
   train_ratio: 0.95
   speaker_overlap: false
   seed: ${seed}

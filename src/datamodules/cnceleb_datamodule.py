@@ -1,6 +1,5 @@
 from typing import Dict, List, Optional
 from pathlib import Path
-import shutil
 
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
@@ -18,10 +17,10 @@ from src.datamodules.components.cnceleb.cnceleb_dataset import (
     EnrollCollate
 )
 
-from src.datamodules.components.cnceleb.cnceleb_prep import CNCelebProcessor
 from src import utils
 from src.datamodules.components.utils import CsvProcessor
 from src.datamodules.components.common import CNCelebDefaults, get_dataset_class
+from src.datamodules.preparation.cnceleb import CNCelebMetadataPreparer
 
 log = utils.get_pylogger(__name__)
 DATASET_DEFAULTS = CNCelebDefaults()
@@ -59,152 +58,29 @@ class CNCelebDataModule(LightningDataModule):
     def prepare_data(self):
         """Prepares the CNCeleb dataset by copying from base_search_dir or generating metadata, splitting, and creating trial lists."""
         log.info("Preparing CNCeleb data...")
-        artifacts_dir = Path(self.hparams.dataset.artifacts_dir)
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        preparer = CNCelebMetadataPreparer(self.hparams.dataset, self.csv_processor)
+        result = preparer.prepare()
+        if result.extras.get("core_files_copied"):
+            log.info("Loaded CNCeleb metadata from pre-generated artifacts.")
+        else:
+            log.info("Generated CNCeleb metadata from raw sources.")
 
-        # Check for base_search_dir and copy core files if available
-        base_search_dir = Path(self.hparams.dataset.get('base_search_dir', ''))
-        
-        # Define core files that can be pre-generated and copied
-        core_files_to_copy = [
-            ('cnceleb_dev.csv', self.hparams.dataset.dev_metadata_file),
-            ('enroll.csv', self.hparams.dataset.enroll_csv_path),
-            ('test_unique.csv', self.hparams.dataset.test_unique_csv_path),
-            ('verification_trials.csv', self.hparams.dataset.veri_test_output_path),
-            ('dev_speakers.txt', self.hparams.dataset.dev_spk_file),
-            ('test_speakers.txt', self.hparams.dataset.test_spk_file),
+    def _artifacts_ready(self) -> bool:
+        required_artifacts = [
+            self.hparams.dataset.train_csv_file,
+            self.hparams.dataset.val_csv_file,
+            self.hparams.dataset.veri_test_output_path,
+            self.hparams.dataset.speaker_lookup,
+            str(self.enroll_csv_path),
+            str(self.test_unique_csv_path),
         ]
-        
-        # Check if core pre-generated files exist
-        core_files_exist = base_search_dir.exists() and all(
-            (base_search_dir / source_file).exists() for source_file, _ in core_files_to_copy
-        )
-        
-        if core_files_exist:
-            log.info(f"Found core pre-generated files in {base_search_dir}. Copying to experiment directory...")
-            for source_file, target_path in core_files_to_copy:
-                source_path = base_search_dir / source_file
-                target_path = Path(target_path)
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_path, target_path)
-                log.info(f"Copied {source_path} -> {target_path}")
-            
-            # Load the copied dev metadata for further processing
-            dev_df = pd.read_csv(self.hparams.dataset.dev_metadata_file, sep=self.hparams.dataset.sep)
-            log.info(f"Loaded pre-generated dev metadata with {len(dev_df)} rows")
-        else:
-            # Generate core metadata from scratch
-            log.info("Pre-generated core files not found. Generating metadata from scratch...")
-            
-            # Step 1: Instantiate the processor with specific artifact paths
-            processor = CNCelebProcessor(
-                root_dir=self.hparams.dataset.data_dir,
-                artifacts_dir=self.hparams.dataset.artifacts_dir,
-                cnceleb1=self.hparams.dataset.cnceleb1,
-                dev_metadata_file=self.hparams.dataset.dev_metadata_file,
-                enroll_csv_path=self.hparams.dataset.enroll_csv_path,
-                test_unique_csv_path=self.hparams.dataset.test_unique_csv_path,
-                dev_spk_file=self.hparams.dataset.dev_spk_file,
-                test_spk_file=self.hparams.dataset.test_spk_file,
-                cnceleb2=self.hparams.dataset.get('cnceleb2', None),
-                verbose=self.hparams.dataset.verbose,
-                sep=self.hparams.dataset.sep,
-            )
-
-            # Step 2: Generate trial and enrollment lists to identify test/enroll speakers
-            trials_df = processor.generate_trial_list()
-            trials_df.to_csv(self.hparams.dataset.veri_test_output_path, sep=self.hparams.dataset.get('sep', '|'), index=False)
-            log.info(f"Saved verification trials to {self.hparams.dataset.veri_test_output_path}")
-            enroll_csv_path, test_unique_csv_path = processor.generate_unique_embeddings_csvs(trials_df)
-            if not (Path(test_unique_csv_path).exists() and Path(enroll_csv_path).exists()):
-                raise FileNotFoundError("Failed to generate unique test or enrollment CSV files.")
-
-            # Step 3: Generate enrollment and development metadata for the entire dataset
-            enroll_df = processor.generate_enrollment_embeddings_list()
-            dev_df = processor.generate_metadata()
-
-            # Exclude enrollment speakers from the development dataframe
-            # TODO: Although we do not loop over the eval dir during preparation, the dev directory somehow still contains enrollment speakers
-            # We need to investigate this further.
-            enroll_speakers = set(enroll_df['enroll_id'].str.split('-').str[0])
-            test_speakers = set(pd.read_csv(processor.test_spk_file, header=None)[0])
-            dev_speakers = set(pd.read_csv(processor.dev_spk_file, header=None)[0])
-
-            original_dev_rows = len(dev_df)
-            dev_df = dev_df[~dev_df['speaker_id'].isin(test_speakers)]
-            log.info(f"Excluded {original_dev_rows - len(dev_df)} utterances belonging to enrollment speakers.")
-
-            assert not dev_speakers.intersection(enroll_speakers), "Dev and enrollment speakers should not overlap!"
-            assert test_speakers.intersection(enroll_speakers), "Enrollment and test speakers should overlap!"
-            assert not test_speakers.intersection(dev_speakers), "Test and dev speakers should not overlap!"
-
-            # Save the metadata file with the filtered dataframe
-            dev_df.to_csv(processor.dev_metadata_file, sep=self.hparams.dataset.sep, index=False)
-
-        # Always generate derived files (speaker_lookup, train/val splits) from the dev metadata
-        log.info("Generating derived files (speaker_lookup, train/val splits)...")
-        
-        # Step 4: Generate speaker metadata from the dev_df and order them by total duration
-        # Note: We need a processor instance for this, so create one if we copied files
-        if core_files_exist:
-            processor = CNCelebProcessor(
-                root_dir=self.hparams.dataset.data_dir,
-                artifacts_dir=self.hparams.dataset.artifacts_dir,
-                cnceleb1=self.hparams.dataset.cnceleb1,
-                dev_metadata_file=self.hparams.dataset.dev_metadata_file,
-                enroll_csv_path=self.hparams.dataset.enroll_csv_path,
-                test_unique_csv_path=self.hparams.dataset.test_unique_csv_path,
-                dev_spk_file=self.hparams.dataset.dev_spk_file,
-                test_spk_file=self.hparams.dataset.test_spk_file,
-                cnceleb2=self.hparams.dataset.get('cnceleb2', None),
-                verbose=self.hparams.dataset.verbose,
-                sep=self.hparams.dataset.sep,
-            )
-        
-        speaker_lookup_df = processor.generate_speaker_metadata(dev_df)
-        speaker_lookup_df.to_csv(self.hparams.dataset.speaker_lookup, sep=self.hparams.dataset.sep, index=False)
-
-        # Step 5: Add metadata class IDs and speaker stats
-        dev_df, speaker_lookup_df = self.csv_processor.process(
-            dataset_files=[str(processor.dev_metadata_file)],
-            spks_metadata_paths=[self.hparams.dataset.speaker_lookup],
-            verbose=self.hparams.dataset.verbose
-            )
-
-        # Overwrite the metadata file with the filtered dataframe
-        dev_df.to_csv(processor.dev_metadata_file, sep=self.hparams.dataset.sep, index=False)
-        log.info(f"Saved metadata to {processor.dev_metadata_file}")        
-        # Save speaker_lookup_df
-        speaker_lookup_df.to_csv(self.hparams.dataset.speaker_lookup, sep=self.hparams.dataset.sep, index=False)
-        log.info(f"Saved speaker lookup to {self.hparams.dataset.speaker_lookup}")        
-
-        # Step 6: Split dataset into train and validation 
-        CsvProcessor.split_dataset(
-            df=dev_df,
-            train_ratio=self.hparams.dataset.train_ratio,
-            save_csv=True,
-            speaker_overlap=self.hparams.dataset.speaker_overlap,
-            speaker_id_col=DATASET_CLS.SPEAKER_ID,
-            train_csv=self.hparams.dataset.train_csv_file,
-            val_csv=self.hparams.dataset.val_csv_file,
-            sep=self.hparams.dataset.sep,
-            seed=self.hparams.dataset.seed
-        )
-        log.info(f"Saved train and val csvs to {self.hparams.dataset.train_csv_file} and {self.hparams.dataset.val_csv_file}")
-
-        # Step 7: Validate the splits
-        log.info("CNCeleb preparation summary:")
-        log.info(f"  Final metadata rows: {len(dev_df)}")
-        if not core_files_exist:
-            trials_df = pd.read_csv(self.hparams.dataset.veri_test_output_path, sep=self.hparams.dataset.sep)
-            enroll_df = pd.read_csv(self.hparams.dataset.enroll_csv_path, sep=self.hparams.dataset.sep)
-            log.info(f"  Trials rows: {len(trials_df)}")
-            log.info(f"  Enrollment rows: {len(enroll_df)}")
-        else:
-            log.info("  (Core files were copied from pre-generated location)")
+        return all(Path(path).exists() for path in required_artifacts)
     
     def setup(self, stage: Optional[str] = None):
         """Instantiates the PyTorch Datasets."""
+        if not self._artifacts_ready():
+            self.prepare_data()
+
         if stage == 'fit' or stage is None:
             self.train_data = CNCelebDataset(
                 data_dir=self.hparams.dataset.data_dir,

@@ -1,4 +1,5 @@
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional
+from pathlib import Path
 
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
@@ -12,11 +13,10 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
     VerificationCollate,
     VoxCelebEnroll,
     EnrollCoallate)
-from src.datamodules.components.voxceleb.voxceleb_prep import VoxCelebProcessor, VoxCelebTestFilter
 from src import utils
 from src.datamodules.components.utils import CsvProcessor
 from src.datamodules.components.common import VoxcelebDefaults, get_dataset_class
-from src import utils
+from src.datamodules.preparation.voxceleb import VoxCelebMetadataPreparer
 
 
 log = utils.get_pylogger(__name__)
@@ -37,122 +37,41 @@ class VoxCelebDataModule(LightningDataModule):
         self.transforms = transforms
         self.loaders = loaders
         self.csv_processor = CsvProcessor(verbose=self.dataset.verbose, fill_value='N/A')
+        self.enroll_data_dict: Dict[str, pd.DataFrame] = {}
+        self.unique_trial_data_dict: Dict[str, pd.DataFrame] = {}
+        self.test_dataframes: Dict[str, pd.DataFrame] = {}
 
     def prepare_data(self):
-        if self.train_data is None:
-            # Step 1: Generate all VoxCeleb metadata (no test speaker exclusion yet)
-            voxceleb_processor = VoxCelebProcessor(
-                root_dir=self.dataset.data_dir,
-                verbose=self.dataset.verbose,
-                artifcats_dir=self.dataset.voxceleb_artifacts_dir,
-                sep=self.dataset.sep)
-            
-            _, _ = voxceleb_processor.generate_metadata(
-                base_search_dir=self.dataset.base_search_dir,
-                min_duration=self.dataset.min_duration,
-                save_df=self.dataset.save_csv
-                )
+        preparer = VoxCelebMetadataPreparer(self.dataset, self.csv_processor)
+        result = preparer.prepare()
 
-            # Step 2: Handle test speaker exclusion for all test sets
-            test_filter = VoxCelebTestFilter(root_dir=self.dataset.data_dir, verbose=self.dataset.verbose)
-            
-            # Process all test sets and collect all test speakers
-            all_test_speakers = set()
-            self.test_dataframes = {}
-            
-            for test_filename in self.dataset.veri_test_filenames:
-                test_speakers, veri_df = test_filter.get_test_speakers(test_filename)
-                all_test_speakers.update(test_speakers)
-                self.test_dataframes[test_filename] = veri_df
-            
-            if self.dataset.verbose:
-                log.info(f"Total unique test speakers across all test sets: {len(all_test_speakers)}")
-            
-            # Load the generated dev metadata and filter out all test speakers
-            dev_metadata = pd.read_csv(str(voxceleb_processor.dev_metadata_file), sep=self.dataset.sep)
-            filtered_dev_metadata = test_filter.filter_dev_metadata(dev_metadata, all_test_speakers)
+        self.enroll_data_dict = result.test.enroll_frames
+        self.unique_trial_data_dict = result.test.unique_trial_frames
+        self.test_dataframes = result.extras["test_dataframes"]
 
-            # This is temporary setting and will be overwritten by the next save command
-            # This is step is needed for compliance csv_processor. So not resetting the indices is ok
-            VoxCelebProcessor.save_csv(filtered_dev_metadata, str(voxceleb_processor.dev_metadata_file), sep=self.dataset.sep)
+    def _artifacts_ready(self) -> bool:
+        required_files = [
+            self.dataset.train_csv_file,
+            self.dataset.val_csv_file,
+            self.dataset.metadata_csv_file,
+            self.dataset.speaker_lookup,
+            *self.dataset.veri_test_output_paths.values(),
+        ]
 
-            # Step 3: Get class id and speaker stats (df is loaded from filtered_dev_metadata!)
-            updated_filtered_dev_metadata, speaker_lookup_csv = self.csv_processor.process(
-                dataset_files=[str(voxceleb_processor.dev_metadata_file)],
-                spks_metadata_paths=[self.dataset.metadata_csv_file],
-                verbose=self.dataset.verbose)
-
-            # save the updated csv
-            VoxCelebProcessor.save_csv(updated_filtered_dev_metadata, str(voxceleb_processor.dev_metadata_file))
-            VoxCelebProcessor.save_csv(speaker_lookup_csv, self.dataset.speaker_lookup)
-            
-            # Step 4: split the dataset into train and validation
-            CsvProcessor.split_dataset(
-                df=updated_filtered_dev_metadata,
-                train_ratio = self.dataset.train_ratio,
-                save_csv=self.dataset.save_csv,
-                speaker_overlap=self.dataset.speaker_overlap,
-                speaker_id_col=DATASET_CLS.SPEAKER_ID,
-                train_csv=self.dataset.train_csv_file,
-                val_csv=self.dataset.val_csv_file,
-                sep=self.dataset.sep,
-                seed=self.dataset.seed
-                )
-            
-            # Step 5: enrich verification files for all test sets
-            self.enroll_data_dict = {}
-            self.unique_trial_data_dict = {}
-            
-            for test_filename in self.dataset.veri_test_filenames:
-                veri_test_path = test_filter.download_test_file(test_filename)
-                test_df = VoxCelebProcessor.enrich_verification_file(
-                    veri_test_path=veri_test_path,
-                    metadata_path=self.dataset.metadata_csv_file,
-                    output_path=self.dataset.veri_test_output_paths[test_filename],
-                    sep=self.dataset.sep,
-                    )
-                
-                self.enroll_data_dict[test_filename] = VoxCelebDataModule._extract_enroll_test(test_df, mode='enroll')
-                self.unique_trial_data_dict[test_filename] = VoxCelebDataModule._extract_enroll_test(test_df, mode='test')
-
-    @staticmethod
-    def _extract_enroll_test(df: pd.DataFrame, mode: Literal['enroll', 'test']):
-        """
-        Vectorized pandas implementation with speaker consistency validation.
-        """
-        path_col = f'{mode}_path'
-        enroll_columns = [col for col in df.columns if col.startswith(f'{mode}_') and col != path_col]
-
-        if not enroll_columns:
-            return df[[path_col]].drop_duplicates().reset_index(drop=True)
-
-        grouped = df.groupby(path_col)
-        
-        # Check which columns are constant within each group (nunique == 1)
-        nunique_per_group = grouped[enroll_columns].nunique()
-        is_constant = nunique_per_group == 1
-        
-        # Find paths where any column is not constant
-        non_constant_mask = ~is_constant.all(axis=1)
-        if non_constant_mask.any():
-            problematic_paths = non_constant_mask[non_constant_mask].index.tolist()
-            # Get details about which columns are inconsistent for the first problematic path
-            first_path = problematic_paths[0]
-            inconsistent_cols = nunique_per_group.loc[first_path][nunique_per_group.loc[first_path] > 1].index.tolist()
-            
-            raise ValueError(
-                f"Inconsistent data found for {mode}_path '{first_path}'. "
-                f"Expected all rows with the same path to have identical values, "
-                f"but found multiple values in columns: {inconsistent_cols}. "
-                f"This violates the assumption that same path = same speaker."
-            )
-        
-        # Get the first value for each column in each group (all values are the same due to validation)
-        results_df = grouped[enroll_columns].first().reset_index()
-        
-        return results_df
+        have_files = all(Path(path).exists() for path in required_files)
+        expected_tests = list(self.dataset.veri_test_filenames)
+        have_enroll = (
+            bool(self.enroll_data_dict)
+            and bool(self.unique_trial_data_dict)
+            and all(name in self.enroll_data_dict for name in expected_tests)
+            and all(name in self.unique_trial_data_dict for name in expected_tests)
+        )
+        return have_files and have_enroll
 
     def setup(self, stage: Optional[str] = None):
+        if not self._artifacts_ready():
+            self.prepare_data()
+
         if stage == 'fit' or stage is None:
             self.train_data = VoxCelebDataset(
                 self.dataset.wav_dir,

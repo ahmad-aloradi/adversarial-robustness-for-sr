@@ -1,15 +1,14 @@
 from typing import Dict, List, Optional
-import os
+from pathlib import Path
 
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
-import pandas as pd
 import hydra
 
 from src import utils
 from src.datamodules.components.librispeech.librispeech_dataset import LibrispeechDataset, Collate
-from src.datamodules.components.librispeech.librispeech_prep import generate_csvs, write_dataset_csv
 from src.datamodules.components.utils import CsvProcessor
+from src.datamodules.preparation.librispeech import LibrispeechMetadataPreparer
 
 log = utils.get_pylogger(__name__)
 
@@ -30,31 +29,22 @@ class LibrispeechDataModule(LightningDataModule):
         self.csv_processor = CsvProcessor(verbose=self.dataset.verbose, fill_value='N/A')
 
     def prepare_data(self):
-        dfs_data, df_speaker = generate_csvs(self.dataset, 
-                                             delimiter=self.dataset.sep, 
-                                             save_csv=self.dataset.save_csv)
+        preparer = LibrispeechMetadataPreparer(self.dataset, self.csv_processor)
+        preparer.prepare()
 
-        # save the updated csv
-        os.makedirs(self.dataset.artifacts_dir, exist_ok=True)
-        write_dataset_csv(df_speaker, self.dataset.speaker_csv_exp_filepath, sep=self.dataset.sep)
-        for df_path, df in dfs_data.items():
-            write_dataset_csv(df, df_path, sep=self.dataset.sep)
-
-        # Get class id and speaker stats
-        updated_dev_csv, speaker_lookup_csv = self.csv_processor.process(
-            dataset_files=list(dfs_data.keys()),
-            spks_metadata_paths=[self.dataset.speaker_csv_path],
-            verbose=self.dataset.verbose)
-        
-        # save the updated csv
-        write_dataset_csv(speaker_lookup_csv, self.dataset.speaker_csv_exp_filepath, sep=self.dataset.sep)
-        for path in [
-            self.dataset.train_csv_exp_filepath, self.dataset.dev_csv_exp_filepath,
-            self.dataset.test_csv_exp_filepath]:
-            write_dataset_csv(updated_dev_csv[updated_dev_csv.split == os.path.splitext(os.path.basename(path))[0]], 
-                              path, sep=self.dataset.sep)
+    def _artifacts_ready(self) -> bool:
+        required_artifacts = [
+            self.dataset.train_csv_exp_filepath,
+            self.dataset.dev_csv_exp_filepath,
+            self.dataset.test_csv_exp_filepath,
+            self.dataset.speaker_csv_exp_filepath,
+        ]
+        return all(Path(path).exists() for path in required_artifacts)
 
     def setup(self, stage: Optional[str] = None):
+        if not self._artifacts_ready():
+            self.prepare_data()
+
         if stage == 'fit' or stage is None:
             self.train_data = LibrispeechDataset(
                 self.dataset.dataset_dir,

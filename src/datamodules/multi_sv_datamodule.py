@@ -14,20 +14,6 @@ from src import utils
 log = utils.get_pylogger(__name__)
 
 
-def _to_bool(value: Any, default: bool = False) -> bool:
-    """Safely convert hydra/omegaconf values to bool."""
-    if value is None:
-        return default
-    if isinstance(value, DictConfig):
-        value = OmegaConf.to_container(value, resolve=True)
-    if isinstance(value, str):
-        lower = value.strip().lower()
-        if lower in {"true", "yes", "y", "1"}:
-            return True
-        if lower in {"false", "no", "n", "0"}:
-            return False
-    return bool(value)
-
 
 class MultiSVDataModule(LightningDataModule):
     """Composite speaker verification datamodule that combines multiple dataset-specific datamodules.
@@ -70,14 +56,18 @@ class MultiSVDataModule(LightningDataModule):
             raise KeyError(f"Unknown dataset '{name}' in MultiSVDataModule configuration.")
         return self.datasets_cfg[name]
 
-    def _is_enabled(self, cfg: DictConfig) -> bool:
-        return _to_bool(cfg.get("enabled", True), default=True)
+    def _is_enabled(self, name: str, cfg: DictConfig) -> bool:
+        assert "enabled" in cfg, f"Dataset '{name}' is missing required 'enabled' configuration field."
+        return cfg["enabled"]
 
-    def _stage_enabled(self, cfg: DictConfig, stage: str) -> bool:
-        stages_cfg = cfg.get("stages", {})
+    def _stage_enabled(self, name: str, cfg: DictConfig, stage: str) -> bool:
+        assert "stages" in cfg, f"Dataset '{name}' is missing required 'stages' configuration block."
+        stages_cfg = cfg["stages"]
         if isinstance(stages_cfg, DictConfig):
-            stages_cfg = OmegaConf.to_container(stages_cfg, resolve=True)
-        return _to_bool(stages_cfg.get(stage), default=False)
+            stages_cfg = OmegaConf.to_container(stages_cfg, resolve=True)    
+        assert isinstance(stages_cfg, dict), f"Expected 'stages' to be a mapping, got {type(stages_cfg).__name__}."
+        assert stage in stages_cfg, f"Expected 'stages' to contain '{stage}', got {list(stages_cfg.keys())}."
+        return stages_cfg[stage]
 
     def _get_or_create_datamodule(self, name: str) -> LightningDataModule:
         if name not in self._datamodules:
@@ -89,19 +79,12 @@ class MultiSVDataModule(LightningDataModule):
             self._datamodules[name] = dm
         return self._datamodules[name]
 
-    def _resolve_collate(self, datasets: Iterable[Tuple[str, Dataset]], default_loader: DataLoader) -> Any:
-        collate_fn = getattr(default_loader, "collate_fn", None)
-        if collate_fn is not None:
-            return collate_fn
-        # Fallback to PyTorch default collate
-        return None
-
     # ------------------------------------------------------------------
     # LightningDataModule API
     # ------------------------------------------------------------------
     def prepare_data(self) -> None:
         for name, cfg in self.datasets_cfg.items():
-            if not self._is_enabled(cfg):
+            if not self._is_enabled(name, cfg):
                 continue
             dm = self._get_or_create_datamodule(name)
             dm.prepare_data()
@@ -120,11 +103,11 @@ class MultiSVDataModule(LightningDataModule):
         self._val_collate = None
 
         for name, cfg in self.datasets_cfg.items():
-            if not self._is_enabled(cfg):
+            if not self._is_enabled(name, cfg):
                 continue
 
-            include_train = self._stage_enabled(cfg, "train")
-            include_val = self._stage_enabled(cfg, "val")
+            include_train = self._stage_enabled(name, cfg, "train")
+            include_val = self._stage_enabled(name, cfg, "val")
             if not (include_train or include_val):
                 continue
 
@@ -159,7 +142,7 @@ class MultiSVDataModule(LightningDataModule):
         self._test_loaders = OrderedDict()
 
         for name, cfg in self.datasets_cfg.items():
-            if not self._is_enabled(cfg) or not self._stage_enabled(cfg, "test"):
+            if not self._is_enabled(name, cfg) or not self._stage_enabled(name, cfg, "test"):
                 continue
 
             dm = self._get_or_create_datamodule(name)
@@ -204,7 +187,7 @@ class MultiSVDataModule(LightningDataModule):
 
     def get_enroll_and_trial_dataloaders(self, dataset_name: str, *args, **kwargs):
         cfg = self._dataset_cfg(dataset_name)
-        if not self._is_enabled(cfg) or not self._stage_enabled(cfg, "test"):
+        if not self._is_enabled(dataset_name, cfg) or not self._stage_enabled(dataset_name, cfg, "test"):
             raise ValueError(f"Dataset '{dataset_name}' is not configured for testing in MultiSVDataModule.")
 
         dm = self._get_or_create_datamodule(dataset_name)
@@ -219,7 +202,7 @@ class MultiSVDataModule(LightningDataModule):
     # ------------------------------------------------------------------
     @property
     def active_datasets(self) -> List[str]:
-        return [name for name, cfg in self.datasets_cfg.items() if self._is_enabled(cfg)]
+        return [name for name, cfg in self.datasets_cfg.items() if self._is_enabled(name, cfg)]
 
 
 
@@ -263,8 +246,8 @@ if __name__ == "__main__":
         test_loaders['cnceleb'].dataset.__getitem__(0)
 
         print("Getting enrollment and unique test dataloaders...")
-        enroll_loader, test_unique_loader = dm.get_enroll_and_trial_dataloaders()
+        enroll_loader, test_unique_loader = dm.get_enroll_and_trial_dataloaders('voxceleb', test_filename='veri_test2')
         print(f"Enrollment loader has {len(enroll_loader)} batches.")
-        print(f"Enrollment loader has {len(enroll_loader)} batches.")
-    
+        print(f"Unique test loader has {len(test_unique_loader)} batches.")
+
     test_datamodule()

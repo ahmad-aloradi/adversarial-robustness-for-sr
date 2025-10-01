@@ -498,15 +498,12 @@ class SpeakerVerification(pl.LightningModule):
             
             # Determine the index of the last batch for this dataloader
             # This is needed for triggering metric computation at the right time
-            try:
-                num_batches = len(dataloader)
-                if num_batches > 0:
-                    self.last_batch_indices[test_filename] = num_batches - 1
-                    log.info(f"Registered '{test_filename}' with {num_batches} batches. Last batch index: {num_batches - 1}.")
-            except TypeError:
-                log.warning(f"Could not determine the number of batches for '{test_filename}'. "
-                            "Metric computation will fall back to on_test_epoch_end.")
-                self.last_batch_indices[test_filename] = -1 # Fallback
+            num_batches = len(dataloader)
+            if num_batches > 0:
+                self.last_batch_indices[test_filename] = num_batches - 1
+                log.info(f"Registered '{test_filename}' with {num_batches} batches. Last batch index: {num_batches - 1}.")
+            else:
+                raise ValueError("Dataloader has zero batches")
 
             # Get unique utterances for enrollment and trials
             enroll_dataloader, trial_unique_dataloader = self.trainer.datamodule.get_enroll_and_trial_dataloaders(test_filename)
