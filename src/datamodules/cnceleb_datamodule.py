@@ -14,7 +14,8 @@ from src.datamodules.components.cnceleb.cnceleb_dataset import (
     CNCelebTest,
     TrainCollate, 
     VerificationCollate,
-    EnrollCollate
+    EnrollCollate,
+    TestCollate
 )
 
 from src import utils
@@ -57,11 +58,15 @@ class CNCelebDataModule(LightningDataModule):
 
     def prepare_data(self):
         """Prepares the CNCeleb dataset by copying from base_search_dir or generating metadata, splitting, and creating trial lists."""
+        if self._artifacts_ready():
+            log.info("Skipping CNCeleb data preparation because all artifacts are already present.")
+            return
         log.info("Preparing CNCeleb data...")
         preparer = CNCelebMetadataPreparer(self.hparams.dataset, self.csv_processor)
         result = preparer.prepare()
+        
         if result.extras.get("core_files_copied"):
-            log.info("Loaded CNCeleb metadata from pre-generated artifacts.")
+            log.info("Loaded CNCeleb metadata from pre-generated artifacts in base_search_dir.")
         else:
             log.info("Generated CNCeleb metadata from raw sources.")
 
@@ -82,34 +87,39 @@ class CNCelebDataModule(LightningDataModule):
             self.prepare_data()
 
         if stage == 'fit' or stage is None:
+            max_duration = -1 if self.hparams.dataset.use_pre_segmentation else self.hparams.dataset.max_duration
+
             self.train_data = CNCelebDataset(
                 data_dir=self.hparams.dataset.data_dir,
                 data_filepath=self.hparams.dataset.train_csv_file,
                 sample_rate=self.hparams.dataset.sample_rate,
-                max_duration=self.hparams.dataset.max_duration,
+                max_duration=-max_duration,
                 sep=self.hparams.dataset.get('sep', '|')
             )
             self.val_data = CNCelebDataset(
                 data_dir=self.hparams.dataset.data_dir,
                 data_filepath=self.hparams.dataset.val_csv_file,
                 sample_rate=self.hparams.dataset.sample_rate,
-                max_duration=self.hparams.dataset.max_duration,
+                max_duration=max_duration,
                 sep=self.hparams.dataset.get('sep', '|')
             )
         
         if stage == 'test' or stage is None:
+            enroll_df = pd.read_csv(self.enroll_csv_path, sep=self.hparams.dataset.get('sep', '|'))
+            enroll_lookup = dict(zip(enroll_df['enroll_id'], enroll_df['enroll_path']))
+            test_unique_df = pd.read_csv(self.test_unique_csv_path, sep=self.hparams.dataset.get('sep', '|'))
+
             self.test_data = CNCelebVerificationDataset(
                 data_dir=self.hparams.dataset.data_dir,
                 data_filepath=self.hparams.dataset.veri_test_output_path,
                 sample_rate=self.hparams.dataset.sample_rate,
-                sep=self.hparams.dataset.get('sep', '|')
+                sep=self.hparams.dataset.get('sep', '|'),
+                enroll_lookup=enroll_lookup,
             )
-            
-            # Load unique enrollment and test data from CSV files
-            enroll_df = pd.read_csv(self.enroll_csv_path, sep=self.hparams.dataset.get('sep', '|'))
+
+            # Prepare enrollment and unique test datasets for embedding computation
             enroll_df['map_path'] = enroll_df['map_path'].apply(lambda x: x.split(';') if pd.notna(x) else [])
-            test_unique_df = pd.read_csv(self.test_unique_csv_path, sep=self.hparams.dataset.get('sep', '|'))
-            
+
             self.enrollment_data = CNCelebEnroll(
                 data_dir=self.hparams.dataset.data_dir,
                 sample_rate=self.hparams.dataset.sample_rate,
@@ -145,9 +155,7 @@ class CNCelebDataModule(LightningDataModule):
         """
         if self.enrollment_data is None or self.test_unique_data is None:
             raise ValueError("Enrollment and test data not prepared. Call setup() first.")
-            
-        collate_fn_enroll = EnrollCollate()
-        
+                    
         # Use enrollment loader config for consistency with VoxCeleb
         enrollment_dataloader = DataLoader(
             self.enrollment_data, 
@@ -155,7 +163,7 @@ class CNCelebDataModule(LightningDataModule):
             shuffle=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).shuffle,
             num_workers=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).num_workers,
             pin_memory=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).pin_memory,
-            collate_fn=collate_fn_enroll
+            collate_fn=EnrollCollate()
         )
         
         test_unique_dataloader = DataLoader(
@@ -164,7 +172,7 @@ class CNCelebDataModule(LightningDataModule):
             shuffle=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).shuffle,
             num_workers=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).num_workers,
             pin_memory=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).pin_memory,
-            collate_fn=collate_fn_enroll
+            collate_fn=TestCollate()
         )
         
         return enrollment_dataloader, test_unique_dataloader

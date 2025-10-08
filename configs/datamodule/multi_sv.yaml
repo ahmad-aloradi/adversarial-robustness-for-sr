@@ -37,9 +37,17 @@ datasets:
         save_csv: true
         sample_rate: 16000
         min_duration: 0.5
-        max_duration: 10.0
         speaker_overlap: true
         train_ratio: 0.95
+        # --- Segmentation Strategy ---
+        use_pre_segmentation: true
+        # Segmentation parameters (only used if use_pre_segmentation=true)
+        segment_duration: 3.0  # Duration of each segment in seconds
+        segment_overlap: 0.0  # Overlap between segments in seconds (0.0 = non-overlapping)
+        min_segment_duration: 0.5  # Minimum segment duration to be included
+        # Random cropping parameter (only used if use_pre_segmentation=false)
+        max_duration: 3.0  # Maximum duration for random cropping during training
+
       transforms: null
       num_classes: 7205
       loaders:
@@ -98,7 +106,15 @@ datasets:
         verbose: true
         sample_rate: 16000
         min_duration: 0.5
-        max_duration: 4.0
+        # --- Segmentation Strategy ---
+        use_pre_segmentation: true
+        # Segmentation parameters (only used if use_pre_segmentation=true)
+        segment_duration: 3.0  # Duration of each segment in seconds
+        segment_overlap: 0.0  # Overlap between segments in seconds (0.0 = non-overlapping)
+        min_segment_duration: 0.5  # Minimum segment duration to be included
+        # Random cropping parameter (only used if use_pre_segmentation=false)
+        max_duration: 3.0  # Maximum duration for random cropping during training
+
       transforms: null
       num_classes: 2793
       loaders:
@@ -155,3 +171,11 @@ loaders:
     num_workers: 4
     drop_last: false
     pin_memory: false
+
+# Compatibility aliases for module configs that expect datamodule.num_classes and datamodule.dataset.*
+# These reference the primary training dataset (voxceleb) to avoid duplication
+num_classes: ${datamodule.datasets.voxceleb.datamodule.num_classes}
+dataset:
+  sample_rate: ${datamodule.datasets.voxceleb.datamodule.dataset.sample_rate}
+  min_duration: ${datamodule.datasets.voxceleb.datamodule.dataset.min_duration}
+  max_duration: ${datamodule.datasets.voxceleb.datamodule.dataset.max_duration}

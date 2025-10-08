@@ -11,6 +11,7 @@ import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, CNCelebDefaults
+from src.datamodules.components.utils import segment_utterance
 
 
 DATASET_DEFAULTS = CNCelebDefaults()
@@ -156,7 +157,11 @@ class CNCelebProcessor:
                  test_spk_file: Union[str, Path],
                  cnceleb2: Optional[str] = None,
                  verbose: bool = True, sep: str = "|", 
-                 sample_rate: int = 16000, n_jobs: Optional[int] = None):
+                 sample_rate: int = 16000, n_jobs: Optional[int] = None,
+                 use_pre_segmentation: bool = False,
+                 segment_duration: float = 3.0,
+                 segment_overlap: float = 0.0,
+                 min_segment_duration: float = 0.5):
         self.sep = sep
         self.verbose = verbose
         if not self.verbose:
@@ -212,7 +217,13 @@ class CNCelebProcessor:
         logger.info(f"  Root: {self.root_dir}")
         logger.info(f"  Sub-datasets: {[str(p) for p in self.sub_dataset_roots]}")
         logger.info(f"  Artifacts: {self.artifacts_dir}")
-
+        
+        # Segmentation parameters (passed from config)
+        self.use_pre_segmentation = use_pre_segmentation
+        self.segment_duration = segment_duration
+        self.segment_overlap = segment_overlap
+        self.min_segment_duration = min_segment_duration
+    
     def _verify_sub_datasets(self):
         """Verify that the specified sub-datasets exist."""
         for sub_root in self.sub_dataset_roots:
@@ -259,10 +270,32 @@ class CNCelebProcessor:
                 assert result, f"Processing failed for: {future_to_path[future]}"
                 utterances.append(result)
 
-        # find none results and filter them out
-        dev_df = pd.DataFrame(utterances)
+        # Apply segmentation only if enabled
+        if self.use_pre_segmentation:
+            logger.info(f"Pre-segmentation enabled. Processing {len(utterances)} utterances...")
+            
+            all_segments = []
+            for utt in tqdm(utterances, desc="Segmenting utterances"):
+                segments = segment_utterance(
+                    speaker_id=utt['speaker_id'],
+                    rel_filepath=utt['rel_filepath'],
+                    recording_duration=utt['recording_duration'],
+                    segment_duration=self.segment_duration,
+                    segment_overlap=self.segment_overlap,
+                    min_segment_duration=self.min_segment_duration,
+                    original_row=utt
+                )
+                all_segments.extend(segments)
+            
+            logger.info(f"Generated {len(all_segments)} segments from {len(utterances)} utterances")
+            logger.info(f"Average segments per utterance: {len(all_segments)/len(utterances):.2f}")
+            dev_df = pd.DataFrame(all_segments)
+        else:
+            logger.info(f"Pre-segmentation disabled. Using full file metadata with random cropping during training.")
+            dev_df = pd.DataFrame(utterances)
+
         dev_df.to_csv(self.dev_metadata_file, sep=self.sep, index=False)
-        logger.info(f"Saved metadata for {len(dev_df)} files to {self.dev_metadata_file}")
+        logger.info(f"Saved metadata for {len(dev_df)} {'segments' if self.use_pre_segmentation else 'files'} to {self.dev_metadata_file}")
         
         return dev_df
     
@@ -393,11 +426,11 @@ class CNCelebProcessor:
         logger.info(f"Saved enrollment list to {self.enroll_csv_path}")
         return enroll_df
     
-    def generate_unique_embeddings_csvs(self, trials_df: pd.DataFrame) -> Tuple[str, str]:
-        """Generate unique test CSV from trials."""
+    def generate_unique_test_csv(self, trials_df: pd.DataFrame) -> None:
+        """Generate unique test CSV from trials (test paths only)."""
         if self.test_unique_csv_path.exists():
-            logger.info(f"Test unique CSV exists: {self.test_unique_csv_path}")
-            return str(self.enroll_csv_path), str(self.test_unique_csv_path)
+            logger.info(f"Test unique CSV already exists: {self.test_unique_csv_path}")
+            return
                 
         # Extract unique test paths
         unique_test_paths = pd.DataFrame({'test_path': trials_df['test_path'].unique()})
@@ -405,8 +438,6 @@ class CNCelebProcessor:
         
         unique_test_paths.to_csv(self.test_unique_csv_path, sep=self.sep, index=False)
         logger.info(f"Saved test unique CSV to {self.test_unique_csv_path}")
-        
-        return str(self.enroll_csv_path), str(self.test_unique_csv_path)
     
     def save_split_speaker_lists(self):
         """Save speaker lists for dev and test splits."""
@@ -600,8 +631,8 @@ if __name__ == "__main__":
     # Run the preprocessing pipeline
     dev_metadata = processor.generate_metadata()
     trials_df = processor.generate_trial_list()
-    processor.generate_enrollment_embeddings_list()
-    processor.generate_unique_embeddings_csvs(trials_df)
     processor.save_split_speaker_lists()
+    processor.generate_enrollment_embeddings_list()
+    processor.generate_unique_test_csv(trials_df)
     
     logger.info(f"Preprocessing completed. Generated {len(trials_df)} trials.")

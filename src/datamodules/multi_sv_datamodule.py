@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from copy import deepcopy
-from typing import Dict, Iterable, List, Optional, Tuple, Any
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
@@ -12,7 +12,6 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from src import utils
 
 log = utils.get_pylogger(__name__)
-
 
 
 class MultiSVDataModule(LightningDataModule):
@@ -26,10 +25,10 @@ class MultiSVDataModule(LightningDataModule):
         self,
         datasets: Dict[str, DictConfig],
         loaders: Dict[str, DictConfig],
+        **kwargs  # Accept and ignore extra parameters (e.g., num_classes, dataset for compatibility)
     ) -> None:
         super().__init__()
-        self.datasets_cfg: Dict[str, DictConfig] = datasets
-        self.loaders_cfg: Dict[str, DictConfig] = loaders
+        self.save_hyperparameters(logger=False)
 
         self._datamodules: Dict[str, LightningDataModule] = {}
         self._train_sets: List[Tuple[str, Dataset]] = []
@@ -37,8 +36,8 @@ class MultiSVDataModule(LightningDataModule):
         self._train_collate = None
         self._val_collate = None
         self._test_loaders: "OrderedDict[str, DataLoader]" = OrderedDict()
-
-        self._prepared: Dict[str, bool] = {}
+        self.train_data: Optional[Dataset] = None
+        self.val_data: Optional[Dataset] = None
 
     # ------------------------------------------------------------------
     # Helper utilities
@@ -88,7 +87,6 @@ class MultiSVDataModule(LightningDataModule):
                 continue
             dm = self._get_or_create_datamodule(name)
             dm.prepare_data()
-            self._prepared[name] = True
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage in ("fit", None):
@@ -101,6 +99,8 @@ class MultiSVDataModule(LightningDataModule):
         self._val_sets.clear()
         self._train_collate = None
         self._val_collate = None
+        self.train_data = None
+        self.val_data = None
 
         for name, cfg in self.datasets_cfg.items():
             if not self._is_enabled(name, cfg):
@@ -114,29 +114,59 @@ class MultiSVDataModule(LightningDataModule):
             dm = self._get_or_create_datamodule(name)
             dm.setup(stage="fit")
 
-            if include_train:
-                train_dataset = getattr(dm, "train_data", None)
-                if train_dataset is None:
-                    loader = dm.train_dataloader()
-                    train_dataset = loader.dataset
-                    self._train_collate = self._train_collate or loader.collate_fn
-                else:
-                    loader = dm.train_dataloader()
-                    self._train_collate = self._train_collate or loader.collate_fn
-                self._train_sets.append((name, train_dataset))
-                log.info(f"Added '{name}' training dataset with {len(train_dataset)} samples to MultiSV training set.")
+            stage_configs = (
+                ("train", include_train, self._train_sets, "_train_collate", "train_data", "training", "training set"),
+                ("val", include_val, self._val_sets, "_val_collate", "val_data", "validation", "validation set"),
+            )
 
-            if include_val:
-                val_dataset = getattr(dm, "val_data", None)
-                if val_dataset is None:
-                    loader = dm.val_dataloader()
-                    val_dataset = loader.dataset
-                    self._val_collate = self._val_collate or loader.collate_fn
-                else:
-                    loader = dm.val_dataloader()
-                    self._val_collate = self._val_collate or loader.collate_fn
-                self._val_sets.append((name, val_dataset))
-                log.info(f"Added '{name}' validation dataset with {len(val_dataset)} samples to MultiSV validation set.")
+            for stage_name, enabled, collection, collate_attr, dataset_attr, log_label, collection_label in stage_configs:
+                if not enabled:
+                    continue
+                self._register_stage_dataset(
+                    stage=stage_name,
+                    name=name,
+                    datamodule=dm,
+                    dataset_attr=dataset_attr,
+                    collection=collection,
+                    collate_attr=collate_attr,
+                    log_label=log_label,
+                    collection_label=collection_label,
+                )
+
+        self.train_data = self._merge_datasets([dataset for _, dataset in self._train_sets])
+        self.val_data = self._merge_datasets([dataset for _, dataset in self._val_sets])
+
+    def _register_stage_dataset(
+        self,
+        *,
+        stage: str,
+        name: str,
+        datamodule: LightningDataModule,
+        dataset_attr: str,
+        collection: List[Tuple[str, Dataset]],
+        collate_attr: str,
+        log_label: str,
+        collection_label: str,
+    ) -> None:
+        dataloader_fn = getattr(datamodule, f"{stage}_dataloader")
+        loader: DataLoader = dataloader_fn()
+        dataset: Optional[Dataset] = getattr(datamodule, dataset_attr, None) or getattr(loader, "dataset", None)
+        if dataset is None:
+            raise AttributeError(f"Underlying datamodule '{name}' must expose a dataset for stage '{stage}'.")
+
+        if getattr(self, collate_attr) is None:
+            setattr(self, collate_attr, loader.collate_fn)
+
+        collection.append((name, dataset))
+        log.info(
+            f"Added {name} {log_label} dataset with {len(dataset)} samples to MultiSV {collection_label}."
+        )
+
+    @staticmethod
+    def _merge_datasets(datasets: List[Dataset]) -> Optional[Dataset]:
+        if not datasets:
+            return None
+        return datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
 
     def _setup_test_stage(self) -> None:
         self._test_loaders = OrderedDict()
@@ -147,16 +177,25 @@ class MultiSVDataModule(LightningDataModule):
 
             dm = self._get_or_create_datamodule(name)
             dm.setup(stage="test")
-            dataset_loaders = dm.test_dataloader()
+            loaders = dm.test_dataloader()
 
-            if isinstance(dataset_loaders, dict):
-                for key, loader in dataset_loaders.items():
-                    alias = f"{name}/{key}" if key != name else key
-                    self._test_loaders[alias] = loader
-            else:
-                self._test_loaders[name] = dataset_loaders
+            size_before = len(self._test_loaders)
+            for alias, loader in self._normalize_test_loaders(name, loaders):
+                self._test_loaders[alias] = loader
+            registered = len(self._test_loaders) - size_before
+            log.info(f"Registered {registered} test loader(s) for dataset '{name}' in MultiSV datamodule.")
 
-            log.info(f"Registered test loaders for dataset '{name}' in MultiSV datamodule.")
+    def _normalize_test_loaders(self, name: str, loaders: Any) -> List[Tuple[str, DataLoader]]:
+        if isinstance(loaders, Mapping):
+            return [
+                (key if key == name else f"{name}/{key}", loader)
+                for key, loader in loaders.items()
+            ]
+
+        if isinstance(loaders, Sequence) and not isinstance(loaders, (str, bytes)):
+            return [(f"{name}/{index}", loader) for index, loader in enumerate(loaders)]
+
+        return [(name, loaders)]
 
     # ------------------------------------------------------------------
     # Dataloaders
@@ -164,21 +203,18 @@ class MultiSVDataModule(LightningDataModule):
     def train_dataloader(self) -> DataLoader:
         if not self._train_sets:
             raise RuntimeError("No datasets were configured for training in MultiSVDataModule.")
-
-        datasets = [dataset for _, dataset in self._train_sets]
-        train_dataset = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
+        if self.train_data is None:
+            raise RuntimeError("MultiSVDataModule.setup('fit') must be called before requesting the train dataloader.")
         loader_kwargs = self._loader_kwargs("train")
         collate_fn = self._train_collate
-        return DataLoader(train_dataset, collate_fn=collate_fn, **loader_kwargs)
+        return DataLoader(self.train_data, collate_fn=collate_fn, **loader_kwargs)
 
     def val_dataloader(self) -> Optional[DataLoader]:
-        if not self._val_sets:
+        if not self._val_sets or self.val_data is None:
             return None
-        datasets = [dataset for _, dataset in self._val_sets]
-        val_dataset = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
         loader_kwargs = self._loader_kwargs("valid")
         collate_fn = self._val_collate
-        return DataLoader(val_dataset, collate_fn=collate_fn, **loader_kwargs)
+        return DataLoader(self.val_data, collate_fn=collate_fn, **loader_kwargs)
 
     def test_dataloader(self):
         if not self._test_loaders:
@@ -186,11 +222,17 @@ class MultiSVDataModule(LightningDataModule):
         return self._test_loaders
 
     def get_enroll_and_trial_dataloaders(self, dataset_name: str, *args, **kwargs):
-        cfg = self._dataset_cfg(dataset_name)
-        if not self._is_enabled(dataset_name, cfg) or not self._stage_enabled(dataset_name, cfg, "test"):
+        base_name = dataset_name
+        alias_test_name: Optional[str] = None
+        if "/" in dataset_name:
+            base_name, alias_test_name = dataset_name.split("/", 1)
+            kwargs.setdefault("test_filename", alias_test_name)
+
+        cfg = self._dataset_cfg(base_name)
+        if not self._is_enabled(base_name, cfg) or not self._stage_enabled(base_name, cfg, "test"):
             raise ValueError(f"Dataset '{dataset_name}' is not configured for testing in MultiSVDataModule.")
 
-        dm = self._get_or_create_datamodule(dataset_name)
+        dm = self._get_or_create_datamodule(base_name)
         if not hasattr(dm, "get_enroll_and_trial_dataloaders"):
             raise AttributeError(
                 f"Underlying datamodule for '{dataset_name}' does not implement 'get_enroll_and_trial_dataloaders'."
@@ -204,6 +246,13 @@ class MultiSVDataModule(LightningDataModule):
     def active_datasets(self) -> List[str]:
         return [name for name, cfg in self.datasets_cfg.items() if self._is_enabled(name, cfg)]
 
+    @property
+    def datasets_cfg(self) -> Dict[str, DictConfig]:
+        return self.hparams.datasets
+
+    @property
+    def loaders_cfg(self) -> Dict[str, DictConfig]:
+        return self.hparams.loaders
 
 
 # ------------------------------------------------------------------
@@ -228,6 +277,7 @@ if __name__ == "__main__":
         print(omegaconf.OmegaConf.to_yaml(cfg))
 
         # Instantiate the DataModule using the loaded config
+        assert "datasets" in cfg.datamodule, 'You are probably not using multi_sv.yaml config for datamodule'
         dm: "MultiSVDataModule" = MultiSVDataModule(datasets=cfg.datamodule.datasets, loaders=cfg.datamodule.loaders)
 
         dm.prepare_data()

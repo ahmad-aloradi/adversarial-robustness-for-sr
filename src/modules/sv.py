@@ -144,6 +144,7 @@ class EmbeddingMetrics:
         if hasattr(self, '_embeddings'):
             delattr(self, '_embeddings')
 
+
 class SpeakerVerification(pl.LightningModule):
     """SV model for speaker verification with audio embeddings."""
     
@@ -469,6 +470,24 @@ class SpeakerVerification(pl.LightningModule):
         """Pre-computes embeddings and prepares for per-dataloader metric logging."""
         # Get all configured test dataloaders from the datamodule
         test_dataloaders = self.trainer.datamodule.test_dataloader()
+        
+        # Normalize to dictionary format for consistent handling
+        if not isinstance(test_dataloaders, dict):
+            # Infer a descriptive base name from the datamodule class
+            datamodule_class = self.trainer.datamodule.__class__.__name__
+            base_name = datamodule_class.replace('DataModule', '').replace('Module', '').lower()
+            
+            if isinstance(test_dataloaders, (list, tuple)):
+                # Multiple loaders returned as list/tuple - use base_name with index
+                test_dataloaders = {f'{base_name}_{i}': loader for i, loader in enumerate(test_dataloaders)}
+                log.info(f"Normalized {len(test_dataloaders)} test loaders to dictionary format with base name '{base_name}'")
+            else:
+                # Single loader returned - use just the base_name
+                test_dataloaders = {base_name: test_dataloaders}
+                log.info(f"Normalized single test loader to dictionary format with key '{base_name}'")
+        
+        # Store normalized dict for use in test_step
+        self.test_dataloaders_dict = test_dataloaders
         test_filenames = list(test_dataloaders.keys())
         
         log.info(f"Found {len(test_filenames)} test set(s): {', '.join(test_filenames)}")
@@ -481,10 +500,10 @@ class SpeakerVerification(pl.LightningModule):
             train_dm = self.trainer.datamodule
             cohort_loader = DataLoader(
                 train_dm.train_data,
-                batch_size=getattr(train_dm.loaders.train, 'batch_size', 256),
-                num_workers=getattr(train_dm.loaders.train, 'num_workers', 0),
+                batch_size=getattr(train_dm.hparams.loaders.train, 'batch_size', 256),
+                num_workers=getattr(train_dm.hparams.loaders.train, 'num_workers', 0),
                 shuffle=False,
-                pin_memory=getattr(train_dm.loaders.train, 'pin_memory', False),
+                pin_memory=getattr(train_dm.hparams.loaders.train, 'pin_memory', False),
                 collate_fn=TrainCollate()
             )
             cohort_embeddings = self._compute_cohort_embeddings(cohort_loader)
@@ -528,8 +547,8 @@ class SpeakerVerification(pl.LightningModule):
         # Move batch to device (needed for some weird device error)
         batch = self._move_batch_to_device(batch)
         
-        # Get test set name from dataloader index
-        test_filenames = list(self.trainer.datamodule.test_dataloader().keys())
+        # Get test set name from dataloader index using the normalized dict
+        test_filenames = list(self.test_dataloaders_dict.keys())
         test_filename = test_filenames[dataloader_idx]
         test_data = self.test_sets_data[test_filename]
         
@@ -562,6 +581,8 @@ class SpeakerVerification(pl.LightningModule):
             del self.test_sets_data
         if hasattr(self, 'last_batch_indices'):
             del self.last_batch_indices
+        if hasattr(self, 'test_dataloaders_dict'):
+            del self.test_dataloaders_dict
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """

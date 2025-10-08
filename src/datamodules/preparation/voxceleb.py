@@ -67,6 +67,10 @@ class VoxCelebMetadataPreparer(BaseMetadataPreparer):
             verbose=dataset.verbose,
             artifcats_dir=dataset.voxceleb_artifacts_dir,
             sep=dataset.sep,
+            use_pre_segmentation=dataset.use_pre_segmentation,
+            segment_duration=dataset.segment_duration,
+            segment_overlap=dataset.segment_overlap,
+            min_segment_duration=dataset.min_segment_duration,
         )
 
         processor.generate_metadata(
@@ -77,14 +81,32 @@ class VoxCelebMetadataPreparer(BaseMetadataPreparer):
 
         test_filter = VoxCelebTestFilter(root_dir=dataset.data_dir, verbose=dataset.verbose)
 
+        # Single loop: extract speakers and enrich verification files
         all_test_speakers = set()
-        test_dataframes: Dict[str, pd.DataFrame] = {}
+        verification_csvs: Dict[str, Path] = {}
+        enroll_data_dict: Dict[str, pd.DataFrame] = {}
+        unique_trial_data_dict: Dict[str, pd.DataFrame] = {}
 
         for test_filename in dataset.veri_test_filenames:
+            # Download and extract speakers (reads file once)
             test_speakers, veri_df = test_filter.get_test_speakers(test_filename)
             all_test_speakers.update(test_speakers)
-            test_dataframes[test_filename] = veri_df
+            
+            # Enrich with metadata (reuses already-loaded DataFrame)
+            test_df = VoxCelebProcessor.enrich_verification_file(
+                veri_test_path=None,
+                metadata_path=dataset.metadata_csv_file,
+                output_path=dataset.veri_test_output_paths[test_filename],
+                sep=dataset.sep,
+                veri_df=veri_df
+            )
 
+            # Store results
+            verification_csvs[test_filename] = Path(dataset.veri_test_output_paths[test_filename])
+            enroll_data_dict[test_filename] = _extract_enroll_test(test_df, mode="enroll")
+            unique_trial_data_dict[test_filename] = _extract_enroll_test(test_df, mode="test")
+
+        # Filter dev metadata to exclude all test speakers
         dev_metadata = pd.read_csv(str(processor.dev_metadata_file), sep=dataset.sep)
         filtered_dev_metadata = test_filter.filter_dev_metadata(dev_metadata, all_test_speakers)
 
@@ -94,6 +116,7 @@ class VoxCelebMetadataPreparer(BaseMetadataPreparer):
             sep=dataset.sep,
         )
 
+        # Process and update metadata with speaker lookup
         updated_filtered_dev_metadata, speaker_lookup_csv = self.csv_processor.process(
             dataset_files=[str(processor.dev_metadata_file)],
             spks_metadata_paths=[dataset.metadata_csv_file],
@@ -107,6 +130,7 @@ class VoxCelebMetadataPreparer(BaseMetadataPreparer):
         )
         VoxCelebProcessor.save_csv(speaker_lookup_csv, dataset.speaker_lookup)
 
+        # Split into train/val
         CsvProcessor.split_dataset(
             df=updated_filtered_dev_metadata,
             train_ratio=dataset.train_ratio,
@@ -118,23 +142,6 @@ class VoxCelebMetadataPreparer(BaseMetadataPreparer):
             sep=dataset.sep,
             seed=dataset.seed,
         )
-
-        verification_csvs: Dict[str, Path] = {}
-        enroll_data_dict: Dict[str, pd.DataFrame] = {}
-        unique_trial_data_dict: Dict[str, pd.DataFrame] = {}
-
-        for test_filename in dataset.veri_test_filenames:
-            veri_test_path = test_filter.download_test_file(test_filename)
-            test_df = VoxCelebProcessor.enrich_verification_file(
-                veri_test_path=veri_test_path,
-                metadata_path=dataset.metadata_csv_file,
-                output_path=dataset.veri_test_output_paths[test_filename],
-                sep=dataset.sep,
-            )
-
-            verification_csvs[test_filename] = Path(dataset.veri_test_output_paths[test_filename])
-            enroll_data_dict[test_filename] = _extract_enroll_test(test_df, mode="enroll")
-            unique_trial_data_dict[test_filename] = _extract_enroll_test(test_df, mode="test")
 
         splits = SplitArtifacts(
             train_csv=Path(dataset.train_csv_file),
@@ -149,6 +156,4 @@ class VoxCelebMetadataPreparer(BaseMetadataPreparer):
             unique_trial_frames=unique_trial_data_dict,
         )
 
-        extras = {"test_dataframes": test_dataframes}
-
-        return PreparationResult(splits=splits, test=test_artifacts, extras=extras)
+        return PreparationResult(splits=splits, test=test_artifacts, extras={})

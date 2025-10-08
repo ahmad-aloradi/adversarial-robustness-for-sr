@@ -26,7 +26,19 @@ dataset:
   save_csv: False
   verbose: True
   sample_rate: 16000
-  max_duration: 10
+
+  # --- Segmentation Strategy ---
+  # - true: Generate segments with fixed boundaries in CSV (deterministic, full coverage)
+  # - false: Store full file metadata, apply random cropping during training (augmentation)
+  use_pre_segmentation: true
+  
+  # Segmentation parameters (only used if use_pre_segmentation=true)
+  segment_duration: 3.0  # Duration of each segment in seconds
+  segment_overlap: 0.0  # Overlap between segments in seconds (0.0 = non-overlapping)
+  min_segment_duration: 0.5  # Minimum segment duration to be included
+  # Random cropping parameter (only used if use_pre_segmentation=false)
+  max_duration: 4.0  # Maximum duration for random cropping during training
+
 
 transforms: null
 

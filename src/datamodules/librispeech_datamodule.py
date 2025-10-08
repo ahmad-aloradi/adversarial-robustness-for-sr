@@ -45,25 +45,27 @@ class LibrispeechDataModule(LightningDataModule):
         if not self._artifacts_ready():
             self.prepare_data()
 
+        max_duration = -1 if self.dataset.use_pre_segmentation else self.dataset.max_duration
+
         if stage == 'fit' or stage is None:
             self.train_data = LibrispeechDataset(
                 self.dataset.dataset_dir,
                 self.dataset.train_csv_exp_filepath,
                 self.dataset.sample_rate,
-                self.dataset.max_duration
+                max_duration
             )
             self.val_data = LibrispeechDataset(
                 self.dataset.dataset_dir,
                 self.dataset.dev_csv_exp_filepath,
                 self.dataset.sample_rate,
-                self.dataset.max_duration
+                max_duration
             )
         if stage == 'test' or stage is None:
             self.test_data = LibrispeechDataset(
                 self.dataset.dataset_dir,
                 self.dataset.test_csv_exp_filepath,
                 self.dataset.sample_rate,
-                self.dataset.max_duration
+                max_duration
             )
 
     def train_dataloader(self):

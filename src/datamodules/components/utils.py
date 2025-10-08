@@ -19,6 +19,74 @@ DATESET_CLS = BaseDatasetCols()
 
 ######### Processing utils #########
 
+def segment_utterance(
+    speaker_id: str,
+    rel_filepath: str,
+    recording_duration: float,
+    segment_duration: float,
+    segment_overlap: float,
+    min_segment_duration: float,
+    original_row: dict
+) -> list:
+    """
+    Segment a single utterance into fixed-duration chunks.
+    
+    This is a shared utility function used across all dataset processors
+    (CNCeleb, VoxCeleb, LibriSpeech) for consistent segmentation behavior.
+    
+    Args:
+        speaker_id: Speaker identifier
+        rel_filepath: Relative file path
+        recording_duration: Total duration of the recording in seconds
+        segment_duration: Desired segment duration in seconds
+        segment_overlap: Overlap between segments in seconds
+        min_segment_duration: Minimum duration for a segment to be included
+        original_row: Dictionary containing other metadata fields
+        
+    Returns:
+        List of dictionaries, each representing a segment
+    """
+    segments = []
+    
+    # Calculate step size (hop) between segments
+    step_size = segment_duration - segment_overlap
+    
+    if step_size <= 0:
+        raise ValueError(f"segment_overlap ({segment_overlap}) must be less than segment_duration ({segment_duration})")
+    
+    # Generate segments
+    start_time = 0.0
+    segment_idx = 0
+    
+    while start_time < recording_duration:
+        end_time = min(start_time + segment_duration, recording_duration)
+        current_duration = end_time - start_time
+        
+        # Only include segments that meet minimum duration requirement
+        if current_duration >= min_segment_duration:
+            segment = {
+                'segment_id': f"{speaker_id}_{Path(rel_filepath).stem}_seg{segment_idx:04d}",
+                'speaker_id': speaker_id,
+                'rel_filepath': rel_filepath,
+                'start_time': round(start_time, 3),
+                'end_time': round(end_time, 3),
+                'segment_duration': round(current_duration, 3),
+                'recording_duration': recording_duration,
+                **{k: v for k, v in original_row.items() if k not in ['speaker_id', 'rel_filepath', 'recording_duration']}
+            }
+            segments.append(segment)
+            segment_idx += 1
+        
+        # Move to next segment
+        start_time += step_size
+        
+        # Break if we can't create another valid segment
+        if start_time + min_segment_duration > recording_duration:
+            break
+    
+    return segments
+
+
 class CsvProcessor:
     """
     Utility class for handling CSV files with metadata.
@@ -110,15 +178,29 @@ class CsvProcessor:
         # Concatenate all DataFrames
         combined_df = pd.concat(dfs, ignore_index=True)
         
-        # Ensure relative paths are unique
-        utterance_counts = combined_df[rel_path_col].value_counts()
-        duplicate_utterances = utterance_counts[utterance_counts > 1].index
-        
-        if not duplicate_utterances.empty:
-            error_msg = "Duplicate utterance IDs found:\n"
-            for utterance, count in duplicate_utterances.items():
-                error_msg += f"- '{utterance}' appears {count} times\n"
-            raise ValueError(error_msg)
+        # Check for duplicates based on data structure
+        # If 'segment_id' exists, check for duplicate segments (pre-segmented data)
+        # Otherwise, check for duplicate file paths (full file data)
+        if 'segment_id' in combined_df.columns:
+            # Pre-segmented data: check for duplicate segment_ids
+            duplicate_counts = combined_df['segment_id'].value_counts()
+            duplicates = duplicate_counts[duplicate_counts > 1]
+            
+            if not duplicates.empty:
+                error_msg = "Duplicate segment IDs found:\n"
+                for segment_id, count in duplicates.items():
+                    error_msg += f"- '{segment_id}' appears {count} times\n"
+                raise ValueError(error_msg)
+        else:
+            # Full file data: check for duplicate relative paths
+            duplicate_counts = combined_df[rel_path_col].value_counts()
+            duplicates = duplicate_counts[duplicate_counts > 1]
+            
+            if not duplicates.empty:
+                error_msg = "Duplicate file paths found:\n"
+                for filepath, count in duplicates.items():
+                    error_msg += f"- '{filepath}' appears {count} times\n"
+                raise ValueError(error_msg)
             
         # Fill missing values
         combined_df = combined_df.fillna(fill_value)
@@ -561,13 +643,65 @@ class BaseDataset(Dataset):
         raise ValueError(f"max_duration must be -1, None, or a positive number, got {max_duration}")
     
     @staticmethod
-    def _process_audio(audio_path: Union[str, Path], audio_processor: AudioProcessor, max_samples: int) -> torch.Tensor:
-        """Process and optionally trim audio file."""
-        waveform, _ = audio_processor.process_audio(str(audio_path))
+    def _load_audio(
+        audio_path: Union[str, Path],
+        audio_processor: AudioProcessor,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        max_samples: int = -1
+    ) -> torch.Tensor:
+        """
+        Load and process audio with flexible segmentation options.
         
-        if max_samples != -1 and waveform.size(0) > max_samples:
-            start = torch.randint(0, waveform.size(0) - max_samples, (1,))
-            waveform = waveform[start:start + max_samples]
+        Args:
+            audio_path: Path to audio file
+            audio_processor: AudioProcessor instance for processing
+            start_time: Optional start time in seconds (for pre-segmentation)
+            end_time: Optional end time in seconds (for pre-segmentation)
+            max_samples: Maximum samples for random cropping (ignored if start_time/end_time provided)
+            
+        Returns:
+            Processed audio waveform tensor
+        """
+        # Get audio info to determine original sample rate and duration
+        info = torchaudio.info(str(audio_path))
+        sr = info.sample_rate
+        total_frames = info.num_frames
+
+        assert (start_time is None and end_time is None) or (start_time is not None and end_time is not None), \
+            "Either both start_time and end_time must be provided, or neither." 
+        
+        # Case 1: Pre-segmentation - use provided start_time and end_time
+        if start_time is not None and end_time is not None:
+            frame_offset = int(start_time * sr)
+            num_frames = int((end_time - start_time) * sr)
+        
+        # Case 2: Random cropping - calculate start_time and end_time randomly
+        else:
+            if max_samples == -1 or total_frames <= max_samples:
+                # Load entire file
+                frame_offset = 0
+                num_frames = total_frames
+            else:
+                # Calculate random segment of max_samples length
+                max_offset = total_frames - max_samples
+                frame_offset = torch.randint(0, max_offset, (1,)).item()
+                num_frames = max_samples
+        
+        # Load the calculated segment (works for both cases)
+        waveform, sr = torchaudio.load(
+            str(audio_path),
+            frame_offset=frame_offset,
+            num_frames=num_frames
+        )
+        waveform = waveform.squeeze(0)  # Remove channel dimension
+        
+        # Resample if needed
+        if sr != audio_processor.sample_rate:
+            waveform = F.resample(waveform, sr, audio_processor.sample_rate)
+        
+        # Normalize
+        waveform = audio_processor.normalize_audio(waveform).squeeze(0)
         
         return waveform
     
@@ -624,7 +758,28 @@ class BaseDataset(Dataset):
         """
         row = self.dataset.iloc[idx]
         audio_path = self.data_dir / row[BaseDataset.DATASET_CLS.REL_FILEPATH]
-        waveform = self._process_audio(audio_path, self.audio_processor, self.max_samples)
+        
+        # Check if CSV has pre-segmented data with time boundaries
+        has_segments = 'start_time' in self.dataset.columns and 'end_time' in self.dataset.columns
+        
+        if has_segments:
+            # Pre-segmented: use explicit time boundaries
+            waveform = self._load_audio(
+                audio_path, 
+                self.audio_processor,
+                start_time=row['start_time'],
+                end_time=row['end_time']
+            )
+            actual_duration = row['end_time'] - row['start_time']
+        else:
+            # Random cropping: use max_samples
+            waveform = self._load_audio(
+                audio_path,
+                self.audio_processor,
+                max_samples=self.max_samples
+            )
+            actual_duration = row[BaseDataset.DATASET_CLS.REC_DURATION].item()
+        
         non_class_id = row[BaseDataset.DATASET_CLS.CLASS_ID] is None
 
         return DatasetItem(
@@ -636,7 +791,7 @@ class BaseDataset(Dataset):
             country=row[BaseDataset.DATASET_CLS.NATIONALITY],
             gender=row[BaseDataset.DATASET_CLS.GENDER],
             sample_rate=self.audio_processor.sample_rate,
-            recording_duration=row[BaseDataset.DATASET_CLS.REC_DURATION].item(),
+            recording_duration=actual_duration,
             text=row.get(BaseDataset.DATASET_CLS.TEXT, '')
         )
 

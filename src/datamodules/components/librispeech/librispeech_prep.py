@@ -15,6 +15,7 @@ from hydra import initialize, compose
 from omegaconf import DictConfig
 
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, LibriSpeechDefaults
+from src.datamodules.components.utils import segment_utterance
 
 DATASET_DEFAULTS = LibriSpeechDefaults()
 DATESET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
@@ -146,6 +147,27 @@ def process(config, delimiter, save_csv=True):
 
         # Re-order columns such that 'text'and 'rel_filepath' are the first two columns
         dfs[subset] = dfs[subset][DF_COLS]
+        
+        # Apply segmentation if enabled in config
+        if config.get('use_pre_segmentation', False):
+            print(f'Pre-segmentation enabled for {subset}. Processing {len(dfs[subset])} utterances...')
+            
+            all_segments = []
+            for _, row in tqdm(dfs[subset].iterrows(), total=len(dfs[subset]), desc=f"Segmenting {os.path.basename(subset)}"):
+                segments = segment_utterance(
+                    speaker_id=row[DATESET_CLS.SPEAKER_ID],
+                    rel_filepath=row[DATESET_CLS.REL_FILEPATH],
+                    recording_duration=row[DATESET_CLS.REC_DURATION],
+                    segment_duration=config.get('segment_duration', 4.0),
+                    segment_overlap=config.get('segment_overlap', 0.0),
+                    min_segment_duration=config.get('min_segment_duration', 2.0),
+                    original_row=row.to_dict()
+                )
+                all_segments.extend(segments)
+            
+            print(f'Generated {len(all_segments)} segments from {len(dfs[subset])} utterances')
+            print(f'Average segments per utterance: {len(all_segments)/len(dfs[subset]):.2f}')
+            dfs[subset] = pd.DataFrame(all_segments)
 
         if save_csv:
             write_dataset_csv(df=dfs[subset], path=os.path.join(config['metadata_path'], f'{os.path.basename(subset)}.csv'))

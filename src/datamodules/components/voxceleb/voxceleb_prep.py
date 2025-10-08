@@ -2,7 +2,8 @@ import os
 import argparse
 from pathlib import Path
 from typing import List, Dict, Optional, Union, Tuple
-from multiprocessing import Pool, cpu_count
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import cpu_count
 
 import soundfile as sf
 import pandas as pd
@@ -14,6 +15,7 @@ from tqdm.auto import tqdm
 from src import utils
 from src.modules.components.utils import LanguagePredictionModel
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, VoxcelebDefaults
+from src.datamodules.components.utils import segment_utterance
 
 DATASET_DEFAULTS = VoxcelebDefaults()
 DATESET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
@@ -21,39 +23,6 @@ SPEAKER_CLS, _ = get_speaker_class(DATASET_DEFAULTS.dataset_name)
 
 log = utils.get_pylogger(__name__)
 
-# Add: lightweight worker state for multiprocessing
-_WORKER_WAV_DIR = None
-_WORKER_SPEAKER_META = None
-_WORKER_DATASET_NAME = None
-_WORKER_MIN_DURATION = None
-
-def _init_vox_worker(wav_dir, speaker_metadata, dataset_name, min_duration):
-    # Disable tqdm lock in workers and set globals once per process
-    tqdm.set_lock(None)
-    global _WORKER_WAV_DIR, _WORKER_SPEAKER_META, _WORKER_DATASET_NAME, _WORKER_MIN_DURATION
-    _WORKER_WAV_DIR = Path(wav_dir)
-    _WORKER_SPEAKER_META = speaker_metadata
-    _WORKER_DATASET_NAME = dataset_name
-    _WORKER_MIN_DURATION = float(min_duration)
-
-def _process_vox_wav(wav_path_str: str):
-    # Stateless task function (picklable on all platforms)
-    wav_path = Path(wav_path_str)
-    info = sf.info(wav_path)
-    rel_path = wav_path.relative_to(_WORKER_WAV_DIR)
-    speaker_id_raw = rel_path.parts[0]
-    speaker_id = f"{_WORKER_DATASET_NAME}_{speaker_id_raw}"
-
-    if info.duration < _WORKER_MIN_DURATION:
-        return None, {'total': {'count': 0}, 'duration': {'count': 1, 'paths': [str(wav_path)]}}
-
-    utt = VoxCelebUtterance(
-        speaker_id=speaker_id,
-        rel_filepath=str(rel_path),
-        recording_duration=info.duration,
-        **_WORKER_SPEAKER_META.get(speaker_id, {})
-    )
-    return utt, {'total': {'count': 1}, 'duration': {'count': 0, 'paths': []}}
 
 @dataclass
 class VoxCelebUtterance:
@@ -70,6 +39,43 @@ class VoxCelebUtterance:
     country: Optional[str] = DATASET_DEFAULTS.country
     speaker_name: Optional[str] = None
     text: Optional[str] = None
+
+
+def _process_vox_wav(task_tuple: Tuple[str, Path, pd.DataFrame, str, float]):
+    """Clean worker function with all data passed as arguments (no globals)."""
+    wav_path_str, wav_dir, speaker_metadata_df, dataset_name, min_duration = task_tuple
+    
+    wav_path = Path(wav_path_str)
+    
+    # Fast file info retrieval
+    info = sf.info(wav_path)
+    
+    # Early rejection for duration
+    if info.duration < min_duration:
+        return None
+    
+    # Extract speaker info
+    rel_path = wav_path.relative_to(wav_dir)
+    speaker_id = f"{dataset_name}_{rel_path.parts[0]}"
+    
+    # Get metadata from DataFrame (fast indexed lookup)
+    try:
+        speaker_row = speaker_metadata_df.loc[speaker_id]
+        speaker_meta = speaker_row.to_dict()
+    except KeyError:
+        # Speaker not in metadata, use defaults
+        speaker_meta = {}
+    
+    # Create utterance with unpacked metadata
+    utt = VoxCelebUtterance(
+        speaker_id=speaker_id,
+        rel_filepath=str(rel_path),
+        recording_duration=info.duration,
+        **speaker_meta
+    )
+    
+    return utt
+
 
 
 class VoxCelebProcessor:
@@ -91,7 +97,11 @@ class VoxCelebProcessor:
                  root_dir: Union[str, Path], 
                  artifcats_dir: Union[str, Path],
                  verbose: bool = True, 
-                 sep: str = '|'):
+                 sep: str = '|',
+                 use_pre_segmentation: bool = False,
+                 segment_duration: float = 4.0,
+                 segment_overlap: float = 0.0,
+                 min_segment_duration: float = 0.5):
         """
         Initialize VoxCeleb processor
         
@@ -100,6 +110,10 @@ class VoxCelebProcessor:
             artifcats_dir: Directory for generated artifacts
             verbose: Print verbose output
             sep: Separator for metadata files
+            use_pre_segmentation: Whether to use pre-segmentation during preprocessing
+            segment_duration: Duration of each segment in seconds
+            segment_overlap: Overlap between segments in seconds
+            min_segment_duration: Minimum segment duration to be included in seconds
         """
         
         self.sep = sep
@@ -131,7 +145,13 @@ class VoxCelebProcessor:
         self._ensure_metadata_files()
 
         # Create or load metadata
-        self.speaker_metadata, self.speaker_metadata_df = self.load_speaker_metadata()
+        self.speaker_metadata_df = self.load_speaker_metadata()
+        
+        # Segmentation parameters (passed from config)
+        self.use_pre_segmentation = use_pre_segmentation
+        self.segment_duration = segment_duration
+        self.segment_overlap = segment_overlap
+        self.min_segment_duration = min_segment_duration
 
 
     def _download_file(self, url: str, target_path: Path) -> None:
@@ -194,128 +214,103 @@ class VoxCelebProcessor:
         return df
 
 
-    def load_speaker_metadata(self) -> Tuple[Tuple[Dict, pd.DataFrame], Tuple[Dict, pd.DataFrame]]:
-        """Load and merge speaker metadata from both VoxCeleb1 and VoxCeleb2"""
+    def load_speaker_metadata(self) -> pd.DataFrame:
+        """Load and merge speaker metadata from both VoxCeleb1 and VoxCeleb2
+        
+        Returns:
+            pd.DataFrame: Combined speaker metadata with standardized columns
+        """
         
         if not self.vox_metadata.exists():
             # Create combined metadata file if it doesn't exist
             df = self._create_combined_speaker_metadata()
             # Post-process speakers metadata
             df = df.rename(columns=asdict(SPEAKER_CLS))
-            df[SPEAKER_CLS.speaker_id] = df[SPEAKER_CLS.speaker_id].apply(lambda x: DATASET_DEFAULTS.dataset_name + '_' + str(x))
-            df[SPEAKER_CLS.gender] = df[SPEAKER_CLS.gender].apply(lambda x: 'male' if x=='m' else 'female') 
-
+            df[SPEAKER_CLS.speaker_id] = df[SPEAKER_CLS.speaker_id].apply(
+                lambda x: DATASET_DEFAULTS.dataset_name + '_' + str(x)
+            )
+            df[SPEAKER_CLS.gender] = df[SPEAKER_CLS.gender].apply(
+                lambda x: 'male' if x == 'm' else 'female'
+            )
         else:
             # Load combined metadata
             if self.verbose:
                 log.info(f"Loading metadata from {self.vox_metadata}")
             df = pd.read_csv(self.vox_metadata, sep=self.sep, dtype='object')
 
-        # Convert to dictionary format
-        metadata = {}
-        for _, row in df.iterrows():
-            metadata[row[SPEAKER_CLS.speaker_id]] = {
-                SPEAKER_CLS.gender: row[SPEAKER_CLS.gender],
-                SPEAKER_CLS.nationality: row[SPEAKER_CLS.nationality],
-                SPEAKER_CLS.source: row[SPEAKER_CLS.source],
-                SPEAKER_CLS.split: row[SPEAKER_CLS.split],
-                SPEAKER_CLS.vggface_id: row[SPEAKER_CLS.vggface_id]
-            }
-
         if self.verbose:
-            log.info(f"Loaded metadata for {len(metadata)} speakers")
+            log.info(f"Loaded metadata for {len(df)} speakers")
 
-        return metadata, df
-
-
-
-
-    def _init_tqdm_worker(self):
-        """Disable internal tqdm bars in worker processes"""
-        tqdm.set_lock(None)
+        return df
 
 
     def _get_voxceleb_utterances(self, wav_paths: List[str], min_duration: float) -> Tuple[List['VoxCelebUtterance'], Dict]:
+        """Process WAV files in parallel using ProcessPoolExecutor (clean & fast)."""
         total_files = len(wav_paths)
-        pbar = tqdm(total=total_files, desc="Processing WAV files")
-
-        # Prepare for lower serialization overhead
-        wav_path_strs = [str(p) for p in wav_paths]
-
+        
+        if self.verbose:
+            log.info(f"Processing {total_files:,} files...")
+        
+        # Set speaker_id as index for fast lookups in worker processes
+        speaker_df_indexed = self.speaker_metadata_df.set_index('speaker_id')
+        
+        # Prepare tasks: each task contains all needed data (no globals)
+        tasks = [
+            (str(p), self.wav_dir, speaker_df_indexed, DATASET_DEFAULTS.dataset_name, min_duration)
+            for p in wav_paths
+        ]
+        
         utterances: List[VoxCelebUtterance] = []
-        final_stats = {
-            'total': {'count': 0},
-            'duration': {'count': 0, 'paths': []}
-        }
+        rejected_count = 0
+        
+        # Use fewer workers to avoid oversubscription
+        n_workers = min(cpu_count(), 8)
+        
+        if self.verbose:
+            log.info(f"Using {n_workers} worker processes")
 
-        # Choose a reasonable chunksize to reduce scheduling overhead
-        procs = cpu_count()
-        chunksize = max(1, total_files // (procs * 8) or 1)
-
-        with Pool(
-            processes=procs,
-            initializer=_init_vox_worker,
-            initargs=(self.wav_dir, self.speaker_metadata, DATASET_DEFAULTS.dataset_name, min_duration),
-        ) as pool:
-            for utterance, local_stats in pool.imap_unordered(_process_vox_wav, wav_path_strs, chunksize=chunksize):
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            # Submit all tasks at once
+            future_to_path = {executor.submit(_process_vox_wav, task): task[0] for task in tasks}
+            
+            # Process results as they complete
+            for future in tqdm(as_completed(future_to_path), total=len(tasks), desc="Processing files"):
+                utterance = future.result()
+                
                 if utterance is not None:
                     utterances.append(utterance)
-                final_stats['total']['count'] += local_stats['total']['count']
-                final_stats['duration']['count'] += local_stats['duration']['count']
-                final_stats['duration']['paths'].extend(local_stats['duration']['paths'])
-                pbar.update(1)
+                else:
+                    rejected_count += 1
 
-        pbar.close()
-        return utterances, final_stats
-
-
-    def _process_single_voxceleb_utterance(self, wav_path, min_duration):
-        info = sf.info(wav_path)
-        rel_path = wav_path.relative_to(self.wav_dir)
-        speaker_id_raw = rel_path.parts[0]
-        speaker_id = DATASET_DEFAULTS.dataset_name + '_' + speaker_id_raw
-
-        excluded_for_duration = info.duration < min_duration
-
-        local_stats = {
-            'total': {'count': 0},
-            'duration': {'count': 0, 'paths': []}
+        # Final statistics
+        valid_count = len(utterances)
+        final_stats = {
+            'total': {'count': valid_count},
+            'duration': {'count': rejected_count, 'paths': []}
         }
+        
+        if self.verbose:
+            log.info(f"Processing complete: {valid_count:,} valid files, {rejected_count:,} rejected")
 
-        if excluded_for_duration:
-            local_stats['duration']['count'] += 1
-            local_stats['duration']['paths'].append(str(wav_path))
-            return None, local_stats
-        else:
-            local_stats['total']['count'] += 1
-            utterance = VoxCelebUtterance(speaker_id=speaker_id, 
-                                          rel_filepath=str(rel_path), 
-                                          recording_duration=info.duration, 
-                                          **self.speaker_metadata.get(speaker_id, {}))
-            return utterance, local_stats
+        return utterances, final_stats
 
 
     def generate_metadata(self,
                           base_search_dir: str,
                           min_duration: float = 1.0, 
                           save_df: bool = True,
-                          ) -> Tuple[Tuple[List[VoxCelebUtterance], pd.DataFrame], Tuple[pd.DataFrame, pd.DataFrame]]:
+                          ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Generate metadata for all valid utterances in the VoxCeleb dataset.
         This method scans through wav files in the dataset directory, processes them to extract utterance
         information, and generates metadata files containing utterance and speaker statistics.
         Args:
             min_duration (float, optional): Minimum duration in seconds for a valid utterance. Defaults to 1.0.
             save_df (bool, optional): Whether to save the generated metadata to CSV files. Defaults to True.
-            save_dir (str, optional): Directory to save metadata files. If None, uses default paths. Defaults to None.
+            base_search_dir (str): Directory to search for existing metadata files.
         Returns:
-            Tuple[Tuple[List[VoxCelebUtterance], pd.DataFrame], Tuple[pd.DataFrame, pd.DataFrame]]:
-                A nested tuple containing:
-                - First tuple:
-                    - List of VoxCelebUtterance objects for valid utterances (None if metadata exists)
-                    - DataFrame with utterance statistics (None if metadata exists)
-                - Second tuple:
-                    - DataFrame with development set metadata
-                    - DataFrame with speaker total metadata
+            Tuple[pd.DataFrame, pd.DataFrame]:
+                - DataFrame with development set metadata (utterances or segments)
+                - DataFrame with speaker metadata
         Notes:
             - If metadata files already exist, loads and returns existing metadata instead of regenerating
             - Saves three CSV files if save_df=True:
@@ -332,7 +327,7 @@ class VoxCelebProcessor:
             wav_paths = list(self.wav_dir.rglob("*.wav"))
 
             if self.verbose:
-                log.info(f"Iterating over {len(wav_paths)} audio filxes ...")
+                log.info(f"Iterating over {len(wav_paths)} audio files ...")
 
             # Process files with progress bar
             utterances, utterances_stats = self._get_voxceleb_utterances(wav_paths, min_duration)
@@ -342,16 +337,40 @@ class VoxCelebProcessor:
             if self.verbose:
                 log.info(f"\nSummary: {utterances_stats['total']} files, {len(utterances)} valid")
 
-            # Save utterances ans stats as csvs
+            # Convert utterances to dataframe
             dev_metadata = self.utterances_to_csv(utterances=utterances,
                                                   dev_metadata_file=self.dev_metadata_file)
+            
+            # Apply segmentation only if enabled
+            if self.use_pre_segmentation:
+                if self.verbose:
+                    log.info(f"Pre-segmentation enabled. Processing {len(dev_metadata)} utterances...")
+                
+                all_segments = []
+                for _, row in tqdm(dev_metadata.iterrows(), total=len(dev_metadata), desc="Segmenting utterances"):
+                    segments = segment_utterance(
+                        speaker_id=row['speaker_id'],
+                        rel_filepath=row['rel_filepath'],
+                        recording_duration=row['recording_duration'],
+                        segment_duration=self.segment_duration,
+                        segment_overlap=self.segment_overlap,
+                        min_segment_duration=self.min_segment_duration,
+                        original_row=row.to_dict()
+                    )
+                    all_segments.extend(segments)
+                
+                if self.verbose:
+                    log.info(f"Generated {len(all_segments)} segments from {len(dev_metadata)} utterances")
+                    log.info(f"Average segments per utterance: {len(all_segments)/len(dev_metadata):.2f}")
+                
+                dev_metadata = pd.DataFrame(all_segments)
 
             if save_df:
                 VoxCelebProcessor.save_csv(dev_metadata, self.dev_metadata_file, sep=self.sep)
                 VoxCelebProcessor.save_csv(utterances_stats, self.preprocess_stats_file, sep=self.sep)
                 VoxCelebProcessor.save_csv(self.speaker_metadata_df, self.vox_metadata, sep=self.sep)
                 if self.verbose:
-                    log.info(f"Saved {len(utterances)} utterances to {self.dev_metadata_file}")
+                    log.info(f"Saved {len(dev_metadata)} {'segments' if self.use_pre_segmentation else 'utterances'} to {self.dev_metadata_file}")
                     log.info(f"Saved speaker metadata to {self.vox_metadata}")
 
             VoxCelebProcessor.print_utts_statistics(utterances)
@@ -399,44 +418,54 @@ class VoxCelebProcessor:
 
     @staticmethod
     def enrich_verification_file(
-        veri_test_path: Union[str, Path],
+        veri_test_path: Optional[Union[str, Path]],
         metadata_path: Union[str, Path],
         output_path: Optional[Union[str, Path]] = None,
-        sep: str = '|'
+        sep: str = '|',
+        veri_df: Optional[pd.DataFrame] = None
     ) -> pd.DataFrame:
         """
         Enrich verification test file with metadata information.
         
         Args:
-            veri_test_path: Path to veri_test.txt
+            veri_test_path: Path to veri_test.txt (required if veri_df is None)
             metadata_path: Path to vox_metadata.csv
             output_path: Optional path to save the enriched CSV
+            sep: Separator for CSV files
+            veri_df: Optional pre-loaded verification DataFrame (avoids file I/O)
             
         Returns:
             DataFrame with enriched verification trials
         """
         
-        # Read metadata
+        # Read metadata and set index for fast lookups
         metadata_df = pd.read_csv(metadata_path, sep='|').fillna('N/A')
+        metadata_indexed = metadata_df.set_index(DATESET_CLS.SPEAKER_ID)
 
-        # Create lookup dictionaries for faster access
-        metadata_lookup = metadata_df.set_index(DATESET_CLS.SPEAKER_ID).to_dict('index')
+        # Load verification DataFrame if not provided
+        if veri_df is None:
+            if veri_test_path is None:
+                raise ValueError("Either veri_test_path or veri_df must be provided")
+            veri_df = pd.read_csv(veri_test_path, sep=' ', header=None,
+                                names=['label', 'enroll_path', 'test_path'])
+        else:
+            # Standardize column names if needed
+            veri_df = veri_df.copy()  # Avoid modifying original
+            if 'enrollment' in veri_df.columns:
+                veri_df.rename(columns={'enrollment': 'enroll_path', 'test': 'test_path'}, inplace=True)
 
-        # Read verification file
-        veri_df = pd.read_csv(veri_test_path, sep=' ', header=None,
-                            names=['label', 'enroll_path', 'test_path'])
-
-        # Extract speaker IDs from paths
-        veri_df['enroll_id'] = veri_df['enroll_path'].apply(lambda x: DATASET_DEFAULTS.dataset_name + '_' + x.split('/')[0])
-        veri_df['test_id'] = veri_df['test_path'].apply(lambda x: DATASET_DEFAULTS.dataset_name + '_' + x.split('/')[0])
+        # Extract speaker IDs from paths (vectorized)
+        dataset_prefix = f"{DATASET_DEFAULTS.dataset_name}_"
+        veri_df['enroll_id'] = dataset_prefix + veri_df['enroll_path'].str.split('/').str[0]
+        veri_df['test_id'] = dataset_prefix + veri_df['test_path'].str.split('/').str[0]
         
-        # Add metadata for both speakers
+        # Add metadata for both speakers (safe lookups with try/except in lambda)
         for field in [DATESET_CLS.NATIONALITY, DATESET_CLS.GENDER]:
-            veri_df[f'enroll_{field}'] = veri_df['enroll_id'].map(
-                lambda x: metadata_lookup[x][field] if x in metadata_lookup else 'N/A'
+            veri_df[f'enroll_{field}'] = veri_df['enroll_id'].apply(
+                lambda x: metadata_indexed.loc[x, field] if x in metadata_indexed.index else 'N/A'
             )
-            veri_df[f'test_{field}'] = veri_df['test_id'].map(
-                lambda x: metadata_lookup[x][field] if x in metadata_lookup else 'N/A'
+            veri_df[f'test_{field}'] = veri_df['test_id'].apply(
+                lambda x: metadata_indexed.loc[x, field] if x in metadata_indexed.index else 'N/A'
             )
         
         # Add trial type (same/different nationality, gender)
