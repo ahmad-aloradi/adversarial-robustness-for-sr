@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -14,6 +14,7 @@ from src.datamodules.components.common import CNCelebDefaults, get_dataset_class
 from src.datamodules.components.utils import CsvProcessor
 
 from .base import BaseMetadataPreparer, PreparationResult, SplitArtifacts
+from .snapshot_keys import CNCELEB_COMPARABLE_KEYS
 
 log = utils.get_pylogger(__name__)
 DATASET_DEFAULTS = CNCelebDefaults()
@@ -23,6 +24,8 @@ DATASET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
 class CNCelebMetadataPreparer(BaseMetadataPreparer):
     """Encapsulates metadata preparation for CNCeleb datasets."""
 
+    COMPARABLE_KEYS: tuple[str, ...] = CNCELEB_COMPARABLE_KEYS
+
     def __init__(self, dataset_cfg: Any, csv_processor: CsvProcessor):
         super().__init__(dataset_cfg=dataset_cfg, csv_processor=csv_processor)
 
@@ -31,8 +34,12 @@ class CNCelebMetadataPreparer(BaseMetadataPreparer):
         artifacts_dir = Path(dataset.artifacts_dir)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-        base_search_dir = Path(dataset.get("base_search_dir", ""))
-        core_files_to_copy = [
+        expected_snapshot = self.build_config_snapshot()
+
+        base_search_dir_value: Optional[str] = dataset.get("base_search_dir", None)
+        base_search_dir = Path(base_search_dir_value).expanduser().resolve() if base_search_dir_value else None
+
+        core_files_to_copy: List[tuple[str, str]] = [
             ("cnceleb_dev.csv", dataset.dev_metadata_file),
             ("enroll.csv", dataset.enroll_csv_path),
             ("test_unique.csv", dataset.test_unique_csv_path),
@@ -41,77 +48,86 @@ class CNCelebMetadataPreparer(BaseMetadataPreparer):
             ("test_speakers.txt", dataset.test_spk_file),
         ]
 
-        core_files_exist = base_search_dir.exists() and all(
-            (base_search_dir / source_file).exists() for source_file, _ in core_files_to_copy
-        )
+        processor = self._build_processor(dataset)
 
-        if core_files_exist:
-            log.info(
-                "Found core pre-generated files in %s. Copying to experiment directory...",
-                base_search_dir,
-            )
+        can_copy = False
+        if base_search_dir and base_search_dir.exists():
+            missing_sources = [
+                source for source, _ in core_files_to_copy if not (base_search_dir / source).exists()
+            ]
+            config_path = base_search_dir / self.CONFIG_SNAPSHOT_FILENAME
+            if missing_sources:
+                log.info(f"Skipping cached artifacts in {base_search_dir} due to missing files: {', '.join(missing_sources)}")
+            elif not config_path.is_file():
+                log.info(f"Cached artifacts in {base_search_dir} lack {self.CONFIG_SNAPSHOT_FILENAME}; regenerating instead.")
+            else:
+                observed_snapshot = self.load_config_snapshot(config_path)
+                if observed_snapshot == expected_snapshot:
+                    can_copy = True
+                else:
+                    diff = self.diff_config_snapshots(expected_snapshot, observed_snapshot)
+                    log.info(f"Cached CNCeleb artifacts config mismatch detected in {base_search_dir}; regenerating. Differences: {diff}")
+
+        if can_copy:
+            log.info(f"Found matching pre-generated files in {base_search_dir}. Copying to experiment directory...")
             for source_file, target_path in core_files_to_copy:
                 source_path = base_search_dir / source_file
                 resolved_target = Path(target_path)
                 resolved_target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source_path, resolved_target)
-                log.info("Copied %s -> %s", source_path, resolved_target)
+                log.info(f"Copied {source_path} -> {resolved_target}")
 
             dev_df = pd.read_csv(dataset.dev_metadata_file, sep=dataset.sep)
-            log.info("Loaded pre-generated dev metadata with %d rows", len(dev_df))
+            log.info(f"Loaded pre-generated dev metadata with {len(dev_df)} rows")
         else:
-            log.info("Pre-generated core files not found. Generating metadata from scratch...")
-            processor = self._build_processor(dataset)
+            log.info("Generating CNCeleb metadata from scratch...")
 
-            # Generate dev metadata first (needed for speaker statistics)
             dev_df = processor.generate_metadata()
-            
-            # Generate trials list
+
             trials_df = processor.generate_trial_list()
             trials_df.to_csv(dataset.veri_test_output_path, sep=dataset.get("sep", "|"), index=False)
-            log.info("Saved verification trials to %s", dataset.veri_test_output_path)
+            log.info(f"Saved verification trials to {dataset.veri_test_output_path}")
 
-            # Save speaker lists (creates dev_speakers.txt and test_speakers.txt)
             processor.save_split_speaker_lists()
-            
-            # Generate enrollment CSV
+
             enroll_df = processor.generate_enrollment_embeddings_list()
             if not Path(processor.enroll_csv_path).exists():
                 raise FileNotFoundError(f"Failed to generate enrollment CSV: {processor.enroll_csv_path}")
 
-            # Generate unique test CSV
             processor.generate_unique_test_csv(trials_df)
             if not Path(processor.test_unique_csv_path).exists():
                 raise FileNotFoundError(f"Failed to generate test unique CSV: {processor.test_unique_csv_path}")
 
-            # Load speaker sets for validation
             enroll_speakers = set(enroll_df["enroll_id"].str.split("-").str[0])
             test_speakers = set(pd.read_csv(processor.test_spk_file, header=None)[0])
             dev_speakers = set(pd.read_csv(processor.dev_spk_file, header=None)[0])
 
-            # Exclude test speakers from dev set
             original_dev_rows = len(dev_df)
             dev_df = dev_df[~dev_df["speaker_id"].isin(test_speakers)]
             excluded_count = original_dev_rows - len(dev_df)
-            log.info("Excluded %d utterances belonging to test speakers from dev set.", excluded_count)
+            log.info(f"Excluded {excluded_count} utterances belonging to test speakers from dev set.")
 
-            # Validate speaker set relationships
             dev_enroll_overlap = dev_speakers.intersection(enroll_speakers)
             test_enroll_overlap = test_speakers.intersection(enroll_speakers)
             test_dev_overlap = test_speakers.intersection(dev_speakers)
-            
-            assert not dev_enroll_overlap, f"Dev and enrollment speakers should not overlap! Found {len(dev_enroll_overlap)} overlapping speakers."
-            assert test_enroll_overlap, f"Enrollment and test speakers should overlap! Found {len(test_enroll_overlap)} overlapping speakers, expected more."
-            assert not test_dev_overlap, f"Test and dev speakers should not overlap! Found {len(test_dev_overlap)} overlapping speakers."
+
+            assert not dev_enroll_overlap, (
+                "Dev and enrollment speakers should not overlap! "
+                f"Found {len(dev_enroll_overlap)} overlapping speakers."
+            )
+            assert test_enroll_overlap, (
+                "Enrollment and test speakers should overlap! "
+                f"Found {len(test_enroll_overlap)} overlapping speakers, expected more."
+            )
+            assert not test_dev_overlap, (
+                "Test and dev speakers should not overlap! "
+                f"Found {len(test_dev_overlap)} overlapping speakers."
+            )
 
             log.info(f"Speaker set validation passed: {len(test_enroll_overlap)} enrollment speakers overlap with test set")
 
             dev_df.to_csv(processor.dev_metadata_file, sep=dataset.sep, index=False)
-        
-        if core_files_exist:
-            processor = self._build_processor(dataset)
-            dev_df = pd.read_csv(dataset.dev_metadata_file, sep=dataset.sep)
-        
+
         speaker_lookup_df = processor.generate_speaker_metadata(dev_df)
         speaker_lookup_df.to_csv(dataset.speaker_lookup, sep=dataset.sep, index=False)
 
@@ -122,9 +138,9 @@ class CNCelebMetadataPreparer(BaseMetadataPreparer):
         )
 
         dev_df.to_csv(processor.dev_metadata_file, sep=dataset.sep, index=False)
-        log.info("Saved metadata to %s", processor.dev_metadata_file)
+        log.info(f"Saved metadata to {processor.dev_metadata_file}")
         speaker_lookup_df.to_csv(dataset.speaker_lookup, sep=dataset.sep, index=False)
-        log.info("Saved speaker lookup to %s", dataset.speaker_lookup)
+        log.info(f"Saved speaker lookup to {dataset.speaker_lookup}")
 
         CsvProcessor.split_dataset(
             df=dev_df,
@@ -137,13 +153,9 @@ class CNCelebMetadataPreparer(BaseMetadataPreparer):
             sep=dataset.sep,
             seed=dataset.seed,
         )
-        log.info(
-            "Saved train and val csvs to %s and %s",
-            dataset.train_csv_file,
-            dataset.val_csv_file,
-        )
+        log.info(f"Saved train and val csvs to {dataset.train_csv_file} and {dataset.val_csv_file}")
 
-        extras: Dict[str, Any] = {"core_files_copied": core_files_exist}
+        extras: Dict[str, Any] = {"core_files_copied": can_copy}
 
         splits = SplitArtifacts(
             train_csv=Path(dataset.train_csv_file),
@@ -168,6 +180,7 @@ class CNCelebMetadataPreparer(BaseMetadataPreparer):
             cnceleb2=dataset.get("cnceleb2", None),
             verbose=dataset.verbose,
             sep=dataset.sep,
+            sample_rate=dataset.get("sample_rate", DATASET_DEFAULTS.sample_rate),
             use_pre_segmentation=dataset.use_pre_segmentation,
             segment_duration=dataset.segment_duration,
             segment_overlap=dataset.segment_overlap,

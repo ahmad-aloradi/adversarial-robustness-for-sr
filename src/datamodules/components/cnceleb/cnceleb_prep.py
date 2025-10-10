@@ -1,30 +1,30 @@
 import os
-import argparse
 from pathlib import Path
-from typing import Optional, Union, Tuple
+from typing import Any, Dict, Optional, Union, Tuple
 from multiprocessing import cpu_count
 import pandas as pd
 import soundfile as sf
 from dataclasses import dataclass
 from tqdm.auto import tqdm
-import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+from src import utils
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, CNCelebDefaults
 from src.datamodules.components.utils import segment_utterance
+from src.datamodules.preparation.base import (
+    CONFIG_SNAPSHOT_FILENAME,
+    build_config_snapshot_from_mapping,
+    read_hydra_config,
+    save_config_snapshot,
+)
+from src.datamodules.preparation.snapshot_keys import CNCELEB_COMPARABLE_KEYS
 
 
 DATASET_DEFAULTS = CNCelebDefaults()
 DATASET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
 SPEAKER_CLS, _ = get_speaker_class(DATASET_DEFAULTS.dataset_name)
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-# Ensure at least one console handler so the user always sees logs when running standalone.
-if not logger.handlers:
-    _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter('[%(levelname)s] %(name)s: %(message)s'))
-    logger.addHandler(_handler)
+log = utils.get_pylogger(__name__)
 
 @dataclass
 class CNCelebUtterance:
@@ -158,14 +158,12 @@ class CNCelebProcessor:
                  cnceleb2: Optional[str] = None,
                  verbose: bool = True, sep: str = "|", 
                  sample_rate: int = 16000, n_jobs: Optional[int] = None,
-                 use_pre_segmentation: bool = False,
+                 use_pre_segmentation: bool = True,
                  segment_duration: float = 3.0,
                  segment_overlap: float = 0.0,
                  min_segment_duration: float = 0.5):
         self.sep = sep
         self.verbose = verbose
-        if not self.verbose:
-            logger.setLevel(logging.WARNING)
         self.sample_rate = sample_rate
         self.root_dir = Path(root_dir)
         
@@ -213,10 +211,10 @@ class CNCelebProcessor:
         if self.cnceleb2_dev_lst_file:
             assert self.cnceleb2_dev_lst_file.exists(), f"spk.lst in CN-Celeb2 not found: {self.cnceleb2_dev_lst_file}"
 
-        logger.info(f"Initialized CNCelebProcessor:")
-        logger.info(f"  Root: {self.root_dir}")
-        logger.info(f"  Sub-datasets: {[str(p) for p in self.sub_dataset_roots]}")
-        logger.info(f"  Artifacts: {self.artifacts_dir}")
+        log.info(f"Initialized CNCelebProcessor:")
+        log.info(f"  Root: {self.root_dir}")
+        log.info(f"  Sub-datasets: {[str(p) for p in self.sub_dataset_roots]}")
+        log.info(f"  Artifacts: {self.artifacts_dir}")
         
         # Segmentation parameters (passed from config)
         self.use_pre_segmentation = use_pre_segmentation
@@ -229,19 +227,15 @@ class CNCelebProcessor:
         for sub_root in self.sub_dataset_roots:
             if not sub_root.exists() or not sub_root.is_dir():
                 raise FileNotFoundError(f"Sub-dataset directory does not exist: {sub_root}")
-        logger.info(f"All specified sub-datasets exist: {[str(p) for p in self.sub_dataset_roots]}")
+        log.info(f"All specified sub-datasets exist: {[str(p) for p in self.sub_dataset_roots]}")
 
     def generate_metadata(self) -> pd.DataFrame:
         """Generate metadata by scanning dev and data directories."""
-        if self.dev_metadata_file.exists():
-            logger.info(f"Loading existing metadata: {self.dev_metadata_file}")
-            return pd.read_csv(self.dev_metadata_file, sep=self.sep)
-
         all_audio_files = []
         
         # Scan all sub-datasets
         for sub_root in self.sub_dataset_roots:
-            logger.info(f"Scanning: {sub_root}")
+            log.info(f"Scanning: {sub_root}")
             
             # Look for audio files in common directories
             scan_dirs = [
@@ -251,10 +245,10 @@ class CNCelebProcessor:
             for scan_dir in scan_dirs:
                 audio_files = list(scan_dir.rglob('*.flac'))
                 assert audio_files, f"No audio files found in {scan_dir}"
-                logger.info(f"Found {len(audio_files)} audio files in {scan_dir}")
+                log.info(f"Found {len(audio_files)} audio files in {scan_dir}")
                 all_audio_files.extend([(f, sub_root) for f in audio_files])
 
-        logger.info(f"Processing {len(all_audio_files)} audio files...")
+        log.info(f"Processing {len(all_audio_files)} audio files...")
         
         # Prepare tasks for multiprocessing - include cnceleb1 and cnceleb2 names
         tasks = [(str(f), str(r), self.sample_rate, self.sub_datasets[0], 
@@ -272,7 +266,7 @@ class CNCelebProcessor:
 
         # Apply segmentation only if enabled
         if self.use_pre_segmentation:
-            logger.info(f"Pre-segmentation enabled. Processing {len(utterances)} utterances...")
+            log.info(f"Pre-segmentation enabled. Processing {len(utterances)} utterances...")
             
             all_segments = []
             for utt in tqdm(utterances, desc="Segmenting utterances"):
@@ -287,16 +281,16 @@ class CNCelebProcessor:
                 )
                 all_segments.extend(segments)
             
-            logger.info(f"Generated {len(all_segments)} segments from {len(utterances)} utterances")
-            logger.info(f"Average segments per utterance: {len(all_segments)/len(utterances):.2f}")
+            log.info(f"Generated {len(all_segments)} segments from {len(utterances)} utterances")
+            log.info(f"Average segments per utterance: {len(all_segments)/len(utterances):.2f}")
             dev_df = pd.DataFrame(all_segments)
         else:
-            logger.info(f"Pre-segmentation disabled. Using full file metadata with random cropping during training.")
+            log.info(f"Pre-segmentation disabled. Using full file metadata with random cropping during training.")
             dev_df = pd.DataFrame(utterances)
 
         dev_df.to_csv(self.dev_metadata_file, sep=self.sep, index=False)
-        logger.info(f"Saved metadata for {len(dev_df)} {'segments' if self.use_pre_segmentation else 'files'} to {self.dev_metadata_file}")
-        
+        log.info(f"Saved metadata for {len(dev_df)} {'segments' if self.use_pre_segmentation else 'files'} to {self.dev_metadata_file}")
+
         return dev_df
     
     def _find_audio_trial_file(self, trial_path: str) -> str:
@@ -331,14 +325,10 @@ class CNCelebProcessor:
     def generate_trial_list(self) -> pd.DataFrame:
         """Generate verification trials."""
         output_path = self.artifacts_dir / "verification_trials.csv"
-        if output_path.exists():
-            logger.info(f"Loading existing trials: {output_path}")
-            return pd.read_csv(output_path, sep=self.sep)
-
         if not self.trials_lst_file.exists():
             raise FileNotFoundError(f"Trials list file not found: {self.trials_lst_file}")
 
-        logger.info(f"Reading trials from: {self.trials_lst_file}")
+        log.info(f"Reading trials from: {self.trials_lst_file}")
         
         trials_data = []
         with open(self.trials_lst_file, 'r', encoding='utf-8') as f:
@@ -367,24 +357,20 @@ class CNCelebProcessor:
             raise ValueError("No valid trials were generated. Check trial paths and audio file locations.")
 
         trials_df = pd.DataFrame(trials_data)
-        logger.info(f"Generated {len(trials_df)} valid trials")
-        
+        log.info(f"Generated {len(trials_df)} valid trials")
+
         trials_df.to_csv(output_path, sep=self.sep, index=False)
-        logger.info(f"Saved trials to {output_path}")
-        
+        log.info(f"Saved trials to {output_path}")
+
         return trials_df
-    
+
     def generate_enrollment_embeddings_list(self) -> pd.DataFrame:
         """Generate enrollment file list using enroll.lst (simplified approach)."""
-        if self.enroll_csv_path.exists():
-            logger.info(f"Loading existing enrollment list: {self.enroll_csv_path}")
-            return pd.read_csv(self.enroll_csv_path, sep=self.sep)
-
         # Try enroll.lst first (simpler format), then enroll.map        
         enrollment_lst_files = []
         enrollment_map_files = []
 
-        logger.info(f"Reading enrollment list: {self.enroll_lst_file}")
+        log.info(f"Reading enrollment list: {self.enroll_lst_file}")
         with open(self.enroll_lst_file, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
@@ -399,10 +385,10 @@ class CNCelebProcessor:
                     'enroll_path': actual_path,
                 })
 
-        logger.info(f"Reading enrollment map: {self.enroll_map_file}")
+        log.info(f"Reading enrollment map: {self.enroll_map_file}")
         with open(self.enroll_map_file, 'r', encoding='utf-8') as f:
             for line in f:
-                line = line.strip()                        
+                line = line.strip()
                 parts = line.split()
                 assert len(parts) >= 2, f"Invalid enroll.map format: {line}"
 
@@ -420,48 +406,43 @@ class CNCelebProcessor:
         enrollment_map_files = pd.DataFrame.from_dict(enrollment_map_files)
 
         enroll_df = pd.merge(enrollment_lst_files, enrollment_map_files, on='enroll_id')
-        logger.info(f"Generated {len(enroll_df)} enrollment mappings")
+        log.info(f"Generated {len(enroll_df)} enrollment mappings")
         
         enroll_df.to_csv(self.enroll_csv_path, sep=self.sep, index=False)
-        logger.info(f"Saved enrollment list to {self.enroll_csv_path}")
+        log.info(f"Saved enrollment list to {self.enroll_csv_path}")
         return enroll_df
     
     def generate_unique_test_csv(self, trials_df: pd.DataFrame) -> None:
         """Generate unique test CSV from trials (test paths only)."""
-        if self.test_unique_csv_path.exists():
-            logger.info(f"Test unique CSV already exists: {self.test_unique_csv_path}")
-            return
-                
-        # Extract unique test paths
         unique_test_paths = pd.DataFrame({'test_path': trials_df['test_path'].unique()})
-        logger.info(f"Found {len(unique_test_paths)} unique test paths")
-        
+        log.info(f"Found {len(unique_test_paths)} unique test paths")
+
         unique_test_paths.to_csv(self.test_unique_csv_path, sep=self.sep, index=False)
-        logger.info(f"Saved test unique CSV to {self.test_unique_csv_path}")
+        log.info(f"Saved test unique CSV to {self.test_unique_csv_path}")
     
     def save_split_speaker_lists(self):
         """Save speaker lists for dev and test splits."""
         # 1. Get dev speakers from CN-Celeb_flac/dev/dev.lst if it exists
-        logger.info(f"Reading dev speakers: {self.cnceleb1_dev_lst_file}")
+        log.info(f"Reading dev speakers: {self.cnceleb1_dev_lst_file}")
         with open(self.cnceleb1_dev_lst_file, 'r', encoding='utf-8') as f:
             cn1_dev_speakers = [line.strip() for line in f if line.strip()]
 
         if self.cnceleb2_dev_lst_file and self.cnceleb2_dev_lst_file.exists():
-            logger.info(f"Reading additional dev speakers from: {self.cnceleb2_dev_lst_file}")
+            log.info(f"Reading additional dev speakers from: {self.cnceleb2_dev_lst_file}")
             with open(self.cnceleb2_dev_lst_file, 'r', encoding='utf-8') as f:
                 cn2_dev_speakers = [line.strip() for line in f if line.strip()]
             dev_speakers = sorted(set(cn1_dev_speakers + cn2_dev_speakers))
         else:
             dev_speakers = sorted(set(cn1_dev_speakers))
         
-        logger.info(f"Total dev speakers found: {len(dev_speakers)}")
+        log.info(f"Total dev speakers found: {len(dev_speakers)}")
 
         # Test speakers from test list
         test_speakers = set()
 
         # 1. Get test speakers from CN-Celeb_flac/eval/lists/test.lst if it exists
         if self.test_lst_file.exists():
-            logger.info(f"Reading test speakers from: {self.test_lst_file}")
+            log.info(f"Reading test speakers from: {self.test_lst_file}")
             with open(self.test_lst_file, 'r', encoding='utf-8') as f:
                 for line in f:
                     file_path = line.strip()
@@ -474,11 +455,11 @@ class CNCelebProcessor:
         # Save speaker lists
         with open(self.dev_spk_file, 'w') as f:
             f.write('\n'.join(dev_speakers) + '\n')
-        logger.info(f"Saved {len(dev_speakers)} dev speakers to {self.dev_spk_file}")
+        log.info(f"Saved {len(dev_speakers)} dev speakers to {self.dev_spk_file}")
 
         with open(self.test_spk_file, 'w') as f:
             f.write('\n'.join(sorted(test_speakers)) + '\n')
-        logger.info(f"Saved {len(test_speakers)} test speakers to {self.test_spk_file}")
+        log.info(f"Saved {len(test_speakers)} test speakers to {self.test_spk_file}")
 
     def generate_speaker_metadata(self, dev_df: pd.DataFrame) -> pd.DataFrame:
         """Generate speaker-level metadata."""
@@ -502,20 +483,20 @@ class CNCelebProcessor:
                 speaker_info = dev_df[['speaker_id', col]].drop_duplicates('speaker_id')
                 speaker_df = pd.merge(speaker_df, speaker_info, on='speaker_id', how='left')
         
-        logger.info(f"Generated speaker metadata for {len(speaker_df)} speakers")
+        log.info(f"Generated speaker metadata for {len(speaker_df)} speakers")
         return speaker_df
     
     def get_speaker_list(self, from_metadata: bool = True) -> set:
         """Get the set of unique speaker IDs from the dataset."""
         if from_metadata and self.dev_metadata_file.exists():
-            logger.info(f"Loading speaker IDs from metadata: {self.dev_metadata_file}")
+            log.info(f"Loading speaker IDs from metadata: {self.dev_metadata_file}")
             df = pd.read_csv(self.dev_metadata_file, sep=self.sep, usecols=['speaker_id'])
             speaker_ids = set(df['speaker_id'].unique())
-            logger.info(f"Found {len(speaker_ids)} unique speakers in metadata")
+            log.info(f"Found {len(speaker_ids)} unique speakers in metadata")
             return speaker_ids
         
         # Scan directory structure directly
-        logger.info("Scanning directory structure for speaker IDs...")
+        log.info("Scanning directory structure for speaker IDs...")
         speaker_ids = set()
         
         # Scan multiple directories for speaker folders
@@ -532,7 +513,7 @@ class CNCelebProcessor:
                 speaker_ids.add(item.name)
         
         # Also extract from trial files if available
-        logger.info("Extracting speaker IDs from enrollment map...")
+        log.info("Extracting speaker IDs from enrollment map...")
         with open(self.enroll_map_file, 'r') as f:
             for line in f:
                 parts = line.strip().split()
@@ -549,7 +530,7 @@ class CNCelebProcessor:
                         speaker_ids.add(path_parts[0])
 
         if self.test_lst_file.exists():
-            logger.info("Extracting speaker IDs from test list...")
+            log.info("Extracting speaker IDs from test list...")
             with open(self.test_lst_file, 'r') as f:
                 for line in f:
                     file_path = line.strip()
@@ -559,7 +540,7 @@ class CNCelebProcessor:
                     speaker_id = filename.split('-')[0]
                     speaker_ids.add(speaker_id)
         
-        logger.info(f"Found {len(speaker_ids)} unique speakers from directory scan")
+        log.info(f"Found {len(speaker_ids)} unique speakers from directory scan")
         return speaker_ids
     
     def _get_enrollment_speakers(self) -> set:
@@ -590,42 +571,47 @@ class CNCelebProcessor:
                     speaker_id = enroll_id.split('-')[0]
                     enroll_speakers.add(speaker_id)
                     
-        logger.info(f"Found {len(enroll_speakers)} unique enrollment speakers.")
-        return enroll_speakers
-        
+        log.info(f"Found {len(enroll_speakers)} unique enrollment speakers.")
+        return enroll_speakers        
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate CNCeleb metadata")
-    parser.add_argument("--root_dir", type=str, default="data/cnceleb", help="Root directory for CNCeleb")
-    parser.add_argument("--artifacts_dir", type=str, default="data/cnceleb/metadata", help="Artifacts directory")
-    parser.add_argument("--cnceleb1", type=str, default="CN-Celeb_flac", help="CNCeleb1 dataset directory (mandatory)")
-    parser.add_argument("--cnceleb2", type=str, default="CN-Celeb2_flac", help="CNCeleb2 dataset directory (optional, set to empty string to skip)")
-    parser.add_argument("--sample_rate", type=int, default=16000, help="Expected sample rate")
-    parser.add_argument("--sep", type=str, default="|", help="CSV separator character")
-    parser.add_argument("--verbose", action="store_true", default=True, help="Enable verbose logging")
-    parser.add_argument("--n_jobs", type=int, default=None, help="Number of parallel jobs")
-    args = parser.parse_args()
-
+    config = read_hydra_config(
+        config_path='../../../../configs',
+        config_name='train.yaml',
+        overrides=[
+            f"paths.data_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data",
+            'datamodule=datasets/cnceleb',
+            f"datamodule.dataset.artifacts_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data/cnceleb/metadata"
+        ]
+    )
+    config = config.datamodule.dataset
+    
+    # Resolve paths
+    resolved_root = Path(config.data_dir).expanduser().resolve()
+    resolved_artifacts = Path(config.artifacts_dir).expanduser().resolve()
+    
     # Handle optional cnceleb2 parameter
-    cnceleb2 = args.cnceleb2 if args.cnceleb2 and args.cnceleb2 != "" else None
-    
-    # Define artifact paths based on artifacts_dir
-    artifacts_dir = Path(args.artifacts_dir)
-    
+    cnceleb2 = config.cnceleb2 if hasattr(config, 'cnceleb2') and config.cnceleb2 else None
+
     processor = CNCelebProcessor(
-        root_dir=args.root_dir, 
-        artifacts_dir=args.artifacts_dir,
-        cnceleb1=args.cnceleb1,
-        dev_metadata_file=artifacts_dir / "cnceleb_dev.csv",
-        enroll_csv_path=artifacts_dir / "enroll.csv",
-        test_unique_csv_path=artifacts_dir / "test_unique.csv",
-        dev_spk_file=artifacts_dir / "dev_speakers.txt",
-        test_spk_file=artifacts_dir / "test_speakers.txt",
+        root_dir=resolved_root,
+        artifacts_dir=resolved_artifacts,
+        cnceleb1=config.cnceleb1,
+        dev_metadata_file=Path(config.dev_metadata_file),
+        enroll_csv_path=Path(config.enroll_csv_path),
+        test_unique_csv_path=Path(config.test_unique_csv_path),
+        dev_spk_file=Path(config.dev_spk_file),
+        test_spk_file=Path(config.test_spk_file),
         cnceleb2=cnceleb2,
-        verbose=args.verbose,
-        sep=args.sep,
-        sample_rate=args.sample_rate,
-        n_jobs=args.n_jobs
+        verbose=config.verbose,
+        sep=config.sep,
+        sample_rate=config.sample_rate,
+        n_jobs=None,  # Use default
+        use_pre_segmentation=config.use_pre_segmentation,
+        segment_duration=config.segment_duration,
+        segment_overlap=config.segment_overlap,
+        min_segment_duration=config.min_segment_duration,
     )
     
     # Run the preprocessing pipeline
@@ -635,4 +621,11 @@ if __name__ == "__main__":
     processor.generate_enrollment_embeddings_list()
     processor.generate_unique_test_csv(trials_df)
     
-    logger.info(f"Preprocessing completed. Generated {len(trials_df)} trials.")
+    # Build snapshot by extracting only the comparable keys from config
+    snapshot_source = {key: getattr(config, key) for key in CNCELEB_COMPARABLE_KEYS if hasattr(config, key)}
+    snapshot = build_config_snapshot_from_mapping(snapshot_source, CNCELEB_COMPARABLE_KEYS)
+    snapshot_path = resolved_artifacts / CONFIG_SNAPSHOT_FILENAME
+    save_config_snapshot(snapshot, snapshot_path)
+    log.info(f"Saved configuration snapshot to {snapshot_path}")
+
+    log.info(f"Preprocessing completed. Generated {len(trials_df)} trials.")

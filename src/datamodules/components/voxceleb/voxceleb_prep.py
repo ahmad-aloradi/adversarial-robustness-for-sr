@@ -1,7 +1,6 @@
 import os
-import argparse
 from pathlib import Path
-from typing import List, Dict, Optional, Union, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import cpu_count
 
@@ -9,13 +8,19 @@ import soundfile as sf
 import pandas as pd
 import wget
 from dataclasses import dataclass, asdict
-from hydra import initialize, compose
 from tqdm.auto import tqdm
 
 from src import utils
 from src.modules.components.utils import LanguagePredictionModel
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, VoxcelebDefaults
 from src.datamodules.components.utils import segment_utterance
+from src.datamodules.preparation.base import (
+    CONFIG_SNAPSHOT_FILENAME,
+    build_config_snapshot_from_mapping,
+    read_hydra_config,
+    save_config_snapshot,
+)
+from src.datamodules.preparation.snapshot_keys import VOXCELEB_COMPARABLE_KEYS
 
 DATASET_DEFAULTS = VoxcelebDefaults()
 DATESET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
@@ -93,15 +98,17 @@ class VoxCelebProcessor:
         'preprocess_stats_file': 'preprocess_stats.csv'
     }
 
-    def __init__(self, 
-                 root_dir: Union[str, Path], 
-                 artifcats_dir: Union[str, Path],
-                 verbose: bool = True, 
-                 sep: str = '|',
-                 use_pre_segmentation: bool = False,
-                 segment_duration: float = 4.0,
-                 segment_overlap: float = 0.0,
-                 min_segment_duration: float = 0.5):
+    def __init__(
+        self,
+        root_dir: Union[str, Path],
+        artifcats_dir: Union[str, Path],
+        verbose: bool = True,
+        sep: str = '|',
+        use_pre_segmentation: bool = True,
+        segment_duration: float = 3.0,
+        segment_overlap: float = 0.0,
+    min_segment_duration: float = 0.5,
+    ):
         """
         Initialize VoxCeleb processor
         
@@ -146,7 +153,7 @@ class VoxCelebProcessor:
 
         # Create or load metadata
         self.speaker_metadata_df = self.load_speaker_metadata()
-        
+
         # Segmentation parameters (passed from config)
         self.use_pre_segmentation = use_pre_segmentation
         self.segment_duration = segment_duration
@@ -295,100 +302,76 @@ class VoxCelebProcessor:
         return utterances, final_stats
 
 
-    def generate_metadata(self,
-                          base_search_dir: str,
-                          min_duration: float = 1.0, 
-                          save_df: bool = True,
-                          ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def generate_metadata(
+        self,
+        min_duration: float = 1.0,
+        save_df: bool = True,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Generate metadata for all valid utterances in the VoxCeleb dataset.
-        This method scans through wav files in the dataset directory, processes them to extract utterance
-        information, and generates metadata files containing utterance and speaker statistics.
-        Args:
-            min_duration (float, optional): Minimum duration in seconds for a valid utterance. Defaults to 1.0.
-            save_df (bool, optional): Whether to save the generated metadata to CSV files. Defaults to True.
-            base_search_dir (str): Directory to search for existing metadata files.
+
         Returns:
-            Tuple[pd.DataFrame, pd.DataFrame]:
-                - DataFrame with development set metadata (utterances or segments)
-                - DataFrame with speaker metadata
-        Notes:
-            - If metadata files already exist, loads and returns existing metadata instead of regenerating
-            - Saves three CSV files if save_df=True:
-                1. Development metadata file
-                2. Preprocessing statistics file
-                3. VoxCeleb metadata file
-        """        
+            Tuple of (development metadata dataframe, speaker metadata dataframe).
+        """
 
-        base_search_dir = Path(base_search_dir)
-        vox_metadata_file = base_search_dir / self.DATASET_PATHS['vox_metadata']
-        dev_metadata_file_search_path = base_search_dir / self.dev_metadata_file.name
+        wav_paths = list(self.wav_dir.rglob("*.wav"))
 
-        if not dev_metadata_file_search_path.is_file():
-            wav_paths = list(self.wav_dir.rglob("*.wav"))
+        if self.verbose:
+            log.info(f"Iterating over {len(wav_paths)} audio files ...")
+
+        # Process files with progress bar
+        utterances, utterances_stats = self._get_voxceleb_utterances(wav_paths, min_duration)
+        utterances_stats = pd.DataFrame.from_dict(utterances_stats, orient='columns')
+
+        # Print statistics
+        if self.verbose:
+            log.info(f"\nSummary: {utterances_stats['total']} files, {len(utterances)} valid")
+
+        # Convert utterances to dataframe
+        dev_metadata = self.utterances_to_csv(
+            utterances=utterances,
+            dev_metadata_file=self.dev_metadata_file,
+        )
+
+        # Apply segmentation only if enabled
+        if self.use_pre_segmentation:
+            if self.verbose:
+                log.info(f"Pre-segmentation enabled. Processing {len(dev_metadata)} utterances...")
+
+            all_segments = []
+            for _, row in tqdm(
+                dev_metadata.iterrows(),
+                total=len(dev_metadata),
+                desc="Segmenting utterances",
+            ):
+                segments = segment_utterance(
+                    speaker_id=row['speaker_id'],
+                    rel_filepath=row['rel_filepath'],
+                    recording_duration=row['recording_duration'],
+                    segment_duration=self.segment_duration,
+                    segment_overlap=self.segment_overlap,
+                    min_segment_duration=self.min_segment_duration,
+                    original_row=row.to_dict(),
+                )
+                all_segments.extend(segments)
 
             if self.verbose:
-                log.info(f"Iterating over {len(wav_paths)} audio files ...")
+                log.info(f"Generated {len(all_segments)} segments from {len(dev_metadata)} utterances")
+                log.info(f"Average segments per utterance: {len(all_segments)/len(dev_metadata):.2f}")
 
-            # Process files with progress bar
-            utterances, utterances_stats = self._get_voxceleb_utterances(wav_paths, min_duration)
-            utterances_stats = pd.DataFrame.from_dict(utterances_stats, orient='columns')
+            dev_metadata = pd.DataFrame(all_segments)
 
-            # Print statistics
+        if save_df:
+            VoxCelebProcessor.save_csv(dev_metadata, self.dev_metadata_file, sep=self.sep)
+            VoxCelebProcessor.save_csv(utterances_stats, self.preprocess_stats_file, sep=self.sep)
+            VoxCelebProcessor.save_csv(self.speaker_metadata_df, self.vox_metadata, sep=self.sep)
             if self.verbose:
-                log.info(f"\nSummary: {utterances_stats['total']} files, {len(utterances)} valid")
+                log.info(
+                    f"Saved {len(dev_metadata)} {'segments' if self.use_pre_segmentation else 'utterances'} to {self.dev_metadata_file}"
+                )
+                log.info(f"Saved speaker metadata to {self.vox_metadata}")
 
-            # Convert utterances to dataframe
-            dev_metadata = self.utterances_to_csv(utterances=utterances,
-                                                  dev_metadata_file=self.dev_metadata_file)
-            
-            # Apply segmentation only if enabled
-            if self.use_pre_segmentation:
-                if self.verbose:
-                    log.info(f"Pre-segmentation enabled. Processing {len(dev_metadata)} utterances...")
-                
-                all_segments = []
-                for _, row in tqdm(dev_metadata.iterrows(), total=len(dev_metadata), desc="Segmenting utterances"):
-                    segments = segment_utterance(
-                        speaker_id=row['speaker_id'],
-                        rel_filepath=row['rel_filepath'],
-                        recording_duration=row['recording_duration'],
-                        segment_duration=self.segment_duration,
-                        segment_overlap=self.segment_overlap,
-                        min_segment_duration=self.min_segment_duration,
-                        original_row=row.to_dict()
-                    )
-                    all_segments.extend(segments)
-                
-                if self.verbose:
-                    log.info(f"Generated {len(all_segments)} segments from {len(dev_metadata)} utterances")
-                    log.info(f"Average segments per utterance: {len(all_segments)/len(dev_metadata):.2f}")
-                
-                dev_metadata = pd.DataFrame(all_segments)
+        VoxCelebProcessor.print_utts_statistics(utterances)
 
-            if save_df:
-                VoxCelebProcessor.save_csv(dev_metadata, self.dev_metadata_file, sep=self.sep)
-                VoxCelebProcessor.save_csv(utterances_stats, self.preprocess_stats_file, sep=self.sep)
-                VoxCelebProcessor.save_csv(self.speaker_metadata_df, self.vox_metadata, sep=self.sep)
-                if self.verbose:
-                    log.info(f"Saved {len(dev_metadata)} {'segments' if self.use_pre_segmentation else 'utterances'} to {self.dev_metadata_file}")
-                    log.info(f"Saved speaker metadata to {self.vox_metadata}")
-
-            VoxCelebProcessor.print_utts_statistics(utterances)
-
-        else:
-            dev_metadata = pd.read_csv(dev_metadata_file_search_path, sep=self.sep)
-            assert vox_metadata_file.is_file(), f"Vox metadata file not found: {vox_metadata_file}"
-
-            vox_metadata = pd.read_csv(vox_metadata_file, sep=self.sep)
-            if not self.speaker_metadata_df.equals(vox_metadata):
-                log.warning("Speaker metadata has changed since last run")
-            if self.verbose:
-                log.info(f"Loading existing metadata file {dev_metadata_file_search_path} with {len(dev_metadata)} total files")
-
-            if save_df:
-                VoxCelebProcessor.save_csv(vox_metadata, self.vox_metadata, sep=self.sep)
-                VoxCelebProcessor.save_csv(dev_metadata, self.dev_metadata_file, sep=self.sep)
-            
         return dev_metadata, self.speaker_metadata_df
 
 
@@ -603,104 +586,88 @@ class VoxCelebTestFilter:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate VoxCeleb metadata")
-    parser.add_argument("--root_dir", 
-                        type=str,
-                        default="data/voxceleb",
-                        help="Root directory containing both VoxCeleb1 and VoxCeleb2")
-    parser.add_argument(
-        "--artifacts_dir",
-        type=str,
-        default="data/voxceleb/voxceleb_metadata/metadata",
-        help="Artifacts directory for generated files"
-        )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Print verbose output"
-        )
-    parser.add_argument(
-        "--min_duration",
-        type=float,
-        default=0.5,
-        help="Minimum duration in seconds. Utterances shorter than this will be excluded"
-        )
-    parser.add_argument(
-        "--sep",
-        type=str,
-        default="|",
-        help="Separator used for the metadata file"
-        )
-    parser.add_argument(
-        "--test_file",
-        type=str,
-        choices=["veri_test2", "veri_test_extended2", "veri_test_hard2"],
-        default="veri_test2",
-        help="Test file name for generating test-specific files. Options: veri_test2, veri_test_extended2, veri_test_hard2",
+    # Load configuration from Hydra YAML files (like LibriSpeech)
+    config = read_hydra_config(
+        config_path='../../../../configs',
+        config_name='train.yaml',
+        overrides=[
+            f"paths.data_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data",
+            'datamodule=datasets/voxceleb',
+            f"datamodule.dataset.voxceleb_artifacts_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data/voxceleb/voxceleb_metadata/metadata"
+        ]
     )
-    parser.add_argument(
-        "--predict_lang",
-        type=bool,
-        default=True,
-        help="Whether to predict language for utterances"
-    )
-
-    args = parser.parse_args()
-
-    # Normalize paths and ensure artifact directory exists
-    args.root_dir = Path(args.root_dir).expanduser().resolve()
-    if not args.root_dir.exists():
-        raise FileNotFoundError(f"Root directory does not exist: {args.root_dir}")
-    if not args.root_dir.is_dir():
-        raise NotADirectoryError(f"Root directory is not a directory: {args.root_dir}")
+    config = config.datamodule.dataset
     
-    args.artifacts_dir = Path(args.artifacts_dir).expanduser().resolve()
-    args.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    # Resolve paths
+    resolved_root = Path(config.data_dir).expanduser().resolve()
+    resolved_artifacts = Path(config.voxceleb_artifacts_dir).expanduser().resolve()
+    
+    if not resolved_root.exists():
+        raise FileNotFoundError(f"Root directory does not exist: {resolved_root}")
+    if not resolved_root.is_dir():
+        raise NotADirectoryError(f"Root directory is not a directory: {resolved_root}")
+    
+    resolved_artifacts.mkdir(parents=True, exist_ok=True)
 
-    # Run VoxCeleb Processor (now generic, no test-specific processing)
     voxceleb_processor = VoxCelebProcessor(
-        root_dir=args.root_dir,
-        artifcats_dir=args.artifacts_dir,
-        verbose=args.verbose,
-        sep=args.sep,
+        root_dir=resolved_root,
+        artifcats_dir=resolved_artifacts,
+        verbose=config.verbose,
+        sep=config.sep,
+        use_pre_segmentation=config.use_pre_segmentation,
+        segment_duration=config.segment_duration,
+        segment_overlap=config.segment_overlap,
+        min_segment_duration=config.min_segment_duration,
     )
 
     if not voxceleb_processor.dev_metadata_file.resolve().is_file():
-        dev_metadata, speaker_metadata = voxceleb_processor.generate_metadata(
-            base_search_dir=args.artifacts_dir, 
-            min_duration=args.min_duration
-            )
+        voxceleb_processor.generate_metadata(min_duration=config.min_duration)
 
-    dev_metadata = pd.read_csv(str(voxceleb_processor.dev_metadata_file.resolve()), sep=args.sep)
+    dev_metadata = pd.read_csv(str(voxceleb_processor.dev_metadata_file.resolve()), sep=config.sep)
 
-    if args.predict_lang:
+    # Language prediction (optional, based on config)
+    predict_lang = getattr(config, 'predict_lang', False)
+    if predict_lang:
         # Identify language of an audio file
         lang_id_cfg = {'batch_size': 64, 'num_workers': 8, 'shuffle': False, 'drop_last': False}
         lang_id_model = LanguagePredictionModel(wav_dir=voxceleb_processor.wav_dir, crop_len=8)
 
         dev_metadata = lang_id_model.forward(df=dev_metadata, cfg=lang_id_cfg)
-        VoxCelebProcessor.save_csv(dev_metadata, str(voxceleb_processor.dev_metadata_file.resolve()), sep=args.sep)
+        VoxCelebProcessor.save_csv(dev_metadata, str(voxceleb_processor.dev_metadata_file.resolve()), sep=config.sep)
 
-    # Now handle test speaker exclusion separately
-    test_filter = VoxCelebTestFilter(root_dir=args.root_dir, verbose=args.verbose)
-    test_speakers, veri_df = test_filter.get_test_speakers(args.test_file)
+    # Handle test speaker exclusion for each test file
+    veri_test_filenames = config.veri_test_filenames if isinstance(config.veri_test_filenames, list) else [config.veri_test_filenames]
     
-    # Filter dev metadata to exclude test speakers
-    filtered_dev_metadata = test_filter.filter_dev_metadata(dev_metadata, test_speakers)
-    
-    # Save filtered metadata with test-specific naming
-    test_specific_dir = args.artifacts_dir / args.test_file
-    test_specific_dir.mkdir(parents=True, exist_ok=True)
-    
-    filtered_dev_file = test_specific_dir / f"voxceleb_dev_{args.test_file}.csv"
-    VoxCelebProcessor.save_csv(filtered_dev_metadata, filtered_dev_file, sep=args.sep)
-    
-    # Run veri_test.txt enricher
-    veri_test_path = test_filter.download_test_file(args.test_file)
-    output_path = test_specific_dir / f"{args.test_file}.csv"
-    enriched_df = VoxCelebProcessor.enrich_verification_file(
-        veri_test_path,
-        voxceleb_processor.vox_metadata,
-        output_path=output_path,
-        sep=args.sep
+    for test_file in veri_test_filenames:
+        test_filter = VoxCelebTestFilter(root_dir=resolved_root, verbose=config.verbose)
+        test_speakers, veri_df = test_filter.get_test_speakers(test_file)
+        
+        # Filter dev metadata to exclude test speakers
+        filtered_dev_metadata = test_filter.filter_dev_metadata(dev_metadata, test_speakers)
+        
+        # Save filtered metadata with test-specific naming
+        test_specific_dir = resolved_artifacts / test_file
+        test_specific_dir.mkdir(parents=True, exist_ok=True)
+        
+        filtered_dev_file = test_specific_dir / f"voxceleb_dev_{test_file}.csv"
+        VoxCelebProcessor.save_csv(filtered_dev_metadata, filtered_dev_file, sep=config.sep)
+        
+        # Run veri_test.txt enricher
+        veri_test_path = test_filter.download_test_file(test_file)
+        output_path = test_specific_dir / f"{test_file}.csv"
+        enriched_df = VoxCelebProcessor.enrich_verification_file(
+            veri_test_path,
+            voxceleb_processor.vox_metadata,
+            output_path=output_path,
+            sep=config.sep
         )
+
+    # Save snapshot to parent artifacts directory (base for experiment reuse)
+    base_artifacts = resolved_artifacts.parent if resolved_artifacts.name in veri_test_filenames else resolved_artifacts
+    
+    # Build snapshot by extracting only the comparable keys from config
+    snapshot_source = {key: getattr(config, key) for key in VOXCELEB_COMPARABLE_KEYS if hasattr(config, key)}
+    snapshot = build_config_snapshot_from_mapping(snapshot_source, VOXCELEB_COMPARABLE_KEYS)
+    snapshot_path = base_artifacts / CONFIG_SNAPSHOT_FILENAME
+    save_config_snapshot(snapshot, snapshot_path)
+    log.info(f"Saved configuration snapshot to {snapshot_path}")

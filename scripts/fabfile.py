@@ -188,7 +188,7 @@ python {settings['script_name']} {script_arguments_str} paths.data_dir=/home/woo
 
 def run_bash_script(pbs):
     with cd(PATH_PROJECT):
-        run('PATH=$PATH:/apps/slurm/current/bin && cat << "EOF" |  sbatch\n%s\nEOF' % pbs, shell=True)
+        run(f'PATH=$PATH:/apps/slurm/current/bin && cat << "EOF" |  sbatch\n{pbs}\nEOF', shell=True)
 
 
 @task
@@ -276,18 +276,21 @@ def run_vpc():
         'cuda': '11.1.0',  # '10.0'
     }
 
+    # datasets = [
+    #     "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, B3: ${datamodule.available_models.B3}}",
+    #     "{LibriSpeech: ${datamodule.available_models.LibriSpeech}}",
+    #     "${datamodule.available_models}"
+    #     ]
     datasets = [
-        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, B3: ${datamodule.available_models.B3}}",
-        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, B4: ${datamodule.available_models.B4}}",
-        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, B5: ${datamodule.available_models.B5}}",
-        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, T8-5: ${datamodule.available_models.T8-5}}",
-        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, T10-2: ${datamodule.available_models.T10-2}}",
-        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, T12-5: ${datamodule.available_models.T12-5}}",
-        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}, T25-1: ${datamodule.available_models.T25-1}}",
-        "{LibriSpeech: ${datamodule.available_models.LibriSpeech}}",
-        "${datamodule.available_models}"
+        "{B3: ${datamodule.available_models.B3}}",
+        "{B4: ${datamodule.available_models.B4}}",
+        "{B5: ${datamodule.available_models.B5}}",
+        "{T8-5: ${datamodule.available_models.T8-5}}",
+        "{T10-2: ${datamodule.available_models.T10-2}}",
+        "{T12-5: ${datamodule.available_models.T12-5}}",
+        "{T25-1: ${datamodule.available_models.T25-1}}",
         ]
-    experiments = ["vpc_amm_cyclic"]
+    experiments = ["vpc_amm_cyclic_audio_from_scratch"]
 
     for experiment in experiments:
         for dataset in datasets:

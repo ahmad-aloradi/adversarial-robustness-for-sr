@@ -11,15 +11,23 @@ import yaml
 import pandas as pd
 import soundfile as sf
 from tqdm import tqdm
-from hydra import initialize, compose
-from omegaconf import DictConfig
 
+from src import utils
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, LibriSpeechDefaults
 from src.datamodules.components.utils import segment_utterance
+from src.datamodules.preparation.base import (
+    CONFIG_SNAPSHOT_FILENAME,
+    build_config_snapshot_from_mapping,
+    read_hydra_config,
+    save_config_snapshot,
+)
+from src.datamodules.preparation.snapshot_keys import LIBRISPEECH_COMPARABLE_KEYS
 
 DATASET_DEFAULTS = LibriSpeechDefaults()
 DATESET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
 SPEAKER_CLS, _ = get_speaker_class(DATASET_DEFAULTS.dataset_name)
+
+log = utils.get_pylogger(__name__)
 
 
 def init_default_config_to_df(df):
@@ -139,7 +147,7 @@ def process(config, delimiter, save_csv=True):
         dfs[subset] = dfs[subset].join(df_speaker.set_index(DATESET_CLS.SPEAKER_ID), on=DATESET_CLS.SPEAKER_ID, rsuffix='_')
 
         # Add audio based features to the df (this may take a while)
-        print(f'Processing audio based features... subset: {subset}')
+        log.info(f'Processing audio based features... subset: {subset}')
         with ThreadPool(100) as p:
             dfs[subset][[DATESET_CLS.SR, DATESET_CLS.REC_DURATION]] =\
                 p.map(lambda x: get_audio_based_features(x, config['dataset_dir']), dfs[subset][DATESET_CLS.REL_FILEPATH])
@@ -150,7 +158,7 @@ def process(config, delimiter, save_csv=True):
         
         # Apply segmentation if enabled in config
         if config.get('use_pre_segmentation', False):
-            print(f'Pre-segmentation enabled for {subset}. Processing {len(dfs[subset])} utterances...')
+            log.info(f'Pre-segmentation enabled for {subset}. Processing {len(dfs[subset])} utterances...')
             
             all_segments = []
             for _, row in tqdm(dfs[subset].iterrows(), total=len(dfs[subset]), desc=f"Segmenting {os.path.basename(subset)}"):
@@ -165,8 +173,8 @@ def process(config, delimiter, save_csv=True):
                 )
                 all_segments.extend(segments)
             
-            print(f'Generated {len(all_segments)} segments from {len(dfs[subset])} utterances')
-            print(f'Average segments per utterance: {len(all_segments)/len(dfs[subset]):.2f}')
+            log.info(f'Generated {len(all_segments)} segments from {len(dfs[subset])} utterances')
+            log.info(f'Average segments per utterance: {len(all_segments)/len(dfs[subset]):.2f}')
             dfs[subset] = pd.DataFrame(all_segments)
 
         if save_csv:
@@ -178,7 +186,7 @@ def get_audio_filepaths_from_dir(config, subset):
     # Find all the audio and files in the dataset directory
     subset = Path(subset)
     filepaths = [str(path) for path in subset.rglob(f"*.{config['audio_file_type']}")]
-    print('Total speech files found in the audio directory: {}'.format(len(filepaths)))
+    log.info(f'Total speech files found in the audio directory: {len(filepaths)}')
     rel_filepaths_from_dir = [os.path.relpath(filepath, config['dataset_dir']) for filepath in filepaths]
     return filepaths, rel_filepaths_from_dir
 
@@ -187,27 +195,16 @@ def read_config(config_path):
         with open(config_path, 'rb') as yaml_file:
             return yaml.safe_load(yaml_file)
     except FileNotFoundError:
-        raise FileNotFoundError('Config file {} does not exist'.format(config_path))
+        raise FileNotFoundError(f'Config file {config_path} does not exist')
 
 
-def read_hydra_config(config_path: str = "conf", config_name: str = "config", overrides: list = None) -> DictConfig:
-    with initialize(version_base=None, config_path=config_path):
-        cfg = compose(config_name=config_name, overrides=overrides)
-        return cfg
-
-def generate_csvs(config, save_csv=True, delimiter="|"):
+def generate_csvs(
+    config,
+    save_csv: bool = True,
+):
     os.makedirs(config['metadata_path'], exist_ok=True)
-
-    if os.path.isfile(config['train_csv']) and os.path.isfile(config['dev_csv']) and os.path.isfile(config['test_csv']) and os.path.isfile(config['speaker_csv_path']):
-        # load them and return them
-        read_paths = [config['train_csv'], config['dev_csv'], config['test_csv']]
-        write_paths = [config['train_csv_exp_filepath'], config['dev_csv_exp_filepath'], config['test_csv_exp_filepath']]
-        return {write_path: pd.read_csv(read_path, sep=delimiter)
-                for read_path, write_path in zip(read_paths, write_paths)}, \
-               pd.read_csv(config['speaker_csv_path'], sep=delimiter)
-    
-    dfs, df_speaker = process(config, delimiter=config['sep'], save_csv=save_csv)
-    return dfs, df_speaker
+    dfs, speaker_df = process(config, delimiter=config['sep'], save_csv=save_csv)
+    return dfs, speaker_df
 
 
 if __name__ == '__main__':
@@ -220,3 +217,13 @@ if __name__ == '__main__':
                                    ])
     config = config.datamodule.dataset
     dfs, df_speaker = generate_csvs(config=config)
+
+    artifacts_dir = Path(config.artifacts_dir).expanduser().resolve()
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build snapshot by extracting only the comparable keys from config
+    snapshot_source = {key: getattr(config, key) for key in LIBRISPEECH_COMPARABLE_KEYS if hasattr(config, key)}
+    snapshot = build_config_snapshot_from_mapping(snapshot_source, LIBRISPEECH_COMPARABLE_KEYS)
+    snapshot_path = artifacts_dir / CONFIG_SNAPSHOT_FILENAME
+    save_config_snapshot(snapshot, snapshot_path)
+    log.info(f"Saved configuration snapshot to {snapshot_path}")
