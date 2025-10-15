@@ -577,7 +577,7 @@ class CNCelebProcessor:
 
 if __name__ == "__main__":
     config = read_hydra_config(
-        config_path='../../../../configs',
+        config_path='../../../configs',
         config_name='train.yaml',
         overrides=[
             f"paths.data_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data",

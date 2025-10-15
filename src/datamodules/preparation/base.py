@@ -90,6 +90,10 @@ CONFIG_SNAPSHOT_FILENAME = BaseMetadataPreparer.CONFIG_SNAPSHOT_FILENAME
 # ----------------------------------------------------------------------
 
 def _normalize_config_value(value: Any) -> Any:
+    # Handle OmegaConf types first (ListConfig, DictConfig)
+    if OmegaConf.is_config(value):
+        value = OmegaConf.to_container(value, resolve=True)
+    
     if isinstance(value, Path):
         return value.name
     if isinstance(value, str):

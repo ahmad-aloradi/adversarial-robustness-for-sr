@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import cpu_count
 
+from omegaconf import ListConfig
 import soundfile as sf
 import pandas as pd
 import wget
@@ -588,7 +589,7 @@ class VoxCelebTestFilter:
 if __name__ == "__main__":
     # Load configuration from Hydra YAML files (like LibriSpeech)
     config = read_hydra_config(
-        config_path='../../../../configs',
+        config_path='../../../configs',
         config_name='train.yaml',
         overrides=[
             f"paths.data_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data",
@@ -636,7 +637,11 @@ if __name__ == "__main__":
         VoxCelebProcessor.save_csv(dev_metadata, str(voxceleb_processor.dev_metadata_file.resolve()), sep=config.sep)
 
     # Handle test speaker exclusion for each test file
-    veri_test_filenames = config.veri_test_filenames if isinstance(config.veri_test_filenames, list) else [config.veri_test_filenames]
+    # Convert OmegaConf ListConfig to regular Python list
+    if isinstance(config.veri_test_filenames, (list, ListConfig)):
+        veri_test_filenames = list(config.veri_test_filenames)
+    else:
+        veri_test_filenames = [config.veri_test_filenames]
     
     for test_file in veri_test_filenames:
         test_filter = VoxCelebTestFilter(root_dir=resolved_root, verbose=config.verbose)
