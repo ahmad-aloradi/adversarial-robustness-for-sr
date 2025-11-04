@@ -45,7 +45,7 @@ def sync_results():
     )
 
 
-def create_bash_script(settings, script_arguments):
+def create_vpc_bash_script(settings, script_arguments):
     """
     Creates a bash script with parallelized data transfer for enhanced performance.
     
@@ -145,7 +145,7 @@ python {settings['script_name']} {script_arguments_str} paths.data_dir=$TMPDIR
     return job_string
 
 
-def create_bash_script_sv(settings, script_arguments):
+def create_sv_bash_script(settings, script_arguments):
     """
     Creates a bash script with parallelized data transfer for enhanced performance.
     
@@ -172,7 +172,7 @@ module load cuda/{settings['cuda']}
 source ~/miniconda3/bin/activate {settings['env_name']}
 cd {settings['path_project']}
 
-echo "No Data transfer is conducted for VoxCeleb dataset"
+echo "No Data transfer is conducted for the SV experiments!"
 
 # Start the training process
 export http_proxy=http://proxy.nhr.fau.de:80
@@ -221,6 +221,7 @@ def cmd(cmd):
 def lsp():
     """Returns the names of pending jobs on the queue."""
     print(run('squeue -t PENDING --format "%.j" -h').split())
+
 
 @task
 def lsr():
@@ -347,7 +348,7 @@ def run_vpc():
             if last_ckpt_exists:
                 script_arguments['ckpt_path'] = last_ckpt
 
-            bash_script = create_bash_script(settings, script_arguments)
+            bash_script = create_vpc_bash_script(settings, script_arguments)
             run_bash_script(bash_script)
             time.sleep(1.0)
 
@@ -357,9 +358,8 @@ def run_sv():
 
     BATCH_SIZE = 32
     NUM_AUG = 1
-    max_epochs = 10
+    max_epochs = 20
     max_duration = 3.0
-    dataset_dirname = 'voxceleb'
 
     settings = {
         'script_name': 'src/train.py',
@@ -367,7 +367,6 @@ def run_sv():
         'path_project': PATH_PROJECT,
         'env_name': CONDA_ENV,
         'data_path': DATA_DIR,
-        'vpc_dirname': dataset_dirname,
         'gpu': GPU,
         'num_nodes': 1,  # Multi-node are not possible on TinyGPU.
         'walltime': '24:00:00',
@@ -375,56 +374,70 @@ def run_sv():
         'cuda': '11.1.0',  # '10.0'
     }
 
-    experiments = ["sv_aug_prune", "sv_vanilla"]
+    experiments = [
+        'sv_pruning_bregman',
+        'sv_pruning_mag_struct_onetime',
+        'sv_pruning_mag_unstruct_onetime',
+        'sv_pruning_mag_struct',
+        'sv_pruning_mag_unstruct',
+        'sv_vanilla',
+        # 'sv_aug'
+        ]
+    sv_models = [model.split('.')[0] for model in os.listdir('../configs/module/sv_model') if model.endswith('.yaml') and
+                 model.startswith('wespeaker') and
+                 'pretrained' not in model and
+                 'wespeaker_ecapa_tdnn' not in model
+                 ]
+    sv_models += ['wespeaker_pretrained_ecapa_tdnn']
 
     for experiment in experiments:
+        for sv_model in sv_models:
+            dataset_name = "multi_sv" # "datasets/voxceleb"
+            # batch_size = BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // NUM_AUG
+            batch_size = BATCH_SIZE
+            job_name = experiment + '-' + sv_model + '-' + os.path.basename(dataset_name) + '-' + 'max_dur' + str(max_duration) + '-' + 'bs' + str(BATCH_SIZE)
 
-        dataset_name = "voxceleb"
-        # batch_size = BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // NUM_AUG
-        batch_size = BATCH_SIZE
-        job_name = experiment + '-' + dataset_name + '-' + 'max_dur' + str(max_duration) + '-' + 'bs' + str(BATCH_SIZE)
+            # Defined this way to avoid re-training on different runs
+            settings['job_name'] = job_name
+            name = os.path.basename(dataset_name) + os.sep + job_name
 
-        # Defined this way to avoid re-training on different runs
-        settings['job_name'] = job_name
-        settings['datamodule_dir'] = dataset_dirname + os.sep + dataset_name
-        name = dataset_name + os.sep + job_name
+            script_arguments = {
+                'datamodule': dataset_name,
+                'experiment': f'sv/{experiment}',
+                'module': 'sv',
+                'trainer': 'gpu',
+                'name': name,
+                'module/sv_model': sv_model,
+                'logger': 'many_loggers.yaml',
+                'logger.wandb.id': f'{os.path.basename(dataset_name)}_{job_name}',
+                # 'logger.neptune.with_id': name,
+                'datamodule.loaders.train.batch_size': batch_size,
+                'datamodule.loaders.valid.batch_size': batch_size,
+                # 'datamodule.dataset.max_duration': max_duration,
+                'trainer.max_epochs': max_epochs,
+                'paths.log_dir': f'{RESULTS_DIR}',
+                'hydra.run.dir': f'{RESULTS_DIR}/train/runs/{name}',
+                "trainer.num_sanity_val_steps": 0,
+            }
 
-        script_arguments = {
-            'datamodule': 'datasets/voxceleb',
-            'experiment': f'sv/{experiment}',
-            'module': 'sv',
-            'trainer': 'gpu',
-            'name': name,
-            # 'logger': 'many_loggers.yaml',
-            # 'logger.wandb.id': name,
-            # 'logger.neptune.with_id': name,
-            'datamodule.loaders.train.batch_size': batch_size,
-            'datamodule.loaders.valid.batch_size': batch_size,
-            'datamodule.dataset.max_duration': max_duration,
-            'trainer.max_epochs': max_epochs,
-            'paths.log_dir': f'{RESULTS_DIR}',
-            'hydra.run.dir': f'{RESULTS_DIR}/train/runs/{name}',
-            "trainer.num_sanity_val_steps": 0,
-        }
+            # Check for pending jobs: continue_flag = 1 if the job is pending
+            continue_flag = check_running_pending(job_name)
 
-        # Check for pending jobs: continue_flag = 1 if the job is pending
-        continue_flag = check_running_pending(job_name)
+            # 1- if pending: do nothing
+            if continue_flag:
+                continue
 
-        # 1- if pending: do nothing
-        if continue_flag:
-            continue
+            # 2- if not: do the following:
+            # get last_ckpt path
+            last_ckpt = os.path.join(script_arguments['hydra.run.dir'], f'checkpoints/last.ckpt')
 
-        # 2- if not: do the following:
-        # get last_ckpt path
-        last_ckpt = os.path.join(script_arguments['hydra.run.dir'], f'checkpoints/last.ckpt')
+            last_ckpt_exists = check_file_exists(f'{last_ckpt}')
+            if last_ckpt_exists:
+                script_arguments['ckpt_path'] = last_ckpt
 
-        last_ckpt_exists = check_file_exists(f'{last_ckpt}')
-        if last_ckpt_exists:
-            script_arguments['ckpt_path'] = last_ckpt
-
-        bash_script = create_bash_script_sv(settings, script_arguments)
-        run_bash_script(bash_script)
-        time.sleep(0.1)
+            bash_script = create_sv_bash_script(settings, script_arguments)
+            run_bash_script(bash_script)
+            time.sleep(0.1)
 
 
 if __name__ == '__main__':
