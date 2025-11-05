@@ -64,7 +64,7 @@ class EncoderWrapper(nn.Module):
         """Handles both high-level and standard SpeechBrain models."""
         if self._is_high_level_pretrained:
             # Pretrained models (e.g., EncoderClassifier) handle their own processing
-            normalized_lens = wav_lens / max(wav_lens) if max(wav_lens) > 0 else wav_lens
+            normalized_lens = wav_lens / max(wav_lens) if max(wav_lens) > 1 else wav_lens
             return self.encoder.encode_batch(wavs=wavs, wav_lens=normalized_lens).squeeze(1)
         else:
             # Standard models require external feature processing

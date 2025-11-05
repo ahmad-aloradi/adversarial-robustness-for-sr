@@ -1,20 +1,16 @@
 # @package module.model
 audio_processor:
-  _target_: torch.nn.Sequential
-  _args_:
-    - _target_: speechbrain.lobes.features.Fbank
-      sample_rate: ${datamodule.dataset.sample_rate}
-      deltas: False
-      n_mels: 80
-      f_min: 0
-      f_max: null
-      n_fft: 512
-      win_length: 25
-      hop_length: 10
-      left_frames: 0
-      right_frames: 0
-    - _target_: src.utils.torch_utils.Permute
-      _args_: [0, 2, 1]
+  _target_: speechbrain.lobes.features.Fbank
+  sample_rate: ${datamodule.dataset.sample_rate}
+  deltas: False
+  n_mels: ${module.model.audio_encoder._args_.0.model_args.feat_dim}
+  f_min: 0
+  f_max: null
+  n_fft: 512
+  win_length: 25
+  hop_length: 10
+  left_frames: 0
+  right_frames: 0
 
 audio_processor_normalizer:
   _target_: torch.nn.Identity
@@ -27,7 +23,7 @@ audio_encoder:
       repo_id: null
       checkpoint_filename: null
       model_args:
-        feat_dim: 80
+        feat_dim: 72
         embed_dim: 192
         pooling_func: ASTP
     - _target_: src.utils.torch_utils.SelectFromTuple

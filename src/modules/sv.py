@@ -298,16 +298,17 @@ class SpeakerVerification(pl.LightningModule):
         if self.device != batch_audio_lens.device:
             batch_audio_lens = batch_audio_lens.to(self.device)
 
-        # The wrapper now handles the entire pipeline from raw audio to embeddings.
         return self.audio_encoder(wavs=batch_audio, wav_lens=batch_audio_lens)
 
     def forward(self, batch: VoxcelebItem) -> Dict[str, torch.Tensor]:
         """Process audio inputs with optimized embedding caching."""
         # Add waveform augmentation if specified.
         if self.training and hasattr(self, "wav_augmenter"):
-            batch.audio, batch.audio_length = self.wav_augmenter(batch.audio, batch.audio_length / max(batch.audio_length))
+            max_audio_length = max(batch.audio_length)
+            batch.audio, audio_length_norm = self.wav_augmenter(batch.audio, batch.audio_length / max_audio_length)
+            batch.audio_length = audio_length_norm * max_audio_length
             batch.class_id = self.wav_augmenter.replicate_labels(batch.class_id)
-            
+
         audio_emb = self._get_audio_embeddings(batch.audio, batch.audio_length)
         logits = self.classifier(audio_emb)
             

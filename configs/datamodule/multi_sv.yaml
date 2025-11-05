@@ -14,7 +14,7 @@ datasets:
     datamodule:
       _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
       dataset:
-        data_dir: data/voxceleb
+        data_dir: ${paths.data_dir}/voxceleb
         wav_dir: ${datamodule.datasets.voxceleb.datamodule.dataset.data_dir}/voxceleb1_2
         veri_test_filenames:
           - veri_test2
@@ -85,7 +85,7 @@ datasets:
     datamodule:
       _target_: src.datamodules.cnceleb_datamodule.CNCelebDataModule
       dataset:
-        data_dir: data/cnceleb
+        data_dir: ${paths.data_dir}/cnceleb
         cnceleb1: "CN-Celeb_flac"
         cnceleb2: "CN-Celeb2_flac"
         base_search_dir: ${datamodule.datasets.cnceleb.datamodule.dataset.data_dir}/metadata
