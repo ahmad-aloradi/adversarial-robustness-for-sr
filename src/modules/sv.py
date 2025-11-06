@@ -501,7 +501,7 @@ class SpeakerVerification(pl.LightningModule):
             train_dm = self.trainer.datamodule
             cohort_loader = DataLoader(
                 train_dm.train_data,
-                batch_size=getattr(train_dm.hparams.loaders.train, 'batch_size', 256),
+                batch_size=getattr(train_dm.hparams.loaders.train, 'batch_size', 64),
                 num_workers=getattr(train_dm.hparams.loaders.train, 'num_workers', 0),
                 shuffle=False,
                 pin_memory=getattr(train_dm.hparams.loaders.train, 'pin_memory', False),
@@ -732,6 +732,9 @@ class SpeakerVerification(pl.LightningModule):
         
     def _epoch_end_common_multi_test(self, test_filename: str) -> None:
         """Handle epoch end for a specific test set."""
+        # Sanitize test_filename for use in file paths (replace all path separators)
+        safe_test_filename = test_filename.replace('/', '_').replace('\\', '_')
+        
         test_data = self.test_sets_data[test_filename]
         enrol_embeds = test_data['enrol_embeds']
         trials_embeds = test_data['test_embeds']
@@ -794,16 +797,16 @@ class SpeakerVerification(pl.LightningModule):
         scores.loc[:, metrics.keys()] = [v.item() if torch.is_tensor(v) else v for v in metrics.values()]
         
         # Set up directory for saving test artifacts (with test set name)
-        dir_suffix = f"_{test_filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        dir_suffix = f"_{safe_test_filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         artifacts_dir = os.path.join(self.trainer.default_root_dir, f"test_artifacts{dir_suffix}")
         os.makedirs(artifacts_dir, exist_ok=True)
 
         # Save scores as CSV
-        scores.to_csv(os.path.join(artifacts_dir, f"{test_filename}_scores.csv"), index=False)
+        scores.to_csv(os.path.join(artifacts_dir, f"{safe_test_filename}_scores.csv"), index=False)
         
         # Save embeddings
-        torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{test_filename}_enrol_embeds.pt"))
-        torch.save(trials_embeds, os.path.join(artifacts_dir, f"{test_filename}_embeds.pt"))
+        torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{safe_test_filename}_enrol_embeds.pt"))
+        torch.save(trials_embeds, os.path.join(artifacts_dir, f"{safe_test_filename}_embeds.pt"))
         if test_data['cohort_embeddings'] is not None:
             torch.save(test_data['cohort_embeddings'], os.path.join(artifacts_dir, f"test_cohort_embeds.pt"))  # Same cohort for all test sets
 
@@ -815,7 +818,7 @@ class SpeakerVerification(pl.LightningModule):
         # Save test metrics as a JSON file 
         metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
         metrics_for_save['test_set'] = test_filename  # Add test set identifier
-        with open(os.path.join(artifacts_dir, f"{test_filename}_metrics.json"), "w") as f:
+        with open(os.path.join(artifacts_dir, f"{safe_test_filename}_metrics.json"), "w") as f:
             json.dump(metrics_for_save, f, indent=4)
 
     def log_figure_with_fallback(self, name: str, fig: plt.Figure) -> None:

@@ -19,7 +19,7 @@ audio_encoder:
   _target_: torch.nn.Sequential
   _args_:
     - _target_: src.utils.hf_utils.load_wespeaker_model
-      model_name: "redimnetb6"
+      model_name: "redimnetb5"
       repo_id: null
       checkpoint_filename: null
       model_args:

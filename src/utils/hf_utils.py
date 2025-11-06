@@ -58,6 +58,8 @@ def load_wespeaker_model(
     model_registry = {
         "campplus": "wespeaker.models.campplus.CAMPPlus",
         "resnet293": "wespeaker.models.resnet.ResNet293",
+        "redimnetb4": "wespeaker.models.redimnet.ReDimNetB4",
+        "redimnetb5": "wespeaker.models.redimnet.ReDimNetB5",
         "redimnetb6": "wespeaker.models.redimnet.ReDimNetB6",
         "dfresnet237": "wespeaker.models.gemini_dfresnet.Gemini_DF_ResNet237",
         "eres2net34_aug": "wespeaker.models.eres2net.ERes2Net34_aug",
