@@ -25,11 +25,7 @@ DATASET_CLS, DF_COLS = get_dataset_class(DATASET_DEFAULTS.dataset_name)
 
 
 class VoxCelebDataModule(LightningDataModule):
-    def __init__(self,
-                 dataset: Dict[str, Dict[str, int]],
-                 transforms: Optional[List[Dict]],
-                 loaders: Dict[str, Dict[str, int]],
-                 *args, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__()
         self.save_hyperparameters(logger=False)
         self.train_data = None
@@ -143,24 +139,18 @@ class VoxCelebDataModule(LightningDataModule):
                          f"unique set has {len(self.test_unique_data_dict[test_filename])} trials.")
 
     def train_dataloader(self):
+        assert self.hparams.get('loaders') is not None, "VoxCelebDataModule requires 'loaders' config"
         return DataLoader(
             self.train_data,
-            batch_size=self.hparams.loaders.train.batch_size,
-            num_workers=self.hparams.loaders.train.num_workers,
-            shuffle=self.hparams.loaders.train.shuffle,
-            drop_last=self.hparams.loaders.train.drop_last,
-            pin_memory=self.hparams.loaders.train.pin_memory,
+            **self.hparams.loaders.train,
             collate_fn=TrainCollate()
         )
 
     def val_dataloader(self):
+        assert self.hparams.get('loaders') is not None, "VoxCelebDataModule requires 'loaders' config"
         return DataLoader(
             self.val_data,
-            batch_size=self.hparams.loaders.valid.batch_size,
-            num_workers=self.hparams.loaders.valid.num_workers,
-            shuffle=self.hparams.loaders.valid.shuffle,
-            drop_last=self.hparams.loaders.valid.drop_last,
-            pin_memory=self.hparams.loaders.valid.pin_memory,
+            **self.hparams.loaders.valid,
             collate_fn=TrainCollate()
         )
 
@@ -170,11 +160,7 @@ class VoxCelebDataModule(LightningDataModule):
         for test_filename in self.hparams.dataset.veri_test_filenames:
             test_dataloaders[test_filename] = DataLoader(
                 self.test_data_dict[test_filename],
-                batch_size=self.hparams.loaders.test.batch_size,
-                num_workers=self.hparams.loaders.test.num_workers,
-                shuffle=self.hparams.loaders.test.shuffle,
-                pin_memory=self.hparams.loaders.test.pin_memory,
-                drop_last=self.hparams.loaders.test.drop_last,
+                **self.hparams.loaders.test,
                 collate_fn=VerificationCollate()
             )
         return test_dataloaders
@@ -193,20 +179,14 @@ class VoxCelebDataModule(LightningDataModule):
         # Enrollment dataloader
         enroll_dataloader = DataLoader(
             self.enrollment_data_dict[test_filename],
-            batch_size=self.hparams.loaders.enrollment.batch_size,
-            shuffle=self.hparams.loaders.enrollment.shuffle,
-            num_workers=self.hparams.loaders.enrollment.num_workers,
-            pin_memory=self.hparams.loaders.enrollment.pin_memory,
+            **self.hparams.loaders.enrollment,
             collate_fn=EnrollCoallate()
         )
 
         # Trial unique dataloader (to compute test embeddings per unique utterance, not per trial)
         trial_unique_dataloader = DataLoader(
             self.test_unique_data_dict[test_filename],
-            batch_size=self.hparams.loaders.enrollment.batch_size,
-            shuffle=self.hparams.loaders.enrollment.shuffle,
-            num_workers=self.hparams.loaders.enrollment.num_workers,
-            pin_memory=self.hparams.loaders.enrollment.pin_memory,
+            **self.hparams.loaders.enrollment,
             collate_fn=EnrollCoallate()
         )
 

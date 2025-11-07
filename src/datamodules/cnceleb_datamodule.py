@@ -132,9 +132,11 @@ class CNCelebDataModule(LightningDataModule):
             )
 
     def train_dataloader(self):
+        assert self.hparams.get('loaders') is not None, "CNCelebDataModule requires 'loaders' config"
         return DataLoader(self.train_data, **self.hparams.loaders.train, collate_fn=TrainCollate())
 
     def val_dataloader(self):
+        assert self.hparams.get('loaders') is not None, "CNCelebDataModule requires 'loaders' config"
         return DataLoader(self.val_data, **self.hparams.loaders.val, collate_fn=TrainCollate())
 
     def test_dataloader(self):
@@ -157,21 +159,16 @@ class CNCelebDataModule(LightningDataModule):
             raise ValueError("Enrollment and test data not prepared. Call setup() first.")
                     
         # Use enrollment loader config for consistency with VoxCeleb
+        loader_cfg = self.hparams.loaders.get('enrollment', self.hparams.loaders.test)
         enrollment_dataloader = DataLoader(
-            self.enrollment_data, 
-            batch_size=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).batch_size,
-            shuffle=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).shuffle,
-            num_workers=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).num_workers,
-            pin_memory=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).pin_memory,
+            self.enrollment_data,
+            **loader_cfg,
             collate_fn=EnrollCollate()
         )
         
         test_unique_dataloader = DataLoader(
-            self.test_unique_data, 
-            batch_size=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).batch_size,
-            shuffle=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).shuffle,
-            num_workers=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).num_workers,
-            pin_memory=self.hparams.loaders.get('enrollment', self.hparams.loaders.test).pin_memory,
+            self.test_unique_data,
+            **loader_cfg,
             collate_fn=TestCollate()
         )
         

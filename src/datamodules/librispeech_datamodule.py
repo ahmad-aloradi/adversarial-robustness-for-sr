@@ -14,30 +14,24 @@ log = utils.get_pylogger(__name__)
 
 
 class LibrispeechDataModule(LightningDataModule):
-    def __init__(self,
-                 dataset: Dict[str, Dict[str, int]],
-                 transforms: Optional[List[Dict]],
-                 loaders: Dict[str, Dict[str, int]],
-                 *args, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__()
+        self.save_hyperparameters(logger=False)
         self.train_data = None
         self.val_data = None
         self.test_data = None
-        self.dataset = dataset
-        self.transforms = transforms
-        self.loaders = loaders
-        self.csv_processor = CsvProcessor(verbose=self.dataset.verbose, fill_value='N/A')
+        self.csv_processor = CsvProcessor(verbose=self.hparams.dataset.verbose, fill_value='N/A')
 
     def prepare_data(self):
-        preparer = LibrispeechMetadataPreparer(self.dataset, self.csv_processor)
+        preparer = LibrispeechMetadataPreparer(self.hparams.dataset, self.csv_processor)
         preparer.prepare()
 
     def _artifacts_ready(self) -> bool:
         required_artifacts = [
-            self.dataset.train_csv_exp_filepath,
-            self.dataset.dev_csv_exp_filepath,
-            self.dataset.test_csv_exp_filepath,
-            self.dataset.speaker_csv_exp_filepath,
+            self.hparams.dataset.train_csv_exp_filepath,
+            self.hparams.dataset.dev_csv_exp_filepath,
+            self.hparams.dataset.test_csv_exp_filepath,
+            self.hparams.dataset.speaker_csv_exp_filepath,
         ]
         return all(Path(path).exists() for path in required_artifacts)
 
@@ -45,59 +39,50 @@ class LibrispeechDataModule(LightningDataModule):
         if not self._artifacts_ready():
             self.prepare_data()
 
-        max_duration = -1 if self.dataset.use_pre_segmentation else self.dataset.max_duration
+        max_duration = -1 if self.hparams.dataset.use_pre_segmentation else self.hparams.dataset.max_duration
 
         if stage == 'fit' or stage is None:
             self.train_data = LibrispeechDataset(
-                self.dataset.dataset_dir,
-                self.dataset.train_csv_exp_filepath,
-                self.dataset.sample_rate,
+                self.hparams.dataset.dataset_dir,
+                self.hparams.dataset.train_csv_exp_filepath,
+                self.hparams.dataset.sample_rate,
                 max_duration
             )
             self.val_data = LibrispeechDataset(
-                self.dataset.dataset_dir,
-                self.dataset.dev_csv_exp_filepath,
-                self.dataset.sample_rate,
+                self.hparams.dataset.dataset_dir,
+                self.hparams.dataset.dev_csv_exp_filepath,
+                self.hparams.dataset.sample_rate,
                 max_duration
             )
         if stage == 'test' or stage is None:
             self.test_data = LibrispeechDataset(
-                self.dataset.dataset_dir,
-                self.dataset.test_csv_exp_filepath,
-                self.dataset.sample_rate,
+                self.hparams.dataset.dataset_dir,
+                self.hparams.dataset.test_csv_exp_filepath,
+                self.hparams.dataset.sample_rate,
                 max_duration
             )
 
     def train_dataloader(self):
+        assert self.hparams.get('loaders') is not None, "LibrispeechDataModule requires 'loaders' config"
         return DataLoader(
             self.train_data,
-            batch_size=self.loaders.train.batch_size,
-            num_workers=self.loaders.train.num_workers,
-            shuffle=self.loaders.train.shuffle,
-            drop_last=self.loaders.train.drop_last,
-            pin_memory=self.loaders.train.pin_memory,
+            **self.hparams.loaders.train,
             collate_fn=Collate(pad_value=0.0)
         )
 
     def val_dataloader(self):
+        assert self.hparams.get('loaders') is not None, "LibrispeechDataModule requires 'loaders' config"
         return DataLoader(
             self.val_data,
-            batch_size=self.loaders.valid.batch_size,
-            num_workers=self.loaders.valid.num_workers,
-            shuffle=self.loaders.valid.shuffle,
-            drop_last=self.loaders.valid.drop_last,
-            pin_memory=self.loaders.valid.pin_memory,
+            **self.hparams.loaders.valid,
             collate_fn=Collate(pad_value=0.0)
         )
 
     def test_dataloader(self):
+        assert self.hparams.get('loaders') is not None, "LibrispeechDataModule requires 'loaders' config"
         return DataLoader(
             self.test_data,
-            batch_size=self.loaders.test.batch_size,
-            num_workers=self.loaders.test.num_workers,
-            shuffle=self.loaders.test.shuffle,
-            pin_memory=self.loaders.test.pin_memory,
-            drop_last=self.loaders.test.drop_last,
+            **self.hparams.loaders.test,
             collate_fn=Collate(pad_value=0.0)
         )
 

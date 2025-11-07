@@ -50,19 +50,9 @@ datasets:
 
       transforms: null
       num_classes: 7205
+      # Dataset-specific loader configs for test/enrollment
+      # Note: train/valid loaders are inherited from MultiSVDataModule's top-level loaders
       loaders:
-        train:
-          batch_size: 32
-          shuffle: true
-          num_workers: 4
-          drop_last: true
-          pin_memory: false
-        valid:
-          batch_size: 32
-          shuffle: false
-          num_workers: 4
-          drop_last: false
-          pin_memory: false
         test:
           batch_size: 8
           shuffle: false
@@ -117,19 +107,9 @@ datasets:
 
       transforms: null
       num_classes: 2793
+      # Dataset-specific loader configs for test/enrollment
+      # Note: train/valid loaders would be inherited from MultiSVDataModule if CNCeleb were used for training
       loaders:
-        train:
-          batch_size: 32
-          shuffle: true
-          num_workers: 4
-          drop_last: true
-          pin_memory: false
-        val:
-          batch_size: 32
-          shuffle: false
-          num_workers: 4
-          drop_last: false
-          pin_memory: false
         test:
           batch_size: 8
           shuffle: false
@@ -143,6 +123,8 @@ datasets:
           drop_last: false
           pin_memory: false
 
+# Top-level loader configs used by MultiSVDataModule for train/val
+# Test/enrollment loaders are dataset-specific (configured above in each dataset)
 loaders:
   train:
     batch_size: 32
@@ -153,20 +135,6 @@ loaders:
 
   valid:
     batch_size: 32
-    shuffle: false
-    num_workers: 4
-    drop_last: false
-    pin_memory: false
-
-  test:
-    batch_size: 8
-    shuffle: false
-    num_workers: 4
-    drop_last: false
-    pin_memory: false
-
-  enrollment:
-    batch_size: 8
     shuffle: false
     num_workers: 4
     drop_last: false

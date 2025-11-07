@@ -21,12 +21,7 @@ class MultiSVDataModule(LightningDataModule):
     enabling cross-dataset evaluation scenarios (e.g., train on VoxCeleb and evaluate on CNCeleb).
     """
 
-    def __init__(
-        self,
-        datasets: Dict[str, DictConfig],
-        loaders: Dict[str, DictConfig],
-        **kwargs  # Accept and ignore extra parameters (e.g., num_classes, dataset for compatibility)
-    ) -> None:
+    def __init__(self, **kwargs) -> None:
         super().__init__()
         self.save_hyperparameters(logger=False)
 
@@ -74,7 +69,13 @@ class MultiSVDataModule(LightningDataModule):
             datamodule_cfg = cfg.get("datamodule")
             if datamodule_cfg is None:
                 raise ValueError(f"Dataset '{name}' is missing the 'datamodule' configuration block.")
-            dm = instantiate(datamodule_cfg, _recursive_=False)
+            # Merge parent's loaders (train/valid) with child's loaders (test/enrollment)
+            if 'loaders' in datamodule_cfg:
+                merged_loaders = OmegaConf.merge(self.hparams.loaders, datamodule_cfg['loaders'])
+            else:
+                merged_loaders = self.hparams.loaders
+            
+            dm = instantiate(datamodule_cfg, loaders=merged_loaders, _recursive_=False)
             self._datamodules[name] = dm
         return self._datamodules[name]
 

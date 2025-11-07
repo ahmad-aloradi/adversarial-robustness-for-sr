@@ -1,4 +1,0 @@
-# Configuration for model pruning callbacks
-# Includes Bregman pruning configuration by default
-defaults:
-  - model_pruning/bregman_agressive
