@@ -94,13 +94,20 @@ class PrunedCheckpointHandler(Callback):
                 log.info("Testing mode: Converting state_dict from pruned to standard format.")
             self._convert_pruned_state_dict(state_dict)
         
-        # Scenario 2: Resuming training. The model has been prepared by setup().
-        # We must clear optimizer states to prevent shape mismatches.
+        # Scenario 2: Resuming training with magnitude pruning active.
+        # The model has been prepared by setup() with pruning structure.
+        # We must clear optimizer states to prevent shape mismatches ONLY if
+        # resuming with MagnitudePruner active.
         else:
-            if "optimizer_states" in checkpoint and checkpoint["optimizer_states"]:
+            should_clear_optimizer = has_magnitude_pruner
+            
+            if should_clear_optimizer and "optimizer_states" in checkpoint and checkpoint["optimizer_states"]:
                 if self.verbose > 0:
-                    log.warning("Training resumption: Clearing optimizer states to prevent shape mismatches.")
+                    log.warning("Training resumption with MagnitudePruner: Clearing optimizer states to prevent shape mismatches.")
+                    log.warning("Optimizer will restart with fresh state (no momentum/adaptive learning rates).")
                 checkpoint["optimizer_states"] = []
+            elif not has_magnitude_pruner and self.verbose > 0:
+                log.info("Training resumption without MagnitudePruner: Preserving optimizer states.")
 
     def _convert_pruned_state_dict(self, state_dict: Dict[str, Any]) -> None:
         """

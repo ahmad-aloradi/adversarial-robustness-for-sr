@@ -174,6 +174,11 @@ class MagnitudePruner(ModelPruning):
         self._checkpoint_callbacks = []
         self._checkpoint_original_settings = {}
         self._has_reset_checkpoint_best_score = False
+        
+        # Track training state for proper resumption handling
+        self._is_resuming = False
+        self._pruning_completed = False
+        self._saved_state = None
 
     def _validate_params(self, amount, scheduled_pruning, initial_amount, final_amount):
         """Validate initialization parameters."""
@@ -525,6 +530,13 @@ class MagnitudePruner(ModelPruning):
 
     def _run_pruning(self, current_epoch: int, pl_module: LightningModule = None) -> None:
         """Override to handle scheduled pruning and safety."""
+        # If pruning was already completed (e.g., masks removed at end of previous training),
+        # skip all further pruning operations
+        if self._pruning_completed:
+            if self.verbose > 0 and current_epoch == -1:  # Only log once at training start
+                log.info(f"[Epoch {current_epoch}] Pruning was already completed in a previous run. Skipping.")
+            return
+        
         # If this is called from on_train_epoch_end, current_epoch will be >= 0.
         # If called from on_train_start, we use -1.
         # This check prevents epoch-end pruning if the user has disabled it.
@@ -940,6 +952,9 @@ class MagnitudePruner(ModelPruning):
 
     def on_train_start(self, trainer, pl_module) -> None:
         """Handle pruning before training starts if enabled."""
+        # Detect if we're resuming from a checkpoint
+        self._is_resuming = trainer.ckpt_path is not None
+        
         if self.save_when_sparser_than is not None:
             from pytorch_lightning.callbacks import ModelCheckpoint
             
@@ -958,13 +973,31 @@ class MagnitudePruner(ModelPruning):
                         "save_top_k": getattr(cb, 'save_top_k', 1),
                         "save_last": getattr(cb, 'save_last', None),
                     }
-            
+        
+        # Check if pruning should be applied at training start
         if self.prune_on_train_start:
-            if self.verbose > 0:
-                log.info("[PreTraining Pruning] Applying pruning before training starts")
+            # Scenario 1: Resuming from checkpoint where pruning was already completed
+            if self._is_resuming and self._pruning_completed:
+                if self.verbose > 0:
+                    log.info("[Training Resumption] Pruning was already completed. Skipping pre-training pruning.")
+                return
             
-            # For pre-training pruning, use epoch -1 to indicate before training
-            self._run_pruning(-1, pl_module)
+            # Scenario 2: Resuming from checkpoint during active pruning
+            if self._is_resuming and not self._pruning_completed:
+                if self.verbose > 0:
+                    log.info("[Training Resumption] Continuing from checkpointed pruning state. Skipping pre-training pruning.")
+                return
+            
+            # Scenario 3: Fresh training start (no checkpoint)
+            if not self._is_resuming:
+                if self.verbose > 0:
+                    log.info("[Fresh Training] Applying initial pruning before training starts")
+                # For pre-training pruning, use epoch -1 to indicate before training
+                self._run_pruning(-1, pl_module)
+            else:
+                # This shouldn't happen, but log it for debugging
+                if self.verbose > 0:
+                    log.debug("[Training Start] Unexpected state: resuming but pruning status unclear")
 
     def on_train_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         """Run pruning at the beginning of the training epoch."""
@@ -1082,6 +1115,10 @@ class MagnitudePruner(ModelPruning):
             # Only make pruning permanent if explicitly asked for
             if self.should_make_pruning_permanent:
                 self.make_pruning_permanent(pl_module)
+                # Mark that pruning has been completed and finalized
+                self._pruning_completed = True
+                if self.verbose > 0:
+                    log.info("Pruning finalized and marked as completed.")
         except Exception as e:
             log.error(f"Error during pruning finalization: {e}")
                 
@@ -1114,6 +1151,7 @@ class MagnitudePruner(ModelPruning):
         pruning_state = {
             "scheduled_pruning": self.scheduled_pruning,
             "current_epoch": trainer.current_epoch,
+            "pruning_completed": self._pruning_completed,  # Track if pruning was finalized
         }
         
         if self.scheduled_pruning:
@@ -1148,5 +1186,10 @@ class MagnitudePruner(ModelPruning):
         # Load the internal state of the pruner
         if "magnitude_pruner_state" in checkpoint:
             self._saved_state = checkpoint["magnitude_pruner_state"]
+            
+            # Restore the pruning completion flag
+            self._pruning_completed = self._saved_state.get("pruning_completed", False)
+            
             if self.verbose > 0:
                 log.info(f"MagnitudePruner: Loaded pruning state: {self._saved_state}")
+                log.info(f"MagnitudePruner: Pruning completed flag: {self._pruning_completed}")
