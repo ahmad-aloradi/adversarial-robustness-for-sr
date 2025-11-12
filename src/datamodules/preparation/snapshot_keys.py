@@ -31,7 +31,7 @@ VOXCELEB_COMPARABLE_KEYS: Tuple[str, ...] = (
     "segment_overlap",
     "min_segment_duration",
     "min_duration",
-    "veri_test_filenames",
+    # "veri_test_filenames",
 )
 
 # LibriSpeech dataset snapshot keys

@@ -12,6 +12,10 @@ from omegaconf import OmegaConf
 import pandas as pd
 
 
+# Module-level constant for snapshot filename
+CONFIG_SNAPSHOT_FILENAME = "prep_config.json"
+
+
 @dataclass
 class SplitArtifacts:
     """Paths to the primary dataset splits and aggregate metadata."""
@@ -43,7 +47,7 @@ class PreparationResult:
 class BaseMetadataPreparer(ABC):
     """Abstract interface for generating metadata artifacts used by datamodules."""
 
-    CONFIG_SNAPSHOT_FILENAME = "prep_config.json"
+    CONFIG_SNAPSHOT_FILENAME = CONFIG_SNAPSHOT_FILENAME  # Reference module constant
     COMPARABLE_KEYS: Sequence[str] = ()
 
     def __init__(self, dataset_cfg: Any, csv_processor: Any):
@@ -65,6 +69,10 @@ class BaseMetadataPreparer(ABC):
         snapshot = build_config_snapshot_from_mapping(mapping, self.COMPARABLE_KEYS)
         return snapshot
 
+    def save_config_snapshot(self, snapshot: Mapping[str, Any], target: Path) -> Path:
+        """Save configuration snapshot using the module-level function."""
+        return save_config_snapshot(snapshot, target)
+
     @classmethod
     def load_config_snapshot(cls, path: Path) -> Dict[str, Any]:
         return load_config_snapshot(path)
@@ -73,17 +81,29 @@ class BaseMetadataPreparer(ABC):
     def diff_config_snapshots(
         cls, expected: Mapping[str, Any], observed: Mapping[str, Any]
     ) -> Dict[str, Any]:
-        return diff_config_snapshots(expected, observed)
+        # Only compare keys that are currently defined in COMPARABLE_KEYS
+        # This prevents false mismatches when COMPARABLE_KEYS evolves over time
+        diff: Dict[str, Any] = {}
+        for key in cls.COMPARABLE_KEYS:
+            if expected.get(key) != observed.get(key):
+                diff[key] = {"expected": expected.get(key), "observed": observed.get(key)}
+        return diff
 
-    def save_config_snapshot(self, target: Path, snapshot: Mapping[str, Any]) -> Path:
-        target_path = Path(target)
-        if target_path.is_dir():
-            target_path = target_path / self.CONFIG_SNAPSHOT_FILENAME
-        return save_config_snapshot(snapshot, target_path)
+    @classmethod
+    def snapshots_match(cls, expected: Mapping[str, Any], observed: Mapping[str, Any]) -> bool:
+        """Check if two snapshots match based on COMPARABLE_KEYS.
 
+        Args:
+            expected: Expected configuration snapshot
+            observed: Observed/cached configuration snapshot
 
-CONFIG_SNAPSHOT_FILENAME = BaseMetadataPreparer.CONFIG_SNAPSHOT_FILENAME
-
+        Returns:
+            True if all comparable keys match, False otherwise
+        """
+        return all(
+            observed.get(key) == expected.get(key)
+            for key in cls.COMPARABLE_KEYS
+        )
 
 # ----------------------------------------------------------------------
 # Module-level helpers used across preparers and standalone prep scripts
@@ -153,7 +173,24 @@ def build_config_snapshot_from_mapping(
 
 
 def save_config_snapshot(snapshot: Mapping[str, Any], target_path: Path) -> Path:
+    """Saves a configuration snapshot to a JSON file.
+
+    If `target_path` is a directory, a default filename is appended. Parent
+    directories are created automatically.
+
+    Args:
+        snapshot: The JSON-serializable configuration data to save.
+        target_path: The destination file or directory path.
+
+    Returns:
+        The full path to the saved snapshot file.
+    """
     target_path = Path(target_path)
+
+    # If target_path is a directory, append the standard filename
+    if target_path.is_dir() or (not target_path.suffix and not target_path.exists()):
+        target_path = target_path / CONFIG_SNAPSHOT_FILENAME
+    
     target_path.parent.mkdir(parents=True, exist_ok=True)
     with target_path.open("w", encoding="utf-8") as fp:
         json.dump(snapshot, fp, indent=2, sort_keys=True)
@@ -164,17 +201,6 @@ def load_config_snapshot(path: Path) -> Dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as fp:
         data = json.load(fp)
     return _normalize_config_value(data)
-
-
-def diff_config_snapshots(
-    expected: Mapping[str, Any], observed: Mapping[str, Any]
-) -> Dict[str, Any]:
-    diff: Dict[str, Any] = {}
-    all_keys = sorted(set(expected) | set(observed))
-    for key in all_keys:
-        if expected.get(key) != observed.get(key):
-            diff[key] = {"expected": expected.get(key), "observed": observed.get(key)}
-    return diff
 
 
 def build_snapshot_from_locals(comparable_keys: Sequence[str], **kwargs) -> Dict[str, Any]:

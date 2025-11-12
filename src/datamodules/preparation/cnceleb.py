@@ -62,7 +62,7 @@ class CNCelebMetadataPreparer(BaseMetadataPreparer):
                 log.info(f"Cached artifacts in {base_search_dir} lack {self.CONFIG_SNAPSHOT_FILENAME}; regenerating instead.")
             else:
                 observed_snapshot = self.load_config_snapshot(config_path)
-                if observed_snapshot == expected_snapshot:
+                if self.snapshots_match(expected_snapshot, observed_snapshot):
                     can_copy = True
                 else:
                     diff = self.diff_config_snapshots(expected_snapshot, observed_snapshot)

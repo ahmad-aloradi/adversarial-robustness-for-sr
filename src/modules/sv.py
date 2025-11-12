@@ -720,8 +720,6 @@ class SpeakerVerification(pl.LightningModule):
         batch_dict = {
             "enroll_path": batch.enroll_path,
             "test_path": batch.test_path,
-            "enroll_length": batch.enroll_length,
-            "test_length": batch.test_length,
             "trial_label": batch.trial_label,
             "same_country_label": batch.same_country_label,
             "same_gender_label": batch.same_gender_label,
@@ -745,8 +743,6 @@ class SpeakerVerification(pl.LightningModule):
             {
                 "enroll_path": enroll_path,
                 "test_path": test_path,
-                "enroll_length": enroll_length,
-                "test_length": test_length,
                 "trial_label": trial_label,
                 "same_country_label": same_country_label,
                 "same_gender_label": same_gender_label,
@@ -754,12 +750,9 @@ class SpeakerVerification(pl.LightningModule):
                 "norm_score": norm_score,
             }
             for batch in trial_results
-            for enroll_path, test_path, enroll_length, test_length, 
-            trial_label, same_country_label, same_gender_label, score, norm_score in zip(
+            for enroll_path, test_path, trial_label, same_country_label, same_gender_label, score, norm_score in zip(
                 batch["enroll_path"],
                 batch["test_path"],
-                batch["enroll_length"],
-                batch["test_length"],
                 batch["trial_label"],
                 batch["same_country_label"],
                 batch["same_gender_label"],
@@ -786,19 +779,16 @@ class SpeakerVerification(pl.LightningModule):
         # Log metrics with a clear prefix for each test set
         temp_metric_class_name = temp_metric.__class__.__name__
         prefixed_metrics = {f"test/{test_filename}/{temp_metric_class_name}/{key}": value for key, value in metrics.items()}
-        self.log_dict(prefixed_metrics, on_step=False, on_epoch=True, sync_dist=True)
-
-        # Minimal console log to confirm completion
-        main_metric_key = next(iter(metrics))
-        main_metric_val = metrics[main_metric_key].item() if torch.is_tensor(metrics[main_metric_key]) else metrics[main_metric_key]
-        log.info(f"Logged {test_filename} results. Main metric ({main_metric_key}): {main_metric_val:.4f}")
+        # Add batch_size to avoid PyTorch Lightning warning about ambiguous batch size inference
+        batch_size = len(trial_results[0]["trial_label"]) if trial_results else 1
+        self.log_dict(prefixed_metrics, batch_size=batch_size, **self.logging_params)
 
         # Update scores DataFrame with computed metrics
         scores.loc[:, metrics.keys()] = [v.item() if torch.is_tensor(v) else v for v in metrics.values()]
         
         # Set up directory for saving test artifacts (with test set name)
-        dir_suffix = f"_{safe_test_filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"test_artifacts{dir_suffix}")
+        dir_suffix = f"{safe_test_filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"test_artifacts/{dir_suffix}")
         os.makedirs(artifacts_dir, exist_ok=True)
 
         # Save scores as CSV
@@ -812,8 +802,13 @@ class SpeakerVerification(pl.LightningModule):
 
         # Plot and log figures for this test set
         figures = temp_metric.plot_curves() or {}
+        plots_dir = os.path.join(artifacts_dir, f"{safe_test_filename}_binary_metrics_plots")
+        os.makedirs(plots_dir, exist_ok=True)
         for name, fig in figures.items():
-            self.log_figure_with_fallback(f"{test_filename}/binary_metrics_plots/{name}_scores", fig)
+            fig_path = os.path.join(plots_dir, f"{name}_scores.png")
+            # Create hierarchical logger name with test set context
+            logger_name = f"{test_filename}/binary_metrics_plots/{name}_scores"
+            self.log_figure_with_fallback(fig_path, fig, logger_name)
 
         # Save test metrics as a JSON file 
         metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
@@ -821,17 +816,15 @@ class SpeakerVerification(pl.LightningModule):
         with open(os.path.join(artifacts_dir, f"{safe_test_filename}_metrics.json"), "w") as f:
             json.dump(metrics_for_save, f, indent=4)
 
-    def log_figure_with_fallback(self, name: str, fig: plt.Figure) -> None:
+    def log_figure_with_fallback(self, fig_path: str, fig: plt.Figure, logger_name: str) -> None:
         """Log figure with fallback for loggers that don't support figure logging.
         
         Args:
-            name: Name of the figure
+            fig_path: File path where the figure will be saved
             fig: Matplotlib figure to log
+            logger_name: Hierarchical name for logging (e.g., "test_set/plots/roc_scores")
         """
         # Save figure to disk as fallback
-        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"{os.path.dirname(name)}")
-        os.makedirs(artifacts_dir, exist_ok=True)
-        fig_path = os.path.join(artifacts_dir, f"{os.path.basename(name)}.png")
         fig.savefig(fig_path, dpi=300, bbox_inches='tight')
         
         # Convert figure to image buffer for loggers that need it
@@ -851,26 +844,26 @@ class SpeakerVerification(pl.LightningModule):
             try:
                 # TensorBoard logger
                 if hasattr(logger, 'experiment') and hasattr(logger.experiment, 'add_figure'):
-                    logger.experiment.add_figure(f'{name}', fig, global_step=self.global_step)
+                    logger.experiment.add_figure(logger_name, fig, global_step=self.global_step)
                     logged_successfully = True
                     continue
                     
                 # Weights & Biases logger
                 if hasattr(logger, 'experiment') and 'wandb' in str(type(logger.experiment).__module__):
                     import wandb
-                    logger.experiment.log({f'{name}': wandb.Image(fig)}, step=self.global_step)
+                    logger.experiment.log({logger_name: wandb.Image(fig)}, step=self.global_step)
                     logged_successfully = True
                     continue
                     
                 # Neptune logger - simplified approach using file path
                 if hasattr(logger, 'experiment') and 'neptune' in str(type(logger.experiment).__module__):
-                    logger.experiment[f'{name}'].upload(fig)
+                    logger.experiment[logger_name].upload(fig)
                     logged_successfully = True
                     continue
                     
                 # MLflow logger
                 if hasattr(logger, 'experiment') and hasattr(logger.experiment, 'log_figure'):
-                    logger.experiment.log_figure(logger.run_id, fig, f'{name}.png')
+                    logger.experiment.log_figure(logger.run_id, fig, f'{logger_name}.png')
                     logged_successfully = True
                     continue
                     
@@ -879,10 +872,10 @@ class SpeakerVerification(pl.LightningModule):
                 log.debug(f"Logger type {logger_type} doesn't support figure logging")
                 
             except Exception as e:
-                log.warning(f"Error logging figure {name} to logger {type(logger).__name__}: {str(e)}")
+                log.warning(f"Error logging figure {logger_name} to logger {type(logger).__name__}: {str(e)}")
         
         if not logged_successfully:
-            log.info(f"Figure '{name}' was saved to disk but couldn't be logged to any logger")
+            log.info(f"Figure '{logger_name}' was saved to disk but couldn't be logged to any logger")
         
         # Always close the figure to prevent memory leaks
         plt.close(fig)

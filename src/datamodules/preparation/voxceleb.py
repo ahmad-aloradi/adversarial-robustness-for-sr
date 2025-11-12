@@ -94,7 +94,7 @@ class VoxCelebMetadataPreparer(BaseMetadataPreparer):
         reuse_artifacts = False
         if all(path.exists() for path in required_files) and snapshot_path.is_file():
             cached_snapshot = self.load_config_snapshot(snapshot_path)
-            if cached_snapshot == expected_snapshot:
+            if self.snapshots_match(expected_snapshot, cached_snapshot):
                 log.info(f"Reusing existing VoxCeleb artifacts in {artifacts_dir}")
                 reuse_artifacts = True
             else:
@@ -139,7 +139,7 @@ class VoxCelebMetadataPreparer(BaseMetadataPreparer):
             base_snapshot_path = base_dir / self.CONFIG_SNAPSHOT_FILENAME
             if base_dir.exists() and all(path.exists() for path in base_required) and base_snapshot_path.is_file():
                 cached_snapshot = self.load_config_snapshot(base_snapshot_path)
-                if cached_snapshot == expected_snapshot:
+                if self.snapshots_match(expected_snapshot, cached_snapshot):
                     log.info(f"Copying VoxCeleb cached metadata from {base_dir}")
                     for src_path in base_required:
                         dest_path = artifacts_dir / src_path.name

@@ -12,7 +12,6 @@ from src import utils
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, CNCelebDefaults
 from src.datamodules.components.utils import segment_utterance
 from src.datamodules.preparation.base import (
-    CONFIG_SNAPSHOT_FILENAME,
     build_config_snapshot_from_mapping,
     read_hydra_config,
     save_config_snapshot,
@@ -57,6 +56,7 @@ def process_audio_file(args_tuple):
     rel_path = audio_path.relative_to(root_dir)
     speaker_id = _extract_speaker_id(rel_path)
     assert speaker_id.startswith('id'), f"Invalid speaker ID extracted: {speaker_id}"
+    speaker_id = _format_global_speaker_id(speaker_id)
 
     # Determine dataset version from root directory path
     split_name = _determine_dataset_split(audio_path, cnceleb1_name, cnceleb2_name)
@@ -64,7 +64,7 @@ def process_audio_file(args_tuple):
     # Create utterance data
     return {
         'speaker_id': speaker_id,
-        'rel_filepath': str(root_dir.name / audio_path.relative_to(root_dir)),
+        'rel_filepath': str(Path(root_dir.name) / rel_path),
         'recording_duration': info.duration,
         'split': split_name,
         'class_id': None,
@@ -133,6 +133,24 @@ def _extract_speaker_id(rel_path: Path) -> Optional[str]:
             return first_part
             
     raise ValueError(f"Could not extract speaker ID from relative path: {rel_path}")
+
+
+def _format_global_speaker_id(local_id: str) -> str:
+    """Attach dataset prefix to a speaker identifier if missing."""
+    prefix = f"{DATASET_DEFAULTS.dataset_name}_"
+    return local_id if local_id.startswith(prefix) else f"{prefix}{local_id}"
+
+
+def _ensure_prefixed_identifier(raw_id: str) -> str:
+    """Apply dataset prefix while preserving any suffix (e.g., '-enroll')."""
+    if raw_id.startswith(f"{DATASET_DEFAULTS.dataset_name}_"):
+        return raw_id
+
+    if '-' in raw_id:
+        speaker_token, remainder = raw_id.split('-', 1)
+        return f"{_format_global_speaker_id(speaker_token)}-{remainder}"
+
+    return _format_global_speaker_id(raw_id)
 
 
 class CNCelebProcessor:
@@ -343,6 +361,7 @@ class CNCelebProcessor:
             assert len(parts) == 3, f"Invalid trial format: expected 3 parts, got {len(parts)} in '{line}'"            
 
             enroll_id, test_path_raw, label_str = parts            
+            enroll_id = _ensure_prefixed_identifier(enroll_id)
             label = int(label_str)
             actual_test_path = self._find_audio_trial_file(test_path_raw)
             
@@ -377,7 +396,7 @@ class CNCelebProcessor:
                 parts = line.split()
                 assert len(parts) >= 2, f"Invalid enroll.lst format: {line}"
 
-                enroll_id = parts[0]
+                enroll_id = _ensure_prefixed_identifier(parts[0])
                 enroll_file = parts[1]  # Usually enroll/id00800-enroll.wav
                 actual_path = self._find_audio_trial_file(enroll_file)
                 enrollment_lst_files.append({
@@ -392,7 +411,7 @@ class CNCelebProcessor:
                 parts = line.split()
                 assert len(parts) >= 2, f"Invalid enroll.map format: {line}"
 
-                enroll_id = parts[0]
+                enroll_id = _ensure_prefixed_identifier(parts[0])
                 actual_paths = []
                 for file_path in parts[1:]:
                     actual_path = self._find_audio_map_files(file_path)
@@ -425,12 +444,12 @@ class CNCelebProcessor:
         # 1. Get dev speakers from CN-Celeb_flac/dev/dev.lst if it exists
         log.info(f"Reading dev speakers: {self.cnceleb1_dev_lst_file}")
         with open(self.cnceleb1_dev_lst_file, 'r', encoding='utf-8') as f:
-            cn1_dev_speakers = [line.strip() for line in f if line.strip()]
+            cn1_dev_speakers = [_format_global_speaker_id(line.strip()) for line in f if line.strip()]
 
         if self.cnceleb2_dev_lst_file and self.cnceleb2_dev_lst_file.exists():
             log.info(f"Reading additional dev speakers from: {self.cnceleb2_dev_lst_file}")
             with open(self.cnceleb2_dev_lst_file, 'r', encoding='utf-8') as f:
-                cn2_dev_speakers = [line.strip() for line in f if line.strip()]
+                cn2_dev_speakers = [_format_global_speaker_id(line.strip()) for line in f if line.strip()]
             dev_speakers = sorted(set(cn1_dev_speakers + cn2_dev_speakers))
         else:
             dev_speakers = sorted(set(cn1_dev_speakers))
@@ -450,15 +469,16 @@ class CNCelebProcessor:
                     filename = file_path.split(os.sep)[-1]
                     assert filename.startswith('id') and '-' in filename, f"Unexpected test file format: {filename}"
                     speaker_id = filename.split('-')[0]
-                    test_speakers.add(speaker_id)
+                    test_speakers.add(_format_global_speaker_id(speaker_id))
                     
         # Save speaker lists
         with open(self.dev_spk_file, 'w') as f:
-            f.write('\n'.join(dev_speakers) + '\n')
+            f.write('\n'.join(dev_speakers) + ('\n' if dev_speakers else ''))
         log.info(f"Saved {len(dev_speakers)} dev speakers to {self.dev_spk_file}")
 
+        sorted_test_speakers = sorted(test_speakers)
         with open(self.test_spk_file, 'w') as f:
-            f.write('\n'.join(sorted(test_speakers)) + '\n')
+            f.write('\n'.join(sorted_test_speakers) + ('\n' if sorted_test_speakers else ''))
         log.info(f"Saved {len(test_speakers)} test speakers to {self.test_spk_file}")
 
     def generate_speaker_metadata(self, dev_df: pd.DataFrame) -> pd.DataFrame:
@@ -502,7 +522,7 @@ class CNCelebProcessor:
         # Scan multiple directories for speaker folders
         scan_dirs = [
             self.root_dir / 'data',
-            self.root_dir / 'dev', 
+            self.root_dir / 'dev',
             self.root_dir / 'eval',
         ]
         
@@ -510,7 +530,7 @@ class CNCelebProcessor:
             assert scan_dir.exists(), f"Scan directory does not exist: {scan_dir}"
             for item in scan_dir.iterdir():
                 assert item.is_dir() and item.name.startswith('id'), f"Unexpected directory structure: {item}"
-                speaker_ids.add(item.name)
+                speaker_ids.add(_format_global_speaker_id(item.name))
         
         # Also extract from trial files if available
         log.info("Extracting speaker IDs from enrollment map...")
@@ -522,12 +542,12 @@ class CNCelebProcessor:
                 enroll_id = parts[0]
                 if '-enroll' in enroll_id:
                     speaker_id = enroll_id.replace('-enroll', '')
-                    speaker_ids.add(speaker_id)
+                    speaker_ids.add(_format_global_speaker_id(speaker_id))
                 
                 for file_path in parts[1:]:
                     path_parts = file_path.split(os.sep)
                     if path_parts and path_parts[0].startswith('id'):
-                        speaker_ids.add(path_parts[0])
+                        speaker_ids.add(_format_global_speaker_id(path_parts[0]))
 
         if self.test_lst_file.exists():
             log.info("Extracting speaker IDs from test list...")
@@ -538,7 +558,7 @@ class CNCelebProcessor:
 
                     assert filename.startswith('id') and '-' in filename, f"Unexpected test file format: {filename}"
                     speaker_id = filename.split('-')[0]
-                    speaker_ids.add(speaker_id)
+                    speaker_ids.add(_format_global_speaker_id(speaker_id))
         
         log.info(f"Found {len(speaker_ids)} unique speakers from directory scan")
         return speaker_ids
@@ -557,7 +577,7 @@ class CNCelebProcessor:
                     
                     enroll_id = line.split()[0]
                     speaker_id = enroll_id.split('-')[0]
-                    enroll_speakers.add(speaker_id)
+                    enroll_speakers.add(_format_global_speaker_id(speaker_id))
 
         # From enroll.map
         if self.enroll_map_file.exists():
@@ -569,7 +589,7 @@ class CNCelebProcessor:
                         
                     enroll_id = line.split()[0]
                     speaker_id = enroll_id.split('-')[0]
-                    enroll_speakers.add(speaker_id)
+                    enroll_speakers.add(_format_global_speaker_id(speaker_id))
                     
         log.info(f"Found {len(enroll_speakers)} unique enrollment speakers.")
         return enroll_speakers        
@@ -624,8 +644,7 @@ if __name__ == "__main__":
     # Build snapshot by extracting only the comparable keys from config
     snapshot_source = {key: getattr(config, key) for key in CNCELEB_COMPARABLE_KEYS if hasattr(config, key)}
     snapshot = build_config_snapshot_from_mapping(snapshot_source, CNCELEB_COMPARABLE_KEYS)
-    snapshot_path = resolved_artifacts / CONFIG_SNAPSHOT_FILENAME
-    save_config_snapshot(snapshot, snapshot_path)
+    snapshot_path = save_config_snapshot(snapshot, resolved_artifacts)
     log.info(f"Saved configuration snapshot to {snapshot_path}")
 
     log.info(f"Preprocessing completed. Generated {len(trials_df)} trials.")

@@ -1,6 +1,16 @@
 # @package module.model
 audio_processor:
-  _target_: torch.nn.Identity
+  _target_: speechbrain.lobes.features.Fbank
+  sample_rate: ${datamodule.dataset.sample_rate}
+  deltas: False
+  n_mels: 80
+  f_min: 0
+  f_max: null
+  n_fft: 512
+  win_length: 25
+  hop_length: 10
+  left_frames: 0
+  right_frames: 0
 
 audio_processor_normalizer:
   _target_: torch.nn.Identity
@@ -10,11 +20,8 @@ audio_encoder:
   model_name: "campplus"
   repo_id: "Wespeaker/wespeaker-voxceleb-campplus-LM"
   checkpoint_filename: "avg_model.pt"
-  model_args:
-    feat_dim: 80
-    embed_dim: 512
 
 classifier:
   _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
-  input_size: 512 # This remains correct for CAM++
+  input_size: 512
   out_neurons:  ${datamodule.num_classes}

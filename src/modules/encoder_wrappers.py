@@ -35,6 +35,8 @@ class EncoderWrapper(nn.Module):
         module_name = self.encoder.__class__.__module__
         if "speechbrain" in module_name:
             return "speechbrain"
+        if "wespeaker" in module_name:
+            return "wespeaker"
         if "nemo" in module_name:
             return "nemo"
         if hasattr(self.encoder, 'code'):
@@ -49,6 +51,8 @@ class EncoderWrapper(nn.Module):
         # Dispatch to the appropriate forward method based on model type
         if self._model_type == "speechbrain":
             embeddings = self._forward_speechbrain(wavs, wav_lens)
+        if self._model_type == "wespeaker":
+            embeddings = self._forward_wespeaker(wavs, wav_lens)
         elif self._model_type == "nemo":
             embeddings = self._forward_nemo(wavs, wav_lens)
         elif self._model_type == "torchscript":
@@ -69,6 +73,13 @@ class EncoderWrapper(nn.Module):
         else:
             # Standard models require external feature processing
             return self._forward_generic(wavs, wav_lens).squeeze(1)
+
+    def _forward_wespeaker(self, wavs: torch.Tensor, wav_lens: torch.Tensor) -> torch.Tensor:
+        """Handles both high-level and standard Wespeaker models."""
+        if self._is_high_level_pretrained:
+            raise NotImplementedError("High-level Wespeaker models are not supported.")
+        else:
+            return self._forward_generic(wavs, wav_lens)
 
     def _forward_nemo(self, wavs: torch.Tensor, wav_lens: torch.Tensor) -> torch.Tensor:
         """Handles both high-level and standard NeMo models."""

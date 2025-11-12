@@ -46,7 +46,7 @@ class LibrispeechMetadataPreparer(BaseMetadataPreparer):
         reuse_artifacts = False
         if all(path.exists() for path in required_files) and snapshot_path.is_file():
             cached_snapshot = self.load_config_snapshot(snapshot_path)
-            if cached_snapshot == expected_snapshot:
+            if self.snapshots_match(expected_snapshot, cached_snapshot):
                 log.info(f"Reusing existing LibriSpeech metadata in {artifacts_dir}")
                 reuse_artifacts = True
             else:

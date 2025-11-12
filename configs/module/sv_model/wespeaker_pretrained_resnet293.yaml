@@ -1,18 +1,29 @@
 # @package module.model
 audio_processor:
-  _target_: torch.nn.Identity
+  _target_: speechbrain.lobes.features.Fbank
+  sample_rate: ${datamodule.dataset.sample_rate}
+  deltas: False
+  n_mels: 80
+  f_min: 0
+  f_max: null
+  n_fft: 512
+  win_length: 25
+  hop_length: 10
+  left_frames: 0
+  right_frames: 0
 
 audio_processor_normalizer:
   _target_: torch.nn.Identity
 
 audio_encoder:
-  _target_: src.utils.hf_utils.load_wespeaker_model
-  model_name: "resnet293"
-  repo_id: "Wespeaker/wespeaker-voxceleb-resnet293-LM"
-  checkpoint_filename: "avg_model.pt"
-  model_args:
-    feat_dim: 80
-    embed_dim: 256
+  _target_: torch.nn.Sequential
+  _args_:
+  - _target_: src.utils.hf_utils.load_wespeaker_model
+    model_name: "resnet293"
+    repo_id: "Wespeaker/wespeaker-voxceleb-resnet293-LM"
+    checkpoint_filename: "avg_model.pt"
+  - _target_: src.utils.torch_utils.SelectFromTuple
+    _args_: [1]
 
 classifier:
   _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier

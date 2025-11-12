@@ -58,6 +58,26 @@ def segment_utterance(
     start_time = 0.0
     segment_idx = 0
     
+    # Remove extension and convert path separators to underscores
+    path_no_ext = Path(rel_filepath).with_suffix('').as_posix()
+    path_tokens = path_no_ext.replace('/', '_').replace('\\', '_').split('_')
+    
+    # Get speaker parts for deduplication (case-insensitive comparison)
+    speaker_parts = {p.lower() for p in speaker_id.split('_')}
+    
+    # Remove redundant tokens (already in speaker_id or duplicates)
+    unique_tokens = []
+    seen_lower = set()
+    for token in path_tokens:
+        token_lower = token.lower()
+        # Skip if: empty, already in speaker_id, or already seen
+        if token and token_lower not in speaker_parts and token_lower not in seen_lower:
+            unique_tokens.append(token)
+            seen_lower.add(token_lower)
+    
+    # Build segment prefix
+    segment_prefix = f"{speaker_id}_{'_'.join(unique_tokens)}" if unique_tokens else speaker_id
+
     while start_time < recording_duration:
         end_time = min(start_time + segment_duration, recording_duration)
         current_duration = end_time - start_time
@@ -65,7 +85,7 @@ def segment_utterance(
         # Only include segments that meet minimum duration requirement
         if current_duration >= min_segment_duration:
             segment = {
-                'segment_id': f"{speaker_id}_{Path(rel_filepath).stem}_seg{segment_idx:04d}",
+                'segment_id': f"{segment_prefix}_seg{segment_idx:04d}",
                 'speaker_id': speaker_id,
                 'rel_filepath': rel_filepath,
                 'start_time': round(start_time, 3),
@@ -293,6 +313,7 @@ class CsvProcessor:
             log.info(f"Total speakers: {len(df_copy[id_col].unique())}")
         
         return df_copy
+
 
     def process(self,
                 dataset_files: List[str],

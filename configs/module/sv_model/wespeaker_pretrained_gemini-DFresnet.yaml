@@ -22,10 +22,6 @@ audio_encoder:
     model_name: "dfresnet237"
     repo_id: Wespeaker/wespeaker-voxceleb-gemini-DFresnet114-LM
     checkpoint_filename: avg_model.pt
-    model_args:
-      feat_dim: 80
-      embed_dim: 256
-      pooling_func: TSTP
   - _target_: src.utils.torch_utils.SelectFromTuple
     _args_: [1]
 

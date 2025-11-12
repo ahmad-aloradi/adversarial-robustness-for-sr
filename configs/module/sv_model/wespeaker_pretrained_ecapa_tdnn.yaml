@@ -22,13 +22,10 @@ audio_encoder:
     model_name: "ecapa_tdnn_glob_c1024"
     repo_id: "Wespeaker/wespeaker-voxceleb-ecapa-tdnn1024-LM"
     checkpoint_filename: "avg_model.pt"
-    model_args:
-      feat_dim: 80
-      embed_dim: 192
   - _target_: src.utils.torch_utils.SelectFromTuple
     _args_: [1]
 
 classifier:
   _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
-  input_size: ${module.model.audio_encoder._args_[0].model_args.embed_dim}
+  input_size: 192
   out_neurons:  ${datamodule.num_classes}

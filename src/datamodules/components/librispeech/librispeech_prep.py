@@ -16,7 +16,6 @@ from src import utils
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, LibriSpeechDefaults
 from src.datamodules.components.utils import segment_utterance
 from src.datamodules.preparation.base import (
-    CONFIG_SNAPSHOT_FILENAME,
     build_config_snapshot_from_mapping,
     read_hydra_config,
     save_config_snapshot,
@@ -224,6 +223,5 @@ if __name__ == '__main__':
     # Build snapshot by extracting only the comparable keys from config
     snapshot_source = {key: getattr(config, key) for key in LIBRISPEECH_COMPARABLE_KEYS if hasattr(config, key)}
     snapshot = build_config_snapshot_from_mapping(snapshot_source, LIBRISPEECH_COMPARABLE_KEYS)
-    snapshot_path = artifacts_dir / CONFIG_SNAPSHOT_FILENAME
-    save_config_snapshot(snapshot, snapshot_path)
+    snapshot_path = save_config_snapshot(snapshot, artifacts_dir)
     log.info(f"Saved configuration snapshot to {snapshot_path}")

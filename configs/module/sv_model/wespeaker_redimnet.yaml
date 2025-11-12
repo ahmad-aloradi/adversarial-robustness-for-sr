@@ -31,5 +31,5 @@ audio_encoder:
 
 classifier:
   _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
-  input_size: 192
+  input_size: ${module.model.audio_encoder._args_[0].model_args.embed_dim}
   out_neurons:  ${datamodule.num_classes}

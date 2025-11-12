@@ -21,14 +21,18 @@ audio_processor_normalizer:
 audio_encoder:
   _target_: torch.nn.Sequential
   _args_:
-  - _target_: wespeaker.models.ecapa_tdnn.ECAPA_TDNN_GLOB_c1024
-    feat_dim: ${module.model.audio_processor.n_mels}
-    embed_dim: 192
-    pooling_func: "ASTP"
+  - _target_: src.utils.hf_utils.load_wespeaker_model
+    model_name: "ecapa_tdnn_glob_c1024"
+    repo_id: null
+    checkpoint_filename: null
+    model_args:
+      feat_dim: ${module.model.audio_processor.n_mels}
+      embed_dim: 192
+      pooling_func: "ASTP"
   - _target_: src.utils.torch_utils.SelectFromTuple
     _args_: [1]
 
-classifier: 
+classifier:
   _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
-  input_size: ${module.model.audio_encoder._args_[0].embed_dim}
+  input_size: ${module.model.audio_encoder._args_[0].model_args.embed_dim}
   out_neurons:  ${datamodule.num_classes}

@@ -1,4 +1,6 @@
+import os
 from typing import Any, Dict, Optional
+
 import torch
 import torch.nn as nn
 
@@ -36,67 +38,74 @@ def load_nemo_model(model_name: str, **kwargs: Any) -> nn.Module:
 
 def load_wespeaker_model(
     model_name: str,
-    repo_id: str,
-    checkpoint_filename: str,
-    model_args: Dict[str, Any],
+    repo_id: str = None,
+    checkpoint_filename: str = None,
+    model_args: Dict[str, Any] = None,
     **kwargs: Any
 ) -> nn.Module:
     """
-    Generic factory function to load a pretrained WeSpeaker model.
+    Factory function to load a WeSpeaker model.
 
     Args:
-        model_name: The architecture name (e.g., "campplus", "resnet").
-        repo_id: The Hugging Face repository ID.
-        checkpoint_filename: The name of the PyTorch checkpoint file.
-        model_args: Dictionary of arguments to pass to the model constructor.
-        **kwargs: Additional keyword arguments (e.g., map_location).
+        model_name: The architecture name (e.g., "campplus", "resnet293").
+        repo_id: The Hugging Face repository ID (optional if loading without pretrained weights).
+        checkpoint_filename: The checkpoint file name (default: "avg_model.pt").
+                           WeSpeaker expects this to be in the downloaded directory.
+        model_args: Dictionary of arguments to pass to the model constructor (only used if repo_id is None).
+        **kwargs: Additional keyword arguments (device, sample_rate).
 
     Returns:
-        The instantiated PyTorch model with pretrained weights.
+        PyTorch model (without Speaker wrapper).
     """
-    # Registry of available WeSpeaker models
-    model_registry = {
-        "campplus": "wespeaker.models.campplus.CAMPPlus",
-        "resnet293": "wespeaker.models.resnet.ResNet293",
-        "redimnetb4": "wespeaker.models.redimnet.ReDimNetB4",
-        "redimnetb5": "wespeaker.models.redimnet.ReDimNetB5",
-        "redimnetb6": "wespeaker.models.redimnet.ReDimNetB6",
-        "dfresnet237": "wespeaker.models.gemini_dfresnet.Gemini_DF_ResNet237",
-        "eres2net34_aug": "wespeaker.models.eres2net.ERes2Net34_aug",
-        "ecapa_tdnn_glob_c1024": "wespeaker.models.ecapa_tdnn.ECAPA_TDNN_GLOB_c1024",
-    }
-    projection_inc_state_dict = ["resnet293", "ecapa_tdnn_glob_c1024"]
-
-    if model_name not in model_registry:
-        raise ValueError(f"Unknown WeSpeaker model name: {model_name}. Available: {list(model_registry.keys())}")
-
     try:
-        from huggingface_hub import hf_hub_download
-        import importlib
+        import wespeaker
+        from huggingface_hub import snapshot_download
     except ImportError:
-        raise ImportError("Please install huggingface_hub: pip install huggingface_hub")
+        raise ImportError(
+            "Please install required packages: pip install wespeaker huggingface_hub"
+        )
 
-    # Dynamically import the model class
-    module_path, class_name = model_registry[model_name].rsplit('.', 1)
-    module = importlib.import_module(module_path)
-    model_class = getattr(module, class_name)
+    if repo_id is not None:
+        model_dir = snapshot_download(repo_id=repo_id)
+        checkpoint_file = checkpoint_filename or "avg_model.pt"
+        checkpoint_path = os.path.join(model_dir, checkpoint_file)
+        
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(
+                f"Checkpoint file '{checkpoint_file}' not found in {model_dir}. "
+                f"Available files: {os.listdir(model_dir)}"
+            )
 
-    # Instantiate the model with its specific arguments
-    model = model_class(**model_args)
-
-    if not (repo_id is None or checkpoint_filename is None):
-        # Download the checkpoint and load the weights
-        model_path = hf_hub_download(repo_id=repo_id, filename=checkpoint_filename)
-        state_dict = torch.load(model_path, 
-                                map_location=kwargs.get('map_location', 'cuda' if torch.cuda.is_available() else 'cpu'))
+        model = wespeaker.load_model_pt(model_dir)
+        log.info(f"Successfully loaded pretrained WeSpeaker model from {repo_id}")
+        
+    else:
+        # Load model without pretrained weights (for training from scratch)
+        import importlib
+        
+        if model_args is None:
+            raise ValueError("model_args must be provided when repo_id is None")
+        
+        model_registry = {
+            "campplus": "wespeaker.models.campplus.CAMPPlus",
+            "resnet293": "wespeaker.models.resnet.ResNet293",
+            "redimnetb4": "wespeaker.models.redimnet.ReDimNetB4",
+            "redimnetb5": "wespeaker.models.redimnet.ReDimNetB5",
+            "redimnetb6": "wespeaker.models.redimnet.ReDimNetB6",
+            "dfresnet237": "wespeaker.models.gemini_dfresnet.Gemini_DF_ResNet237",
+            "eres2net34_aug": "wespeaker.models.eres2net.ERes2Net34_aug",
+            "ecapa_tdnn_glob_c1024": "wespeaker.models.ecapa_tdnn.ECAPA_TDNN_GLOB_c1024",
+        }
+        
+        if model_name not in model_registry:
+            raise ValueError(f"Unknown WeSpeaker model name: {model_name}. Available: {list(model_registry.keys())}")
+        
+        module_path, class_name = model_registry[model_name].rsplit('.', 1)
+        module = importlib.import_module(module_path)
+        model_class = getattr(module, class_name)
+        model = model_class(**model_args)
+        log.info(f"Successfully instantiated WeSpeaker model '{model_name}' without pretrained weights")
     
-        # special handling for resnet293 to remove incompatible keys
-        if model_name in projection_inc_state_dict:
-            del state_dict['projection.weight'] 
-
-        model.load_state_dict(state_dict)
-
-    log.info(f"Successfully loaded WeSpeaker model '{model_name}' from {repo_id}")
     return model
 
 
