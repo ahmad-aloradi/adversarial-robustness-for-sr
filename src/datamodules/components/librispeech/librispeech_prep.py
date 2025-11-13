@@ -156,7 +156,7 @@ def process(config, delimiter, save_csv=True):
         dfs[subset] = dfs[subset][DF_COLS]
         
         # Apply segmentation if enabled in config
-        if config.get('use_pre_segmentation', False):
+        if config.get('use_pre_segmentation', False) and 'train' in os.path.basename(subset):
             log.info(f'Pre-segmentation enabled for {subset}. Processing {len(dfs[subset])} utterances...')
             
             all_segments = []

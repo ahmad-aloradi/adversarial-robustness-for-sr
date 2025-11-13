@@ -41,6 +41,12 @@ class CNCelebUtterance:
     text: Optional[str] = None
 
 
+def write_dataset_csv(df, path, sep='|', fillna_value='N/A'):
+    """Save updated metadata"""
+    df = df.fillna(fillna_value)
+    df.to_csv(path, sep=sep, index=False)
+
+
 def process_audio_file(args_tuple):
     """Process a single audio file - optimized for multiprocessing."""
     (audio_path, root_dir_str, sample_rate, cnceleb1_name, cnceleb2_name) = args_tuple
@@ -306,7 +312,7 @@ class CNCelebProcessor:
             log.info(f"Pre-segmentation disabled. Using full file metadata with random cropping during training.")
             dev_df = pd.DataFrame(utterances)
 
-        dev_df.to_csv(self.dev_metadata_file, sep=self.sep, index=False)
+        write_dataset_csv(dev_df, self.dev_metadata_file, sep=self.sep)
         log.info(f"Saved metadata for {len(dev_df)} {'segments' if self.use_pre_segmentation else 'files'} to {self.dev_metadata_file}")
 
         return dev_df
