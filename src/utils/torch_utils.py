@@ -18,6 +18,38 @@ class Permute(nn.Module):
         return f"{self.__class__.__name__}(dims={self.dims})"
 
 
+class Squeeze(nn.Module):
+    """
+    A torch.nn.Module to squeeze a tensor at a specified dimension.
+    """
+
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        return x.squeeze(self.dim)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(dim={self.dim})"
+
+
+class UnSqueeze(nn.Module):
+    """
+    A torch.nn.Module to unsqueeze a tensor at a specified dimension.
+    """
+
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        return x.unsqueeze(self.dim)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(dim={self.dim})"
+
+
 class SelectFromTuple(nn.Module):
     """
     A module to select one or more items from a sequence (e.g., a tuple).

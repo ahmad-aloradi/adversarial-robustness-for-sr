@@ -30,8 +30,8 @@ audio_encoder:
         expansion: 4
         baseWidth: 24
         scale: 3
-    - _target_: src.utils.torch_utils.SelectFromTuple
-      _args_: [1]
+    # - _target_: src.utils.torch_utils.SelectFromTuple
+    #   _args_: [1]
 
 classifier:
   _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
