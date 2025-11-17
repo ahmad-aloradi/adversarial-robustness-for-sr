@@ -48,10 +48,8 @@ callbacks:
     parameters_to_prune: null
     pruning_dim: null
     verbose: 2
-    prune_on_train_epoch_start: false  # Don't prune during training
-    prune_on_train_start: true  # Apply pruning before fine-tuning starts
+    pruning_trigger: pre_training  # Apply pruning once before fine-tuning starts
     scheduled_pruning: false
-    initial_amount: null
     final_amount: null
     epochs_to_ramp: null
     collect_metrics: true

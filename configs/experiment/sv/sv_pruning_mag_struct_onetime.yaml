@@ -48,10 +48,8 @@ callbacks:
     pruning_dim: 1  # Dimension along which to prune for structured pruning methods (0 = channels, 1 = filters)
     pruning_norm: 1  # Norm to use for structured pruning methods (e.g., 1 for L1 norm)
     verbose: 2
-    prune_on_train_epoch_start: false  # Don't prune during training
-    prune_on_train_start: true  # Apply pruning before fine-tuning starts
+    pruning_trigger: pre_training  # Apply pruning once before fine-tuning starts
     scheduled_pruning: false
-    initial_amount: null
     final_amount: null
     epochs_to_ramp: null
     collect_metrics: true
