@@ -32,7 +32,12 @@ class EncoderWrapper(nn.Module):
 
     def _get_model_type(self) -> str:
         """Determines the model's library/type based on its module path or attributes."""
-        module_name = self.encoder.__class__.__module__
+        # handle the case where self.encoder is a torch.Sequential wrapper
+        if isinstance(self.encoder, nn.Sequential) and len(self.encoder) > 0:
+            module_name = self.encoder[0].__class__.__module__
+        else:
+            module_name = self.encoder.__class__.__module__
+        
         if "speechbrain" in module_name:
             return "speechbrain"
         if "wespeaker" in module_name:
@@ -51,7 +56,7 @@ class EncoderWrapper(nn.Module):
         # Dispatch to the appropriate forward method based on model type
         if self._model_type == "speechbrain":
             embeddings = self._forward_speechbrain(wavs, wav_lens)
-        if self._model_type == "wespeaker":
+        elif self._model_type == "wespeaker":
             embeddings = self._forward_wespeaker(wavs, wav_lens)
         elif self._model_type == "nemo":
             embeddings = self._forward_nemo(wavs, wav_lens)

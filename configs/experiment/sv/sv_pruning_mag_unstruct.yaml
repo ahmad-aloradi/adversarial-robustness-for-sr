@@ -48,14 +48,14 @@ callbacks:
     parameters_to_prune: null  # Optional list of (module, name) tuples specifying which parameters to prune; if null, all eligible parameters are examined
     pruning_dim: null  # Dimension along which to prune for structured pruning methods; Mandatory for structured pruning
     pruning_norm: null  # Norm to use for structured pruning methods (e.g., 1 for L1 norm)
-    verbose: 2  # Verbosity level: 0=silent, 1=basic progress, 2=detailed statistics and warnings
+    verbose: 1  # Verbosity level: 0=silent, 1=basic progress, 2=detailed statistics and warnings
     pruning_trigger: epoch_start  # Apply pruning at the start of each training epoch
     scheduled_pruning: true  # If true, gradually increases pruning amount to final_amount over epochs_to_ramp
     final_amount: 0.9  # Final pruning amount when using scheduled_pruning (must be between 0 and 1)
     # epochs_to_ramp: ${oc.eval:${trainer.max_epochs} // 1.5} # Number of epochs over which to linearly increase pruning to final_amount
     epochs_to_ramp: 10 # Number of epochs over which to linearly increase pruning to final_amount
-    collect_metrics: true  # If true, collects and logs detailed sparsity metrics during training for analysis
     save_when_sparser_than: 0.9 # Disable checkpointing until model sparsity is >= final_amount
+    schedule_type: linear
 
 datamodule:
   dataset:
