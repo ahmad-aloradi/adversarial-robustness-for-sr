@@ -4,14 +4,24 @@
 <a href="https://pytorchlightning.ai/"><img alt="Lightning" src="https://img.shields.io/badge/-Lightning-792ee5?logo=pytorchlightning&logoColor=white"></a>
 <a href="https://hydra.cc/"><img alt="Config: Hydra" src="https://img.shields.io/badge/Config-Hydra-89b8cd"></a>
 <a href="https://github.com/gorodnitskiy/yet-another-lightning-hydra-template"><img alt="Template" src="https://img.shields.io/badge/-Lightning--Hydra--Template-017F2F?style=flat&logo=github&labelColor=gray"></a>
-[![Publication](https://img.shields.io/badge/Paper-In%20progress-red)]()<br>
+[![arXiv](https://img.shields.io/badge/arXiv-2507.12081-orange)](https://arxiv.org/pdf/2507.12081)<br>
 
 ## Description
 
 The aim of this work is to study robustness and develop a robust speaker recognition against domain shifts, adversarial attacks, and audio spoofing. 
 
 The framework is based on [this template](https://github.com/gorodnitskiy/yet-another-lightning-hydra-template), which is based on
-[PyTorch Lightning](https://github.com/Lightning-AI/lightning) and [Hydra](https://github.com/facebookresearch/hydra). 
+[PyTorch Lightning](https://github.com/Lightning-AI/lightning) and [Hydra](https://github.com/facebookresearch/hydra).
+
+### Neural Network Compression
+
+This project implements two complementary neural network compression methods to create efficient speaker recognition models:
+
+1. **Bregman Learning Framework** - A sparsity-inducing training approach based on [Bungert et al. (2022)](https://www.jmlr.org/papers/volume23/21-0545/21-0545.pdf). This method uses adaptive regularization during training to achieve sparse networks. Implementation is adapted from [TimRoith/BregmanLearning](https://github.com/TimRoith/BregmanLearning/tree/main/notebooks).
+
+2. **Magnitude-Based Pruning** - Classical pruning with advanced scheduling and checkpoint compatibility. Removes weights with smallest magnitudes either gradually during training or all at once.
+
+For detailed documentation on both methods, usage examples, and best practices, see **[docs/pruning.md](docs/pruning.md)**. 
 
 
 ## Quick start
