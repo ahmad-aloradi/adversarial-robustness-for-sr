@@ -8,20 +8,17 @@
 
 ## Description
 
-The aim of this work is to study robustness and develop a robust speaker recognition against domain shifts, adversarial attacks, and audio spoofing. 
+This repository bundles our research effort on **robust and efficient speaker recognition** across two related tasks:
+- **Speaker verification** – training and evaluating modern architectures (ECAPA-TDNN, ResNets, custom WeSpeaker models) on public corpora such as VoxCeleb, LibriSpeech, and CN-Celeb.
+- **Speaker De-anonymization** – against the [VoicePrivacy 2025](https://voiceprivacychallenge.org/) challenge data.
 
-The framework is based on [this template](https://github.com/gorodnitskiy/yet-another-lightning-hydra-template), which is based on
-[PyTorch Lightning](https://github.com/Lightning-AI/lightning) and [Hydra](https://github.com/facebookresearch/hydra).
+The framework builds on [PyTorch Lightning](https://github.com/Lightning-AI/lightning) and [Hydra](https://github.com/facebookresearch/hydra) via [this template](https://github.com/gorodnitskiy/yet-another-lightning-hydra-template), which lets us compose experiments with declarative configs. Datasets live under `configs/datamodule/datasets` and include ready-made recipes for `voxceleb`, `cnceleb`, `librispeech`, and `vpc` (VoicePrivacy).
+ 
+In addition, we also ship two compression techniques:
+1. **Bregman Learning Framework** – adaptive regularization that induces sparsity during training (based on [Bungert et al. 2022](https://www.jmlr.org/papers/volume23/21-0545/21-0545.pdf) and the [TimRoith/BregmanLearning](https://github.com/TimRoith/BregmanLearning/tree/main/notebooks) reference implementation).
+2. **Magnitude-Based Pruning** – structured or unstructured pruning with schedulers, checkpoint-safe masks, and deployment tooling.
 
-### Neural Network Compression
-
-This project implements two complementary neural network compression methods to create efficient speaker recognition models:
-
-1. **Bregman Learning Framework** - A sparsity-inducing training approach based on [Bungert et al. (2022)](https://www.jmlr.org/papers/volume23/21-0545/21-0545.pdf). This method uses adaptive regularization during training to achieve sparse networks. Implementation is adapted from [TimRoith/BregmanLearning](https://github.com/TimRoith/BregmanLearning/tree/main/notebooks).
-
-2. **Magnitude-Based Pruning** - Classical pruning with advanced scheduling and checkpoint compatibility. Removes weights with smallest magnitudes either gradually during training or all at once.
-
-For detailed documentation on both methods, usage examples, and best practices, see **[docs/pruning.md](docs/pruning.md)**. 
+📖 The compression was designed to experiment with the speaker recogntion models. However, they are implemented as Lightning callbacks, rendering their use flexible to other tasks. Learn how to enable these methods in **[docs/pruning.md](docs/pruning.md)**.
 
 
 ## Quick start
@@ -34,6 +31,24 @@ cd adversarial-robustness-for-sr
 # install requirements
 pip install -r requirements.txt
 ```
+
+### Example: Override CLI arguments (Hydra style)
+
+Hydra lets you override any config directly from the command line. The command below trains an ECAPA-TDNN model on CN-Celeb, switches to the structured pruning recipe, shrinks batch sizes, caps utterance duration, and limits the run length:
+
+```bash
+python src/train.py \
+    datamodule=datasets/cnceleb \
+    module/sv_model=wespeaker_ecapa_tdnn \
+    experiment=sv/sv_pruning_mag_struct \
+    datamodule.loaders.train.batch_size=8 \
+    datamodule.loaders.valid.batch_size=8 \
+    datamodule.dataset.max_duration=3.0 \
+    trainer.max_epochs=10 \
+    trainer.num_sanity_val_steps=1
+```
+
+Add further overrides (e.g., `logger=wandb`) as needed; Hydra composes them with the defaults defined under `configs/`.
 
 ## Main Packages
 
