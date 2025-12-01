@@ -1,0 +1,98 @@
+# @package _global_
+
+# to execute this experiment run:
+# python train.py experiment=sv/sv_pruning_mag_unstruct_onetime
+
+defaults:
+  # This MUST be first. It tells Hydra to start building the config from this file.
+  - _self_  
+  - /module/sv_model: wespeaker_ecapa_tdnn.yaml
+  - override /callbacks: 
+    - default.yaml
+    - checkpoint_handler.yaml
+  - override /datamodule: datasets/voxceleb.yaml
+  - override /module: sv.yaml
+  - override /trainer: gpu.yaml
+  - override /logger: tensorboard.yaml
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+tags: ["voxceleb", "l1_unstructured_pruning", "onetime_pruning", "sv"]
+seed: 42
+
+trainer:
+  min_epochs: 10
+  max_epochs: 25
+  gradient_clip_val: 1.0
+  num_sanity_val_steps: 0
+
+callbacks:
+  model_checkpoint:
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+  early_stopping:
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: 8
+    
+  model_pruning:
+    _target_: src.callbacks.pruning.prune.MagnitudePruner
+    pruning_fn: l1_unstructured
+    amount: 0.9  # 90% pruning applied before fine-tuning
+    use_global_unstructured: true
+    apply_pruning: true
+    make_pruning_permanent: true
+    use_lottery_ticket_hypothesis: false
+    resample_parameters: false
+    parameters_to_prune: null
+    pruning_dim: null
+    verbose: 1
+    pruning_trigger: pre_training  # Apply pruning once before fine-tuning starts
+    scheduled_pruning: false
+    final_amount: null
+    epochs_to_ramp: null
+    save_when_sparser_than: 0.9 # Disable checkpointing until model sparsity is >= amount
+    schedule_type: linear
+
+datamodule:
+  dataset:
+    max_duration: 3.0
+
+  loaders:
+    train:
+      batch_size: 64
+    valid:
+      batch_size: 64
+    test:
+      batch_size: 8
+    enrollment:
+      batch_size: 8
+
+### score normalization ###
+module:
+  normalize_test_scores: False
+
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: "max"
+      factor: 0.25
+      min_lr: 1.0e-6
+      patience: 2
+      verbose: True
+    extras:
+      monitor: ${replace:"valid/__metric__"}
+      interval: "epoch"
+      frequency: 1
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: True
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
+
+logger:
+  wandb:
+    tags: ${tags}
+    group: "voxceleb"

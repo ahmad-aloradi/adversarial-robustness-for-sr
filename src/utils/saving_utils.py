@@ -1,6 +1,7 @@
 import csv
 import json
 from collections import OrderedDict
+import shutil
 from pathlib import Path
 from typing import Any, List, Optional, Union
 
@@ -10,6 +11,72 @@ from pytorch_lightning import LightningModule, Trainer
 from src.utils import pylogger
 
 log = pylogger.get_pylogger(__name__)
+
+
+def _finalize_pruned_state_dict(state_dict: OrderedDict) -> OrderedDict:
+    """Convert torch pruning reparameterization keys to dense parameters."""
+
+    converted = OrderedDict()
+    modified = False
+
+    for key, value in state_dict.items():
+        if key.endswith("_mask"):
+            # Mask tensors are only an implementation detail; drop them entirely
+            modified = True
+            continue
+
+        if key.endswith("_orig"):
+            base_key = key[:-5]
+            mask_key = f"{base_key}_mask"
+            mask = state_dict.get(mask_key)
+            tensor = value
+            if mask is not None and isinstance(mask, torch.Tensor):
+                # Reapply the mask once so the checkpoint stores the sparse tensor directly
+                tensor = value * mask
+            converted[base_key] = tensor
+            modified = True
+            continue
+
+        # Skip placeholder entry if corresponding _orig exists
+        if f"{key}_orig" in state_dict:
+            # torch.nn.utils.prune leaves a thin wrapper parameter that just references *_orig
+            # Avoid duplicating it in the rewritten state dict
+            continue
+
+        converted[key] = value
+
+    return converted if modified else state_dict
+
+
+def make_checkpoint_pruning_permanent(ckpt_path: str, backup: bool = True) -> bool:
+    """Rewrite a Lightning checkpoint so pruned params are stored without masks."""
+
+    if not Path(ckpt_path).is_file():
+        log.warning(f"Checkpoint {ckpt_path} not found; skipping pruning finalization")
+        return False
+
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    state_dict = checkpoint.get("state_dict")
+    if state_dict is None:
+        log.warning(f"Checkpoint {ckpt_path} missing state_dict; skipping")
+        return False
+
+    new_state_dict = _finalize_pruned_state_dict(state_dict)
+    if new_state_dict is state_dict:
+        # Nothing to do
+        return False
+
+    checkpoint["state_dict"] = new_state_dict
+    if backup:
+        backup_path = f"{ckpt_path}.pre_pruning_backup"
+        # Keep a copy of the original sparse checkpoint for reproducibility/debugging
+        shutil.copy2(ckpt_path, backup_path)
+        log.info(f"Backup of original checkpoint saved to: {backup_path}")
+
+    # Overwrite original checkpoint with mask-free weights so downstream loads succeed
+    torch.save(checkpoint, ckpt_path)
+    log.info(f"Pruning made permanent in checkpoint: {ckpt_path}")
+    return True
 
 
 def process_state_dict(
@@ -87,6 +154,11 @@ def save_state_dicts(
     else:
         log.warning("Best ckpt score not found! Use prefix <unknown>!")
         prefix = "unknown"
+
+    # Ensure checkpoint does not contain pruning reparameterization tensors
+    made_permanent = make_checkpoint_pruning_permanent(best_ckpt_path, backup=False)
+    if made_permanent:
+        log.info("Best checkpoint converted to dense weights before export")
 
     # load model from best checkpoint (note that .load_from_checkpoint is a classmethod!)
     model = type(model).load_from_checkpoint(best_ckpt_path)

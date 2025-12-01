@@ -4,55 +4,15 @@ defaults:
   - _self_
 
 model:
-  # audio_processor:
-  #   _target_: torch.nn.Identity
-  # audio_processor_normalizer:
-  #   _target_: torch.nn.Identity
-  # audio_encoder:
-  #   _target_: speechbrain.inference.EncoderClassifier.from_hparams
-  #   source: "speechbrain/spkrec-ecapa-voxceleb"
-  #   savedir: "local/.pretrained_models/spkrec-ecapa-voxceleb"
-  #   run_opts:
-  #     device: "cuda"
+  audio_processor: ???
+  audio_processor_normalizer: ???
+  audio_encoder: ???
+  classifier: ???
 
-  audio_processor:
-    _target_: speechbrain.lobes.features.Fbank
-    sample_rate: ${datamodule.dataset.sample_rate}
-    deltas: False
-    n_mels: 80
-    f_min: 0
-    f_max: null
-    n_fft: 512
-    win_length: 25
-    hop_length: 10
-    left_frames: 0
-    right_frames: 0
-
-  audio_processor_normalizer:
-    _target_: speechbrain.processing.features.InputNormalization
-    norm_type: sentence
-    std_norm: False
-
-  audio_encoder:
-    _target_: speechbrain.lobes.models.ECAPA_TDNN.ECAPA_TDNN
-    input_size: ${module.model.audio_processor.n_mels}
-    channels: [1024, 1024, 1024, 1024, 3072]
-    kernel_sizes: [5, 3, 3, 3, 1]
-    dilations: [1, 2, 3, 4, 1]
-    groups: [1, 1, 1, 1, 1]
-    attention_channels: 128
-    lin_neurons: 192  # ECAPA embedding size
-
-  ### classifier ###
-  classifier: 
-    _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
-    input_size: ${module.model.audio_encoder.lin_neurons}
-    out_neurons:  ${datamodule.num_classes}
-
-### caching ###
-  embedding_cache:
-    max_size: 500000
-    bypass_warmup: True
+# ### caching ###
+#   embedding_cache:
+#     max_size: 500000
+#     bypass_warmup: True
     
 ### criteria and metrics ###
 criterion:
@@ -83,12 +43,7 @@ metrics:
     _target_: src.modules.metrics.metrics.VerificationMetrics
 
 ### optimizer and lr_scheduler ###
-optimizer:
-  _target_: torch.optim.AdamW
-  _partial_: True
-  lr: 1.0e-3
-  weight_decay: 1.0e-5
-
+optimizer: ???
 lr_scheduler: ???
 
 ### extras and callbacks ###

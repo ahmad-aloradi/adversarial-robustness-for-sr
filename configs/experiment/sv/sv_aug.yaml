@@ -4,6 +4,7 @@
 # python train.py experiment=example
 
 defaults:
+  - /module/sv_model: wespeaker_ecapa_tdnn.yaml
   - override /callbacks: default.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml
@@ -14,7 +15,7 @@ defaults:
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["data_augmentation", "voxceleb", "sv", "ecapa"]
+tags: ["data_augmentation", "voxceleb", "sv"]
 seed: 42
 
 trainer:
@@ -38,34 +39,42 @@ datamodule:
 
   loaders:
     train:
-      batch_size: 64
+      batch_size: 16
     valid:
-      batch_size: 64
+      batch_size: 16
     test:
-      batch_size: 4
+      batch_size: 8
     enrollment:
-      batch_size: 1
+      batch_size: 8
 
 module:
   normalize_test_scores: True
 
-  lr_scheduler: 
+  lr_scheduler:
     scheduler:
-        _target_: torch.optim.lr_scheduler.CyclicLR
-        base_lr: 1e-8
-        max_lr: ${module.optimizer.lr}
-        step_size_up: ${oc.eval:"int(2 * 1176000 / ${datamodule.loaders.train.batch_size})"}
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: "max"
+      factor: 0.25
+      min_lr: 1.0e-6
+      patience: 2
+      verbose: True
     extras:
       monitor: ${replace:"valid/__metric__"}
-      interval: step
+      interval: "epoch"
       frequency: 1
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: True
+    lr: 1.0e-4
+    weight_decay: 1.0e-5
 
   ### Data for augmentation ###
   data_augemntation:
 
     noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
     rir_dataset_url: https://www.dropbox.com/scl/fi/linhy77c36mu10965a836/RIRs.zip?rlkey=pg9cu8vrpn2u173vhiqyu743u&dl=1
-    data_folder_rir_noises: ${datamodule.dataset.data_dir}/RIRS_NOISES
+    data_folder_rir_noises: ${paths.data_dir}/RIRS_NOISES
     noise_annotation: ${module.data_augemntation.data_folder_rir_noises}/noise.csv
     rir_annotation: ${module.data_augemntation.data_folder_rir_noises}/reverb.csv
 
@@ -128,8 +137,7 @@ module:
           - ${module.data_augemntation.augmentations.drop_freq}
           - ${module.data_augemntation.augmentations.drop_chunk}
 
-# logger:
-#   wandb:
-#     tags: ${tags}
-#     group: "mnist"
-
+logger:
+  wandb:
+    tags: ${tags}
+    group: "voxceleb"

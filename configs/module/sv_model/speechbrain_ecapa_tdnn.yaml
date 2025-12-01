@@ -1,0 +1,38 @@
+# @package module.model
+audio_processor:
+  _target_: speechbrain.lobes.features.Fbank
+  sample_rate: ${datamodule.dataset.sample_rate}
+  deltas: False
+  n_mels: 80
+  f_min: 0
+  f_max: null
+  n_fft: 512
+  win_length: 25
+  hop_length: 10
+  left_frames: 0
+  right_frames: 0
+
+audio_processor_normalizer:
+  _target_: speechbrain.processing.features.InputNormalization
+  norm_type: sentence
+  std_norm: False
+
+audio_encoder:
+  _target_: torch.nn.Sequential
+  _args_:
+    - _target_: speechbrain.lobes.models.ECAPA_TDNN.ECAPA_TDNN
+      input_size: ${module.model.audio_processor.n_mels}
+      channels: [1024, 1024, 1024, 1024, 3072]
+      # channels: [512, 512, 512, 512, 1536]
+      kernel_sizes: [5, 3, 3, 3, 1]
+      dilations: [1, 2, 3, 4, 1]
+      groups: [1, 1, 1, 1, 1]
+      attention_channels: 128
+      lin_neurons: 192  # ECAPA embedding size
+    - _target_: src.utils.torch_utils.Squeeze
+      dim: 1
+
+classifier: 
+  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  input_size: ${module.model.audio_encoder._args_[0].lin_neurons}
+  out_neurons:  ${datamodule.num_classes}

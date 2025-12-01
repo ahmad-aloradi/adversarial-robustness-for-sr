@@ -1,0 +1,7 @@
+# @package module.model.fusion_classifier
+_target_: src.modules.audio_vpc.RobustFusionClassifier
+audio_embedding_size: 192
+hidden_size: 512
+num_classes: ${datamodule.num_classes}
+norm_type: 'layer'
+dropout_audio: 0.3

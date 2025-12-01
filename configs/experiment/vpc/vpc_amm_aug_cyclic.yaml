@@ -4,6 +4,7 @@
 # python train.py experiment=example
 
 defaults:
+  - /module/fusion_classifier: robust.yaml
   - override /callbacks: default.yaml
   - override /datamodule: datasets/vpc.yaml
   - override /module: vpc.yaml
@@ -49,6 +50,43 @@ datamodule:
       batch_size: 1
 
 module:
+  ############################
+  ### main model structure ###
+  ############################
+  model:
+
+    audio_processor:
+        _target_: torch.nn.Identity
+
+    audio_encoder:
+      _target_: speechbrain.inference.EncoderClassifier.from_hparams
+      source: "speechbrain/spkrec-ecapa-voxceleb"
+      savedir: "local/.pretrained_models/spkrec-ecapa-voxceleb"
+      run_opts:
+        device: "cuda"
+
+    text_processor:
+      _target_: transformers.BertTokenizer.from_pretrained
+      pretrained_model_name_or_path: "bert-base-uncased"
+
+    text_encoder:
+      _target_: transformers.BertModel.from_pretrained
+      pretrained_model_name_or_path: ${module.model.text_processor.pretrained_model_name_or_path}
+      num_labels: ${datamodule.num_classes}
+
+    text_processor_kwargs:
+      return_tensors: "pt"
+      padding: "max_length"
+      truncation: True
+      max_length: 512
+
+    ### caching ###
+    embedding_cache:
+      max_size: 500000
+      bypass_warmup: True
+
+  ############################
+
   normalize_test_scores: True
       
   criterion:

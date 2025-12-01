@@ -4,14 +4,21 @@
 <a href="https://pytorchlightning.ai/"><img alt="Lightning" src="https://img.shields.io/badge/-Lightning-792ee5?logo=pytorchlightning&logoColor=white"></a>
 <a href="https://hydra.cc/"><img alt="Config: Hydra" src="https://img.shields.io/badge/Config-Hydra-89b8cd"></a>
 <a href="https://github.com/gorodnitskiy/yet-another-lightning-hydra-template"><img alt="Template" src="https://img.shields.io/badge/-Lightning--Hydra--Template-017F2F?style=flat&logo=github&labelColor=gray"></a>
-[![Publication](https://img.shields.io/badge/Paper-In%20progress-red)]()<br>
+[![arXiv](https://img.shields.io/badge/arXiv-2507.12081-orange)](https://arxiv.org/pdf/2507.12081)<br>
 
 ## Description
 
-The aim of this work is to study robustness and develop a robust speaker recognition against domain shifts, adversarial attacks, and audio spoofing. 
+This repository bundles our research effort on **robust and efficient speaker recognition** across two related tasks:
+- **Speaker verification** – training and evaluating modern architectures (ECAPA-TDNN, ResNets, custom WeSpeaker models) on public corpora such as VoxCeleb, LibriSpeech, and CN-Celeb.
+- **Speaker De-anonymization** – against the [VoicePrivacy 2025](https://voiceprivacychallenge.org/) challenge data.
 
-The framework is based on [this template](https://github.com/gorodnitskiy/yet-another-lightning-hydra-template), which is based on
-[PyTorch Lightning](https://github.com/Lightning-AI/lightning) and [Hydra](https://github.com/facebookresearch/hydra). 
+The framework builds on [PyTorch Lightning](https://github.com/Lightning-AI/lightning) and [Hydra](https://github.com/facebookresearch/hydra) via [this template](https://github.com/gorodnitskiy/yet-another-lightning-hydra-template), which lets us compose experiments with declarative configs. Datasets live under `configs/datamodule/datasets` and include ready-made recipes for `voxceleb`, `cnceleb`, `librispeech`, and `vpc` (VoicePrivacy).
+ 
+In addition, we also ship two compression techniques:
+1. **Bregman Learning Framework** – adaptive regularization that induces sparsity during training (based on [Bungert et al. 2022](https://www.jmlr.org/papers/volume23/21-0545/21-0545.pdf) and the [TimRoith/BregmanLearning](https://github.com/TimRoith/BregmanLearning/tree/main/notebooks) reference implementation).
+2. **Magnitude-Based Pruning** – structured or unstructured pruning with schedulers, checkpoint-safe masks, and deployment tooling.
+
+📖 The compression was designed to experiment with the speaker recogntion models. However, they are implemented as Lightning callbacks, rendering their use flexible to other tasks. Learn how to enable these methods in **[docs/pruning.md](docs/pruning.md)**.
 
 
 ## Quick start
@@ -24,6 +31,24 @@ cd adversarial-robustness-for-sr
 # install requirements
 pip install -r requirements.txt
 ```
+
+### Example: Override CLI arguments (Hydra style)
+
+Hydra lets you override any config directly from the command line. The command below trains an ECAPA-TDNN model on CN-Celeb, switches to the structured pruning recipe, shrinks batch sizes, caps utterance duration, and limits the run length:
+
+```bash
+python src/train.py \
+    datamodule=datasets/cnceleb \
+    module/sv_model=wespeaker_ecapa_tdnn \
+    experiment=sv/sv_pruning_mag_struct \
+    datamodule.loaders.train.batch_size=8 \
+    datamodule.loaders.valid.batch_size=8 \
+    datamodule.dataset.max_duration=3.0 \
+    trainer.max_epochs=10 \
+    trainer.num_sanity_val_steps=1
+```
+
+Add further overrides (e.g., `logger=wandb`) as needed; Hydra composes them with the defaults defined under `configs/`.
 
 ## Main Packages
 

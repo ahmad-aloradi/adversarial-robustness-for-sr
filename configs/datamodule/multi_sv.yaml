@@ -1,0 +1,149 @@
+defaults:
+  - _self_
+
+_target_: src.datamodules.multi_sv_datamodule.MultiSVDataModule
+
+# Stage participation and dataset-specific configuration blocks.
+datasets:
+  voxceleb:
+    enabled: true
+    stages:
+      train: true
+      val: true
+      test: true
+    datamodule:
+      _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
+      dataset:
+        data_dir: ${paths.data_dir}/voxceleb
+        wav_dir: ${datamodule.datasets.voxceleb.datamodule.dataset.data_dir}/voxceleb1_2
+        veri_test_filenames:
+          - veri_test2
+          - veri_test_extended2
+          - veri_test_hard2
+        voxceleb_metadata: ${datamodule.datasets.voxceleb.datamodule.dataset.data_dir}/voxceleb_metadata
+        base_search_dir: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_metadata}/metadata
+        voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
+        veri_test_output_paths:
+          veri_test2: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/veri_test2.csv
+          veri_test_extended2: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/veri_test_extended2.csv
+          veri_test_hard2: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/veri_test_hard2.csv
+        metadata_csv_file: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/vox_meta.csv
+        train_csv_file: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/train.csv
+        val_csv_file: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/val.csv
+        speaker_lookup: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/speaker_lookup.csv
+        seed: ${seed}
+        sep: "|"
+        verbose: true
+        save_csv: true
+        sample_rate: 16000
+        min_duration: 0.5
+        speaker_overlap: true
+        train_ratio: 0.95
+        # --- Segmentation Strategy ---
+        use_pre_segmentation: true
+        # Segmentation parameters (only used if use_pre_segmentation=true)
+        segment_duration: 3.0  # Duration of each segment in seconds
+        segment_overlap: 0.0  # Overlap between segments in seconds (0.0 = non-overlapping)
+        min_segment_duration: 0.5  # Minimum segment duration to be included
+        # Random cropping parameter (only used if use_pre_segmentation=false)
+        max_duration: 3.0  # Maximum duration for random cropping during training
+
+      transforms: null
+      num_classes: 7205
+      # Dataset-specific loader configs for test/enrollment
+      # Note: train/valid loaders are inherited from MultiSVDataModule's top-level loaders
+      loaders:
+        test:
+          batch_size: 8
+          shuffle: false
+          num_workers: 4
+          drop_last: false
+          pin_memory: false
+        enrollment:
+          batch_size: 8
+          shuffle: false
+          num_workers: 4
+          drop_last: false
+          pin_memory: false
+
+  cnceleb:
+    enabled: true
+    stages:
+      train: false
+      val: false
+      test: true
+    datamodule:
+      _target_: src.datamodules.cnceleb_datamodule.CNCelebDataModule
+      dataset:
+        data_dir: ${paths.data_dir}/cnceleb
+        cnceleb1: "CN-Celeb_flac"
+        cnceleb2: "CN-Celeb2_flac"
+        base_search_dir: ${datamodule.datasets.cnceleb.datamodule.dataset.data_dir}/metadata
+        artifacts_dir: ${hydra:runtime.output_dir}/cnceleb_artifacts
+        dev_metadata_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/cnceleb_dev.csv
+        enroll_csv_path: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/enroll.csv
+        test_unique_csv_path: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/test_unique.csv
+        train_csv_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/train.csv
+        val_csv_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/val.csv
+        speaker_lookup: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/speaker_lookup.csv
+        veri_test_output_path: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/verification_trials.csv
+        dev_spk_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/dev_speakers.txt
+        test_spk_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/test_speakers.txt
+        train_ratio: 0.95
+        speaker_overlap: false
+        seed: ${seed}
+        sep: "|"
+        verbose: true
+        sample_rate: 16000
+        min_duration: 0.5
+        # --- Segmentation Strategy ---
+        use_pre_segmentation: true
+        # Segmentation parameters (only used if use_pre_segmentation=true)
+        segment_duration: 3.0  # Duration of each segment in seconds
+        segment_overlap: 0.0  # Overlap between segments in seconds (0.0 = non-overlapping)
+        min_segment_duration: 0.5  # Minimum segment duration to be included
+        # Random cropping parameter (only used if use_pre_segmentation=false)
+        max_duration: 3.0  # Maximum duration for random cropping during training
+
+      transforms: null
+      num_classes: 2793
+      # Dataset-specific loader configs for test/enrollment
+      # Note: train/valid loaders would be inherited from MultiSVDataModule if CNCeleb were used for training
+      loaders:
+        test:
+          batch_size: 8
+          shuffle: false
+          num_workers: 4
+          drop_last: false
+          pin_memory: false
+        enrollment:
+          batch_size: 8
+          shuffle: false
+          num_workers: 4
+          drop_last: false
+          pin_memory: false
+
+# Top-level loader configs used by MultiSVDataModule for train/val
+# Test/enrollment loaders are dataset-specific (configured above in each dataset)
+loaders:
+  train:
+    batch_size: 32
+    shuffle: true
+    num_workers: 4
+    drop_last: true
+    pin_memory: false
+
+  valid:
+    batch_size: 32
+    shuffle: false
+    num_workers: 4
+    drop_last: false
+    pin_memory: false
+
+# Compatibility aliases for module configs that expect datamodule.num_classes and datamodule.dataset.*
+# These reference the primary training dataset (voxceleb) to avoid duplication
+num_classes: ${datamodule.datasets.voxceleb.datamodule.num_classes}
+dataset:
+  sample_rate: ${datamodule.datasets.voxceleb.datamodule.dataset.sample_rate}
+  min_duration: ${datamodule.datasets.voxceleb.datamodule.dataset.min_duration}
+  max_duration: ${datamodule.datasets.voxceleb.datamodule.dataset.max_duration}

@@ -1,13 +1,12 @@
 import os
 import io
 import json
-from typing import Any, Dict, Optional, Tuple, Union
-from collections import defaultdict
-import random
+from typing import Any, Dict, Optional
 from pathlib import Path
+from datetime import datetime
 
+import random
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 import pytorch_lightning as pl
@@ -23,15 +22,14 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
     VoxCelebVerificationItem,
     TrainCollate)
 from src import utils
-from src.modules.components.utils import EmbeddingCache
+from src.modules.encoder_wrappers import EncoderWrapper
+from src.callbacks.pruning.utils.pruning_manager import PruningManager
 from src.modules.metrics.metrics import AS_norm 
-from datetime import datetime
 
 
 log = utils.get_pylogger(__name__)
 
 
-###################################
 class EmbeddingMetrics:
     def __init__(
         self,
@@ -97,16 +95,6 @@ class EmbeddingMetrics:
         
         return self._indices
 
-    def get_loaders(self) -> Tuple[DataLoader, DataLoader]:
-        """Get enrollment and unique utterance loaders for testing.
-
-        Returns:
-            Tuple of DataLoader for enrollment and unique utterances.
-        """
-        assert self.stage == 'test'
-        enroll_loader, unique_loader = self.trainer.datamodule.enrolling_dataloader()
-        return enroll_loader, unique_loader
-
     def get_cohort_loader(self) -> DataLoader:
         """Get DataLoader for the cohort subset.
 
@@ -156,6 +144,7 @@ class EmbeddingMetrics:
         if hasattr(self, '_embeddings'):
             delattr(self, '_embeddings')
 
+
 class SpeakerVerification(pl.LightningModule):
     """SV model for speaker verification with audio embeddings."""
     
@@ -185,14 +174,12 @@ class SpeakerVerification(pl.LightningModule):
         # Setup training components
         self._setup_training_components(criterion, optimizer, lr_scheduler)
         
-        # Freeze pretrained components
-        self._freeze_pretrained_components()
+        # Freeze pretrained components (Ignore for now)
 
         # Initialize text embedding cache with appropriate limits
         self._embeds_cache_config = model.get("embedding_cache", {})
         self._max_cache_size = self._embeds_cache_config.get("max_size", 500000)
         self._bypass_warmup = self._embeds_cache_config.get("bypass_warmup", False)
-        self._embedding_cache = EmbeddingCache(max_size=self._max_cache_size)
         
         # Embeddings norm configs
         self.normalize_test_scores = kwargs.get("normalize_test_scores", False)
@@ -208,13 +195,23 @@ class SpeakerVerification(pl.LightningModule):
         self.valid_metric_best = instantiate(metrics.valid_best)
 
     def _setup_model_components(self, model: DictConfig) -> None:
-        """Initialize encoders and classifiers."""
+        """Initialize encoders and classifiers, wrapping the encoder for a unified interface."""
         # Audio processing
         self.audio_processor = instantiate(model.audio_processor)
         self.audio_processor_normalizer = instantiate(model.audio_processor_normalizer)
-        self.audio_encoder = instantiate(model.audio_encoder)
-        self.classifier = instantiate(model.classifier)
         
+        # Instantiate the raw encoder
+        raw_audio_encoder = instantiate(model.audio_encoder)
+        
+        # Wrap the encoder and its pre-processing steps
+        self.audio_encoder = EncoderWrapper(
+            encoder=raw_audio_encoder,
+            audio_processor=self.audio_processor,
+            audio_processor_normalizer=self.audio_processor_normalizer
+        )
+        
+        self.classifier = instantiate(model.classifier)
+
         # Setup wav augmentation if configured
         if self.data_augemntation is not None:
             assert "wav_augmenter" in self.data_augemntation.augmentations, 'Expected augmentations.wav_augmenter when passing data_augemntation'
@@ -229,9 +226,12 @@ class SpeakerVerification(pl.LightningModule):
 
     def _freeze_pretrained_components(self) -> None:
         """Freeze pretrained components and enable training for others."""
-        if hasattr(self.audio_encoder, "encode_batch"):
-            for param in self.audio_encoder.parameters():
-                param.requires_grad = False
+        # Access the original encoder through the wrapper
+        original_encoder = self.audio_encoder.encoder
+
+        # if hasattr(self.audio_encoder, "encode_batch"):  Define what to freeze -- IGNORE ---  
+        for param in original_encoder.parameters():
+            param.requires_grad = False
 
     def _log_step_metrics(self, results: Dict[str, Any], batch: VoxcelebItem, stage: str) -> None:
         criterion = getattr(self, f"{stage}_criterion")
@@ -289,31 +289,26 @@ class SpeakerVerification(pl.LightningModule):
 
     ############ Lightning ############
     def _get_audio_embeddings(self, batch_audio: torch.Tensor, batch_audio_lens: torch.Tensor) -> torch.Tensor:
-        if hasattr(self.audio_encoder, "encode_batch"):
-            # For speechbrain encoders (e.g., x-vector)
-            audio_emb = self.audio_encoder.encode_batch(
-                wavs=batch_audio,
-                wav_lens=batch_audio_lens/max(batch_audio_lens)
-                ).squeeze(1)
-        else:
-            # TODO: strange mismatch during testing 
-            if self.device != batch_audio.device:
-                batch_audio = batch_audio.to(self.device)
-            if self.device != batch_audio_lens.device:
-                batch_audio_lens = batch_audio_lens.to(self.device)
-            input_values = self.audio_processor(batch_audio)
-            input_values = self.audio_processor_normalizer(input_values, lengths=batch_audio_lens/max(batch_audio_lens))
-            audio_emb = self.audio_encoder(input_values, lengths=batch_audio_lens/max(batch_audio_lens)).squeeze(1)
-        
-        return audio_emb
+        """
+        Computes audio embeddings using the wrapped encoder, which handles the full pipeline.
+        """
+        # Move tensors to the correct device.
+        if self.device != batch_audio.device:
+            batch_audio = batch_audio.to(self.device)
+        if self.device != batch_audio_lens.device:
+            batch_audio_lens = batch_audio_lens.to(self.device)
+
+        return self.audio_encoder(wavs=batch_audio, wav_lens=batch_audio_lens)
 
     def forward(self, batch: VoxcelebItem) -> Dict[str, torch.Tensor]:
-        """Process text/audio inputs with optimized embedding caching."""
+        """Process audio inputs with optimized embedding caching."""
         # Add waveform augmentation if specified.
         if self.training and hasattr(self, "wav_augmenter"):
-            batch.audio, batch.audio_length = self.wav_augmenter(batch.audio, batch.audio_length / max(batch.audio_length))
+            max_audio_length = max(batch.audio_length)
+            batch.audio, audio_length_norm = self.wav_augmenter(batch.audio, batch.audio_length / max_audio_length)
+            batch.audio_length = audio_length_norm * max_audio_length
             batch.class_id = self.wav_augmenter.replicate_labels(batch.class_id)
-            
+
         audio_emb = self._get_audio_embeddings(batch.audio, batch.audio_length)
         logits = self.classifier(audio_emb)
             
@@ -341,7 +336,7 @@ class SpeakerVerification(pl.LightningModule):
         # accuracy from these checks
         self.valid_metric_best.reset()
         self.audio_encoder.train()
-        if self.global_step == 0 and not self._bypass_warmup:
+        if bool(len(self._embeds_cache_config)) and (self.global_step == 0) and (not self._bypass_warmup):
             self._warmup_cache()
 
     def training_step(self, batch: VoxcelebItem, batch_idx: int) -> Dict[str, torch.Tensor]:
@@ -357,14 +352,6 @@ class SpeakerVerification(pl.LightningModule):
     def on_train_epoch_end(self) -> None:
         self.train_metric.reset()
 
-        # Cache processing
-        stats = self._embedding_cache.stats()
-        self.log("train/cache/cache_hit_rate", stats["hit_rate"])
-        self.log("train/cache/cache_size", len(self._embedding_cache))
-        # resize the cache if it exceeds the max size
-        if len(self._embedding_cache) > self._max_cache_size:
-            self._embedding_cache.resize(self._max_cache_size)
-            
         # Log sparsity information if pruning is being used
         self._log_sparsity_info_if_pruning()
 
@@ -481,44 +468,172 @@ class SpeakerVerification(pl.LightningModule):
 
     @torch.inference_mode()
     def on_test_start(self) -> None:
-        """Compute embeddings for test trials."""
-        self.metric_tracker = EmbeddingMetrics(self.trainer,
-                                               stage='test',
-                                               **self.scores_norm.embeds_metric_params)
-        enroll_test_loader, unique_test_loader = self.metric_tracker.get_loaders()
-
+        """Pre-computes embeddings and prepares for per-dataloader metric logging."""
+        # Get all configured test dataloaders from the datamodule
+        test_dataloaders = self.trainer.datamodule.test_dataloader()
+        
+        # Normalize to dictionary format for consistent handling
+        if not isinstance(test_dataloaders, dict):
+            # Infer a descriptive base name from the datamodule class
+            datamodule_class = self.trainer.datamodule.__class__.__name__
+            base_name = datamodule_class.replace('DataModule', '').replace('Module', '').lower()
+            
+            if isinstance(test_dataloaders, (list, tuple)):
+                # Multiple loaders returned as list/tuple - use base_name with index
+                test_dataloaders = {f'{base_name}_{i}': loader for i, loader in enumerate(test_dataloaders)}
+                log.info(f"Normalized {len(test_dataloaders)} test loaders to dictionary format with base name '{base_name}'")
+            else:
+                # Single loader returned - use just the base_name
+                test_dataloaders = {base_name: test_dataloaders}
+                log.info(f"Normalized single test loader to dictionary format with key '{base_name}'")
+        
+        # Store normalized dict for use in test_step
+        self.test_dataloaders_dict = test_dataloaders
+        test_filenames = list(test_dataloaders.keys())
+        
+        log.info(f"Found {len(test_filenames)} test set(s): {', '.join(test_filenames)}")
+        
+        # Compute cohort embeddings once from training data (if needed for AS-Norm)
+        cohort_embeddings = None
         if self.normalize_test_scores:
-            cohort_loader = self.metric_tracker.get_cohort_loader()
+            log.info("Computing shared cohort embeddings for AS-Norm...")
+            # Use training loader params for cohort loader.
+            train_dm = self.trainer.datamodule
+            cohort_loader = DataLoader(
+                train_dm.train_data,
+                batch_size=getattr(train_dm.hparams.loaders.train, 'batch_size', 64),
+                num_workers=getattr(train_dm.hparams.loaders.train, 'num_workers', 0),
+                shuffle=False,
+                pin_memory=getattr(train_dm.hparams.loaders.train, 'pin_memory', False),
+                collate_fn=TrainCollate()
+            )
             cohort_embeddings = self._compute_cohort_embeddings(cohort_loader)
-            self.metric_tracker.set_cohort_embeddings(cohort_embeddings)
-        else:
-            self.metric_tracker.set_cohort_embeddings(None)
+            log.info(f"Computed cohort embeddings of shape: {cohort_embeddings.shape}")
 
-        self.enrol_embeds = self._compute_embeddings(enroll_test_loader, mode='enrollment')
-        self.test_embeds = self._compute_embeddings(unique_test_loader, mode='test')
+        self.test_sets_data = {}
+        self.last_batch_indices = {}
+
+        for test_filename, dataloader in test_dataloaders.items():
+            log.info(f"Processing '{test_filename}'...")
+            
+            # Determine the index of the last batch for this dataloader
+            # This is needed for triggering metric computation at the right time
+            num_batches = len(dataloader)
+            if num_batches > 0:
+                self.last_batch_indices[test_filename] = num_batches - 1
+                log.info(f"Registered '{test_filename}' with {num_batches} batches. Last batch index: {num_batches - 1}.")
+            else:
+                raise ValueError("Dataloader has zero batches")
+
+            # Get unique utterances for enrollment and trials
+            enroll_dataloader, trial_unique_dataloader = self.trainer.datamodule.get_enroll_and_trial_dataloaders(test_filename)
+            
+            # Compute embeddings for enrollment and test utterances
+            enrol_embeds = self._compute_embeddings(enroll_dataloader, mode='enrollment')
+            test_embeds = self._compute_embeddings(trial_unique_dataloader, mode='test')
+            
+            # Store all data for this test set (sharing the same cohort embeddings)
+            self.test_sets_data[test_filename] = {
+                'enrol_embeds': enrol_embeds,
+                'test_embeds': test_embeds,
+                'cohort_embeddings': cohort_embeddings,
+                'trial_results': []
+            }
+            
+        log.info(f"Finished computing embeddings for all test sets")
 
     @torch.inference_mode()
-    def test_step(self, batch: VoxCelebVerificationItem, batch_idx: int) -> None:
-        """Compute EER and minDCF on these test trials"""        
-        self._trials_eval_step(batch, is_test=True)
+    def test_step(self, batch: VoxCelebVerificationItem, batch_idx: int, dataloader_idx: int = 0) -> None:
+        """Handle test step and trigger logging on the last batch of each dataloader."""
+        # Move batch to device (needed for some weird device error)
+        batch = self._move_batch_to_device(batch)
+        
+        # Get test set name from dataloader index using the normalized dict
+        test_filenames = list(self.test_dataloaders_dict.keys())
+        test_filename = test_filenames[dataloader_idx]
+        test_data = self.test_sets_data[test_filename]
+        
+        # Run trial evaluation for this test set
+        self._trials_eval_step_multi_test(batch, test_data)
+
+        # Check if this is the last batch for the current dataloader
+        is_last_batch = (batch_idx == self.last_batch_indices.get(test_filename, -1))
+
+        if is_last_batch:
+            log.info(f"Last batch for '{test_filename}' (idx: {batch_idx}) reached. Finalizing and logging metrics.")
+            self._epoch_end_common_multi_test(test_filename)
 
     def on_test_epoch_end(self) -> None:
-        self._epoch_end_common(is_test=True)
-
-    def configure_optimizers(self) -> Dict:
-        """Configure optimizers and learning rate schedulers."""
-        optimizer: torch.optim = instantiate(self.optimizer)(params=self.parameters())
+        """Callback at the end of the test epoch.
         
-        if self.slr_params.get("scheduler"):
-            scheduler: torch.optim.lr_scheduler = instantiate(
-                self.slr_params.scheduler,
-                optimizer=optimizer,
-                _convert_="partial",
+        This is now primarily a cleanup step. It also handles any test sets
+        where the number of batches could not be determined.
+        """
+        # Process any test sets that were not handled in test_step (fallback)
+        if hasattr(self, 'last_batch_indices'):
+            for test_filename, last_idx in self.last_batch_indices.items():
+                if last_idx == -1:
+                    log.warning(f"Running fallback metric computation for '{test_filename}' at epoch end.")
+                    self._epoch_end_common_multi_test(test_filename)
+
+        log.info("Test epoch finished. All test sets have been processed.")
+        # Clean up stored data to free memory
+        if hasattr(self, 'test_sets_data'):
+            del self.test_sets_data
+        if hasattr(self, 'last_batch_indices'):
+            del self.last_batch_indices
+        if hasattr(self, 'test_dataloaders_dict'):
+            del self.test_dataloaders_dict
+
+    def configure_optimizers(self) -> Dict[str, Any]:
+        """
+        Configures optimizers and learning rate schedulers.
+
+        This method dynamically adapts its behavior based on the configured optimizer:
+        
+        1.  If a Bregman-type optimizer (AdaBreg, LinBreg, ProxSGD) is used,
+            it initializes the PruningManager to handle parameter groups with
+            specific regularization settings defined in the config.
+
+        2.  For any standard optimizer (e.g., Adam, SGD), it applies the
+            optimizer to all model parameters uniformly.
+        """
+        BREGMAN_OPTIMIZERS = {"AdaBreg", "LinBreg", "ProxSGD"}
+        optimizer_class_name = self.hparams.optimizer._target_.split('.')[-1]
+
+        # Use the two-step partial instantiation pattern for the optimizer
+        optimizer_partial = instantiate(self.hparams.optimizer)
+
+        if optimizer_class_name in BREGMAN_OPTIMIZERS:
+            # --- Pruning-Aware Optimizer Logic ---
+            self.pruning_manager = PruningManager(
+                pl_module=self,
+                group_configs=self.hparams.model.pruning_groups
+            )
+            optimizer_param_groups = self.pruning_manager.get_optimizer_param_groups()
+            
+            # Manually instantiate the regularization object for each group
+            for group in optimizer_param_groups:
+                if 'reg' in group and isinstance(group.get('reg'), (dict, DictConfig)):
+                    group['reg'] = instantiate(group['reg'])
+            
+            optimizer = optimizer_partial(params=optimizer_param_groups)
+
+        else:
+            # --- Standard Optimizer Logic ---
+            optimizer = optimizer_partial(params=self.parameters())
+
+        # --- Common Scheduler Logic ---
+        if self.hparams.get("lr_scheduler"):
+            # Instantiate the scheduler, which now receives a fully formed optimizer
+            scheduler = instantiate(
+                self.hparams.lr_scheduler.scheduler,
+                optimizer=optimizer
             )
             
             lr_scheduler_dict = {"scheduler": scheduler}
-            if self.slr_params.get("extras"):
-                for key, value in self.slr_params.get("extras").items():
+            if self.hparams.lr_scheduler.get("extras"):
+                for key, value in self.hparams.lr_scheduler.get("extras").items():
                     lr_scheduler_dict[key] = value
             return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_dict}
         
@@ -534,8 +649,8 @@ class SpeakerVerification(pl.LightningModule):
                 outputs = self(batch)
                 embed = outputs['embeds']
                 # Handle frame-level embeddings (if applicable)
-                if len(embed.shape) == 3:  # [1, num_frames, embedding_dim]
-                    embed = embed.mean(dim=1)  # [num_frames, embedding_dim]
+                if len(embed.shape) == 3:  # [B, num_frames, embedding_dim]
+                    embed = embed.mean(dim=1)  # [B, embedding_dim]
 
                 embeddings_dict.update({path: emb for path, emb in zip(batch.audio_path, embed)})
 
@@ -557,28 +672,35 @@ class SpeakerVerification(pl.LightningModule):
                 cohort = outputs['embeds']
 
                 # Handle frame-level embeddings (if applicable)
-                if len(cohort.shape) == 3:  # [1, num_frames, embedding_dim]
-                    cohort = cohort.mean(dim=1)  # [num_frames, embedding_dim]
+                if len(cohort.shape) == 3:  # [B, num_frames, embedding_dim]
+                    cohort = cohort.mean(dim=1)  # [B, embedding_dim]
 
                 embeddings_list.append(cohort)
         
         cohort_embeds = torch.cat(embeddings_list, dim=0)
         return cohort_embeds
 
-    def _trials_eval_step(self, batch, is_test: bool):
-        """Common logic for test and validation steps."""
-        embeds = self.test_embeds if is_test else self.dev_embeds
-        enrol = self.enrol_embeds if is_test else self.enrol_dev_embeds
-        metric = self.test_metric if is_test else self.valid_metric
+    def _move_batch_to_device(self, batch: VoxCelebVerificationItem) -> VoxCelebVerificationItem:
+        """Move batch tensors to the model's device."""
+        batch.enroll_audio = batch.enroll_audio.to(self.device)
+        batch.test_audio = batch.test_audio.to(self.device)
+        batch.enroll_length = batch.enroll_length.to(self.device)
+        batch.test_length = batch.test_length.to(self.device)
+        return batch
+        
+    def _trials_eval_step_multi_test(self, batch: VoxCelebVerificationItem, test_data: Dict):
+        """Evaluation step for a specific test set."""
+        embeds = test_data['test_embeds']
+        enrol_embeds = test_data['enrol_embeds']
+        cohort_embeddings = test_data['cohort_embeddings']
         
         trial_embeddings = torch.stack([embeds[path] for path in batch.test_path])
-        enroll_embeddings = torch.stack([enrol[path] for path in batch.enroll_path])
-        cohort_embeddings = metric.cohort_embeddings
+        enroll_embeddings = torch.stack([enrol_embeds[path] for path in batch.enroll_path])
 
         # Compute raw cosine similarity scores
         raw_scores = torch.nn.functional.cosine_similarity(enroll_embeddings, trial_embeddings)
         
-        # Apply AS-Norm
+        # Apply AS-Norm if cohort embeddings are available (same cohort for all test sets)
         if cohort_embeddings is not None:
             normalized_scores = []
             for i in range(trial_embeddings.shape[0]):
@@ -592,47 +714,45 @@ class SpeakerVerification(pl.LightningModule):
         else:
             normalized_scores = raw_scores.clone()
 
-        # Update metric with normalized scores
-        metric.update(scores=normalized_scores, labels=torch.tensor(batch.trial_label))
+        # Don't update the shared metric - we'll compute metrics separately per test set
+        # self.test_metric.update(scores=normalized_scores, labels=torch.tensor(batch.trial_label))
         
         batch_dict = {
             "enroll_path": batch.enroll_path,
             "test_path": batch.test_path,
-            "enroll_length": batch.enroll_length,
-            "test_length": batch.test_length,
             "trial_label": batch.trial_label,
             "same_country_label": batch.same_country_label,
             "same_gender_label": batch.same_gender_label,
             "score": raw_scores.detach().cpu().tolist(),
             "norm_score": normalized_scores.detach().cpu().tolist(),
         }
-        self.metric_tracker._trial_results.append(batch_dict)
-
-    def _epoch_end_common(self, is_test: bool) -> None:
-        """Common logic for test and validation epoch end."""
-        metric = self.test_metric if is_test else self.valid_metric
-        enrol_embeds = self.enrol_embeds if is_test else self.enrol_dev_embeds
-        trials_embeds = self.test_embeds if is_test else self.dev_embeds
-
+        test_data['trial_results'].append(batch_dict)
+        
+    def _epoch_end_common_multi_test(self, test_filename: str) -> None:
+        """Handle epoch end for a specific test set."""
+        # Sanitize test_filename for use in file paths (replace all path separators)
+        safe_test_filename = test_filename.replace('/', '_').replace('\\', '_')
+        
+        test_data = self.test_sets_data[test_filename]
+        enrol_embeds = test_data['enrol_embeds']
+        trials_embeds = test_data['test_embeds']
+        trial_results = test_data['trial_results']
+        
+        # Build scores DataFrame
         scores = pd.DataFrame([
             {
                 "enroll_path": enroll_path,
                 "test_path": test_path,
-                "enroll_length": enroll_length,
-                "test_length": test_length,
                 "trial_label": trial_label,
                 "same_country_label": same_country_label,
                 "same_gender_label": same_gender_label,
                 "score": score,
                 "norm_score": norm_score,
             }
-            for batch in self.metric_tracker._trial_results
-            for enroll_path, test_path, enroll_length, test_length, 
-            trial_label, same_country_label, same_gender_label, score, norm_score in zip(
+            for batch in trial_results
+            for enroll_path, test_path, trial_label, same_country_label, same_gender_label, score, norm_score in zip(
                 batch["enroll_path"],
                 batch["test_path"],
-                batch["enroll_length"],
-                batch["test_length"],
                 batch["trial_label"],
                 batch["same_country_label"],
                 batch["same_gender_label"],
@@ -641,65 +761,70 @@ class SpeakerVerification(pl.LightningModule):
             )
         ])
 
-        self._end_of_epoch_metrics(
-            enrol_embeds=enrol_embeds,
-            trials_embeds=trials_embeds,
-            scores=scores,
-            metric=metric,
-            is_test=is_test
-        )
-
-        self.metric_tracker.cleanup()
-
-    def _end_of_epoch_metrics(self, enrol_embeds: Dict, trials_embeds: Dict, scores: pd.DataFrame, metric, is_test: bool) -> None:
-        """Compute EER and minDCF, handle logging and saving of artifacts."""
-        # Compute metrics (EER, minDCF, etc.)
-        metrics = metric.compute()
+        # Create a temporary metric instance for this specific test set
+        temp_metric = instantiate(self.hparams.metrics.test)
         
-        # Log metrics with appropriate prefix (test or valid)
-        stage = 'test' if is_test else 'valid'
-        prefixed_metrics = {f"{stage}/{metric.__class__.__name__}/{key}": value for key, value in metrics.items()}
-        self.log_dict(prefixed_metrics, **self.logging_params)
+        # Update the temporary metric with this test set's data
+        all_norm_scores = []
+        all_labels = []
+        for batch in trial_results:
+            all_norm_scores.extend(batch["norm_score"])
+            all_labels.extend(batch["trial_label"])
+        
+        temp_metric.update(scores=torch.tensor(all_norm_scores), labels=torch.tensor(all_labels))
+        
+        # Compute metrics for this specific test set
+        metrics = temp_metric.compute()
+        
+        # Log metrics with a clear prefix for each test set
+        temp_metric_class_name = temp_metric.__class__.__name__
+        prefixed_metrics = {f"test/{test_filename}/{temp_metric_class_name}/{key}": value for key, value in metrics.items()}
+        # Add batch_size to avoid PyTorch Lightning warning about ambiguous batch size inference
+        batch_size = len(trial_results[0]["trial_label"]) if trial_results else 1
+        self.log_dict(prefixed_metrics, batch_size=batch_size, **self.logging_params)
 
         # Update scores DataFrame with computed metrics
         scores.loc[:, metrics.keys()] = [v.item() if torch.is_tensor(v) else v for v in metrics.values()]
         
-        # Set up directory for saving artifacts
-        dir_suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if is_test else ""
-        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"{stage}_artifacts{dir_suffix}")
+        # Set up directory for saving test artifacts (with test set name)
+        dir_suffix = f"{safe_test_filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"test_artifacts/{dir_suffix}")
         os.makedirs(artifacts_dir, exist_ok=True)
 
         # Save scores as CSV
-        scores.to_csv(os.path.join(artifacts_dir, f"{stage}_scores.csv"), index=False)
+        scores.to_csv(os.path.join(artifacts_dir, f"{safe_test_filename}_scores.csv"), index=False)
         
         # Save embeddings
-        torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{stage}_enrol_embeds.pt"))
-        torch.save(trials_embeds, os.path.join(artifacts_dir, f"{stage}_embeds.pt"))
-        if metric.cohort_embeddings is not None:
-            torch.save(metric.cohort_embeddings, os.path.join(artifacts_dir, f"{stage}_cohort_embeds.pt"))
+        torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{safe_test_filename}_enrol_embeds.pt"))
+        torch.save(trials_embeds, os.path.join(artifacts_dir, f"{safe_test_filename}_embeds.pt"))
+        if test_data['cohort_embeddings'] is not None:
+            torch.save(test_data['cohort_embeddings'], os.path.join(artifacts_dir, f"test_cohort_embeds.pt"))  # Same cohort for all test sets
 
-        # Plot and log figures for the current epoch
-        figures = metric.plot_curves() or {}
+        # Plot and log figures for this test set
+        figures = temp_metric.plot_curves() or {}
+        plots_dir = os.path.join(artifacts_dir, f"{safe_test_filename}_binary_metrics_plots")
+        os.makedirs(plots_dir, exist_ok=True)
         for name, fig in figures.items():
-            self.log_figure_with_fallback(f"{stage}/binary_metrics_plots/{name}_scores", fig)
+            fig_path = os.path.join(plots_dir, f"{name}_scores.png")
+            # Create hierarchical logger name with test set context
+            logger_name = f"{test_filename}/binary_metrics_plots/{name}_scores"
+            self.log_figure_with_fallback(fig_path, fig, logger_name)
 
-        # Save test metrics as a JSON file during the test phase
-        if is_test:
-            metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
-            with open(os.path.join(artifacts_dir, "test_metrics.json"), "w") as f:
-                json.dump(metrics_for_save, f, indent=4)
- 
-    def log_figure_with_fallback(self, name: str, fig: plt.Figure) -> None:
+        # Save test metrics as a JSON file 
+        metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
+        metrics_for_save['test_set'] = test_filename  # Add test set identifier
+        with open(os.path.join(artifacts_dir, f"{safe_test_filename}_metrics.json"), "w") as f:
+            json.dump(metrics_for_save, f, indent=4)
+
+    def log_figure_with_fallback(self, fig_path: str, fig: plt.Figure, logger_name: str) -> None:
         """Log figure with fallback for loggers that don't support figure logging.
         
         Args:
-            name: Name of the figure
+            fig_path: File path where the figure will be saved
             fig: Matplotlib figure to log
+            logger_name: Hierarchical name for logging (e.g., "test_set/plots/roc_scores")
         """
         # Save figure to disk as fallback
-        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"{os.path.dirname(name)}")
-        os.makedirs(artifacts_dir, exist_ok=True)
-        fig_path = os.path.join(artifacts_dir, f"{os.path.basename(name)}.png")
         fig.savefig(fig_path, dpi=300, bbox_inches='tight')
         
         # Convert figure to image buffer for loggers that need it
@@ -719,26 +844,26 @@ class SpeakerVerification(pl.LightningModule):
             try:
                 # TensorBoard logger
                 if hasattr(logger, 'experiment') and hasattr(logger.experiment, 'add_figure'):
-                    logger.experiment.add_figure(f'{name}', fig, global_step=self.global_step)
+                    logger.experiment.add_figure(logger_name, fig, global_step=self.global_step)
                     logged_successfully = True
                     continue
                     
                 # Weights & Biases logger
                 if hasattr(logger, 'experiment') and 'wandb' in str(type(logger.experiment).__module__):
                     import wandb
-                    logger.experiment.log({f'{name}': wandb.Image(fig)}, step=self.global_step)
+                    logger.experiment.log({logger_name: wandb.Image(fig)}, step=self.global_step)
                     logged_successfully = True
                     continue
                     
                 # Neptune logger - simplified approach using file path
                 if hasattr(logger, 'experiment') and 'neptune' in str(type(logger.experiment).__module__):
-                    logger.experiment[f'{name}'].upload(fig)
+                    logger.experiment[logger_name].upload(fig)
                     logged_successfully = True
                     continue
                     
                 # MLflow logger
                 if hasattr(logger, 'experiment') and hasattr(logger.experiment, 'log_figure'):
-                    logger.experiment.log_figure(logger.run_id, fig, f'{name}.png')
+                    logger.experiment.log_figure(logger.run_id, fig, f'{logger_name}.png')
                     logged_successfully = True
                     continue
                     
@@ -747,56 +872,10 @@ class SpeakerVerification(pl.LightningModule):
                 log.debug(f"Logger type {logger_type} doesn't support figure logging")
                 
             except Exception as e:
-                log.warning(f"Error logging figure {name} to logger {type(logger).__name__}: {str(e)}")
+                log.warning(f"Error logging figure {logger_name} to logger {type(logger).__name__}: {str(e)}")
         
         if not logged_successfully:
-            log.info(f"Figure '{name}' was saved to disk but couldn't be logged to any logger")
+            log.info(f"Figure '{logger_name}' was saved to disk but couldn't be logged to any logger")
         
         # Always close the figure to prevent memory leaks
         plt.close(fig)
-
-    ############ Load and save ############
-    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Saves the text embedding cache state in the model checkpoint.
-        
-        Args:
-            checkpoint: Dictionary containing model checkpoint data
-        """
-        # Call parent class's save checkpoint method if it exists
-        super().on_save_checkpoint(checkpoint)
-        
-        # Save cache contents and metadata
-        cache_state = {
-            'max_size': self._embedding_cache.max_size,
-            'hits': self._embedding_cache.hits,
-            'misses': self._embedding_cache.misses,
-            'contents': {
-                key: tensor.cpu() 
-                for key, tensor in self._embedding_cache._cache.items()
-            }
-        }
-        checkpoint['text_embedding_cache'] = cache_state
-
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Restores the text embedding cache state from the model checkpoint.
-        
-        Args:
-            checkpoint: Dictionary containing model checkpoint data
-        """
-        # Call parent class's load checkpoint method if it exists
-        super().on_load_checkpoint(checkpoint)
-        
-        # Restore cache if it exists in checkpoint
-        if 'text_embedding_cache' in checkpoint:
-            cache_state = checkpoint['text_embedding_cache']
-            
-            # Recreate cache with saved size
-            self._embedding_cache = EmbeddingCache(max_size=cache_state['max_size'])
-            
-            # Restore performance counters
-            self._embedding_cache.hits = cache_state['hits']
-            self._embedding_cache.misses = cache_state['misses']
-            
-            # Restore cached embeddings
-            for key, tensor in cache_state['contents'].items():
-                self._embedding_cache.update(key, tensor)

@@ -1,0 +1,18 @@
+# @package module.model
+audio_processor:
+  _target_: torch.nn.Identity
+
+audio_processor_normalizer:
+  _target_: torch.nn.Identity
+
+audio_encoder:
+  _target_: src.utils.hf_utils.load_pretrained_model
+  filename: "ecapa2.pt"
+  repo_id: "Jenthe/ECAPA2"
+  map_location: "cuda"
+  cache_dir: null
+
+classifier:
+  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  input_size: 192
+  out_neurons: ${datamodule.num_classes}

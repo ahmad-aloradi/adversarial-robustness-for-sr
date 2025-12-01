@@ -560,7 +560,8 @@ class MultiModalVPCModel(pl.LightningModule):
         # Audio processing
         self.audio_processor = instantiate(model.audio_processor)
         self.audio_encoder = instantiate(model.audio_encoder)
-        self.audio_processor_kwargs = model.audio_processor_kwargs
+        if model.get("audio_processor_kwargs", None) is not None:
+            self.audio_processor_kwargs = model.audio_processor_kwargs
         if hasattr(model, "audio_processor_normalizer"):
             self.audio_processor_normalizer = instantiate(model.audio_processor_normalizer)
         

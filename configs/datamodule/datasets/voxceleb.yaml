@@ -3,17 +3,21 @@ _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
 dataset:
   data_dir: ${paths.data_dir}/voxceleb
   wav_dir: ${datamodule.dataset.data_dir}/voxceleb1_2
+  veri_test_filenames: 
+    - veri_test2
+    - veri_test_extended2
+    - veri_test_hard2
   voxceleb_metadata: ${datamodule.dataset.data_dir}/voxceleb_metadata
-  # For copying the metadata files to the preprocessed directory
-  veri_test_path: ${datamodule.dataset.voxceleb_metadata}/downloaded/veri_test.txt
   base_search_dir: ${datamodule.dataset.voxceleb_metadata}/metadata
 
   voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
-  veri_test_output_path: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test.csv
-  dev_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/voxceleb_dev.csv
+  veri_test_output_paths:
+    veri_test2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test2.csv
+    veri_test_extended2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test_extended2.csv
+    veri_test_hard2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test_hard2.csv
   metadata_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/vox_meta.csv
-  train_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/train_csv.csv
-  val_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/val_csv.csv
+  train_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/train.csv
+  val_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/val.csv
   speaker_lookup: ${datamodule.dataset.voxceleb_artifacts_dir}/speaker_lookup.csv
 
   seed: ${seed}
@@ -23,9 +27,21 @@ dataset:
   sample_rate: 16000
 
   min_duration: 0.5
-  max_duration: 10.0
   speaker_overlap: True
-  train_ratio: 0.98
+  train_ratio: 0.95
+
+  # --- Segmentation Strategy ---
+  # - true: Generate segments with fixed boundaries in CSV (deterministic, full coverage)
+  # - false: Store full file metadata, apply random cropping during training (augmentation)
+  use_pre_segmentation: true
+  
+  # Segmentation parameters (only used if use_pre_segmentation=true)
+  segment_duration: 3.0  # Duration of each segment in seconds
+  segment_overlap: 0.0  # Overlap between segments in seconds (0.0 = non-overlapping)
+  min_segment_duration: 0.5  # Minimum segment duration to be included
+  
+  # Random cropping parameter (only used if use_pre_segmentation=false)
+  max_duration: 3.0  # Maximum duration for random cropping during training
 
 transforms: null
 
@@ -49,13 +65,13 @@ loaders:
   test:
     batch_size: 8
     shuffle: False
-    num_workers: 0
+    num_workers: 4
     drop_last: False
     pin_memory: False
 
   enrollment:
-    batch_size: 1 # 1 for enrollment
+    batch_size: 8
     shuffle: False
-    num_workers: 0
+    num_workers: 4
     drop_last: False
     pin_memory: False
