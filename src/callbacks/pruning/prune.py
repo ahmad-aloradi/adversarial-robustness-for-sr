@@ -50,7 +50,11 @@ class MagnitudePruner(Callback):
         # Scheduler Config
         self.final_amount = amount
         self.initial_amount = initial_amount if scheduled_pruning else amount
-        self.epochs_to_ramp = max(1, epochs_to_ramp)
+
+        if scheduled_pruning:
+            self.epochs_to_ramp = max(1, epochs_to_ramp)
+        else:
+            assert not epochs_to_ramp, "epochs_to_ramp should be None when scheduled_pruning is False."
 
         if self.scheduled:
             self.scheduler = PruningScheduler(

@@ -1,3 +1,17 @@
+"""Fabric helpers for launching HPC jobs with clear, human-readable steps.
+
+The tasks in this file perform two high-level chores:
+
+1. Prepare data on the remote cluster so each training job reads from the fast
+    local SSD instead of the congested shared filesystem.
+2. Generate the SLURM bash scripts that actually start the training runs for
+    the VPC (voice privacy challenge) and speaker-verification experiments.
+
+Everything is written to be readable even if you are not a daily Fabric/SLURM
+user—constants are named, and each function contains docstrings that describe
+what happens in plain English.
+"""
+
 import os
 import datetime
 import time
@@ -19,6 +33,13 @@ CONDA_ENV = 'comfort'
 WOODY_DIR = f'/home/woody/{env.user[: 4]}/{env.user}'
 RESULTS_DIR = os.path.join(WOODY_DIR, 'results')
 DATA_DIR = os.path.join(WOODY_DIR, 'datasets')
+# Speaker-verification datasets packaged as fast-to-extract .tar.zst files.
+# Paths are relative to DATA_DIR on the cluster.
+SV_DATA_ARCHIVES = [
+    "cnceleb/CN-Celeb_flac.tar.zst",
+    "cnceleb/CN-Celeb2_flac.tar.zst",
+    "voxceleb/voxceleb1_2.tar.zst",
+]
 
 # sync_results paths
 # SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, 'train/runs/*/vpc_amm_cyclic-*-max_dur10-bs32')  # remote results dir
@@ -157,6 +178,8 @@ def create_sv_bash_script(settings, script_arguments):
         str: A bash script as a string, ready to be submitted to SLURM.
     """
     script_arguments_str = ' '.join([f'{k}={v}' for k, v in script_arguments.items()])
+    archives = settings.get('sv_archives', SV_DATA_ARCHIVES)
+    archives_literal = ' '.join([f'"{a}"' for a in archives])
     
     job_string = f"""#!/bin/bash -l
 #SBATCH --job-name={settings['job_name']}
@@ -172,7 +195,112 @@ module load cuda/{settings['cuda']}
 source ~/miniconda3/bin/activate {settings['env_name']}
 cd {settings['path_project']}
 
-echo "No Data transfer is conducted for the SV experiments!"
+DATA_ROOT="{settings['data_path']}"
+DEST_DATA_ROOT="$TMPDIR/datasets"
+DATA_ARCHIVES=({archives_literal})
+
+# Helper: copy compressed datasets to the node-local SSD (automatically deleted)
+# after the jobs ends.
+stage_archive() {{
+    local relative="$1"
+    local archive_path="$DATA_ROOT/$relative"
+    local archive_name=$(basename "$relative")
+    local extract_dir="$archive_name"
+    extract_dir="${{extract_dir%.tar.gz}}"
+    extract_dir="${{extract_dir%.tar.zst}}"
+    local target_dir="$DEST_DATA_ROOT/$(dirname "$relative")"
+
+    if [[ ! -f "$archive_path" ]]; then
+        echo "Error: Archive $archive_path not found" >&2
+        return 1
+    fi
+
+    mkdir -p "$target_dir"
+
+    if [[ -d "$target_dir/$extract_dir" ]]; then
+        echo "$relative already extracted"
+        return 0
+    fi
+
+    echo "Transferring $relative -> $target_dir"
+    rsync -ah "$archive_path" "$target_dir/"
+
+    local tar_file="$target_dir/$archive_name"
+    local tar_cmd=(tar)
+
+    if [[ "$archive_name" == *.tar.zst ]]; then
+        local zstd_prog=""
+        if command -v zstdmt >/dev/null 2>&1; then
+            zstd_prog=$(command -v zstdmt)
+        elif command -v zstd >/dev/null 2>&1; then
+            zstd_prog=$(command -v zstd)
+        fi
+
+        if [[ -z "$zstd_prog" ]]; then
+            echo "Error: zstd/zstdmt not found for $archive_name" >&2
+            return 1
+        fi
+
+        tar_cmd+=(--use-compress-program "$zstd_prog" -xf)
+    elif [[ "$archive_name" == *.tar.gz ]]; then
+        if command -v pigz >/dev/null 2>&1; then
+            tar_cmd+=(--use-compress-program "$(command -v pigz)" -xf)
+        else
+            tar_cmd+=(-xzf)
+        fi
+    else
+        echo "Error: Unsupported archive format $archive_name" >&2
+        return 1
+    fi
+
+    echo "Extracting $archive_name"
+    "${{tar_cmd[@]}}" "$tar_file" -C "$target_dir"
+}}
+
+# Transfer metadata folders and create symlinks to data/
+transfer_metadata() {{
+    local dataset_type="$1"  # "voxceleb" or "cnceleb"
+    local metadata_src=""
+    local metadata_dest=""
+
+    if [[ "$dataset_type" == "voxceleb" ]]; then
+        metadata_src="$DATA_ROOT/voxceleb/voxceleb_metadata"
+        metadata_dest="$DEST_DATA_ROOT/voxceleb/voxceleb_metadata"
+    elif [[ "$dataset_type" == "cnceleb" ]]; then
+        metadata_src="$DATA_ROOT/cnceleb/metadata"
+        metadata_dest="$DEST_DATA_ROOT/cnceleb/metadata"
+    fi
+
+    if [[ -d "$metadata_src" && ! -e "$metadata_dest" ]]; then
+        echo "Transferring metadata for $dataset_type"
+        mkdir -p "$(dirname "$metadata_dest")"
+        rsync -ah "$metadata_src" "$(dirname "$metadata_dest")/"
+    fi
+}}
+
+echo "Staging speaker verification datasets to $DEST_DATA_ROOT"
+mkdir -p "$DEST_DATA_ROOT"
+stage_start=$(date +%s)
+for archive in "${{DATA_ARCHIVES[@]}}"; do
+    stage_archive "$archive" &
+done
+wait
+
+# Transfer metadata for each dataset type
+transfer_metadata "voxceleb"
+transfer_metadata "cnceleb"
+
+# Create symlink from data/ to the staged datasets
+DATA_SYMLINK="${{PWD}}/data"
+if [[ ! -L "$DATA_SYMLINK" || "$(readlink "$DATA_SYMLINK")" != "$DEST_DATA_ROOT" ]]; then
+    rm -rf "$DATA_SYMLINK" 2>/dev/null || true
+    ln -sfn "$DEST_DATA_ROOT" "$DATA_SYMLINK"
+    echo "Created symlink: $DATA_SYMLINK -> $DEST_DATA_ROOT"
+fi
+
+stage_end=$(date +%s)
+stage_duration=$((stage_end - stage_start))
+echo "Dataset staging complete in $((stage_duration / 60)) minutes $((stage_duration % 60)) seconds"
 
 # Start the training process
 export http_proxy=http://proxy.nhr.fau.de:80
@@ -181,7 +309,7 @@ export HTTP_PROXY=http://proxy.nhr.fau.de:80
 export HTTPS_PROXY=http://proxy.nhr.fau.de:80
 
 echo 'Starting training'
-python {settings['script_name']} {script_arguments_str} paths.data_dir=/home/woody/dsnf/dsnf101h/datasets
+python {settings['script_name']} {script_arguments_str} paths.data_dir=$DEST_DATA_ROOT
 """
     return job_string
 
@@ -274,7 +402,7 @@ def run_vpc():
         'num_nodes': 1,  # Multi-node are not possible on TinyGPU.
         'walltime': '24:00:00',
         'num_gpus': 1,
-        'cuda': '11.1.0',  # '10.0'
+        'cuda': '11.8.0',  # '10.0'
     }
 
     # datasets = [
@@ -357,8 +485,6 @@ def run_sv():
     """The main function that generates all SV jobs """
 
     BATCH_SIZE = 32
-    NUM_AUG = 1
-    max_epochs = 20
     max_duration = 3.0
 
     settings = {
@@ -371,7 +497,7 @@ def run_sv():
         'num_nodes': 1,  # Multi-node are not possible on TinyGPU.
         'walltime': '24:00:00',
         'num_gpus': 1,
-        'cuda': '11.1.0',  # '10.0'
+        'cuda': '12.8.0',
     }
 
     experiments = [
@@ -381,16 +507,23 @@ def run_sv():
         'sv_pruning_mag_struct',
         'sv_pruning_mag_unstruct',
         'sv_vanilla',
-        # 'sv_aug'
+        'sv_aug'
         ]
+    
     sv_models = [model.split('.')[0] for model in os.listdir('../configs/module/sv_model') if model.endswith('.yaml') and
                  model.startswith('wespeaker') and
-                 'pretrained' not in model and
-                 'wespeaker_ecapa_tdnn' not in model
+                 'pretrained' not in model and # Exclude pretrained models since they are not the main focus
+                 'redimnet' not in model and # Exclude redimnet for speed
+                 'eres2net34' not in model # Exclude eres2net34 for speed
                  ]
+
     sv_models += ['wespeaker_pretrained_ecapa_tdnn']
 
+
     for experiment in experiments:
+        
+        max_epochs = 25 if 'pruning' in experiment and 'onetime' not in experiment else 15
+
         for sv_model in sv_models:
             dataset_name = "multi_sv" # "datasets/voxceleb"
             # batch_size = BATCH_SIZE if 'aug' not in experiment else BATCH_SIZE // NUM_AUG
@@ -409,8 +542,6 @@ def run_sv():
                 'name': name,
                 'module/sv_model': sv_model,
                 'logger': 'many_loggers.yaml',
-                'logger.wandb.id': f'{os.path.basename(dataset_name)}_{job_name}',
-                # 'logger.neptune.with_id': name,
                 'datamodule.loaders.train.batch_size': batch_size,
                 'datamodule.loaders.valid.batch_size': batch_size,
                 # 'datamodule.dataset.max_duration': max_duration,
@@ -434,11 +565,10 @@ def run_sv():
             last_ckpt_exists = check_file_exists(f'{last_ckpt}')
             if last_ckpt_exists:
                 script_arguments['ckpt_path'] = last_ckpt
+                # if using wandb logger, set the id to be the same as before
+                if script_arguments['logger'] == 'many_loggers.yaml' or 'wandb' in script_arguments['logger']:
+                    script_arguments['logger.wandb.id'] = f'{os.path.basename(dataset_name)}_{job_name}'
 
             bash_script = create_sv_bash_script(settings, script_arguments)
             run_bash_script(bash_script)
             time.sleep(0.1)
-
-
-if __name__ == '__main__':
-    run_vpc()
