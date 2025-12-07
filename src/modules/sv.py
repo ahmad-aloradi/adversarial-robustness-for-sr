@@ -493,28 +493,22 @@ class SpeakerVerification(pl.LightningModule):
         
         log.info(f"Found {len(test_filenames)} test set(s): {', '.join(test_filenames)}")
         
-        # Compute cohort embeddings once from training data (if needed for AS-Norm)
-        cohort_embeddings = None
-        if self.normalize_test_scores:
-            log.info("Computing shared cohort embeddings for AS-Norm...")
-            # Use training loader params for cohort loader.
-            train_dm = self.trainer.datamodule
-            cohort_loader = DataLoader(
-                train_dm.train_data,
-                batch_size=getattr(train_dm.hparams.loaders.train, 'batch_size', 64),
-                num_workers=getattr(train_dm.hparams.loaders.train, 'num_workers', 0),
-                shuffle=False,
-                pin_memory=getattr(train_dm.hparams.loaders.train, 'pin_memory', False),
-                collate_fn=TrainCollate()
-            )
-            cohort_embeddings = self._compute_cohort_embeddings(cohort_loader)
-            log.info(f"Computed cohort embeddings of shape: {cohort_embeddings.shape}")
+        # Compute cohort embeddings per dataset (if needed for AS-Norm)
+        cohort_embeddings_by_dataset: Dict[str, torch.Tensor] = {}
+        train_dm = self.trainer.datamodule
 
         self.test_sets_data = {}
         self.last_batch_indices = {}
 
         for test_filename, dataloader in test_dataloaders.items():
             log.info(f"Processing '{test_filename}'...")
+            base_dataset = test_filename.split('/')[0]
+
+            cohort_embeddings = self._get_cohort_embeddings_for_dataset(
+                base_dataset=base_dataset,
+                train_dm=train_dm,
+                cache=cohort_embeddings_by_dataset,
+            ) if self.normalize_test_scores else None
             
             # Determine the index of the last batch for this dataloader
             # This is needed for triggering metric computation at the right time
@@ -656,9 +650,16 @@ class SpeakerVerification(pl.LightningModule):
 
         return embeddings_dict
 
-    def _compute_cohort_embeddings(self, dataloader) -> dict:
+    def _compute_cohort_embeddings(self, dataloader, cohort_tag: Optional[str] = None) -> dict:
         exp_root_path = Path(self.trainer.default_root_dir)
-        cohort_path = next(exp_root_path.rglob('test*/test_cohort_embeds.pt'), None)
+        tagged_pattern = f"test*/{cohort_tag}_test_cohort_embeds.pt" if cohort_tag else None
+        cohort_path = None
+
+        if tagged_pattern:
+            cohort_path = next(exp_root_path.rglob(tagged_pattern), None)
+        if cohort_path is None:
+            cohort_path = next(exp_root_path.rglob('test*/test_cohort_embeds.pt'), None)
+
         assert cohort_path is None or cohort_path.is_file(), f'Unexpected cohort_path file: {cohort_path}'        
         
         if cohort_path is not None:
@@ -679,6 +680,68 @@ class SpeakerVerification(pl.LightningModule):
         
         cohort_embeds = torch.cat(embeddings_list, dim=0)
         return cohort_embeds
+
+    def _get_cohort_embeddings_for_dataset(
+        self,
+        base_dataset: str,
+        train_dm,
+        cache: Dict[str, torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        """Return (and cache) cohort embeddings for the given dataset name."""
+        if base_dataset in cache:
+            return cache[base_dataset]
+
+        collate_fn = None
+
+        # Ensure the datamodule exposes cohort datasets even if training is disabled
+        if hasattr(train_dm, "ensure_cohort_datasets_for_normalization"):
+            train_dm.ensure_cohort_datasets_for_normalization()
+
+        # If the datamodule can set up fit stage lazily, do it to populate train_data
+        if (not hasattr(train_dm, "train_data")) or (getattr(train_dm, "train_data", None) is None):
+            setup_fn = getattr(train_dm, "setup", None)
+            if callable(setup_fn):
+                setup_fn(stage="fit")
+
+        train_dataset = None
+        if hasattr(train_dm, "get_train_dataset"):
+            train_dataset = train_dm.get_train_dataset(base_dataset)
+        elif hasattr(train_dm, "_train_sets"):
+            train_dataset = next((ds for name, ds in getattr(train_dm, "_train_sets") if name == base_dataset), None)
+        elif hasattr(train_dm, "train_data"):
+            train_dataset = getattr(train_dm, "train_data")
+        # Fall back to pulling dataset from the train dataloader if available
+        if train_dataset is None and hasattr(train_dm, "train_dataloader"):
+            try:
+                loader = train_dm.train_dataloader()
+                train_dataset = getattr(loader, "dataset", None)
+                if collate_fn is None and hasattr(loader, "collate_fn"):
+                    collate_fn = loader.collate_fn
+            except Exception:
+                pass
+
+        assert train_dataset is not None, (
+            f"Score normalization requires training data for '{base_dataset}', "
+            "but none was found. Disable normalize_test_scores or enable training for this dataset."
+        )
+
+        log.info(f"Computing cohort embeddings for '{base_dataset}'...")
+        if hasattr(train_dm, "get_train_collate"):
+            collate_fn = train_dm.get_train_collate(base_dataset)
+        cohort_loader = DataLoader(
+            train_dataset,
+            batch_size=getattr(train_dm.hparams.loaders.train, 'batch_size', 64),
+            num_workers=getattr(train_dm.hparams.loaders.train, 'num_workers', 0),
+            shuffle=False,
+            pin_memory=getattr(train_dm.hparams.loaders.train, 'pin_memory', False),
+            collate_fn=collate_fn or getattr(train_dm, '_train_collate', None) or TrainCollate(),
+        )
+        cache[base_dataset] = self._compute_cohort_embeddings(cohort_loader, cohort_tag=base_dataset)
+        log.info(
+            f"Computed cohort embeddings for '{base_dataset}' of shape: "
+            f"{cache[base_dataset].shape}"
+        )
+        return cache[base_dataset]
 
     def _move_batch_to_device(self, batch: VoxCelebVerificationItem) -> VoxCelebVerificationItem:
         """Move batch tensors to the model's device."""
@@ -713,9 +776,6 @@ class SpeakerVerification(pl.LightningModule):
             normalized_scores = torch.tensor(normalized_scores, device=raw_scores.device)
         else:
             normalized_scores = raw_scores.clone()
-
-        # Don't update the shared metric - we'll compute metrics separately per test set
-        # self.test_metric.update(scores=normalized_scores, labels=torch.tensor(batch.trial_label))
         
         batch_dict = {
             "enroll_path": batch.enroll_path,
@@ -798,7 +858,9 @@ class SpeakerVerification(pl.LightningModule):
         torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{safe_test_filename}_enrol_embeds.pt"))
         torch.save(trials_embeds, os.path.join(artifacts_dir, f"{safe_test_filename}_embeds.pt"))
         if test_data['cohort_embeddings'] is not None:
-            torch.save(test_data['cohort_embeddings'], os.path.join(artifacts_dir, f"test_cohort_embeds.pt"))  # Same cohort for all test sets
+            base_dataset = test_filename.split('/')[0]
+            torch.save(test_data['cohort_embeddings'], os.path.join(artifacts_dir, f"test_cohort_embeds.pt"))
+            torch.save(test_data['cohort_embeddings'], os.path.join(artifacts_dir, f"{base_dataset}_test_cohort_embeds.pt"))
 
         # Plot and log figures for this test set
         figures = temp_metric.plot_curves() or {}

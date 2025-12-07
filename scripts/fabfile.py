@@ -290,14 +290,6 @@ wait
 transfer_metadata "voxceleb"
 transfer_metadata "cnceleb"
 
-# Create symlink from data/ to the staged datasets
-DATA_SYMLINK="${{PWD}}/data"
-if [[ ! -L "$DATA_SYMLINK" || "$(readlink "$DATA_SYMLINK")" != "$DEST_DATA_ROOT" ]]; then
-    rm -rf "$DATA_SYMLINK" 2>/dev/null || true
-    ln -sfn "$DEST_DATA_ROOT" "$DATA_SYMLINK"
-    echo "Created symlink: $DATA_SYMLINK -> $DEST_DATA_ROOT"
-fi
-
 stage_end=$(date +%s)
 stage_duration=$((stage_end - stage_start))
 echo "Dataset staging complete in $((stage_duration / 60)) minutes $((stage_duration % 60)) seconds"
@@ -522,7 +514,7 @@ def run_sv():
 
     for experiment in experiments:
         
-        max_epochs = 25 if 'pruning' in experiment and 'onetime' not in experiment else 15
+        max_epochs = 30 if 'pruning' in experiment and 'onetime' not in experiment else 20
 
         for sv_model in sv_models:
             dataset_name = "multi_sv" # "datasets/voxceleb"
@@ -541,7 +533,7 @@ def run_sv():
                 'trainer': 'gpu',
                 'name': name,
                 'module/sv_model': sv_model,
-                'logger': 'many_loggers.yaml',
+                'logger': 'tensorboard.yaml',
                 'datamodule.loaders.train.batch_size': batch_size,
                 'datamodule.loaders.valid.batch_size': batch_size,
                 # 'datamodule.dataset.max_duration': max_duration,
