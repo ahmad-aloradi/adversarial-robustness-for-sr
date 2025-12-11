@@ -29,6 +29,9 @@ from src.modules.metrics.metrics import AS_norm
 
 log = utils.get_pylogger(__name__)
 
+# Constants for test checkpointing
+TEST_CHECKPOINT_INTERVAL = 10000  # Save trial results every N batches
+
 
 class EmbeddingMetrics:
     def __init__(
@@ -501,6 +504,12 @@ class SpeakerVerification(pl.LightningModule):
         self.last_batch_indices = {}
 
         for test_filename, dataloader in test_dataloaders.items():
+            # Skip already completed test sets
+            if self._is_test_set_complete(test_filename):
+                log.info(f"Skipping '{test_filename}' - already complete")
+                self.last_batch_indices[test_filename] = -2  # Mark as skip
+                continue
+
             log.info(f"Processing '{test_filename}'...")
             base_dataset = test_filename.split('/')[0]
 
@@ -511,7 +520,6 @@ class SpeakerVerification(pl.LightningModule):
             ) if self.normalize_test_scores else None
             
             # Determine the index of the last batch for this dataloader
-            # This is needed for triggering metric computation at the right time
             num_batches = len(dataloader)
             if num_batches > 0:
                 self.last_batch_indices[test_filename] = num_batches - 1
@@ -519,19 +527,27 @@ class SpeakerVerification(pl.LightningModule):
             else:
                 raise ValueError("Dataloader has zero batches")
 
-            # Get unique utterances for enrollment and trials
-            enroll_dataloader, trial_unique_dataloader = self.trainer.datamodule.get_enroll_and_trial_dataloaders(test_filename)
+            # Try to load cached embeddings, otherwise compute them
+            cached = self._load_cached_embeddings(test_filename)
+            if cached:
+                enrol_embeds, test_embeds = cached['enrol_embeds'], cached['test_embeds']
+            else:
+                enroll_dataloader, trial_unique_dataloader = self.trainer.datamodule.get_enroll_and_trial_dataloaders(test_filename)
+                enrol_embeds = self._compute_embeddings(enroll_dataloader, mode='enrollment')
+                test_embeds = self._compute_embeddings(trial_unique_dataloader, mode='test')
+                self._save_embeddings_cache(test_filename, enrol_embeds, test_embeds)
+
+            # Load partial trial results if resuming
+            trial_results, resume_batch_idx, resume_batch_paths = self._load_partial_trial_results(test_filename)
             
-            # Compute embeddings for enrollment and test utterances
-            enrol_embeds = self._compute_embeddings(enroll_dataloader, mode='enrollment')
-            test_embeds = self._compute_embeddings(trial_unique_dataloader, mode='test')
-            
-            # Store all data for this test set (sharing the same cohort embeddings)
+            # Store all data for this test set
             self.test_sets_data[test_filename] = {
                 'enrol_embeds': enrol_embeds,
                 'test_embeds': test_embeds,
                 'cohort_embeddings': cohort_embeddings,
-                'trial_results': []
+                'trial_results': trial_results,
+                'resume_batch_idx': resume_batch_idx,
+                'resume_batch_paths': resume_batch_paths
             }
             
         log.info(f"Finished computing embeddings for all test sets")
@@ -539,16 +555,45 @@ class SpeakerVerification(pl.LightningModule):
     @torch.inference_mode()
     def test_step(self, batch: VoxCelebVerificationItem, batch_idx: int, dataloader_idx: int = 0) -> None:
         """Handle test step and trigger logging on the last batch of each dataloader."""
-        # Move batch to device (needed for some weird device error)
-        batch = self._move_batch_to_device(batch)
-        
-        # Get test set name from dataloader index using the normalized dict
+        # Get test set name from dataloader index
         test_filenames = list(self.test_dataloaders_dict.keys())
         test_filename = test_filenames[dataloader_idx]
+        
+        # Skip if this test set was already completed or marked to skip
+        if self.last_batch_indices.get(test_filename, -1) == -2:
+            return
+        
+        # Skip batches already processed (resumption) with path check on the boundary batch
         test_data = self.test_sets_data[test_filename]
+        resume_idx = test_data.get('resume_batch_idx', -1)
+        resume_paths = test_data.get('resume_batch_paths')
+        if batch_idx < resume_idx:
+            return
+        if batch_idx == resume_idx and resume_paths is not None:
+            if list(batch.enroll_path) == resume_paths.get('enroll_path') and list(batch.test_path) == resume_paths.get('test_path'):
+                return
+            log.warning(
+                f"Resume boundary mismatch for '{test_filename}' at batch {batch_idx}; processing batch to realign."
+            )
+
+        # Move batch to device
+        batch = self._move_batch_to_device(batch)
         
         # Run trial evaluation for this test set
         self._trials_eval_step_multi_test(batch, test_data)
+
+        # Periodic checkpointing
+        if (batch_idx + 1) % TEST_CHECKPOINT_INTERVAL == 0:
+            self._save_trial_results_checkpoint(
+                test_filename,
+                test_data['trial_results'],
+                batch_idx,
+                {
+                    'enroll_path': list(batch.enroll_path),
+                    'test_path': list(batch.test_path)
+                }
+            )
+            log.info(f"Checkpoint saved for '{test_filename}' at batch {batch_idx}")
 
         # Check if this is the last batch for the current dataloader
         is_last_batch = (batch_idx == self.last_batch_indices.get(test_filename, -1))
@@ -556,6 +601,7 @@ class SpeakerVerification(pl.LightningModule):
         if is_last_batch:
             log.info(f"Last batch for '{test_filename}' (idx: {batch_idx}) reached. Finalizing and logging metrics.")
             self._epoch_end_common_multi_test(test_filename)
+            self._mark_test_complete(test_filename)
 
     def on_test_epoch_end(self) -> None:
         """Callback at the end of the test epoch.
@@ -566,9 +612,12 @@ class SpeakerVerification(pl.LightningModule):
         # Process any test sets that were not handled in test_step (fallback)
         if hasattr(self, 'last_batch_indices'):
             for test_filename, last_idx in self.last_batch_indices.items():
+                if last_idx == -2:  # Skipped (already complete)
+                    continue
                 if last_idx == -1:
                     log.warning(f"Running fallback metric computation for '{test_filename}' at epoch end.")
                     self._epoch_end_common_multi_test(test_filename)
+                    self._mark_test_complete(test_filename)
 
         log.info("Test epoch finished. All test sets have been processed.")
         # Clean up stored data to free memory
@@ -634,6 +683,66 @@ class SpeakerVerification(pl.LightningModule):
         return {"optimizer": optimizer}
 
     ############ Dev and eval utils ############
+    def _get_test_artifacts_dir(self, test_filename: str) -> Path:
+        """Get the artifacts directory for a test set (without timestamp for caching)."""
+        safe_name = test_filename.replace('/', '_').replace('\\', '_')
+        return Path(self.trainer.default_root_dir) / "test_artifacts" / safe_name
+
+    def _is_test_set_complete(self, test_filename: str) -> bool:
+        """Check if a test set has already been fully evaluated."""
+        artifacts_dir = self._get_test_artifacts_dir(test_filename)
+        return (artifacts_dir / "COMPLETE").exists()
+
+    def _load_cached_embeddings(self, test_filename: str) -> Optional[Dict[str, Dict[str, torch.Tensor]]]:
+        """Load cached embeddings for a test set if they exist."""
+        artifacts_dir = self._get_test_artifacts_dir(test_filename)
+        enrol_path = artifacts_dir / "enrol_embeds_cache.pt"
+        test_path = artifacts_dir / "test_embeds_cache.pt"
+        
+        if enrol_path.exists() and test_path.exists():
+            log.info(f"Loading cached embeddings for '{test_filename}'")
+            return {
+                'enrol_embeds': torch.load(enrol_path),
+                'test_embeds': torch.load(test_path)
+            }
+        return None
+
+    def _save_embeddings_cache(self, test_filename: str, enrol_embeds: dict, test_embeds: dict) -> None:
+        """Save embeddings to cache for potential resumption."""
+        artifacts_dir = self._get_test_artifacts_dir(test_filename)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(enrol_embeds, artifacts_dir / "enrol_embeds_cache.pt")
+        torch.save(test_embeds, artifacts_dir / "test_embeds_cache.pt")
+
+    def _load_partial_trial_results(self, test_filename: str) -> tuple[list, int, Optional[dict]]:
+        """Load partial trial results if they exist. Returns (results, last_batch_idx, last_batch_paths)."""
+        artifacts_dir = self._get_test_artifacts_dir(test_filename)
+        checkpoint_path = artifacts_dir / "trial_results_checkpoint.pt"
+        
+        if checkpoint_path.exists():
+            checkpoint = torch.load(checkpoint_path)
+            log.info(f"Resuming '{test_filename}' from batch {checkpoint['last_batch_idx'] + 1}")
+            return checkpoint['trial_results'], checkpoint['last_batch_idx'], checkpoint.get('last_batch_paths')
+        return [], -1, None
+
+    def _save_trial_results_checkpoint(self, test_filename: str, trial_results: list, batch_idx: int, batch_paths: dict) -> None:
+        """Save trial results checkpoint for resumption."""
+        artifacts_dir = self._get_test_artifacts_dir(test_filename)
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {'trial_results': trial_results, 'last_batch_idx': batch_idx, 'last_batch_paths': batch_paths},
+            artifacts_dir / "trial_results_checkpoint.pt"
+        )
+
+    def _mark_test_complete(self, test_filename: str) -> None:
+        """Mark a test set as complete."""
+        artifacts_dir = self._get_test_artifacts_dir(test_filename)
+        (artifacts_dir / "COMPLETE").touch()
+        # Clean up checkpoint file
+        checkpoint_path = artifacts_dir / "trial_results_checkpoint.pt"
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+
     def _compute_embeddings(self, dataloader, mode: str = 'test') -> dict:
         embeddings_dict = {}
         desc = f"Computing {mode} embeddings"
