@@ -6,7 +6,6 @@ from datetime import datetime
 
 import random
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 import pytorch_lightning as pl
 from hydra.utils import instantiate
@@ -28,125 +27,7 @@ from src.modules.metrics.metrics import AS_norm
 log = utils.get_pylogger(__name__)
 
 # Constants for test checkpointing
-TEST_CHECKPOINT_INTERVAL = 3_0000  # Save trial results every N batches
-
-
-
-class EmbeddingMetrics:
-    def __init__(
-        self,
-        trainer: pl.Trainer,
-        stage: str,
-        num_speakers_in_cohort: int = 6000,
-        min_utts_per_speaker: int = 6,
-        speaker_col: str = 'speaker_id'
-    ):
-        """Initialize the EmbeddingMetrics class.
-
-        Args:
-            trainer: PyTorch Lightning Trainer instance.
-            stage: Stage of evaluation ('valid' or 'test').
-            num_speakers_in_cohort: Number of speakers to include in the cohort (default: 6000).
-            min_utts_per_speaker: Target number of utterances to sample per speaker (default: 6).
-            speaker_col: Column name for speaker IDs in the dataset (default: 'speaker_id').
-        """
-        self.trainer = trainer
-        self.stage = stage
-        self.num_speakers_in_cohort = num_speakers_in_cohort
-        self.min_utts_per_speaker = min_utts_per_speaker
-        self.speaker_col = speaker_col
-
-    @property
-    def _trial_results(self):
-        """Cached list of trial results."""
-        if not hasattr(self, '_results'):
-            self._results = []
-        return self._results
-
-    @property
-    def _cohort_indices(self):
-        """
-        Compute balanced cohort indices ensuring good coverage across speakers.
-
-        Returns:
-            List of selected indices for the cohort.
-        """
-        if not hasattr(self, '_indices'):
-            df = self.trainer.datamodule.train_data.dataset
-            
-            # Validate required column
-            if self.speaker_col not in df.columns:
-                raise ValueError(f"Missing required column: {self.speaker_col}")
-            
-            # Get unique speakers
-            unique_speakers = df[self.speaker_col].unique()
-            num_speakers_to_select = min(len(unique_speakers), self.num_speakers_in_cohort)
-            
-            # Randomly sample speakers
-            selected_speakers = random.sample(list(unique_speakers), num_speakers_to_select)
-            
-            # Sample utterances from each selected speaker
-            all_indices = []
-            for speaker in selected_speakers:
-                indices = df[df[self.speaker_col] == speaker].index.tolist()
-                all_indices.extend(
-                    random.sample(indices, min(self.min_utts_per_speaker, len(indices)))
-                )
-            
-            self._indices = all_indices
-        
-        return self._indices
-
-    def get_cohort_loader(self) -> DataLoader:
-        """Get DataLoader for the cohort subset.
-
-        Returns:
-            DataLoader for the cohort data.
-        """
-        return DataLoader(
-            dataset=Subset(self.trainer.datamodule.train_data, self._cohort_indices),
-            batch_size=self.trainer.datamodule.loaders.train.batch_size,
-            num_workers=self.trainer.datamodule.loaders.train.num_workers,
-            pin_memory=self.trainer.datamodule.loaders.train.pin_memory,
-            collate_fn=TrainCollate(),
-            shuffle=False
-        )
-
-    @property
-    def cohort_embeddings(self) -> Optional[Dict[str, torch.Tensor]]:
-        """Get the computed cohort embeddings.
-
-        Returns:
-            Dictionary of cohort embeddings or None if not set.
-        """
-        return self._embeddings
-
-    def set_cohort_embeddings(self, embeddings_dict: Dict[str, torch.Tensor]) -> None:
-        """Set the cohort embeddings and update metrics.
-
-        Args:
-            embeddings_dict: Dictionary mapping model IDs to their cohort embeddings.
-        """
-        self._embeddings = embeddings_dict
-        
-        # Set cohort embeddings in the metrics
-        metrics = [
-            self.trainer.model.valid_metric if self.stage == 'valid'
-            else self.trainer.model.test_metric
-        ]
-        for metric in metrics:
-            metric.cohort_embeddings = embeddings_dict
-
-    def cleanup(self):
-        """Delete cached attributes to free memory."""
-        if hasattr(self, '_results'):
-            delattr(self, '_results')
-        if hasattr(self, '_indices'):
-            delattr(self, '_indices')
-        if hasattr(self, '_embeddings'):
-            delattr(self, '_embeddings')
-
-
+TEST_CHECKPOINT_INTERVAL = 50_000  # Save trial results every N batches
 class SpeakerVerification(pl.LightningModule):
     """SV model for speaker verification with audio embeddings."""
     
@@ -603,8 +484,8 @@ class SpeakerVerification(pl.LightningModule):
 
         if is_last_batch:
             log.info(f"Last batch for '{test_filename}' (idx: {batch_idx}) reached. Finalizing and logging metrics.")
-            self._epoch_end_common_multi_test(test_filename)
-            self._mark_test_complete(test_filename)
+            run_timestamp = self._epoch_end_common_multi_test(test_filename)
+            self._mark_test_complete(test_filename, run_timestamp=run_timestamp)
 
     def on_test_epoch_end(self) -> None:
         """Callback at the end of the test epoch.
@@ -619,8 +500,8 @@ class SpeakerVerification(pl.LightningModule):
                     continue
                 if last_idx == -1:
                     log.warning(f"Running fallback metric computation for '{test_filename}' at epoch end.")
-                    self._epoch_end_common_multi_test(test_filename)
-                    self._mark_test_complete(test_filename)
+                    run_timestamp = self._epoch_end_common_multi_test(test_filename)
+                    self._mark_test_complete(test_filename, run_timestamp=run_timestamp)
 
         log.info("Test epoch finished. All test sets have been processed.")
         # Clean up stored data to free memory
@@ -718,7 +599,7 @@ class SpeakerVerification(pl.LightningModule):
         test_path = cache_dir / "test_embeds_cache.pt"
         
         if enrol_path.exists() and test_path.exists():
-            log.info(f"Loading cached embeddings for '{test_filename}'")
+            log.info(f"Loading cached enrollment and test embeddings for '{test_filename}'")
             return {
                 'enrol_embeds': torch.load(enrol_path),
                 'test_embeds': torch.load(test_path)
@@ -745,18 +626,51 @@ class SpeakerVerification(pl.LightningModule):
             return checkpoint['trial_results'], checkpoint['last_batch_idx'], checkpoint.get('last_batch_paths')
         return [], -1, None
 
-    def _mark_test_complete(self, test_filename: str) -> None:
-        """Mark a test set as complete."""
+    def _mark_test_complete(self, test_filename: str, run_timestamp: Optional[str] = None) -> None:
+        """Mark a test set as complete.
+
+        Writes a COMPLETE marker and also records the last successful run timestamp
+        (so "COMPLETE" implies there is a corresponding results directory).
+        """
         base_dir = self._get_test_artifacts_dir(test_filename)
+        base_dir.mkdir(parents=True, exist_ok=True)
         (base_dir / "COMPLETE").touch()
+        if run_timestamp is not None:
+            (base_dir / "LAST_RUN").write_text(str(run_timestamp))
         checkpoint_path = self._get_test_cache_dir(test_filename) / "trial_results_checkpoint.pt"
         if checkpoint_path.exists():
             checkpoint_path.unlink()
 
     def _is_test_set_complete(self, test_filename: str) -> bool:
-        """Check if a test set has already been fully evaluated."""
+        """Check if a test set has already been fully evaluated.
+
+        "COMPLETE" alone is treated as insufficient if there is no corresponding
+        timestamped results directory.
+        """
         base_dir = self._get_test_artifacts_dir(test_filename)
-        return (base_dir / "COMPLETE").exists()
+        if not (base_dir / "COMPLETE").exists():
+            return False
+
+        last_run_path = base_dir / "LAST_RUN"
+        if last_run_path.exists():
+            ts = last_run_path.read_text().strip()
+            if ts:
+                run_dir = base_dir / ts
+                if run_dir.is_dir():
+                    return True
+
+        # Fallback: accept COMPLETE if at least one timestamped run dir exists.
+        has_run_dir = any(
+            p.is_dir() and p.name[:9].isdigit() and '_' in p.name
+            for p in base_dir.iterdir()
+        )
+        if not has_run_dir:
+            log.warning(
+                f"Found COMPLETE for '{test_filename}' but no timestamped results directory under {base_dir}. "
+                "Treating as incomplete to regenerate results."
+            )
+            return False
+        return True
 
     def _compute_embeddings(self, dataloader, mode: str = 'test') -> dict:
         embeddings_dict = {}
@@ -774,7 +688,7 @@ class SpeakerVerification(pl.LightningModule):
 
         return embeddings_dict
 
-    def _compute_cohort_embeddings(self, dataloader, cohort_tag: Optional[str] = None) -> dict:
+    def _compute_cohort_embeddings(self, dataloader) -> torch.Tensor:
         # Compute only. Loading/saving is handled by _get_cohort_embeddings_for_dataset.
         embeddings_list = []
         with tqdm(dataloader, desc="Computing cohort embeddings", leave=False) as pbar:
@@ -806,7 +720,7 @@ class SpeakerVerification(pl.LightningModule):
             log.info(f"Loading cohort embeddings for '{base_dataset}' from: {cohort_cache_path}")
             cache[base_dataset] = torch.load(cohort_cache_path)
             return cache[base_dataset]
-
+        
         collate_fn = None
 
         # Ensure the datamodule exposes cohort datasets even if training is disabled
@@ -852,7 +766,7 @@ class SpeakerVerification(pl.LightningModule):
             pin_memory=getattr(train_dm.hparams.loaders.train, 'pin_memory', False),
             collate_fn=collate_fn or getattr(train_dm, '_train_collate', None) or TrainCollate(),
         )
-        cache[base_dataset] = self._compute_cohort_embeddings(cohort_loader, cohort_tag=base_dataset)
+        cache[base_dataset] = self._compute_cohort_embeddings(cohort_loader)
         cohort_cache_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(cache[base_dataset], cohort_cache_path)
         log.info(f"Saved cohort embeddings for '{base_dataset}' to: {cohort_cache_path}")
@@ -907,7 +821,7 @@ class SpeakerVerification(pl.LightningModule):
         }
         test_data['trial_results'].append(batch_dict)
         
-    def _epoch_end_common_multi_test(self, test_filename: str) -> None:
+    def _epoch_end_common_multi_test(self, test_filename: str) -> str:
         """Handle epoch end for a specific test set."""
         t0 = time.perf_counter()
         # Sanitize test_filename for use in file paths (replace all path separators)
@@ -954,7 +868,6 @@ class SpeakerVerification(pl.LightningModule):
         for batch in trial_results:
             all_norm_scores.extend(batch["norm_score"])
             all_labels.extend(batch["trial_label"])
-
         t_metric0 = time.perf_counter()
         temp_metric.update(
             scores=torch.tensor(all_norm_scores, dtype=torch.float32),
@@ -994,17 +907,7 @@ class SpeakerVerification(pl.LightningModule):
         t_save0 = time.perf_counter()
         torch.save(enrol_embeds, artifacts_dir / f"{safe_test_filename}_enrol_embeds.pt")
         torch.save(trials_embeds, artifacts_dir / f"{safe_test_filename}_embeds.pt")
-        if test_data['cohort_embeddings'] is not None:
-            base_dataset = test_filename.split('/')[0]
-            cache_dir = self._get_test_cache_dir(test_filename)
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(test_data['cohort_embeddings'], artifacts_dir / "test_cohort_embeds.pt")
-            torch.save(test_data['cohort_embeddings'], artifacts_dir / f"{base_dataset}_test_cohort_embeds.pt")
-            torch.save(test_data['cohort_embeddings'], cache_dir / f"{base_dataset}_test_cohort_embeds_cache.pt")
         log.info(f"Finalizing '{test_filename}': saved embeddings in {time.perf_counter() - t_save0:.1f}s")
-
-        # Plotting is intentionally removed from the online evaluation path.
-        # Curves can be generated offline from the saved scores CSV/metrics JSON.
 
         # Save test metrics as a JSON file 
         metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
@@ -1013,4 +916,4 @@ class SpeakerVerification(pl.LightningModule):
             json.dump(metrics_for_save, f, indent=4)
 
         log.info(f"Finalizing '{test_filename}': total finalize time {time.perf_counter() - t0:.1f}s")
-
+        return run_timestamp
