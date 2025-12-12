@@ -1,6 +1,5 @@
-import os
-import io
 import json
+import time
 from typing import Any, Dict, Optional
 from pathlib import Path
 from datetime import datetime
@@ -14,7 +13,6 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 from tqdm import tqdm
 import pandas as pd
-import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
 
 from src.datamodules.components.voxceleb.voxceleb_dataset import (
@@ -30,7 +28,8 @@ from src.modules.metrics.metrics import AS_norm
 log = utils.get_pylogger(__name__)
 
 # Constants for test checkpointing
-TEST_CHECKPOINT_INTERVAL = 10000  # Save trial results every N batches
+TEST_CHECKPOINT_INTERVAL = 3_0000  # Save trial results every N batches
+
 
 
 class EmbeddingMetrics:
@@ -188,6 +187,10 @@ class SpeakerVerification(pl.LightningModule):
         self.normalize_test_scores = kwargs.get("normalize_test_scores", False)
         self.scores_norm = kwargs.get("scores_norm",
                                       OmegaConf.create({"embeds_metric_params": {}, "scores_norm_params": {}}))
+
+        # Test-time artifact controls
+        # - Repeating dataset-level metrics in every CSV row is expensive/large; metrics are always saved to JSON.
+        self.scores_csv_include_metrics: bool = bool(kwargs.get("scores_csv_include_metrics", True))
 
     ############ Setup init ############
     def _setup_metrics(self, metrics: DictConfig) -> None:
@@ -684,20 +687,35 @@ class SpeakerVerification(pl.LightningModule):
 
     ############ Dev and eval utils ############
     def _get_test_artifacts_dir(self, test_filename: str) -> Path:
-        """Get the artifacts directory for a test set (without timestamp for caching)."""
+        """Get the base artifacts directory for a test set."""
         safe_name = test_filename.replace('/', '_').replace('\\', '_')
         return Path(self.trainer.default_root_dir) / "test_artifacts" / safe_name
 
-    def _is_test_set_complete(self, test_filename: str) -> bool:
-        """Check if a test set has already been fully evaluated."""
-        artifacts_dir = self._get_test_artifacts_dir(test_filename)
-        return (artifacts_dir / "COMPLETE").exists()
+    def _get_test_cache_dir(self, test_filename: str) -> Path:
+        """Get the cache directory for a test set (embeds/checkpoints)."""
+        return self._get_test_artifacts_dir(test_filename) / "cache"
+
+    def _get_cohort_cache_path(self, base_dataset: str) -> Path:
+        """Get the per-dataset cohort embeddings cache path.
+
+        Stored once per experiment to avoid mixing datasets.
+        """
+        cache_root = Path(self.trainer.default_root_dir) / "test_artifacts" / "_cohort_cache"
+        return cache_root / f"{base_dataset}_test_cohort_embeds_cache.pt"
+
+    def _save_embeddings_cache(self, test_filename: str, enrol_embeds: dict, test_embeds: dict) -> None:
+        """Save embeddings to cache for potential resumption."""
+        cache_dir = self._get_test_cache_dir(test_filename)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(enrol_embeds, cache_dir / "enrol_embeds_cache.pt")
+        torch.save(test_embeds, cache_dir / "test_embeds_cache.pt")
 
     def _load_cached_embeddings(self, test_filename: str) -> Optional[Dict[str, Dict[str, torch.Tensor]]]:
         """Load cached embeddings for a test set if they exist."""
-        artifacts_dir = self._get_test_artifacts_dir(test_filename)
-        enrol_path = artifacts_dir / "enrol_embeds_cache.pt"
-        test_path = artifacts_dir / "test_embeds_cache.pt"
+        cache_dir = self._get_test_cache_dir(test_filename)
+
+        enrol_path = cache_dir / "enrol_embeds_cache.pt"
+        test_path = cache_dir / "test_embeds_cache.pt"
         
         if enrol_path.exists() and test_path.exists():
             log.info(f"Loading cached embeddings for '{test_filename}'")
@@ -707,17 +725,19 @@ class SpeakerVerification(pl.LightningModule):
             }
         return None
 
-    def _save_embeddings_cache(self, test_filename: str, enrol_embeds: dict, test_embeds: dict) -> None:
-        """Save embeddings to cache for potential resumption."""
-        artifacts_dir = self._get_test_artifacts_dir(test_filename)
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(enrol_embeds, artifacts_dir / "enrol_embeds_cache.pt")
-        torch.save(test_embeds, artifacts_dir / "test_embeds_cache.pt")
+    def _save_trial_results_checkpoint(self, test_filename: str, trial_results: list, batch_idx: int, batch_paths: dict) -> None:
+        """Save trial results checkpoint for resumption."""
+        cache_dir = self._get_test_cache_dir(test_filename)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {'trial_results': trial_results, 'last_batch_idx': batch_idx, 'last_batch_paths': batch_paths},
+            cache_dir / "trial_results_checkpoint.pt"
+        )
 
     def _load_partial_trial_results(self, test_filename: str) -> tuple[list, int, Optional[dict]]:
         """Load partial trial results if they exist. Returns (results, last_batch_idx, last_batch_paths)."""
-        artifacts_dir = self._get_test_artifacts_dir(test_filename)
-        checkpoint_path = artifacts_dir / "trial_results_checkpoint.pt"
+        cache_dir = self._get_test_cache_dir(test_filename)
+        checkpoint_path = cache_dir / "trial_results_checkpoint.pt"
         
         if checkpoint_path.exists():
             checkpoint = torch.load(checkpoint_path)
@@ -725,23 +745,18 @@ class SpeakerVerification(pl.LightningModule):
             return checkpoint['trial_results'], checkpoint['last_batch_idx'], checkpoint.get('last_batch_paths')
         return [], -1, None
 
-    def _save_trial_results_checkpoint(self, test_filename: str, trial_results: list, batch_idx: int, batch_paths: dict) -> None:
-        """Save trial results checkpoint for resumption."""
-        artifacts_dir = self._get_test_artifacts_dir(test_filename)
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {'trial_results': trial_results, 'last_batch_idx': batch_idx, 'last_batch_paths': batch_paths},
-            artifacts_dir / "trial_results_checkpoint.pt"
-        )
-
     def _mark_test_complete(self, test_filename: str) -> None:
         """Mark a test set as complete."""
-        artifacts_dir = self._get_test_artifacts_dir(test_filename)
-        (artifacts_dir / "COMPLETE").touch()
-        # Clean up checkpoint file
-        checkpoint_path = artifacts_dir / "trial_results_checkpoint.pt"
+        base_dir = self._get_test_artifacts_dir(test_filename)
+        (base_dir / "COMPLETE").touch()
+        checkpoint_path = self._get_test_cache_dir(test_filename) / "trial_results_checkpoint.pt"
         if checkpoint_path.exists():
             checkpoint_path.unlink()
+
+    def _is_test_set_complete(self, test_filename: str) -> bool:
+        """Check if a test set has already been fully evaluated."""
+        base_dir = self._get_test_artifacts_dir(test_filename)
+        return (base_dir / "COMPLETE").exists()
 
     def _compute_embeddings(self, dataloader, mode: str = 'test') -> dict:
         embeddings_dict = {}
@@ -760,21 +775,7 @@ class SpeakerVerification(pl.LightningModule):
         return embeddings_dict
 
     def _compute_cohort_embeddings(self, dataloader, cohort_tag: Optional[str] = None) -> dict:
-        exp_root_path = Path(self.trainer.default_root_dir)
-        tagged_pattern = f"test*/{cohort_tag}_test_cohort_embeds.pt" if cohort_tag else None
-        cohort_path = None
-
-        if tagged_pattern:
-            cohort_path = next(exp_root_path.rglob(tagged_pattern), None)
-        if cohort_path is None:
-            cohort_path = next(exp_root_path.rglob('test*/test_cohort_embeds.pt'), None)
-
-        assert cohort_path is None or cohort_path.is_file(), f'Unexpected cohort_path file: {cohort_path}'        
-        
-        if cohort_path is not None:
-            log.info('Loading Cohort Embeddings')
-            return torch.load(cohort_path)
-
+        # Compute only. Loading/saving is handled by _get_cohort_embeddings_for_dataset.
         embeddings_list = []
         with tqdm(dataloader, desc="Computing cohort embeddings", leave=False) as pbar:
             for batch in pbar:
@@ -798,6 +799,12 @@ class SpeakerVerification(pl.LightningModule):
     ) -> Optional[torch.Tensor]:
         """Return (and cache) cohort embeddings for the given dataset name."""
         if base_dataset in cache:
+            return cache[base_dataset]
+
+        cohort_cache_path = self._get_cohort_cache_path(base_dataset)
+        if cohort_cache_path.exists():
+            log.info(f"Loading cohort embeddings for '{base_dataset}' from: {cohort_cache_path}")
+            cache[base_dataset] = torch.load(cohort_cache_path)
             return cache[base_dataset]
 
         collate_fn = None
@@ -846,6 +853,9 @@ class SpeakerVerification(pl.LightningModule):
             collate_fn=collate_fn or getattr(train_dm, '_train_collate', None) or TrainCollate(),
         )
         cache[base_dataset] = self._compute_cohort_embeddings(cohort_loader, cohort_tag=base_dataset)
+        cohort_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(cache[base_dataset], cohort_cache_path)
+        log.info(f"Saved cohort embeddings for '{base_dataset}' to: {cohort_cache_path}")
         log.info(
             f"Computed cohort embeddings for '{base_dataset}' of shape: "
             f"{cache[base_dataset].shape}"
@@ -899,6 +909,7 @@ class SpeakerVerification(pl.LightningModule):
         
     def _epoch_end_common_multi_test(self, test_filename: str) -> None:
         """Handle epoch end for a specific test set."""
+        t0 = time.perf_counter()
         # Sanitize test_filename for use in file paths (replace all path separators)
         safe_test_filename = test_filename.replace('/', '_').replace('\\', '_')
         
@@ -906,6 +917,9 @@ class SpeakerVerification(pl.LightningModule):
         enrol_embeds = test_data['enrol_embeds']
         trials_embeds = test_data['test_embeds']
         trial_results = test_data['trial_results']
+
+        log.info(f"Finalizing '{test_filename}': {len(trial_results)} batches accumulated")
+        t_build0 = time.perf_counter()
         
         # Build scores DataFrame
         scores = pd.DataFrame([
@@ -929,6 +943,7 @@ class SpeakerVerification(pl.LightningModule):
                 batch["norm_score"],
             )
         ])
+        log.info(f"Finalizing '{test_filename}': built scores DataFrame in {time.perf_counter() - t_build0:.1f}s (rows={len(scores)})")
 
         # Create a temporary metric instance for this specific test set
         temp_metric = instantiate(self.hparams.metrics.test)
@@ -939,11 +954,18 @@ class SpeakerVerification(pl.LightningModule):
         for batch in trial_results:
             all_norm_scores.extend(batch["norm_score"])
             all_labels.extend(batch["trial_label"])
-        
-        temp_metric.update(scores=torch.tensor(all_norm_scores), labels=torch.tensor(all_labels))
+
+        t_metric0 = time.perf_counter()
+        temp_metric.update(
+            scores=torch.tensor(all_norm_scores, dtype=torch.float32),
+            labels=torch.tensor(all_labels, dtype=torch.long),
+        )
+        log.info(f"Finalizing '{test_filename}': metric.update in {time.perf_counter() - t_metric0:.1f}s")
         
         # Compute metrics for this specific test set
+        t_compute0 = time.perf_counter()
         metrics = temp_metric.compute()
+        log.info(f"Finalizing '{test_filename}': metric.compute in {time.perf_counter() - t_compute0:.1f}s")
         
         # Log metrics with a clear prefix for each test set
         temp_metric_class_name = temp_metric.__class__.__name__
@@ -952,101 +974,43 @@ class SpeakerVerification(pl.LightningModule):
         batch_size = len(trial_results[0]["trial_label"]) if trial_results else 1
         self.log_dict(prefixed_metrics, batch_size=batch_size, **self.logging_params)
 
-        # Update scores DataFrame with computed metrics
-        scores.loc[:, metrics.keys()] = [v.item() if torch.is_tensor(v) else v for v in metrics.values()]
+        # Update scores DataFrame with computed metrics (optional; metrics are always saved in JSON)
+        if self.scores_csv_include_metrics:
+            scores.loc[:, metrics.keys()] = [v.item() if torch.is_tensor(v) else v for v in metrics.values()]
         
-        # Set up directory for saving test artifacts (with test set name)
-        dir_suffix = f"{safe_test_filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        artifacts_dir = os.path.join(self.trainer.default_root_dir, f"test_artifacts/{dir_suffix}")
-        os.makedirs(artifacts_dir, exist_ok=True)
+        # Set up directory for saving test artifacts
+        # Layout: test_artifacts/<test_set>/<timestamp>/...
+        run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        base_dir = self._get_test_artifacts_dir(test_filename)
+        artifacts_dir = base_dir / run_timestamp
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         # Save scores as CSV
-        scores.to_csv(os.path.join(artifacts_dir, f"{safe_test_filename}_scores.csv"), index=False)
+        t_csv0 = time.perf_counter()
+        scores.to_csv(artifacts_dir / f"{safe_test_filename}_scores.csv", index=False)
+        log.info(f"Finalizing '{test_filename}': wrote CSV in {time.perf_counter() - t_csv0:.1f}s")
         
         # Save embeddings
-        torch.save(enrol_embeds, os.path.join(artifacts_dir, f"{safe_test_filename}_enrol_embeds.pt"))
-        torch.save(trials_embeds, os.path.join(artifacts_dir, f"{safe_test_filename}_embeds.pt"))
+        t_save0 = time.perf_counter()
+        torch.save(enrol_embeds, artifacts_dir / f"{safe_test_filename}_enrol_embeds.pt")
+        torch.save(trials_embeds, artifacts_dir / f"{safe_test_filename}_embeds.pt")
         if test_data['cohort_embeddings'] is not None:
             base_dataset = test_filename.split('/')[0]
-            torch.save(test_data['cohort_embeddings'], os.path.join(artifacts_dir, f"test_cohort_embeds.pt"))
-            torch.save(test_data['cohort_embeddings'], os.path.join(artifacts_dir, f"{base_dataset}_test_cohort_embeds.pt"))
+            cache_dir = self._get_test_cache_dir(test_filename)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(test_data['cohort_embeddings'], artifacts_dir / "test_cohort_embeds.pt")
+            torch.save(test_data['cohort_embeddings'], artifacts_dir / f"{base_dataset}_test_cohort_embeds.pt")
+            torch.save(test_data['cohort_embeddings'], cache_dir / f"{base_dataset}_test_cohort_embeds_cache.pt")
+        log.info(f"Finalizing '{test_filename}': saved embeddings in {time.perf_counter() - t_save0:.1f}s")
 
-        # Plot and log figures for this test set
-        figures = temp_metric.plot_curves() or {}
-        plots_dir = os.path.join(artifacts_dir, f"{safe_test_filename}_binary_metrics_plots")
-        os.makedirs(plots_dir, exist_ok=True)
-        for name, fig in figures.items():
-            fig_path = os.path.join(plots_dir, f"{name}_scores.png")
-            # Create hierarchical logger name with test set context
-            logger_name = f"{test_filename}/binary_metrics_plots/{name}_scores"
-            self.log_figure_with_fallback(fig_path, fig, logger_name)
+        # Plotting is intentionally removed from the online evaluation path.
+        # Curves can be generated offline from the saved scores CSV/metrics JSON.
 
         # Save test metrics as a JSON file 
         metrics_for_save = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items()}
         metrics_for_save['test_set'] = test_filename  # Add test set identifier
-        with open(os.path.join(artifacts_dir, f"{safe_test_filename}_metrics.json"), "w") as f:
+        with open(artifacts_dir / f"{safe_test_filename}_metrics.json", "w") as f:
             json.dump(metrics_for_save, f, indent=4)
 
-    def log_figure_with_fallback(self, fig_path: str, fig: plt.Figure, logger_name: str) -> None:
-        """Log figure with fallback for loggers that don't support figure logging.
-        
-        Args:
-            fig_path: File path where the figure will be saved
-            fig: Matplotlib figure to log
-            logger_name: Hierarchical name for logging (e.g., "test_set/plots/roc_scores")
-        """
-        # Save figure to disk as fallback
-        fig.savefig(fig_path, dpi=300, bbox_inches='tight')
-        
-        # Convert figure to image buffer for loggers that need it
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=300, bbox_inches='tight')
-        buf.seek(0)
-        
-        if self.logger is None:
-            log.warning("No logger available for logging figures")
-            return
-        
-        # Handle either a single logger or a collection of loggers
-        loggers = self.logger.loggers if hasattr(self.logger, 'loggers') else [self.logger]
-        logged_successfully = False
-        
-        for logger in loggers:
-            try:
-                # TensorBoard logger
-                if hasattr(logger, 'experiment') and hasattr(logger.experiment, 'add_figure'):
-                    logger.experiment.add_figure(logger_name, fig, global_step=self.global_step)
-                    logged_successfully = True
-                    continue
-                    
-                # Weights & Biases logger
-                if hasattr(logger, 'experiment') and 'wandb' in str(type(logger.experiment).__module__):
-                    import wandb
-                    logger.experiment.log({logger_name: wandb.Image(fig)}, step=self.global_step)
-                    logged_successfully = True
-                    continue
-                    
-                # Neptune logger - simplified approach using file path
-                if hasattr(logger, 'experiment') and 'neptune' in str(type(logger.experiment).__module__):
-                    logger.experiment[logger_name].upload(fig)
-                    logged_successfully = True
-                    continue
-                    
-                # MLflow logger
-                if hasattr(logger, 'experiment') and hasattr(logger.experiment, 'log_figure'):
-                    logger.experiment.log_figure(logger.run_id, fig, f'{logger_name}.png')
-                    logged_successfully = True
-                    continue
-                    
-                # Logger type doesn't support figure logging
-                logger_type = type(logger).__name__
-                log.debug(f"Logger type {logger_type} doesn't support figure logging")
-                
-            except Exception as e:
-                log.warning(f"Error logging figure {logger_name} to logger {type(logger).__name__}: {str(e)}")
-        
-        if not logged_successfully:
-            log.info(f"Figure '{logger_name}' was saved to disk but couldn't be logged to any logger")
-        
-        # Always close the figure to prevent memory leaks
-        plt.close(fig)
+        log.info(f"Finalizing '{test_filename}': total finalize time {time.perf_counter() - t0:.1f}s")
+
