@@ -226,81 +226,199 @@ class VerificationMetrics(Metric):
         }
 
     def compute(self) -> Dict[str, torch.Tensor]:
-        """
-        Compute final metrics.
+        """Compute final verification metrics.
+
+        This implementation is vectorized and scales as $O(n\log n)$ (sort + cumulative sums).
+        The previous implementation iterated over ~all unique thresholds and re-scanned the
+        full score vector for each threshold, which becomes prohibitively slow for large
+        evaluation sets.
+
+        Semantics:
+        - Predictions are defined as `score > threshold` (strict).
+        - Curve points are evaluated at *tie-free* thresholds (midpoints between adjacent
+          distinct scores, plus two sentinel thresholds), so boundary equality handling is
+          naturally avoided for the main curve.
+        - If `fixed_threshold` is provided, statistics are computed exactly at that
+          threshold (with strict `>`), and it participates in minDCF selection.
         """
         scores = self.scores
         labels = self.labels
-        
+
         if scores.numel() == 0 or labels.numel() == 0:
             raise ValueError("No data to compute metrics. Please call `update` with valid inputs first.")
-        
+
         assert labels.shape == scores.shape, "Scores and labels must have the same shape"
-        assert len(labels.shape) == 1, "Scores and labels must be 1D tensors"
+        assert labels.ndim == 1, "Scores and labels must be 1D tensors"
+
+        device = scores.device
+        scores = scores.detach()
+        labels = labels.detach()
 
         pos_mask = (labels == self.positive_label)
-        pos_scores = scores[pos_mask]
-        neg_scores = scores[~pos_mask]
-        
-        if pos_scores.numel() == 0 or neg_scores.numel() == 0:
+        if pos_mask.sum() == 0 or (~pos_mask).sum() == 0:
             raise ValueError("Both positive and negative samples are required to compute verification metrics.")
-        
-        thresholds = torch.sort(torch.unique(scores))[0]
-        
-        if thresholds.numel() > 1:
-            intermediate = (thresholds[:-1] + thresholds[1:]) / 2
-            thresholds = torch.sort(torch.cat([thresholds, intermediate]))[0]
-        
-        if self.fixed_threshold is not None:
+
+        # Sort scores (descending) and align labels.
+        order = torch.argsort(scores, descending=True)
+        s = scores[order]
+        y = pos_mask[order].to(torch.float32)
+
+        P = y.sum()
+        N = (1.0 - y).sum()
+
+        # Cumulative counts for the top-k rule (k=0..n).
+        tp = torch.cat([torch.zeros(1, device=device), torch.cumsum(y, dim=0)])
+        fp = torch.cat([torch.zeros(1, device=device), torch.cumsum(1.0 - y, dim=0)])
+        fn = P - tp
+        tn = N - fp
+
+        # Build a tie-free threshold grid corresponding to each k.
+        # k=0 => threshold > max(scores) => no positives predicted
+        # k=n => threshold < min(scores) => all predicted positive
+        if s.numel() == 1:
+            thresholds = torch.stack([s[0] + 1.0, s[0] - 1.0]).to(device)
+        else:
+            mid = (s[:-1] + s[1:]) / 2.0
             thresholds = torch.cat([
-                thresholds,
-                self.fixed_threshold.unsqueeze(0).to(thresholds.device)
+                (s[:1] + 1.0),
+                mid,
+                (s[-1:] - 1.0),
             ])
-            thresholds = torch.unique(thresholds)
-            thresholds = torch.sort(thresholds)[0]
-        
+
+        eps = self.eps.to(device)
+        beta = self.beta.to(device)
+        Cfa = self.Cfa.to(device)
+        Cfr = self.Cfr.to(device)
+        P_target = self.P_target.to(device)
+
+        precision = tp / (tp + fp + eps)
+        recall = tp / (tp + fn + eps)
+        far = fp / (N + eps)
+        frr = fn / (P + eps)
+
+        f_score = ((1.0 + beta**2.0) * tp) / (
+            (1.0 + beta**2.0) * tp + beta**2.0 * fn + fp + eps
+        )
+        detection_cost = Cfa * P_target * far + Cfr * (1.0 - P_target) * frr
+
+        # Save curve data for plotting/debugging.
         self._curve_data = {
-            'threshold': [],
-            'precision': [],
-            'recall': [],
-            'far': [],
-            'frr': [],
-            'f_score': [],
-            'detection_cost': [],
-            'TP': [],
-            'FP': [],
-            'FN': [],
-            'TN': []
+            'threshold': thresholds,
+            'precision': precision,
+            'recall': recall,
+            'far': far,
+            'frr': frr,
+            'f_score': f_score,
+            'detection_cost': detection_cost,
+            'TP': tp,
+            'FP': fp,
+            'FN': fn,
+            'TN': tn,
         }
-        
-        min_dcf = torch.tensor(float('inf'), device=scores.device)
-        min_dcf_threshold = None
-        
-        for t in thresholds:
-            stats = self._compute_stats_at_threshold(scores, labels, t)
-            
-            for key in self._curve_data.keys():
-                if key in stats:
-                    self._curve_data[key].append(stats[key])
-            
-            if stats['detection_cost'] < min_dcf:
-                min_dcf = stats['detection_cost']
-                min_dcf_threshold = stats['threshold']
-        
-        # Convert lists to tensors
-        self._curve_data = {k: torch.stack(v) if v else torch.tensor([]) for k, v in self._curve_data.items()}
-        
-        eer, eer_threshold = self._compute_eer(scores, labels, thresholds)
-        
-        threshold = self.fixed_threshold if self.fixed_threshold is not None else eer_threshold
-        final_stats = self._compute_stats_at_threshold(scores, labels, threshold)
-        
-        final_stats['eer'] = eer
-        final_stats['eer_threshold'] = eer_threshold
-        final_stats['minDCF'] = min_dcf
-        final_stats['minDCF_threshold'] = min_dcf_threshold
-        
-        return final_stats
+
+        # minDCF over curve thresholds.
+        min_idx = torch.argmin(detection_cost)
+        min_dcf = detection_cost[min_idx]
+        min_dcf_threshold = thresholds[min_idx]
+
+        # EER: find crossing FAR ~= FRR on the monotonic curve (top-k sweep).
+        diff = far - frr
+        # First index where diff >= 0 (crossing point when sweeping k increasing).
+        ge0 = torch.nonzero(diff >= 0, as_tuple=False).flatten()
+        if ge0.numel() == 0:
+            eer_idx = torch.argmin(torch.abs(diff))
+            eer = (far[eer_idx] + frr[eer_idx]) / 2.0
+            eer_threshold = thresholds[eer_idx]
+        else:
+            i1 = ge0[0]
+            if i1 == 0:
+                eer = (far[i1] + frr[i1]) / 2.0
+                eer_threshold = thresholds[i1]
+            else:
+                i0 = i1 - 1
+                d0 = diff[i0]
+                d1 = diff[i1]
+                # Linear interpolation in index space.
+                alpha = d0 / (d0 - d1 + eps)
+                eer = far[i0] + alpha * (far[i1] - far[i0])
+                eer_threshold = thresholds[i0] + alpha * (thresholds[i1] - thresholds[i0])
+
+        # Final stats at the selected operating threshold.
+        if self.fixed_threshold is not None:
+            thr = self.fixed_threshold.to(device)
+            preds = (scores > thr).to(torch.float32)
+            pos = pos_mask.to(torch.float32)
+            neg = (1.0 - pos)
+            TP = (preds * pos).sum()
+            FP = (preds * neg).sum()
+            FN = ((1.0 - preds) * pos).sum()
+            TN = ((1.0 - preds) * neg).sum()
+
+            precision_f = TP / (TP + FP + eps)
+            recall_f = TP / (TP + FN + eps)
+            far_f = FP / (neg.sum() + eps)
+            frr_f = FN / (pos.sum() + eps)
+            f_score_f = ((1.0 + beta**2.0) * TP) / (
+                (1.0 + beta**2.0) * TP + beta**2.0 * FN + FP + eps
+            )
+            detection_cost_f = Cfa * P_target * far_f + Cfr * (1.0 - P_target) * frr_f
+
+            # Include fixed-threshold point in minDCF selection.
+            if detection_cost_f < min_dcf:
+                min_dcf = detection_cost_f
+                min_dcf_threshold = thr
+
+            final = {
+                'threshold': thr,
+                'TP': TP,
+                'TN': TN,
+                'FP': FP,
+                'FN': FN,
+                'precision': precision_f,
+                'recall': recall_f,
+                'far': far_f,
+                'frr': frr_f,
+                'f_score': f_score_f,
+                'detection_cost': detection_cost_f,
+            }
+        else:
+            thr = eer_threshold
+            preds = (scores > thr).to(torch.float32)
+            pos = pos_mask.to(torch.float32)
+            neg = (1.0 - pos)
+            TP = (preds * pos).sum()
+            FP = (preds * neg).sum()
+            FN = ((1.0 - preds) * pos).sum()
+            TN = ((1.0 - preds) * neg).sum()
+
+            precision_f = TP / (TP + FP + eps)
+            recall_f = TP / (TP + FN + eps)
+            far_f = FP / (neg.sum() + eps)
+            frr_f = FN / (pos.sum() + eps)
+            f_score_f = ((1.0 + beta**2.0) * TP) / (
+                (1.0 + beta**2.0) * TP + beta**2.0 * FN + FP + eps
+            )
+            detection_cost_f = Cfa * P_target * far_f + Cfr * (1.0 - P_target) * frr_f
+
+            final = {
+                'threshold': thr,
+                'TP': TP,
+                'TN': TN,
+                'FP': FP,
+                'FN': FN,
+                'precision': precision_f,
+                'recall': recall_f,
+                'far': far_f,
+                'frr': frr_f,
+                'f_score': f_score_f,
+                'detection_cost': detection_cost_f,
+            }
+
+        final['eer'] = eer
+        final['eer_threshold'] = eer_threshold
+        final['minDCF'] = min_dcf
+        final['minDCF_threshold'] = min_dcf_threshold
+        return final
 
     def plot_curves(self) -> Dict[str, plt.Figure]:
         """
@@ -309,16 +427,15 @@ class VerificationMetrics(Metric):
         Returns:
             Dictionary containing matplotlib figures for different plots
         """
-        if self._curve_data is None:
-            _ = self.compute()
-            
+        # Ensure metrics + curve data are available.
+        metrics = self.compute()
+
         # Convert tensors to numpy for plotting
         curve_data_np = {
-            k: v.detach().cpu().numpy() 
+            k: v.detach().cpu().numpy()
             for k, v in self._curve_data.items()
         }
-        
-        metrics = self.compute()
+
         metrics_np = {
             k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
             for k, v in metrics.items()
@@ -358,7 +475,7 @@ class VerificationMetrics(Metric):
         ax_det.set_ylabel('False Rejection Rate (FRR)')
         ax_det.set_title('Detection Error Tradeoff (DET) Curve')
         ax_det.grid(True, which='both', linestyle='--', alpha=0.3)
-        ax_det.legend(frameon=True, fancybox=False, edgecolor='black')
+        ax_det.legend(loc='upper right', frameon=True, fancybox=False, edgecolor='black')
         figures['det'] = fig_det
         
         # Detection Cost Curve
@@ -379,7 +496,7 @@ class VerificationMetrics(Metric):
         ax_dcf.set_xlabel('Threshold (θ)')
         ax_dcf.set_ylabel('Detection Cost')
         ax_dcf.set_title('Detection Cost Function')
-        ax_dcf.legend(frameon=True, fancybox=False, edgecolor='black')
+        ax_dcf.legend(loc='upper right', frameon=True, fancybox=False, edgecolor='black')
         ax_dcf.grid(True, linestyle='--', alpha=0.3)
         figures['dcf'] = fig_dcf
         
@@ -418,7 +535,7 @@ class VerificationMetrics(Metric):
         ax_rates.set_xlabel('Threshold (θ)')
         ax_rates.set_ylabel('Count')
         ax_rates.set_title('Classification Metrics vs Threshold')
-        ax_rates.legend(frameon=True, fancybox=False, edgecolor='black')
+        ax_rates.legend(loc='upper right', frameon=True, fancybox=False, edgecolor='black')
         ax_rates.grid(True, linestyle='--', alpha=0.3)
         figures['rates'] = fig_rates
         
