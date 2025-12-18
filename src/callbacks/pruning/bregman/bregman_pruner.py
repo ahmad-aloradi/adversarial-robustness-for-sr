@@ -211,7 +211,7 @@ class BregmanPruner(Callback):
             self._update_regularization_strength(trainer)
         
         if self.collect_metrics and (trainer.global_step > 0 and trainer.global_step % 100 == 0):
-             self._log_metrics(trainer)
+            self._log_metrics(trainer)
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
         """
@@ -219,6 +219,7 @@ class BregmanPruner(Callback):
         """
         if not self._initialized:
             return
+        
         if self.verbose > 0:
             log.info(f"Epoch {trainer.current_epoch}: Sparsity of pruned modules = {self._compute_overall_sparsity():.3%}")
 
@@ -232,7 +233,7 @@ class BregmanPruner(Callback):
         # If exists, pass the last cached sparsity ckpt on the first step after resuming
         last_sparsity = self._last_known_sparsity_from_ckpt
         if last_sparsity is not None:
-            self._last_known_sparsity_from_ckpt = None # Use only once
+            self._last_known_sparsity_from_ckpt = None # Use only once when resuming
 
         new_global_lamda = self.lambda_scheduler.step(current_sparsity, last_sparsity)
 
@@ -330,26 +331,37 @@ class BregmanPruner(Callback):
     def _setup_lambda_scheduler(self, optimizer) -> None:
         """
         Instantiates the lambda scheduler if it was passed as a partial function.
-        Also validates consistency between scheduler and regularizer configurations.
+        Also validates consistency between scheduler and regularizer configurations,
+        for per-batch updates.
         """
         if self.lambda_scheduler is None:
             log.info("No lambda scheduler configured - regularizer lamda values will remain static")
             self._validate_static_lambda_configuration(optimizer)
             return
         
-        # Instantiate the scheduler from the partial config
-        if callable(self.lambda_scheduler) and not hasattr(self.lambda_scheduler, 'step'):
+        # Scheduler can be passed as an instance (has .step) or as a Hydra partial/callable.
+        if not hasattr(self.lambda_scheduler, "step"):
+            if not callable(self.lambda_scheduler):
+                raise TypeError(
+                    "Invalid lambda_scheduler: expected an object with a 'step' method or a callable that returns one. "
+                    f"Got type={type(self.lambda_scheduler)}"
+                )
+
             try:
-                # The optimizer argument is not used by LambdaScheduler but kept for compatibility
                 self.lambda_scheduler = self.lambda_scheduler()
-                log.info(f"Lambda scheduler instantiated with target sparsity: {getattr(self.lambda_scheduler, 'target_sparsity', 'N/A')}")
             except Exception as e:
-                log.error(f"Failed to instantiate lambda scheduler: {e}")
-                self.lambda_scheduler = None
-                self._validate_static_lambda_configuration(optimizer)
-                return
-        else:
-            log.info("Lambda scheduler already instantiated.")
+                raise RuntimeError(f"Failed to instantiate lambda scheduler: {e}") from e
+
+            if not hasattr(self.lambda_scheduler, "step"):
+                raise TypeError(
+                    "Invalid lambda_scheduler instance: expected a 'step' method after instantiation. "
+                    f"Got type={type(self.lambda_scheduler)}"
+                )
+
+            log.info(
+                "Lambda scheduler instantiated with target sparsity: "
+                f"{getattr(self.lambda_scheduler, 'target_sparsity', 'N/A')}"
+            )
 
         # If we are resuming, load the state into the newly created scheduler
         if self._scheduler_state_from_ckpt:
@@ -357,7 +369,7 @@ class BregmanPruner(Callback):
                 self.lambda_scheduler.load_state(self._scheduler_state_from_ckpt)
             else:
                 log.warning("Found lambda_scheduler_state in checkpoint, but scheduler has no `load_state` method.")
-            
+
         # Validate configuration consistency
         self._validate_lambda_configuration(optimizer)
         

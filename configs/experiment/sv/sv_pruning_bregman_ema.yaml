@@ -47,6 +47,10 @@ callbacks:
       acceleration_factor: .25
       min_lambda: 1e-6
       max_lambda: 1e1 # This value caps the sparsity rate reached, may not reach target sparsity!
+      # Per-batch updates with optional EMA smoothing
+      use_ema: true
+      # EMA smoothing factor (0.0 to disable; higher = more smoothing)
+      sparsity_ema_decay: 0.8
 
 datamodule:
   dataset:
