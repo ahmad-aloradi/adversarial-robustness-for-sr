@@ -436,8 +436,13 @@ class AudioProcessor:
 
     def load_audio(self, audio_path: str) -> Tuple[torch.Tensor, int]:
         """Load audio file and return waveform and sample rate"""
-        waveform, sr = torchaudio.load(audio_path)
-        return waveform, sr
+        try:
+            waveform, sr = torchaudio.load(audio_path)
+            return waveform, sr
+        except Exception as e:
+            msg = f"Failed to load audio file: {audio_path}. Error: {e}"
+            log.error(msg)
+            raise RuntimeError(msg) from e
 
     def convert_to_mono(self, waveform: torch.Tensor) -> torch.Tensor:
         """Convert multi-channel audio to mono"""
@@ -524,12 +529,14 @@ class AudioProcessor:
             
         Raises:
             FileNotFoundError: If file doesn't exist
-            ValueError: If path is invalid
+            ValueError: If path is invalid or file is empty
         """
         try:
             path = Path(audio_path).resolve()
             if not path.is_file():
                 raise FileNotFoundError(f"Audio file not found: {path}")
+            if path.stat().st_size == 0:
+                raise ValueError(f"Audio file is empty: {path}")
             return path
         except Exception as e:
             raise ValueError(f"Invalid audio path {audio_path}: {str(e)}")
@@ -685,7 +692,13 @@ class BaseDataset(Dataset):
             Processed audio waveform tensor
         """
         # Get audio info to determine original sample rate and duration
-        info = torchaudio.info(str(audio_path))
+        try:
+            info = torchaudio.info(str(audio_path))
+        except Exception as e:
+            msg = f"Failed to get audio info for file: {audio_path}. Error: {e}"
+            log.error(msg)
+            raise RuntimeError(msg) from e
+
         sr = info.sample_rate
         total_frames = info.num_frames
 
@@ -694,8 +707,19 @@ class BaseDataset(Dataset):
         
         # Case 1: Pre-segmentation - use provided start_time and end_time
         if start_time is not None and end_time is not None:
-            frame_offset = int(start_time * sr)
-            num_frames = int((end_time - start_time) * sr)
+            # Validate against actual file length to prevent psf_fseek errors
+            start_frame = int(start_time * sr)
+            end_frame = int(end_time * sr)
+            
+            # Clamp to valid range
+            start_frame = min(start_frame, total_frames)
+            end_frame = min(end_frame, total_frames)
+            
+            frame_offset = start_frame
+            num_frames = max(0, end_frame - start_frame)
+            
+            if num_frames == 0:
+                raise RuntimeError(f"Segment {start_time}-{end_time}s is outside file boundaries (length {total_frames/sr:.2f}s)")
         
         # Case 2: Random cropping - calculate start_time and end_time randomly
         else:
@@ -710,11 +734,17 @@ class BaseDataset(Dataset):
                 num_frames = max_samples
         
         # Load the calculated segment (works for both cases)
-        waveform, sr = torchaudio.load(
-            str(audio_path),
-            frame_offset=frame_offset,
-            num_frames=num_frames
-        )
+        try:
+            waveform, sr = torchaudio.load(
+                str(audio_path),
+                frame_offset=frame_offset,
+                num_frames=num_frames
+            )
+        except Exception as e:
+            msg = f"Failed to load audio file: {audio_path}. Error: {e}"
+            log.error(msg)
+            raise RuntimeError(msg) from e
+        
         waveform = waveform.squeeze(0)  # Remove channel dimension
         
         # Resample if needed
@@ -828,7 +858,13 @@ class SimpleAudioDataset(Dataset):
 
     def __getitem__(self, idx):
         wav_path = str(self.wav_dir / self.df.iloc[idx].rel_filepath)
-        waveform, sr = torchaudio.load(wav_path)
+        try:
+            waveform, sr = torchaudio.load(wav_path)
+        except Exception as e:
+            msg = f"Failed to load audio file: {wav_path}. Error: {e}"
+            log.error(msg)
+            raise RuntimeError(msg) from e
+            
         if self.crop_len:
             waveform = waveform[:, : int(sr * self.crop_len)]
         return waveform.squeeze(0), idx

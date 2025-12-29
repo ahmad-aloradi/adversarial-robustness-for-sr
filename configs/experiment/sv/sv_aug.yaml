@@ -70,32 +70,32 @@ module:
     weight_decay: 1.0e-5
 
   ### Data for augmentation ###
-  data_augemntation:
+  data_augmentation:
 
     noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
     rir_dataset_url: https://www.dropbox.com/scl/fi/linhy77c36mu10965a836/RIRs.zip?rlkey=pg9cu8vrpn2u173vhiqyu743u&dl=1
     data_folder_rir_noises: ${paths.data_dir}/RIRS_NOISES
-    noise_annotation: ${module.data_augemntation.data_folder_rir_noises}/noise.csv
-    rir_annotation: ${module.data_augemntation.data_folder_rir_noises}/reverb.csv
+    noise_annotation: ${hydra:runtime.output_dir}/noise.csv
+    rir_annotation:  ${hydra:runtime.output_dir}/reverb.csv
 
     prepare_noise_data:
       _target_: speechbrain.augment.preparation.prepare_dataset_from_URL
-      URL: ${module.data_augemntation.noise_dataset_url}
-      dest_folder: ${module.data_augemntation.data_folder_rir_noises}/noise
+      URL: ${module.data_augmentation.noise_dataset_url}
+      dest_folder: ${module.data_augmentation.data_folder_rir_noises}/noise
       ext: wav
-      csv_file: ${module.data_augemntation.noise_annotation}
+      csv_file: ${module.data_augmentation.noise_annotation}
 
     prepare_rir_data:
       _target_: speechbrain.augment.preparation.prepare_dataset_from_URL
-      URL: ${module.data_augemntation.rir_dataset_url}
-      dest_folder: ${module.data_augemntation.data_folder_rir_noises}/rir
+      URL: ${module.data_augmentation.rir_dataset_url}
+      dest_folder: ${module.data_augmentation.data_folder_rir_noises}/rir
       ext: wav
-      csv_file: ${module.data_augemntation.rir_annotation}
+      csv_file: ${module.data_augmentation.rir_annotation}
 
     augmentations:
       add_noise:
         _target_: speechbrain.augment.time_domain.AddNoise
-        csv_file: ${module.data_augemntation.noise_annotation}
+        csv_file: ${module.data_augmentation.noise_annotation}
         snr_low: 0
         snr_high: 15
         noise_sample_rate: ${datamodule.dataset.sample_rate}
@@ -104,7 +104,7 @@ module:
 
       add_reverb:
         _target_: speechbrain.augment.time_domain.AddReverb
-        csv_file: ${module.data_augemntation.rir_annotation}
+        csv_file: ${module.data_augmentation.rir_annotation}
         reverb_sample_rate: ${datamodule.dataset.sample_rate}
         clean_sample_rate: ${datamodule.dataset.sample_rate}
         num_workers: ${datamodule.loaders.train.num_workers}
@@ -132,10 +132,10 @@ module:
         max_augmentations: 4
         augment_prob: 1.0
         augmentations:
-          - ${module.data_augemntation.augmentations.add_noise}
-          - ${module.data_augemntation.augmentations.add_reverb}
-          - ${module.data_augemntation.augmentations.drop_freq}
-          - ${module.data_augemntation.augmentations.drop_chunk}
+          - ${module.data_augmentation.augmentations.add_noise}
+          - ${module.data_augmentation.augmentations.add_reverb}
+          - ${module.data_augmentation.augmentations.drop_freq}
+          - ${module.data_augmentation.augmentations.drop_chunk}
 
 logger:
   wandb:

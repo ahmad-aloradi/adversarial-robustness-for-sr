@@ -6,7 +6,7 @@ from tqdm import tqdm
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
-from speechbrain.pretrained import EncoderClassifier
+from speechbrain.inference.classifiers import EncoderClassifier
 
 from src.datamodules.components.utils import SimpleAudioDataset
 from src import utils
