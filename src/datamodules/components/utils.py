@@ -1,7 +1,8 @@
 from operator import itemgetter
-from typing import Iterator, Optional, Tuple, List, Dict, Union
+from typing import Iterator, Optional, Tuple, List, Dict, Union, Any
 from pathlib import Path
 import random
+import json
 
 import pandas as pd
 import torch
@@ -12,9 +13,9 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.utils.rnn import pad_sequence
 
 from src.datamodules.components.common import BaseDatasetCols, DatasetItem
-from src import utils
+from src.utils.pylogger import get_pylogger
 
-log = utils.get_pylogger(__name__)
+log = get_pylogger(__name__)
 DATESET_CLS = BaseDatasetCols()
 
 ######### Processing utils #########
@@ -26,7 +27,10 @@ def segment_utterance(
     segment_duration: float,
     segment_overlap: float,
     min_segment_duration: float,
-    original_row: dict
+    original_row: dict,
+    base_start_time: float = 0.0,
+    vad_speech_timestamps: Optional[Union[str, List[Tuple[float, float]]]] = None,
+    segment_max_silence_ratio: Optional[float] = None,
 ) -> list:
     """
     Segment a single utterance into fixed-duration chunks.
@@ -78,18 +82,82 @@ def segment_utterance(
     # Build segment prefix
     segment_prefix = f"{speaker_id}_{'_'.join(unique_tokens)}" if unique_tokens else speaker_id
 
+    def _parse_speech_segments(value: Optional[Union[str, List[Tuple[float, float]]]]) -> Optional[List[Tuple[float, float]]]:
+        if value is None:
+            return None
+        if isinstance(value, list):
+            try:
+                return [(float(s), float(e)) for (s, e) in value]
+            except Exception:
+                return None
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+                if isinstance(decoded, list):
+                    return [(float(s), float(e)) for (s, e) in decoded]
+            except Exception:
+                return None
+        return None
+
+    def _speech_fraction(seg_start: float, seg_end: float, speech: List[Tuple[float, float]]) -> float:
+        if seg_end <= seg_start:
+            return 0.0
+        total = 0.0
+        for s, e in speech:
+            overlap = max(0.0, min(seg_end, e) - max(seg_start, s))
+            total += overlap
+        return total / (seg_end - seg_start)
+
+    speech_segments = _parse_speech_segments(vad_speech_timestamps)
+
     while start_time < recording_duration:
+        # Predictive tail handling: if the remaining audio is shorter than a full
+        # segment and we already have at least one segment, merge the remainder
+        # into the previous segment instead of creating a tiny final segment.
+        remaining = recording_duration - start_time
+        if segments and 0.0 < remaining < segment_duration:
+            last_seg = segments[-1]
+            last_start_abs = float(last_seg['start_time'])
+            merged_end_abs = base_start_time + recording_duration
+
+            if speech_segments is not None and segment_max_silence_ratio is not None:
+                speech_ratio = _speech_fraction(last_start_abs, merged_end_abs, speech_segments)
+                silence_ratio = 1.0 - speech_ratio
+                if silence_ratio > float(segment_max_silence_ratio):
+                    break
+
+            last_seg['end_time'] = round(merged_end_abs, 3)
+            last_seg['segment_duration'] = round(merged_end_abs - last_start_abs, 3)
+            break
+
         end_time = min(start_time + segment_duration, recording_duration)
         current_duration = end_time - start_time
         
         # Only include segments that meet minimum duration requirement
         if current_duration >= min_segment_duration:
+            start_time_abs = base_start_time + start_time
+            end_time_abs = base_start_time + end_time
+
+            if speech_segments is not None and segment_max_silence_ratio is not None:
+                speech_ratio = _speech_fraction(start_time_abs, end_time_abs, speech_segments)
+                silence_ratio = 1.0 - speech_ratio
+                if silence_ratio > float(segment_max_silence_ratio):
+                    start_time += step_size
+                    if start_time + min_segment_duration > recording_duration:
+                        break
+                    continue
+
+            segment_prefix_local = segment_prefix
+            if isinstance(original_row, dict) and original_row.get('vad_chunk_id'):
+                safe_chunk = str(original_row.get('vad_chunk_id')).replace('/', '_').replace('\\', '_')
+                segment_prefix_local = f"{segment_prefix}_{safe_chunk}"
+
             segment = {
-                'segment_id': f"{segment_prefix}_seg{segment_idx:04d}",
+                'segment_id': f"{segment_prefix_local}_seg{segment_idx:04d}",
                 'speaker_id': speaker_id,
                 'rel_filepath': rel_filepath,
-                'start_time': round(start_time, 3),
-                'end_time': round(end_time, 3),
+                'start_time': round(start_time_abs, 3),
+                'end_time': round(end_time_abs, 3),
                 'segment_duration': round(current_duration, 3),
                 'recording_duration': recording_duration,
                 **{k: v for k, v in original_row.items() if k not in ['speaker_id', 'rel_filepath', 'recording_duration']}
@@ -198,24 +266,27 @@ class CsvProcessor:
         # Concatenate all DataFrames
         combined_df = pd.concat(dfs, ignore_index=True)
         
-        # Check for duplicates based on data structure
-        # If 'segment_id' exists, check for duplicate segments (pre-segmented data)
-        # Otherwise, check for duplicate file paths (full file data)
+        # Check for duplicates based on data structure.
+        # - Pre-segmented data: unique by 'segment_id'
+        # - VAD-split file-level data: unique by 'vad_chunk_id'
+        # - Otherwise: unique by relative path
+        unique_key = None
         if 'segment_id' in combined_df.columns:
-            # Pre-segmented data: check for duplicate segment_ids
-            duplicate_counts = combined_df['segment_id'].value_counts()
+            unique_key = 'segment_id'
+        elif 'vad_chunk_id' in combined_df.columns:
+            unique_key = 'vad_chunk_id'
+
+        if unique_key is not None:
+            duplicate_counts = combined_df[unique_key].value_counts()
             duplicates = duplicate_counts[duplicate_counts > 1]
-            
             if not duplicates.empty:
-                error_msg = "Duplicate segment IDs found:\n"
-                for segment_id, count in duplicates.items():
-                    error_msg += f"- '{segment_id}' appears {count} times\n"
+                error_msg = f"Duplicate {unique_key} values found:\n"
+                for key_val, count in duplicates.items():
+                    error_msg += f"- '{key_val}' appears {count} times\n"
                 raise ValueError(error_msg)
         else:
-            # Full file data: check for duplicate relative paths
             duplicate_counts = combined_df[rel_path_col].value_counts()
             duplicates = duplicate_counts[duplicate_counts > 1]
-            
             if not duplicates.empty:
                 error_msg = "Duplicate file paths found:\n"
                 for filepath, count in duplicates.items():

@@ -15,6 +15,7 @@ from tqdm import tqdm
 from src import utils
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, LibriSpeechDefaults
 from src.datamodules.components.utils import segment_utterance
+from hydra.utils import instantiate
 from src.datamodules.preparation.base import (
     build_config_snapshot_from_mapping,
     read_hydra_config,
@@ -152,8 +153,25 @@ def process(config, delimiter, save_csv=True):
                 p.map(lambda x: get_audio_based_features(x, config['dataset_dir']), dfs[subset][DATESET_CLS.REL_FILEPATH])
                 # p.map(get_audio_based_features, dfs[subset][DATESET_CLS.REL_FILEPATH], config['dataset_dir'])
 
+        # Optional VAD (applied at file-level / before segmentation)
+        vad_cfg = config.get('vad', None)
+        subset_name = os.path.basename(str(subset))
+        vad = instantiate(vad_cfg) if vad_cfg and getattr(vad_cfg, '_target_', None) else None
+        if vad is not None and getattr(vad, 'enabled', False) and vad.should_apply(subset_name):
+            rows = dfs[subset].to_dict('records')
+            vad_rows = vad.apply(
+                rows,
+                audio_root=Path(config['dataset_dir']),
+                split_name=subset_name,
+                rel_filepath_key=DATESET_CLS.REL_FILEPATH,
+                recording_duration_key=DATESET_CLS.REC_DURATION,
+            )
+            dfs[subset] = pd.DataFrame(vad_rows)
+
         # Re-order columns such that 'text'and 'rel_filepath' are the first two columns
-        dfs[subset] = dfs[subset][DF_COLS]
+        base_cols = [c for c in DF_COLS if c in dfs[subset].columns]
+        extra_cols = [c for c in dfs[subset].columns if c not in base_cols]
+        dfs[subset] = dfs[subset][base_cols + extra_cols]
         
         # Apply segmentation if enabled in config
         if config.get('use_pre_segmentation', False) and 'train' in os.path.basename(subset):
@@ -168,7 +186,10 @@ def process(config, delimiter, save_csv=True):
                     segment_duration=config.get('segment_duration', 4.0),
                     segment_overlap=config.get('segment_overlap', 0.0),
                     min_segment_duration=config.get('min_segment_duration', 2.0),
-                    original_row=row.to_dict()
+                    original_row=row.to_dict(),
+                    base_start_time=float(row.get('vad_start', 0.0) or 0.0),
+                    vad_speech_timestamps=row.get('vad_speech_timestamps', None),
+                    segment_max_silence_ratio=float(getattr(vad, 'segment_max_silence_ratio', 0.60)) if vad is not None and getattr(vad, 'enabled', False) else None,
                 )
                 all_segments.extend(segments)
             

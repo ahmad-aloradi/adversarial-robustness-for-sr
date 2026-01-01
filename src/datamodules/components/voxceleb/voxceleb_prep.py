@@ -12,6 +12,7 @@ from dataclasses import dataclass, asdict
 from tqdm.auto import tqdm
 
 from src import utils
+from hydra.utils import instantiate
 from src.modules.components.utils import LanguagePredictionModel
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, VoxcelebDefaults
 from src.datamodules.components.utils import segment_utterance
@@ -107,7 +108,8 @@ class VoxCelebProcessor:
         use_pre_segmentation: bool = True,
         segment_duration: float = 3.0,
         segment_overlap: float = 0.0,
-    min_segment_duration: float = 0.5,
+        min_segment_duration: float = 0.5,
+        vad: Any = None,
     ):
         """
         Initialize VoxCeleb processor
@@ -159,6 +161,9 @@ class VoxCelebProcessor:
         self.segment_duration = segment_duration
         self.segment_overlap = segment_overlap
         self.min_segment_duration = min_segment_duration
+
+        # Optional VAD config (Hydra-instantiated when used)
+        self.vad_cfg = vad
 
 
     def _download_file(self, url: str, target_path: Path) -> None:
@@ -332,6 +337,20 @@ class VoxCelebProcessor:
             dev_metadata_file=self.dev_metadata_file,
         )
 
+        # Optional VAD (applied at file-level / before segmentation)
+        vad_cfg = self.vad_cfg
+        vad = instantiate(vad_cfg) if vad_cfg and getattr(vad_cfg, '_target_', None) else None
+        if vad is not None and getattr(vad, 'enabled', False) and vad.should_apply('dev'):
+            rows = dev_metadata.to_dict('records')
+            vad_rows = vad.apply(
+                rows,
+                audio_root=self.wav_dir,
+                split_name='dev',
+                rel_filepath_key='rel_filepath',
+                recording_duration_key='recording_duration',
+            )
+            dev_metadata = pd.DataFrame(vad_rows)
+
         # Apply segmentation only if enabled
         if self.use_pre_segmentation:
             if self.verbose:
@@ -351,6 +370,9 @@ class VoxCelebProcessor:
                     segment_overlap=self.segment_overlap,
                     min_segment_duration=self.min_segment_duration,
                     original_row=row.to_dict(),
+                    base_start_time=float(row.get('vad_start', 0.0) or 0.0),
+                    vad_speech_timestamps=row.get('vad_speech_timestamps', None),
+                    segment_max_silence_ratio=float(getattr(vad, 'segment_max_silence_ratio', 0.60)) if vad is not None and getattr(vad, 'enabled', False) else None,
                 )
                 all_segments.extend(segments)
 
@@ -618,6 +640,7 @@ if __name__ == "__main__":
         segment_duration=config.segment_duration,
         segment_overlap=config.segment_overlap,
         min_segment_duration=config.min_segment_duration,
+        vad=getattr(config, 'vad', None),
     )
 
     if not voxceleb_processor.dev_metadata_file.resolve().is_file():

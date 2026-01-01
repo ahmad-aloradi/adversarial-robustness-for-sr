@@ -39,6 +39,34 @@ dataset:
   # Random cropping parameter (only used if use_pre_segmentation=false)
   max_duration: 4.0  # Maximum duration for random cropping during training
 
+  # --- Optional VAD (applied at CSV level, before segmentation) ---
+  vad:
+    _target_: src.datamodules.preparation.vad.SileroCsvVad
+    enabled: false  # Master switch; when true, VAD rewrites rows via vad_start/vad_end
+    apply_to_splits: [train-clean-360, dev-clean]  # Which subsets get VAD (test is typically excluded)
+
+    # Model input/sample rate (should match your audio + pipeline expectations)
+    sample_rate: ${datamodule.dataset.sample_rate}
+
+    # Silero VAD detection knobs
+    min_speech_duration_ms: 250  # Drop detected speech bursts shorter than this (in ms)
+    min_silence_duration_ms: 100  # Silence shorter than this will not split speech segments (in ms)
+    speech_pad_ms: 30  # Expand speech segments a bit on both ends (in ms)
+
+    # Post-processing to reduce VAD glitches
+    merge_gap_s: 0.10  # Merge adjacent speech segments separated by <= this gap (seconds)
+    drop_short_speech_s: 0.20  # Drop post-merged speech segments shorter than this (seconds)
+
+    # Split a file into multiple rows if there is a long internal silence.
+    # Threshold is dynamic: clamp(duration * ratio, min_s, max_s)
+    long_silence_ratio: 0.20
+    long_silence_min_s: 0.60
+    long_silence_max_s: 2.00
+
+    # Segment-level skipping (only relevant when you also pre-segment):
+    # a segment is dropped if silence_ratio > segment_max_silence_ratio.
+    segment_max_silence_ratio: 0.80
+
 
 transforms: null
 

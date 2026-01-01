@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from src import utils
+from hydra.utils import instantiate
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, CNCelebDefaults
 from src.datamodules.components.utils import segment_utterance
 from src.datamodules.preparation.base import (
@@ -185,7 +186,8 @@ class CNCelebProcessor:
                  use_pre_segmentation: bool = True,
                  segment_duration: float = 3.0,
                  segment_overlap: float = 0.0,
-                 min_segment_duration: float = 0.5):
+                 min_segment_duration: float = 0.5,
+                 vad: Any = None):
         self.sep = sep
         self.verbose = verbose
         self.sample_rate = sample_rate
@@ -245,6 +247,9 @@ class CNCelebProcessor:
         self.segment_duration = segment_duration
         self.segment_overlap = segment_overlap
         self.min_segment_duration = min_segment_duration
+
+        # Optional VAD config (Hydra-instantiated when used)
+        self.vad_cfg = vad
     
     def _verify_sub_datasets(self):
         """Verify that the specified sub-datasets exist."""
@@ -288,6 +293,18 @@ class CNCelebProcessor:
                 assert result, f"Processing failed for: {future_to_path[future]}"
                 utterances.append(result)
 
+        # Optional VAD (applied at file-level / before segmentation)
+        vad_cfg = self.vad_cfg
+        vad = instantiate(vad_cfg) if vad_cfg and getattr(vad_cfg, '_target_', None) else None
+        if vad is not None and getattr(vad, 'enabled', False) and vad.should_apply('dev'):
+            utterances = vad.apply(
+                utterances,
+                audio_root=self.root_dir,
+                split_name='dev',
+                rel_filepath_key='rel_filepath',
+                recording_duration_key='recording_duration',
+            )
+
         # Apply segmentation only if enabled
         if self.use_pre_segmentation:
             log.info(f"Pre-segmentation enabled. Processing {len(utterances)} utterances...")
@@ -301,7 +318,10 @@ class CNCelebProcessor:
                     segment_duration=self.segment_duration,
                     segment_overlap=self.segment_overlap,
                     min_segment_duration=self.min_segment_duration,
-                    original_row=utt
+                    original_row=utt,
+                    base_start_time=float(utt.get('vad_start', 0.0) or 0.0),
+                    vad_speech_timestamps=utt.get('vad_speech_timestamps', None),
+                    segment_max_silence_ratio=float(getattr(vad, 'segment_max_silence_ratio', 0.60)) if vad is not None and getattr(vad, 'enabled', False) else None,
                 )
                 all_segments.extend(segments)
             
@@ -638,6 +658,7 @@ if __name__ == "__main__":
         segment_duration=config.segment_duration,
         segment_overlap=config.segment_overlap,
         min_segment_duration=config.min_segment_duration,
+        vad=getattr(config, 'vad', None),
     )
     
     # Run the preprocessing pipeline

@@ -83,7 +83,7 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
         log.info(f"Seed everything with <{cfg.seed}>")
         seed_everything(cfg.seed, workers=True)
 
-    # Prepare/validate (and optionally aggregate) SpeechBrain augmentation assets.
+    # Prepare augmentation assets using SpeechBrain
     prepare_speechbrain_augmentation(cfg)
 
     # Init lightning datamodule
