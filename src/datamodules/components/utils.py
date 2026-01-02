@@ -18,6 +18,48 @@ from src.utils.pylogger import get_pylogger
 log = get_pylogger(__name__)
 DATESET_CLS = BaseDatasetCols()
 
+
+def make_dataloader(
+    dataset: Dataset,
+    loader_kwargs: dict,
+    collate_fn,
+    batch_sampler_cfg=None,
+) -> "torch.utils.data.DataLoader":
+    """Create a DataLoader with optional batch_sampler (e.g. PKSpeakerBatchSampler) + DDP support.
+
+    Args:
+        dataset: The PyTorch Dataset to load from.
+        loader_kwargs: Dict of DataLoader kwargs (batch_size, shuffle, num_workers, etc.).
+        collate_fn: Collate function for the DataLoader.
+        batch_sampler_cfg: None for default batching, or a Hydra config/partial for a batch sampler.
+            If using Hydra DI, set `_partial_: true` so the sampler factory receives the dataset.
+
+    Returns:
+        A configured DataLoader.
+    """
+    from torch.utils.data import DataLoader
+
+    if batch_sampler_cfg is not None:
+        # Handle Hydra DictConfig: instantiate it (with _partial_=true it becomes a callable factory)
+        if hasattr(batch_sampler_cfg, "_target_"):
+            import hydra
+            batch_sampler_cfg = hydra.utils.instantiate(batch_sampler_cfg)
+
+        # If it's a partial/factory, call it with the dataset to get the actual sampler.
+        batch_sampler = batch_sampler_cfg(dataset) if callable(batch_sampler_cfg) else batch_sampler_cfg
+
+        # Wrap for DDP if needed (so each rank gets different batches).
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            if not isinstance(batch_sampler, DistributedSamplerWrapper):
+                batch_sampler = DistributedSamplerWrapper(batch_sampler, shuffle=False, drop_last=True)
+
+        # DataLoader cannot accept batch_size/shuffle/drop_last alongside batch_sampler.
+        kwargs = {k: v for k, v in loader_kwargs.items() if k not in ("batch_size", "shuffle", "drop_last")}
+        return DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=collate_fn, **kwargs)
+
+    return DataLoader(dataset, collate_fn=collate_fn, **loader_kwargs)
+
+
 ######### Processing utils #########
 
 def segment_utterance(
@@ -38,49 +80,55 @@ def segment_utterance(
     This is a shared utility function used across all dataset processors
     (CNCeleb, VoxCeleb, LibriSpeech) for consistent segmentation behavior.
     
+    Tail handling: If the remaining audio after the last full segment is shorter
+    than segment_duration, it is merged into the previous segment rather than
+    creating a tiny final segment. This means min_segment_duration only applies
+    to recordings shorter than segment_duration (i.e., the first/only segment).
+    
     Args:
         speaker_id: Speaker identifier
         rel_filepath: Relative file path
         recording_duration: Total duration of the recording in seconds
         segment_duration: Desired segment duration in seconds
         segment_overlap: Overlap between segments in seconds
-        min_segment_duration: Minimum duration for a segment to be included
+        min_segment_duration: Minimum duration for short recordings (< segment_duration)
+            to be included as a single segment. Has no effect on longer recordings.
         original_row: Dictionary containing other metadata fields
+        base_start_time: Offset for absolute timestamps (e.g., from VAD)
+        vad_speech_timestamps: Optional speech segments for silence filtering
+        segment_max_silence_ratio: Optional max silence ratio to filter segments
         
     Returns:
         List of dictionaries, each representing a segment
     """
-    segments = []
+    # Early exit: recording too short to be useful
+    if recording_duration < min_segment_duration:
+        return []
     
     # Calculate step size (hop) between segments
     step_size = segment_duration - segment_overlap
-    
     if step_size <= 0:
         raise ValueError(f"segment_overlap ({segment_overlap}) must be less than segment_duration ({segment_duration})")
     
-    # Generate segments
-    start_time = 0.0
-    segment_idx = 0
-    
-    # Remove extension and convert path separators to underscores
+    # Build segment ID prefix from speaker_id and filepath components
     path_no_ext = Path(rel_filepath).with_suffix('').as_posix()
     path_tokens = path_no_ext.replace('/', '_').replace('\\', '_').split('_')
-    
-    # Get speaker parts for deduplication (case-insensitive comparison)
     speaker_parts = {p.lower() for p in speaker_id.split('_')}
     
-    # Remove redundant tokens (already in speaker_id or duplicates)
     unique_tokens = []
     seen_lower = set()
     for token in path_tokens:
         token_lower = token.lower()
-        # Skip if: empty, already in speaker_id, or already seen
         if token and token_lower not in speaker_parts and token_lower not in seen_lower:
             unique_tokens.append(token)
             seen_lower.add(token_lower)
     
-    # Build segment prefix
     segment_prefix = f"{speaker_id}_{'_'.join(unique_tokens)}" if unique_tokens else speaker_id
+    
+    # Handle VAD chunk suffix if present
+    if isinstance(original_row, dict) and original_row.get('vad_chunk_id'):
+        safe_chunk = str(original_row.get('vad_chunk_id')).replace('/', '_').replace('\\', '_')
+        segment_prefix = f"{segment_prefix}_{safe_chunk}"
 
     def _parse_speech_segments(value: Optional[Union[str, List[Tuple[float, float]]]]) -> Optional[List[Tuple[float, float]]]:
         if value is None:
@@ -108,69 +156,57 @@ def segment_utterance(
             total += overlap
         return total / (seg_end - seg_start)
 
+    def _exceeds_silence_threshold(start_abs: float, end_abs: float) -> bool:
+        """Check if segment exceeds the silence ratio threshold."""
+        if speech_segments is None or segment_max_silence_ratio is None:
+            return False
+        speech_ratio = _speech_fraction(start_abs, end_abs, speech_segments)
+        return (1.0 - speech_ratio) > float(segment_max_silence_ratio)
+
     speech_segments = _parse_speech_segments(vad_speech_timestamps)
+    segments = []
+    start_time = 0.0
+    segment_idx = 0
 
     while start_time < recording_duration:
-        # Predictive tail handling: if the remaining audio is shorter than a full
-        # segment and we already have at least one segment, merge the remainder
-        # into the previous segment instead of creating a tiny final segment.
         remaining = recording_duration - start_time
-        if segments and 0.0 < remaining < segment_duration:
+        
+        # Tail merging: if remaining < segment_duration and we have previous segments,
+        # extend the last segment to cover the remainder instead of creating a short one.
+        if segments and remaining < segment_duration:
             last_seg = segments[-1]
             last_start_abs = float(last_seg['start_time'])
             merged_end_abs = base_start_time + recording_duration
-
-            if speech_segments is not None and segment_max_silence_ratio is not None:
-                speech_ratio = _speech_fraction(last_start_abs, merged_end_abs, speech_segments)
-                silence_ratio = 1.0 - speech_ratio
-                if silence_ratio > float(segment_max_silence_ratio):
-                    break
-
-            last_seg['end_time'] = round(merged_end_abs, 3)
-            last_seg['segment_duration'] = round(merged_end_abs - last_start_abs, 3)
+            
+            # Only merge if it doesn't exceed silence threshold
+            if not _exceeds_silence_threshold(last_start_abs, merged_end_abs):
+                last_seg['end_time'] = round(merged_end_abs, 3)
+                last_seg['segment_duration'] = round(merged_end_abs - last_start_abs, 3)
             break
 
+        # Calculate segment boundaries
         end_time = min(start_time + segment_duration, recording_duration)
-        current_duration = end_time - start_time
-        
-        # Only include segments that meet minimum duration requirement
-        if current_duration >= min_segment_duration:
-            start_time_abs = base_start_time + start_time
-            end_time_abs = base_start_time + end_time
+        start_time_abs = base_start_time + start_time
+        end_time_abs = base_start_time + end_time
 
-            if speech_segments is not None and segment_max_silence_ratio is not None:
-                speech_ratio = _speech_fraction(start_time_abs, end_time_abs, speech_segments)
-                silence_ratio = 1.0 - speech_ratio
-                if silence_ratio > float(segment_max_silence_ratio):
-                    start_time += step_size
-                    if start_time + min_segment_duration > recording_duration:
-                        break
-                    continue
+        # Skip segments that exceed silence threshold
+        if _exceeds_silence_threshold(start_time_abs, end_time_abs):
+            start_time += step_size
+            continue
 
-            segment_prefix_local = segment_prefix
-            if isinstance(original_row, dict) and original_row.get('vad_chunk_id'):
-                safe_chunk = str(original_row.get('vad_chunk_id')).replace('/', '_').replace('\\', '_')
-                segment_prefix_local = f"{segment_prefix}_{safe_chunk}"
-
-            segment = {
-                'segment_id': f"{segment_prefix_local}_seg{segment_idx:04d}",
-                'speaker_id': speaker_id,
-                'rel_filepath': rel_filepath,
-                'start_time': round(start_time_abs, 3),
-                'end_time': round(end_time_abs, 3),
-                'segment_duration': round(current_duration, 3),
-                'recording_duration': recording_duration,
-                **{k: v for k, v in original_row.items() if k not in ['speaker_id', 'rel_filepath', 'recording_duration']}
-            }
-            segments.append(segment)
-            segment_idx += 1
-        
-        # Move to next segment
+        segment = {
+            'segment_id': f"{segment_prefix}_seg{segment_idx:04d}",
+            'speaker_id': speaker_id,
+            'rel_filepath': rel_filepath,
+            'start_time': round(start_time_abs, 3),
+            'end_time': round(end_time_abs, 3),
+            'segment_duration': round(end_time - start_time, 3),
+            'recording_duration': recording_duration,
+            **{k: v for k, v in original_row.items() if k not in ['speaker_id', 'rel_filepath', 'recording_duration']}
+        }
+        segments.append(segment)
+        segment_idx += 1
         start_time += step_size
-        
-        # Break if we can't create another valid segment
-        if start_time + min_segment_duration > recording_duration:
-            break
     
     return segments
 
@@ -974,6 +1010,119 @@ class SimpleAudioDataset(Dataset):
         return waveforms_tensor, indices
 
 
+class PKSpeakerBatchSampler(Sampler[List[int]]):
+    """Batch sampler that yields batches with P speakers and K utterances each.
+
+    Each yielded element is a list of dataset indices of length P*K.
+
+    Notes:
+        - Requires the dataset to expose a pandas DataFrame on `dataset.dataset`
+          containing a `speaker_id` column.
+        - If a speaker has fewer than K utterances, sampling falls back to sampling
+          with replacement for that speaker.
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        num_speakers: int,
+        num_utterances: int,
+        *,
+        seed: int = 0,
+        shuffle: bool = True,
+        drop_last: bool = True,
+        batches_per_epoch: Optional[int] = None,
+        speaker_id_col: str = DATESET_CLS.SPEAKER_ID,
+    ) -> None:
+        if num_speakers <= 0:
+            raise ValueError(f"num_speakers must be > 0, got {num_speakers}")
+        if num_utterances <= 0:
+            raise ValueError(f"num_utterances must be > 0, got {num_utterances}")
+
+        self.dataset = dataset
+        self.num_speakers = int(num_speakers)
+        self.num_utterances = int(num_utterances)
+        self.seed = int(seed)
+        self.shuffle = bool(shuffle)
+        self.drop_last = bool(drop_last)
+        self.speaker_id_col = speaker_id_col
+        self.epoch = 0
+
+        self._indices_by_speaker = self._build_index()
+        self._speakers = list(self._indices_by_speaker.keys())
+        if not self._speakers:
+            raise ValueError("No speakers found for PK sampling.")
+
+        if batches_per_epoch is None:
+            batch_size = self.num_speakers * self.num_utterances
+            if batch_size <= 0:
+                raise ValueError("Invalid batch size computed for PK sampler.")
+            if self.drop_last:
+                self.batches_per_epoch = len(self.dataset) // batch_size
+            else:
+                self.batches_per_epoch = (len(self.dataset) + batch_size - 1) // batch_size
+        else:
+            self.batches_per_epoch = int(batches_per_epoch)
+
+        if self.batches_per_epoch <= 0:
+            raise ValueError(
+                "PKSpeakerBatchSampler has zero batches per epoch. "
+                "Increase dataset size, decrease P/K, or set batches_per_epoch explicitly."
+            )
+
+    def _build_index(self) -> Dict[str, List[int]]:
+        df = getattr(self.dataset, "dataset", None)
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(
+                "PKSpeakerBatchSampler requires dataset.dataset to be a pandas.DataFrame "
+                f"with a '{self.speaker_id_col}' column."
+            )
+
+        if self.speaker_id_col not in df.columns:
+            raise KeyError(
+                f"Dataset dataframe is missing speaker id column '{self.speaker_id_col}'. "
+                f"Available columns: {list(df.columns)}"
+            )
+
+        indices_by_speaker: Dict[str, List[int]] = {}
+        for idx, speaker in enumerate(df[self.speaker_id_col].astype(str).tolist()):
+            indices_by_speaker.setdefault(speaker, []).append(idx)
+        return indices_by_speaker
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __len__(self) -> int:
+        return self.batches_per_epoch
+
+    def __iter__(self) -> Iterator[List[int]]:
+        rng = random.Random(self.seed + self.epoch)
+
+        speakers = self._speakers
+        for _ in range(self.batches_per_epoch):
+            if self.shuffle:
+                if len(speakers) >= self.num_speakers:
+                    batch_speakers = rng.sample(speakers, self.num_speakers)
+                else:
+                    batch_speakers = [rng.choice(speakers) for _ in range(self.num_speakers)]
+            else:
+                # Deterministic (but still cycles if not enough speakers)
+                batch_speakers = [speakers[i % len(speakers)] for i in range(self.num_speakers)]
+
+            batch_indices: List[int] = []
+            for spk in batch_speakers:
+                pool = self._indices_by_speaker[spk]
+                if len(pool) >= self.num_utterances:
+                    chosen = rng.sample(pool, self.num_utterances) if self.shuffle else pool[: self.num_utterances]
+                else:
+                    chosen = [rng.choice(pool) for _ in range(self.num_utterances)]
+                batch_indices.extend(chosen)
+
+            if self.shuffle:
+                rng.shuffle(batch_indices)
+            yield batch_indices
+
+
 ######### Datasets utils #########
 
 class DatasetFromSampler(Dataset):
@@ -1025,6 +1174,7 @@ class DistributedSamplerWrapper(DistributedSampler):
         num_replicas: Optional[int] = None,
         rank: Optional[int] = None,
         shuffle: bool = True,
+        drop_last: bool = False,
     ):
         """
         Args:
@@ -1041,19 +1191,40 @@ class DistributedSamplerWrapper(DistributedSampler):
             num_replicas=num_replicas,
             rank=rank,
             shuffle=shuffle,
+            drop_last=drop_last,
         )
         self.sampler = sampler
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self) -> Iterator[Any]:
         """Iterate over sampler.
 
         Returns:
-            python iterator
+            Iterator over elements produced by the wrapped sampler.
         """
+        # Materialize the parent sampler's indices-of-indices so we can safely
+        # return an iterator over *elements* of the wrapped sampler.
+        #
+        # Using itemgetter(*iterable) is compact but has a sharp edge:
+        # if the iterable has length 1, itemgetter returns a single element,
+        # and iter(single_element) would iterate that element (e.g., a list of
+        # ints) instead of yielding it as one sample.
         self.dataset = DatasetFromSampler(self.sampler)
-        indexes_of_indexes = super().__iter__()
-        sub_sampler_indexes = self.dataset
-        return iter(itemgetter(*indexes_of_indexes)(sub_sampler_indexes))
+        indexes_of_indexes = list(super().__iter__())
+        return (self.dataset[i] for i in indexes_of_indexes)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set epoch for deterministic shuffling and propagate to wrapped sampler.
+
+        This is especially useful when wrapping custom samplers/batch samplers
+        (e.g., PKSpeakerBatchSampler) that implement their own `set_epoch`.
+        """
+        super().set_epoch(epoch)
+        if hasattr(self.sampler, "set_epoch"):
+            try:
+                self.sampler.set_epoch(epoch)
+            except TypeError:
+                # Some user samplers may define set_epoch without a compatible signature.
+                pass
 
 
 if __name__ == "__main__":

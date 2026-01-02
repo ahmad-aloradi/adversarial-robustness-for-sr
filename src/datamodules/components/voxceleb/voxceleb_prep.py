@@ -340,7 +340,7 @@ class VoxCelebProcessor:
         # Optional VAD (applied at file-level / before segmentation)
         vad_cfg = self.vad_cfg
         vad = instantiate(vad_cfg) if vad_cfg and getattr(vad_cfg, '_target_', None) else None
-        if vad is not None and getattr(vad, 'enabled', False) and vad.should_apply('dev'):
+        if vad is not None and vad.should_apply('dev'):
             rows = dev_metadata.to_dict('records')
             vad_rows = vad.apply(
                 rows,
@@ -372,7 +372,7 @@ class VoxCelebProcessor:
                     original_row=row.to_dict(),
                     base_start_time=float(row.get('vad_start', 0.0) or 0.0),
                     vad_speech_timestamps=row.get('vad_speech_timestamps', None),
-                    segment_max_silence_ratio=float(getattr(vad, 'segment_max_silence_ratio', 0.60)) if vad is not None and getattr(vad, 'enabled', False) else None,
+                    segment_max_silence_ratio=float(getattr(vad, 'segment_max_silence_ratio', 0.80)) if vad is not None and vad.enabled else None,
                 )
                 all_segments.extend(segments)
 

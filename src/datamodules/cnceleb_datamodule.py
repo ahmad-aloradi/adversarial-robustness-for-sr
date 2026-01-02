@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 
 from pytorch_lightning import LightningDataModule
@@ -19,7 +19,7 @@ from src.datamodules.components.cnceleb.cnceleb_dataset import (
 )
 
 from src import utils
-from src.datamodules.components.utils import CsvProcessor
+from src.datamodules.components.utils import CsvProcessor, make_dataloader
 from src.datamodules.components.common import CNCelebDefaults, get_dataset_class
 from src.datamodules.preparation.cnceleb import CNCelebMetadataPreparer
 
@@ -93,7 +93,7 @@ class CNCelebDataModule(LightningDataModule):
                 data_dir=self.hparams.dataset.data_dir,
                 data_filepath=self.hparams.dataset.train_csv_file,
                 sample_rate=self.hparams.dataset.sample_rate,
-                max_duration=-max_duration,
+                max_duration=max_duration,
                 sep=self.hparams.dataset.get('sep', '|')
             )
             self.val_data = CNCelebDataset(
@@ -133,7 +133,12 @@ class CNCelebDataModule(LightningDataModule):
 
     def train_dataloader(self):
         assert self.hparams.get('loaders') is not None, "CNCelebDataModule requires 'loaders' config"
-        return DataLoader(self.train_data, **self.hparams.loaders.train, collate_fn=TrainCollate())
+        return make_dataloader(
+            dataset=self.train_data,
+            loader_kwargs=dict(self.hparams.loaders.train),
+            collate_fn=TrainCollate(),
+            batch_sampler_cfg=self.hparams.dataset.get("batch_sampler", None),
+        )
 
     def val_dataloader(self):
         assert self.hparams.get('loaders') is not None, "CNCelebDataModule requires 'loaders' config"

@@ -49,13 +49,13 @@ dataset:
     sample_rate: ${datamodule.dataset.sample_rate}
 
     # Silero VAD detection knobs
-    min_speech_duration_ms: 250  # Drop detected speech bursts shorter than this (in ms)
-    min_silence_duration_ms: 100  # Silence shorter than this will not split speech segments (in ms)
-    speech_pad_ms: 30  # Expand speech segments a bit on both ends (in ms)
+    min_speech_duration_ms: 100  # Drop detected speech bursts shorter than this (in ms)
+    min_silence_duration_ms: 300  # Silence shorter than this will not split speech segments (in ms)
+    speech_pad_ms: 60  # Expand speech segments a bit on both ends (in ms)
 
     # Post-processing to reduce VAD glitches
-    merge_gap_s: 0.10  # Merge adjacent speech segments separated by <= this gap (seconds)
-    drop_short_speech_s: 0.20  # Drop post-merged speech segments shorter than this (seconds)
+    merge_gap_s: 0.20  # Merge adjacent speech segments separated by <= this gap (seconds)
+    drop_short_speech_s: 0.10  # Drop post-merged speech segments shorter than this (seconds)
 
     # Split a file into multiple rows if there is a long internal silence.
     # Threshold is dynamic: clamp(duration * ratio, min_s, max_s)
@@ -65,7 +65,10 @@ dataset:
 
     # Segment-level skipping (only relevant when you also pre-segment):
     # a segment is dropped if silence_ratio > segment_max_silence_ratio.
-    segment_max_silence_ratio: 0.80
+    segment_max_silence_ratio: 0.90
+
+  # Set to null for default DataLoader batching.
+  batch_sampler: null
 
 
 transforms: null

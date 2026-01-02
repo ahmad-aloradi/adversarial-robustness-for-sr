@@ -14,7 +14,7 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
     VoxCelebEnroll,
     EnrollCoallate)
 from src import utils
-from src.datamodules.components.utils import CsvProcessor
+from src.datamodules.components.utils import CsvProcessor, make_dataloader
 from src.datamodules.components.common import VoxcelebDefaults, get_dataset_class
 from src.datamodules.preparation.voxceleb import VoxCelebMetadataPreparer, _extract_enroll_test
 
@@ -140,10 +140,11 @@ class VoxCelebDataModule(LightningDataModule):
 
     def train_dataloader(self):
         assert self.hparams.get('loaders') is not None, "VoxCelebDataModule requires 'loaders' config"
-        return DataLoader(
-            self.train_data,
-            **self.hparams.loaders.train,
-            collate_fn=TrainCollate()
+        return make_dataloader(
+            dataset=self.train_data,
+            loader_kwargs=dict(self.hparams.loaders.train),
+            collate_fn=TrainCollate(),
+            batch_sampler_cfg=self.hparams.dataset.get("batch_sampler", None),
         )
 
     def val_dataloader(self):
