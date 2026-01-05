@@ -157,18 +157,21 @@ def _process_file(
         wav = _worker_read_audio(str(audio_path), sampling_rate=_worker_sample_rate)
         
         with torch.no_grad():
-            speech = _worker_get_speech_timestamps(
+            speech_timestamps = _worker_get_speech_timestamps(
                 wav,
                 _worker_model,
                 sampling_rate=_worker_sample_rate,
                 min_speech_duration_ms=min_speech_ms,
                 min_silence_duration_ms=min_silence_ms,
                 speech_pad_ms=speech_pad_ms,
+                return_seconds=True,
             )
         
-        # Convert to seconds (pre-compute inverse for efficiency)
-        sr_inv = 1.0 / _worker_sample_rate
-        raw = [(seg["start"] * sr_inv, seg["end"] * sr_inv) for seg in speech if seg["end"] > seg["start"]]
+        # [{'start': 0.4, 'end': 2.1}, {'start': 2.9, 'end': 3.3}] -> [(0.4, 2.1), (2.9, 3.3)]
+        raw = [
+            (float(seg["start"]), float(seg["end"])) for seg in speech_timestamps
+            if float(seg["end"]) > float(seg["start"])
+            ]
         
         # Post-process and split on long silences
         fixed = _postprocess_segments(raw, duration_s, merge_gap_s, drop_short_s)
@@ -212,7 +215,7 @@ class SileroCsvVad:
     @staticmethod
     def _compute_speaker_stats(
         input_rows: List[Dict[str, Any]],
-        out_rows: List[Dict[str, Any]],
+        output_rows: List[Dict[str, Any]],
         skipped: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Compute speaker-level exclusion statistics. This is relevant in case some 
@@ -226,7 +229,7 @@ class SileroCsvVad:
         
         # Count files per speaker in output
         speakers_after: Dict[str, int] = {}
-        for r in out_rows:
+        for r in output_rows:
             spk = str(r.get("speaker_id", "unknown"))
             speakers_after[spk] = speakers_after.get(spk, 0) + 1
         
@@ -242,7 +245,7 @@ class SileroCsvVad:
         for s in skipped:
             spk = s.get("speaker_id", "unknown")
             if spk not in skipped_speaker_stats:
-                total_files_for_spk = speakers_before.get(spk, 1)
+                total_files_for_spk = speakers_before.get(spk, 0)
                 skipped_files_for_spk = sum(1 for x in skipped if x.get("speaker_id") == spk)
                 skipped_speaker_stats[spk] = {
                     "total_files": total_files_for_spk,
@@ -286,7 +289,6 @@ class SileroCsvVad:
         total_seconds_after = sum(float(r.get(recording_duration_key, 0.0)) for r in output_rows) if output_rows else 0.0
         skip_pct = len(skipped) / total_files * 100 if total_files else 0
         reduction_pct = (1 - total_seconds_after / total_seconds_before) * 100 if total_seconds_before else 0
-        num_output_segments = len(output_rows)
 
         # Write skip list
         if skip_list_path:
@@ -313,8 +315,11 @@ class SileroCsvVad:
                 for s in skipped:
                     spk = s.get("speaker_id", "unknown")
                     stats = skipped_speaker_stats.get(spk, {})
+                    rel = s.get("rel_filepath", "unknown")
+                    dur = s.get("duration_s", 0)
+                    err = s.get("error", "")
                     lines.append(
-                        f"{s['rel_filepath']},{spk},{s.get('duration_s', 0)},{stats.get('skip_pct', 0):.1f},{stats.get('fully_excluded', False)},{s.get('error', '')}"
+                        f"{rel},{spk},{dur},{stats.get('skip_pct', 0):.1f},{stats.get('fully_excluded', False)},{err}"
                     )
                 
                 skip_list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -323,7 +328,7 @@ class SileroCsvVad:
                 log.exception(f"Failed to write skip list: {e}")
 
         # Log summary including speaker statistics
-        log.info(f"VAD complete: {num_output_segments} segments from {total_files - len(skipped)} files, "
+        log.info(f"VAD complete: {len(output_rows)} segments from {total_files - len(skipped)} files, "
                  f"skipped {len(skipped)} ({skip_pct:.1f}%), "
                  f"reduced {total_seconds_before/60:.1f} \u2192 {total_seconds_after/60:.1f} min ({reduction_pct:.1f}%)")
         log.info(f"Speaker stats: {num_speakers_before} \u2192 {num_speakers_after} speakers "
@@ -462,7 +467,11 @@ class SileroCsvVad:
                     skipped.append(skipped_info)
 
         # Compute speaker-level exclusion statistics
-        speaker_stats = self._compute_speaker_stats(input_rows=rows, output_rows=out, skipped=skipped)
+        speaker_stats = self._compute_speaker_stats(
+            input_rows=rows,
+            output_rows=out,
+            skipped=skipped
+            )
 
         # Write skip list and log summary
         self._write_skip_list_and_log(
