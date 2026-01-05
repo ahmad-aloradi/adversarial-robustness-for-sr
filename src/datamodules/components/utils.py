@@ -125,10 +125,15 @@ def segment_utterance(
     
     segment_prefix = f"{speaker_id}_{'_'.join(unique_tokens)}" if unique_tokens else speaker_id
     
-    # Handle VAD chunk suffix if present
+    # Handle VAD chunk suffix if present - extract just the vad index (e.g., 'vad00')
     if isinstance(original_row, dict) and original_row.get('vad_chunk_id'):
-        safe_chunk = str(original_row.get('vad_chunk_id')).replace('/', '_').replace('\\', '_')
-        segment_prefix = f"{segment_prefix}_{safe_chunk}"
+        vad_chunk_id = str(original_row.get('vad_chunk_id'))
+        # Extract just the vad index after '::' (e.g., 'path/to/file.flac::vad00' -> 'vad00')
+        if '::' in vad_chunk_id:
+            vad_suffix = vad_chunk_id.split('::')[-1]
+        else:
+            vad_suffix = vad_chunk_id.replace('/', '_').replace('\\', '_')
+        segment_prefix = f"{segment_prefix}::{vad_suffix}"
 
     def _parse_speech_segments(value: Optional[Union[str, List[Tuple[float, float]]]]) -> Optional[List[Tuple[float, float]]]:
         if value is None:
@@ -202,7 +207,11 @@ def segment_utterance(
             'end_time': round(end_time_abs, 3),
             'segment_duration': round(end_time - start_time, 3),
             'recording_duration': recording_duration,
-            **{k: v for k, v in original_row.items() if k not in ['speaker_id', 'rel_filepath', 'recording_duration']}
+            **{
+                k: v for k, v in original_row.items() if k not in [
+                    'speaker_id', 'rel_filepath', 'recording_duration',
+                    'vad_chunk_id', 'vad_speech_timestamps']  # Exclude redundant VAD fields
+                }
         }
         segments.append(segment)
         segment_idx += 1

@@ -348,6 +348,7 @@ class VoxCelebProcessor:
                 split_name='dev',
                 rel_filepath_key='rel_filepath',
                 recording_duration_key='recording_duration',
+                skip_list_path=self.artifcats_dir / f"vad_skipped_dev.txt",
             )
             dev_metadata = pd.DataFrame(vad_rows)
 

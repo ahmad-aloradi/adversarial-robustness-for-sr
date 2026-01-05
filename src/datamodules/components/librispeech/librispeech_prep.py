@@ -165,6 +165,7 @@ def process(config, delimiter, save_csv=True):
                 split_name=subset_name,
                 rel_filepath_key=DATESET_CLS.REL_FILEPATH,
                 recording_duration_key=DATESET_CLS.REC_DURATION,
+                skip_list_path=(Path(config['artifacts_dir']) / f"vad_skipped_{subset_name}.txt"),
             )
             dfs[subset] = pd.DataFrame(vad_rows)
 
