@@ -25,8 +25,8 @@ dataset:
   test_spk_file: ${datamodule.dataset.artifacts_dir}/test_speakers.txt
 
   # --- Data Preparation Settings ---
-  train_ratio: 0.95
-  speaker_overlap: false
+  train_ratio: 0.9
+  speaker_overlap: true
   seed: ${seed}
   sep: "|"
   verbose: true
@@ -39,9 +39,9 @@ dataset:
   use_pre_segmentation: true
   
   # Segmentation parameters (only used if use_pre_segmentation=true)
-  segment_duration: 3.0  # Duration of each segment in seconds
+  segment_duration: 5.0  # Duration of each segment in seconds
   segment_overlap: 0.0  # Overlap between segments in seconds (0.0 = non-overlapping)
-  min_segment_duration: 1.0  # Minimum segment duration to be included
+  min_segment_duration: 2.0  # Minimum segment duration to be included
 
   # Random cropping parameter (only used if use_pre_segmentation=false)
   max_duration: 4.0  # Maximum duration for random cropping during training

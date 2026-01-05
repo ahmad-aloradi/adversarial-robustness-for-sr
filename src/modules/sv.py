@@ -673,6 +673,18 @@ class SpeakerVerification(pl.LightningModule):
         return True
 
     def _compute_embeddings(self, dataloader, mode: str = 'test') -> dict:
+        """Compute embeddings for test or enrollment data.
+        
+        For enrollment mode with CNCeleb multi-utterance enrollments, this method
+        aggregates embeddings per enroll_id using mean pooling.
+        
+        Args:
+            dataloader: DataLoader yielding batches
+            mode: 'test' or 'enrollment'
+            
+        Returns:
+            Dictionary mapping path/enroll_id to embedding tensor
+        """
         embeddings_dict = {}
         desc = f"Computing {mode} embeddings"
 
@@ -684,7 +696,18 @@ class SpeakerVerification(pl.LightningModule):
                 if len(embed.shape) == 3:  # [B, num_frames, embedding_dim]
                     embed = embed.mean(dim=1)  # [B, embedding_dim]
 
-                embeddings_dict.update({path: emb for path, emb in zip(batch.audio_path, embed)})
+                # Check if this is a multi-utterance enrollment batch (CNCeleb)
+                if mode == 'enrollment' and hasattr(batch, 'utt_counts') and batch.utt_counts is not None:
+                    # Aggregate embeddings per enroll_id using mean pooling
+                    idx = 0
+                    for enroll_id, count in zip(batch.enroll_id, batch.utt_counts):
+                        utt_embeds = embed[idx:idx + count]  # [count, embed_dim]
+                        aggregated_embed = utt_embeds.mean(dim=0)  # [embed_dim]
+                        embeddings_dict[enroll_id] = aggregated_embed
+                        idx += count
+                else:
+                    # Standard single-utterance handling (test mode or VoxCeleb)
+                    embeddings_dict.update({path: emb for path, emb in zip(batch.audio_path, embed)})
 
         return embeddings_dict
 
@@ -785,13 +808,29 @@ class SpeakerVerification(pl.LightningModule):
         return batch
         
     def _trials_eval_step_multi_test(self, batch: VoxCelebVerificationItem, test_data: Dict):
-        """Evaluation step for a specific test set."""
+        """Evaluation step for a specific test set.
+        
+        For CNCeleb, enrollment embeddings are keyed by enroll_id (aggregated from
+        multiple utterances). For VoxCeleb, they are keyed by enroll_path.
+        """
         embeds = test_data['test_embeds']
         enrol_embeds = test_data['enrol_embeds']
         cohort_embeddings = test_data['cohort_embeddings']
         
         trial_embeddings = torch.stack([embeds[path] for path in batch.test_path])
-        enroll_embeddings = torch.stack([enrol_embeds[path] for path in batch.enroll_path])
+        
+        # Determine whether to look up by enroll_id or enroll_path
+        # CNCeleb uses enroll_id (aggregated multi-utterance), VoxCeleb uses enroll_path
+        if hasattr(batch, 'enroll_id') and batch.enroll_id[0] is not None:
+            # Check if enrol_embeds is keyed by enroll_id
+            sample_key = batch.enroll_id[0]
+            if sample_key in enrol_embeds:
+                enroll_embeddings = torch.stack([enrol_embeds[eid] for eid in batch.enroll_id])
+            else:
+                # Fallback to enroll_path for backward compatibility
+                enroll_embeddings = torch.stack([enrol_embeds[path] for path in batch.enroll_path])
+        else:
+            enroll_embeddings = torch.stack([enrol_embeds[path] for path in batch.enroll_path])
 
         # Compute raw cosine similarity scores
         raw_scores = torch.nn.functional.cosine_similarity(enroll_embeddings, trial_embeddings)

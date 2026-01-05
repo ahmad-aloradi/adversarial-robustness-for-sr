@@ -1,4 +1,4 @@
-from typing import Dict, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -56,21 +56,30 @@ class CNCelebItem(DatasetItem):
 
 @dataclass
 class CNCelebEnrollSample:
-    """Single enrollment sample before collation."""
-    audio: torch.Tensor
-    audio_length: int
+    """Single enrollment sample before collation.
+    
+    For CNCeleb, each enrollment ID may have multiple utterances (from map_path).
+    This sample contains all utterances for a single enroll_id.
+    """
+    audios: List[torch.Tensor]  # List of audio tensors for this enrollment
+    audio_lengths: List[int]  # Length of each audio
     enroll_id: str
-    enroll_path: str
+    audio_paths: List[str]  # Paths to each utterance
     sample_rate: int
 
 
 @dataclass
 class CNCelebEnrollBatch:
-    """Batched enrollment data consumed by the model."""
-    audio: torch.Tensor
-    audio_length: torch.Tensor
-    audio_path: Tuple[str, ...]
-    enroll_id: Tuple[str, ...]
+    """Batched enrollment data consumed by the model.
+    
+    For CNCeleb multi-enrollment, audio contains all utterances flattened,
+    with utt_counts indicating how many utterances belong to each enroll_id.
+    """
+    audio: torch.Tensor  # [total_utterances, max_length] - all utterances flattened
+    audio_length: torch.Tensor  # [total_utterances] - length of each utterance
+    audio_path: Tuple[str, ...]  # Paths for all utterances (flattened)
+    enroll_id: Tuple[str, ...]  # Enrollment IDs (one per enrollment, not per utterance)
+    utt_counts: Tuple[int, ...]  # Number of utterances per enrollment ID
     sample_rate: int
 
 
@@ -136,7 +145,11 @@ class VerificationCollate(BaseCollate):
 
 
 class EnrollCollate(BaseCollate):
-    """Collate function for enrollment data"""
+    """Collate function for enrollment data with multi-utterance support.
+    
+    Flattens all utterances across enrollments into a single batch for efficient
+    embedding computation, while preserving the grouping information via utt_counts.
+    """
     def __init__(self, pad_value=0):
         super().__init__(pad_value)
 
@@ -144,15 +157,30 @@ class EnrollCollate(BaseCollate):
         if not batch:
             raise ValueError("CNCeleb enrollment batch is empty.")
 
-        audios = [item.audio for item in batch]
-        lengths = torch.tensor([item.audio_length for item in batch], dtype=torch.long)
-        padded_audios = pad_sequence(audios, batch_first=True, padding_value=self.pad_value)
+        # Flatten all utterances across all enrollments
+        all_audios = []
+        all_lengths = []
+        all_paths = []
+        enroll_ids = []
+        utt_counts = []
+        
+        for item in batch:
+            enroll_ids.append(item.enroll_id)
+            utt_counts.append(len(item.audios))
+            for audio, length, path in zip(item.audios, item.audio_lengths, item.audio_paths):
+                all_audios.append(audio)
+                all_lengths.append(length)
+                all_paths.append(path)
+        
+        lengths = torch.tensor(all_lengths, dtype=torch.long)
+        padded_audios = pad_sequence(all_audios, batch_first=True, padding_value=self.pad_value)
 
         return CNCelebEnrollBatch(
             audio=padded_audios,
             audio_length=lengths,
-            audio_path=tuple(item.enroll_path for item in batch),
-            enroll_id=tuple(item.enroll_id for item in batch),
+            audio_path=tuple(all_paths),
+            enroll_id=tuple(enroll_ids),
+            utt_counts=tuple(utt_counts),
             sample_rate=batch[0].sample_rate,
         )
 
@@ -306,7 +334,10 @@ class CNCelebVerificationDataset(Dataset):
 class CNCelebEnroll(Dataset):    
     """
     Dataset for loading enrollment files for embedding extraction.
-    This is used to pre-compute enrollment embeddings.
+    
+    For CNCeleb, each enrollment ID has multiple utterances listed in map_path.
+    This dataset loads ALL utterances for each enroll_id to enable proper
+    multi-enrollment aggregation (averaging) as per the CNCeleb protocol.
     """
     def __init__(
         self,
@@ -322,7 +353,13 @@ class CNCelebEnroll(Dataset):
         
         # Load enrollment mappings
         self.enroll_df = df
-        log.info(f"Loaded {len(self.enroll_df)} enrollment file mappings")
+        
+        # Count total utterances for logging
+        total_utterances = sum(
+            len(paths) if isinstance(paths, list) else 1 
+            for paths in self.enroll_df['map_path']
+        )
+        log.info(f"Loaded {len(self.enroll_df)} enrollment IDs with {total_utterances} total utterances")
         
     def __len__(self):
         return len(self.enroll_df)
@@ -330,17 +367,30 @@ class CNCelebEnroll(Dataset):
     def __getitem__(self, idx) -> CNCelebEnrollSample:
         row = self.enroll_df.iloc[idx]
         enroll_id = row['enroll_id']
-        enroll_path = row['enroll_path']
         
-        # Load enrollment audio
-        audio_path = self.data_dir / enroll_path
-        audio, _ = self.audio_processor.process_audio(str(audio_path))
+        # Get utterance paths from map_path (list of paths for this enrollment)
+        map_paths = row['map_path']
+        if not isinstance(map_paths, list):
+            # Fallback: if map_path wasn't parsed as list, use enroll_path
+            map_paths = [row['enroll_path']]
+        
+        # Load all utterances for this enrollment
+        audios = []
+        audio_lengths = []
+        audio_paths = []
+        
+        for utt_path in map_paths:
+            audio_path = self.data_dir / utt_path
+            audio, _ = self.audio_processor.process_audio(str(audio_path))
+            audios.append(audio)
+            audio_lengths.append(len(audio))
+            audio_paths.append(utt_path)
         
         return CNCelebEnrollSample(
-            audio=audio,
-            audio_length=len(audio),
+            audios=audios,
+            audio_lengths=audio_lengths,
             enroll_id=enroll_id,
-            enroll_path=enroll_path,
+            audio_paths=audio_paths,
             sample_rate=self.sample_rate,
         )
 
