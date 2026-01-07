@@ -36,8 +36,8 @@ callbacks:
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-30
-    collect_metrics: true
     verbose: 2
+    console_log_frequency: 1e5  # Frequency for console output (verbose >= 2)
     # Global lambda scheduler configuration.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler

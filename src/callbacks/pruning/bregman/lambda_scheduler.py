@@ -1,3 +1,5 @@
+import math
+from numbers import Real
 from typing import Optional
 from src import utils
 
@@ -25,8 +27,8 @@ class LambdaScheduler:
         Minimum lambda value
     max_lambda : float, default=1e3
         Maximum lambda value
-    sparsity_ema_decay : float, default=0.9
-        Decay factor for exponential moving average of sparsity readings.
+    ema_decay_factor : float, default=0.9
+        EMA coefficient $\beta$ for sparsity smoothing.
         Higher values = more smoothing. Set to 0.0 to disable EMA.
     use_ema : bool, default=True
         Whether to use EMA-smoothed sparsity for lambda updates.
@@ -39,9 +41,20 @@ class LambdaScheduler:
         acceleration_factor: float = 0.25,
         min_lambda: float = 1e-6,
         max_lambda: float = 1e3,
-        sparsity_ema_decay: float = 0.9,
+        ema_decay_factor: float = 0.9,
         use_ema: bool = True,
     ):
+        if not (0.0 < target_sparsity <= 1.0):
+            raise ValueError(f"target_sparsity must be in (0.0, 1.0], got {target_sparsity}")
+        if acceleration_factor < 0.0:
+            raise ValueError(f"acceleration_factor must be >= 0.0, got {acceleration_factor}")
+        if min_lambda <= 0.0:
+            raise ValueError(f"min_lambda must be > 0.0, got {min_lambda}")
+        if max_lambda < min_lambda:
+            raise ValueError(f"max_lambda must be >= min_lambda, got max_lambda={max_lambda}, min_lambda={min_lambda}")
+        if not (min_lambda <= initial_lambda <= max_lambda):
+            raise ValueError(f"initial_lambda must be between min_lambda and max_lambda, got {initial_lambda}")
+
         self.lambda_value = initial_lambda
         self.target_sparsity = target_sparsity
         self.acceleration_factor = acceleration_factor
@@ -50,14 +63,15 @@ class LambdaScheduler:
         
         # EMA smoothing for sparsity
         self.use_ema = use_ema
-        self.sparsity_ema_decay = sparsity_ema_decay
-        if self.use_ema and self.sparsity_ema_decay <= 0.0:
-            log.warning(
-                "sparsity_ema_decay <= 0.0 with use_ema=True disables EMA smoothing."
-            )
-        self._sparsity_ema: Optional[float] = None
-        self._last_sparsity: Optional[float] = None
+        self.ema_decay_factor = float(ema_decay_factor)
 
+        if not (0.0 <= self.ema_decay_factor <= 1.0):
+            raise ValueError(f"ema_decay_factor must be in [0.0, 1.0], got {self.ema_decay_factor}")
+        if self.use_ema and self.ema_decay_factor <= 0.0:
+            log.warning(
+                "ema_decay_factor <= 0.0 with use_ema=True disables EMA smoothing."
+            )
+        self._ema_smoothed_sparsity: Optional[float] = None
 
     def step(
         self,
@@ -84,31 +98,27 @@ class LambdaScheduler:
         """
         # If resuming from a checkpoint, use provided last_sparsity
         if last_sparsity is not None:
-            self._last_sparsity = last_sparsity
-            self._sparsity_ema = last_sparsity
+            self._validate_sparsity(last_sparsity)
+            self._ema_smoothed_sparsity = float(last_sparsity)
 
-        # Handle spurious zero readings
-        effective_sparsity = self._get_sparsity(current_sparsity)
+        self._validate_sparsity(current_sparsity)
         
         # Update EMA (if enabled)
-        if self.use_ema and self.sparsity_ema_decay > 0.0:
-            if self._sparsity_ema is None:
-                self._sparsity_ema = effective_sparsity
+        if self.use_ema and self.ema_decay_factor > 0.0:
+            if self._ema_smoothed_sparsity is None:
+                self._ema_smoothed_sparsity = float(current_sparsity)
             else:
-                self._sparsity_ema = (
-                    self.sparsity_ema_decay * self._sparsity_ema
-                    + (1 - self.sparsity_ema_decay) * effective_sparsity
+                self._ema_smoothed_sparsity = (
+                    self.ema_decay_factor * self._ema_smoothed_sparsity
+                    + (1 - self.ema_decay_factor) * float(current_sparsity)
                 )
         else:
-            # Keep EMA state consistent for logging/inspection.
-            self._sparsity_ema = effective_sparsity
+            self._ema_smoothed_sparsity = float(current_sparsity)
         
-        # Store valid sparsity reading
-        if current_sparsity > 0.0:
-            self._last_sparsity = current_sparsity
-
-        # Choose sparsity signal for lambda update
-        sparsity_signal = self._sparsity_ema if (self.use_ema and self._sparsity_ema is not None) else effective_sparsity
+        # After the update above, _ema_smoothed_sparsity is always the signal we want:
+        # - if EMA enabled: EMA-smoothed sparsity
+        # - else: current sparsity (stored into _ema_smoothed_sparsity)
+        sparsity_signal = self._ema_smoothed_sparsity
         sparsity_difference = sparsity_signal - self.target_sparsity
 
         # Update lambda based on smoothed sparsity
@@ -124,65 +134,60 @@ class LambdaScheduler:
         
         return self.lambda_value
 
-    def _get_sparsity(self, current_sparsity: float) -> float:
+    def _validate_sparsity(self, current_sparsity: float) -> None:
+        """Validate a sparsity reading. In Bregman context, sparsity is expected to be strictly positive
+        Expected domain: a finite float in (0.0, 1.0].
         """
-        Get model sparsity with safety mechanism for spurious zeros.
-
-        Parameters
-        ----------
-        current_sparsity : float
-            Raw sparsity reading
-
-        Returns
-        -------
-        float
-            Effective sparsity after safety check
-        """
-        # If current reading is exactly 0.0 and we have a valid last reading,
-        # use the last reading to avoid spurious zeros
-        if current_sparsity == 0.0 and self._last_sparsity is not None:
-            log.warning(
-                f"Spurious zero sparsity detected, using last valid reading: "
-                f"{self._last_sparsity:.4f}"
+        if not isinstance(current_sparsity, Real):
+            raise TypeError(f"current_sparsity must be a real number, got {type(current_sparsity)}")
+        current_sparsity = float(current_sparsity)
+        if not math.isfinite(current_sparsity):
+            raise ValueError(f"current_sparsity must be finite, got {current_sparsity}")
+        if current_sparsity <= 0.0 or current_sparsity > 1.0:
+            raise ValueError(
+                f"current_sparsity must be in (0.0, 1.0], got {current_sparsity}. "
+                "In Bregman framework we expect the model to start sparse (sparsity > 0)."
             )
-            return self._last_sparsity
-
-        return current_sparsity
 
     def get_lambda(self) -> float:
         """Get current lambda value."""
         return self.lambda_value
     
-    def get_smoothed_sparsity(self) -> Optional[float]:
+    def get_ema_smoothed_sparsity(self) -> Optional[float]:
         """Get current EMA-smoothed sparsity value."""
-        return self._sparsity_ema
+        return self._ema_smoothed_sparsity
 
     def get_state(self) -> dict:
         """Get scheduler state for checkpointing."""
         return {
             'lambda_value': self.lambda_value,
             'target_sparsity': self.target_sparsity,
-            '_last_sparsity': self._last_sparsity,
-            '_sparsity_ema': self._sparsity_ema,
+            '_ema_smoothed_sparsity': self._ema_smoothed_sparsity,
             'acceleration_factor': self.acceleration_factor,
             'min_lambda': self.min_lambda,
             'max_lambda': self.max_lambda,
             'use_ema': self.use_ema,
-            'sparsity_ema_decay': self.sparsity_ema_decay,
+            'ema_decay_factor': self.ema_decay_factor,
         }
 
     def load_state(self, state: dict) -> None:
         """Load scheduler state from a checkpoint."""
         self.lambda_value = state['lambda_value']
         self.target_sparsity = state['target_sparsity']
-        self._last_sparsity = state.get('_last_sparsity')
-        self._sparsity_ema = state.get('_sparsity_ema')
+        self._ema_smoothed_sparsity = state.get('_ema_smoothed_sparsity')
+        if self._ema_smoothed_sparsity is not None:
+            # Ensure restored state is consistent with strict Bregman assumptions.
+            self._validate_sparsity(self._ema_smoothed_sparsity)
         self.acceleration_factor = state['acceleration_factor']
         self.min_lambda = state['min_lambda']
         self.max_lambda = state['max_lambda']
-        self.use_ema = state.get('use_ema', True)
-        self.sparsity_ema_decay = state.get('sparsity_ema_decay', 0.9)
-        sparsity_ema_str = f"{self._sparsity_ema:.4f}" if self._sparsity_ema is not None else "None"
+        self.use_ema = state['use_ema']
+        self.ema_decay_factor = float(state['ema_decay_factor'])
+        sparsity_ema_str = (
+            f"{self._ema_smoothed_sparsity:.4f}"
+            if self._ema_smoothed_sparsity is not None
+            else "None"
+        )
         log.info(
             f"LambdaScheduler state restored. lambda={self.lambda_value:.4f}, "
             f"sparsity_ema={sparsity_ema_str}"

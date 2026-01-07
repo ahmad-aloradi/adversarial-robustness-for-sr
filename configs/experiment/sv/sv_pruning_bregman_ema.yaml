@@ -36,8 +36,8 @@ callbacks:
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-30
-    collect_metrics: true
     verbose: 2
+    console_log_frequency: 1e5  # Frequency for console output (verbose >= 2)
     # Global lambda scheduler configuration.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
@@ -49,8 +49,8 @@ callbacks:
       max_lambda: 1e1 # This value caps the sparsity rate reached, may not reach target sparsity!
       # Per-batch updates with optional EMA smoothing
       use_ema: true
-      # EMA smoothing factor (0.0 to disable; higher = more smoothing)
-      sparsity_ema_decay: 0.8
+      # EMA smoothing factor (0.0 to disable; higher = more smoothing) [0.0, 1.0)
+      ema_decay_factor: 0.8
 
 datamodule:
   dataset:
