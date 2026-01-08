@@ -6,14 +6,15 @@
 # To avoiding copying of loss and metric names, during hydra initialization
 # there is custom resolver which replaces __loss__ to loss.__class__.__name__
 # and __metric__ to main_metric.__class__.__name__,
-# for example: ${replace:"__metric__/valid"}
+# for example: ${replace:"valid/__metric__"}
 # Use quotes for defining internal value in ${replace:"..."} to avoid
 # grammar problems with hydra config parser.
 
 model_checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
   dirpath: ${paths.output_dir}/checkpoints # directory to save the model file
-  filename: ${replace:"epoch{epoch:03d}-loss_valid{__loss__/valid:.3f}-metric_valid{__metric__/valid:.3f}"} # checkpoint filename
+  # NOTE: metrics are logged as `valid/<MetricName>` in modules, so placeholders must be stage-first.
+  filename: ${replace:"epoch{epoch:03d}-loss_valid{valid/__loss__:.3f}-metric_valid{valid/__metric__:.3f}"} # checkpoint filename
   monitor: ??? # name of the logged metric which determines when model is improving
   verbose: True # verbosity mode
   save_last: True # additionally always save an exact copy of the last checkpoint to a file last.ckpt

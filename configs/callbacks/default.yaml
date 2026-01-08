@@ -4,6 +4,7 @@ defaults:
   - model_summary.yaml
   - rich_progress_bar.yaml
   - learning_rate_monitor.yaml
+  - epoch_summary_logger.yaml
   - wandb.yaml
   # - gradient_monitor.yaml
   - _self_

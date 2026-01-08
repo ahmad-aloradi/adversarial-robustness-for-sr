@@ -1,0 +1,4 @@
+epoch_summary_logger:
+  _target_: src.callbacks.epoch_summary_logger.EpochSummaryLogger
+  filename: train_log.txt
+  sparsity_threshold: 1e-12
