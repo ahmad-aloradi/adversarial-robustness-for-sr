@@ -358,6 +358,7 @@ class VoxCelebProcessor:
                 log.info(f"Pre-segmentation enabled. Processing {len(dev_metadata)} utterances...")
 
             all_segments = []
+            skipped_utterances = 0
             for _, row in tqdm(
                 dev_metadata.iterrows(),
                 total=len(dev_metadata),
@@ -375,11 +376,20 @@ class VoxCelebProcessor:
                     vad_speech_timestamps=row.get('vad_speech_timestamps', None),
                     segment_max_silence_ratio=float(getattr(vad, 'segment_max_silence_ratio', 0.80)) if vad is not None and vad.enabled else None,
                 )
-                all_segments.extend(segments)
+                if not segments:
+                    skipped_utterances += 1
+                else:
+                    all_segments.extend(segments)
 
-            if self.verbose:
-                log.info(f"Generated {len(all_segments)} segments from {len(dev_metadata)} utterances")
-                log.info(f"Average segments per utterance: {len(all_segments)/len(dev_metadata):.2f}")
+            # Compute skipped utts percentage and average segment length (seconds)
+            total_utterances = len(dev_metadata)
+            skipped_pct = (skipped_utterances / total_utterances) * 100 if total_utterances > 0 else 0.0
+            avg_segment_length = sum(s.get('segment_duration', 0.0) for s in all_segments) / len(all_segments)
+
+            log.info(f"Generated {len(all_segments)} segments from {total_utterances} utterances")
+            log.info(f"Average segments per utterance: {len(all_segments)/total_utterances:.2f}")
+            log.info(f"Average segment duration: {avg_segment_length:.3f}s")
+            log.info(f"Skipped {skipped_utterances} utterances ({skipped_pct:.2f}%) due to duration < min_segment_duration={self.min_segment_duration}s or silence filtering")
 
             dev_metadata = pd.DataFrame(all_segments)
 

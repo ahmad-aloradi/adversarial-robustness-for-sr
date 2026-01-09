@@ -20,6 +20,7 @@ CNCELEB_COMPARABLE_KEYS: Tuple[str, ...] = (
     "segment_overlap",
     "min_segment_duration",
     "vad",
+    "concat_mapping_file"
 )
 
 # VoxCeleb dataset snapshot keys

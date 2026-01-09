@@ -1,0 +1,36 @@
+#!/bin/bash
+# Clean up concatenated utterances and mapping file for CNCeleb
+# Run this before re-running concat_cnceleb.sh with new parameters
+
+set -euo pipefail
+
+# Default paths (same as concat_cnceleb.sh)
+ROOT_DIR="${1:-data/cnceleb}"
+OUTPUT_DIR="${2:-data/cnceleb/concatenated}"
+MAPPING_FILE="${3:-data/cnceleb/metadata/concat_mapping.map}"
+
+echo "🧹 Cleaning up CNCeleb concatenation artifacts"
+echo "   Output directory: $OUTPUT_DIR"
+echo "   Mapping file: $MAPPING_FILE"
+echo ""
+
+# Remove mapping file
+if [ -f "$MAPPING_FILE" ]; then
+    rm -v "$MAPPING_FILE"
+    echo "   ✓ Removed mapping file"
+else
+    echo "   ⚠ Mapping file not found: $MAPPING_FILE"
+fi
+
+# Remove concatenated files directory
+if [ -d "$OUTPUT_DIR" ]; then
+    # Count files before deletion
+    FILE_COUNT=$(find "$OUTPUT_DIR" -type f -name "*.flac" 2>/dev/null | wc -l)
+    rm -rf "$OUTPUT_DIR"
+    echo "   ✓ Removed $FILE_COUNT concatenated audio files from $OUTPUT_DIR"
+else
+    echo "   ⚠ Output directory not found: $OUTPUT_DIR"
+fi
+
+echo ""
+echo "✅ Cleanup complete. Ready for new concatenation run."

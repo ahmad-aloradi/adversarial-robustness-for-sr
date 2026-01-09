@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, Tuple
+from typing import Any, Dict, Optional, Union, Tuple, Set
 from multiprocessing import cpu_count
 import pandas as pd
 import soundfile as sf
@@ -81,7 +81,8 @@ def process_audio_file(args_tuple):
         'gender': None,
         'country': DATASET_DEFAULTS.country,
         'speaker_name': None,
-        'text': None
+        'text': None,
+        'is_concatenated': False
     }
 
 
@@ -187,7 +188,8 @@ class CNCelebProcessor:
                  segment_duration: float = 3.0,
                  segment_overlap: float = 0.0,
                  min_segment_duration: float = 0.5,
-                 vad: Any = None):
+                 vad: Any = None,
+                 concat_mapping_file: Optional[Union[str, Path]] = None):
         self.sep = sep
         self.verbose = verbose
         self.sample_rate = sample_rate
@@ -250,6 +252,23 @@ class CNCelebProcessor:
 
         # Optional VAD config (Hydra-instantiated when used)
         self.vad_cfg = vad
+        
+        # Load concatenation mapping if provided (CSV format: output_path|source_paths|duration|speaker_id|original_split)
+        self.concat_mapping_df: Optional[pd.DataFrame] = None
+        self.merged_source_files: Set[str] = set()
+        self.concat_mapping_file = Path(concat_mapping_file) if concat_mapping_file else None
+        
+        if self.concat_mapping_file and self.concat_mapping_file.exists():
+            log.info(f"Loading concatenation mapping from: {self.concat_mapping_file}")
+            self.concat_mapping_df = pd.read_csv(self.concat_mapping_file, sep='|')
+            # Build set of merged source files from semicolon-delimited source_paths column
+            for source_paths in self.concat_mapping_df['source_paths']:
+                for path in source_paths.split(';'):
+                    self.merged_source_files.add(path)
+            log.info(f"Loaded mapping with {len(self.concat_mapping_df)} concatenated files")
+            log.info(f"Will skip {len(self.merged_source_files)} merged source files")
+        elif self.concat_mapping_file:
+            log.warning(f"Concatenation mapping file not found: {self.concat_mapping_file}")
     
     def _verify_sub_datasets(self):
         """Verify that the specified sub-datasets exist."""
@@ -257,10 +276,70 @@ class CNCelebProcessor:
             if not sub_root.exists() or not sub_root.is_dir():
                 raise FileNotFoundError(f"Sub-dataset directory does not exist: {sub_root}")
         log.info(f"All specified sub-datasets exist: {[str(p) for p in self.sub_dataset_roots]}")
+    
+    def _collect_concatenated_utterances(self) -> list:
+        """
+        Collect utterances from concatenated files based on the mapping CSV.
+        
+        Returns:
+            List of utterance dictionaries for concatenated files
+        """
+        concat_utterances = []
+        
+        if self.concat_mapping_df is None or len(self.concat_mapping_df) == 0:
+            return concat_utterances
+        
+        log.info(f"Adding {len(self.concat_mapping_df)} concatenated files from mapping...")
+        
+        for _, row in self.concat_mapping_df.iterrows():
+            concat_path = self.root_dir / row['output_path']
+            if not concat_path.exists():
+                log.warning(f"Concatenated file not found: {concat_path}")
+                continue
+            
+            # Use original_split to preserve CN-Celeb1/CN-Celeb2 origin
+            # Fall back to first source file's path if original_split not in mapping
+            original_split = row.get('original_split')
+            if pd.isna(original_split) and row.get('source_paths'):
+                # Extract from first source path: "CN-Celeb_flac/data/..." -> "CN-Celeb_flac"
+                first_source = row['source_paths'].split(';')[0]
+                original_split = first_source.split('/')[0] if '/' in first_source else None
+            
+            # Create utterance dict for concatenated file
+            # Normalize rel_filepath to match original files: prefix with root_dir.name
+            rel_filepath = str(Path(self.root_dir.name) / row['output_path'])
+            
+            concat_utt = {
+                'speaker_id': _format_global_speaker_id(row['speaker_id']),
+                'rel_filepath': rel_filepath,
+                'recording_duration': row['duration'],
+                'split': original_split,  # Preserves original CN-Celeb1/CN-Celeb2 origin
+                'class_id': None,
+                'dataset_name': DATASET_DEFAULTS.dataset_name,
+                'sample_rate': self.sample_rate,
+                'language': DATASET_DEFAULTS.language,
+                'gender': None,
+                'country': DATASET_DEFAULTS.country,
+                'speaker_name': None,
+                'text': None,
+                'is_concatenated': True,
+                # 'source_files': row['source_paths'],  # Already semicolon-delimited in CSV
+            }
+            concat_utterances.append(concat_utt)
+        
+        log.info(f"Added {len(concat_utterances)} concatenated utterances")
+        return concat_utterances
 
     def generate_metadata(self) -> pd.DataFrame:
-        """Generate metadata by scanning dev and data directories."""
+        """Generate metadata by scanning dev and data directories.
+        
+        If a concatenation mapping is provided, this method will:
+        1. Skip original source files that have been merged into concatenated files
+        2. Include the concatenated files in processing
+        3. Apply VAD to concatenated files (as per requirement)
+        """
         all_audio_files = []
+        skipped_merged_count = 0
         
         # Scan all sub-datasets
         for sub_root in self.sub_dataset_roots:
@@ -275,9 +354,26 @@ class CNCelebProcessor:
                 audio_files = list(scan_dir.rglob('*.flac'))
                 assert audio_files, f"No audio files found in {scan_dir}"
                 log.info(f"Found {len(audio_files)} audio files in {scan_dir}")
-                all_audio_files.extend([(f, sub_root) for f in audio_files])
+                
+                for f in audio_files:
+                    # Build relative path as stored in the mapping (sub_dataset/rel_path)
+                    rel_to_root = f.relative_to(self.root_dir)
+                    rel_path_str = str(rel_to_root)
+                    
+                    # Skip files that have been merged into concatenated files
+                    if rel_path_str in self.merged_source_files:
+                        skipped_merged_count += 1
+                        continue
+                    
+                    all_audio_files.extend([(f, sub_root)])
+        
+        if self.merged_source_files:
+            log.info(f"Skipped {skipped_merged_count} files that have been merged into concatenated utterances")
+        
+        # Add concatenated files if mapping exists
+        concat_utterances = self._collect_concatenated_utterances()
 
-        log.info(f"Processing {len(all_audio_files)} audio files...")
+        log.info(f"Processing {len(all_audio_files)} original audio files...")
         
         # Prepare tasks for multiprocessing - include cnceleb1 and cnceleb2 names
         tasks = [(str(f), str(r), self.sample_rate, self.sub_datasets[0], 
@@ -292,8 +388,13 @@ class CNCelebProcessor:
                 result = future.result()
                 assert result, f"Processing failed for: {future_to_path[future]}"
                 utterances.append(result)
+        
+        # Merge original utterances with concatenated utterances
+        utterances.extend(concat_utterances)
+        log.info(f"Total utterances (original + concatenated): {len(utterances)}")
 
         # Optional VAD (applied at file-level / before segmentation)
+        # VAD is applied to ALL utterances including concatenated ones
         vad_cfg = self.vad_cfg
         vad = instantiate(vad_cfg) if vad_cfg and getattr(vad_cfg, '_target_', None) else None
         if vad is not None and vad.should_apply('dev'):
@@ -311,6 +412,7 @@ class CNCelebProcessor:
             log.info(f"Pre-segmentation enabled. Processing {len(utterances)} utterances...")
             
             all_segments = []
+            skipped_utterances = 0
             for utt in tqdm(utterances, desc="Segmenting utterances"):
                 segments = segment_utterance(
                     speaker_id=utt['speaker_id'],
@@ -324,10 +426,20 @@ class CNCelebProcessor:
                     vad_speech_timestamps=utt.get('vad_speech_timestamps', None),
                     segment_max_silence_ratio=float(getattr(vad, 'segment_max_silence_ratio', 0.80)) if vad is not None and vad.enabled else None,
                 )
-                all_segments.extend(segments)
-            
-            log.info(f"Generated {len(all_segments)} segments from {len(utterances)} utterances")
-            log.info(f"Average segments per utterance: {len(all_segments)/len(utterances):.2f}")
+                if not segments:
+                    skipped_utterances += 1
+                else:
+                    all_segments.extend(segments)
+
+            # Compute skipped utts percentage and average segment length (seconds)
+            total_utterances = len(utterances)
+            skipped_pct = (skipped_utterances / total_utterances) * 100 if total_utterances > 0 else 0.0
+            avg_segment_length = sum(s.get('segment_duration', 0.0) for s in all_segments) / len(all_segments)
+
+            log.info(f"Generated {len(all_segments)} segments from {total_utterances} utterances")
+            log.info(f"Average segments per utterance: {len(all_segments)/total_utterances:.2f}")
+            log.info(f"Average segment duration: {avg_segment_length:.3f}s")
+            log.info(f"Skipped {skipped_utterances} utterances ({skipped_pct:.2f}%) due to duration < min_segment_duration={self.min_segment_duration}s or silence filtering")
             dev_df = pd.DataFrame(all_segments)
         else:
             log.info(f"Pre-segmentation disabled. Using full file metadata with random cropping during training.")
@@ -660,6 +772,7 @@ if __name__ == "__main__":
         segment_overlap=config.segment_overlap,
         min_segment_duration=config.min_segment_duration,
         vad=getattr(config, 'vad', None),
+        concat_mapping_file=getattr(config, 'concat_mapping_file', None),
     )
     
     # Run the preprocessing pipeline
