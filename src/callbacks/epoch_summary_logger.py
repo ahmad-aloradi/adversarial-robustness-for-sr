@@ -4,7 +4,7 @@ from pytorch_lightning.utilities import rank_zero_only
 
 
 class EpochSummaryLogger(Callback):
-    """Logs average train/validation loss and model sparsity to a file each epoch.
+    """Logs average train/validation loss, monitor metric, and model sparsity to a file each epoch.
 
     Minimal and self-contained: accumulates batch losses (weighted by batch size)
     for train and validation, computes average losses at epoch end, computes
@@ -12,12 +12,15 @@ class EpochSummaryLogger(Callback):
     `train_log.txt` in the experiment directory (Trainer.default_root_dir).
     """
 
-    def __init__(self,
-                 filename: str = "train_log.txt",
-                 sparsity_threshold: float = 1e-12
-                 ):
+    def __init__(
+        self,
+        monitor: str,
+        filename: str = "train_log.txt",
+        sparsity_threshold: float = 1e-12
+    ):
         self.filename = filename
         self.sparsity_threshold = sparsity_threshold
+        self.monitor = monitor
 
         # train accumulators
         self.train_loss_sum = 0.0
@@ -85,7 +88,7 @@ class EpochSummaryLogger(Callback):
         self.val_samples += batch_size
 
     @rank_zero_only
-    def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+    def on_validation_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
         # Compute averages
         train_avg = self.train_loss_sum / self.train_samples if self.train_samples > 0 else float("nan")
         # Prefer the val accumulators (validation usually runs at epoch end)
@@ -104,6 +107,16 @@ class EpochSummaryLogger(Callback):
 
         sparsity = float(zeros) / max(1, total)
 
+        cb_metrics = dict(trainer.callback_metrics)
+        if self.monitor not in cb_metrics:
+            raise KeyError(f"EpochSummaryLogger: monitored metric '{self.monitor}' not found in trainer.callback_metrics. Available: {list(cb_metrics.keys())}")
+
+        monitor_val = (
+            float(cb_metrics[self.monitor].item())
+            if hasattr(cb_metrics[self.monitor], 'item')
+            else float(cb_metrics[self.monitor])
+        )
+
         # Write to file
         out_dir = Path(trainer.default_root_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -111,6 +124,9 @@ class EpochSummaryLogger(Callback):
 
         with open(path, "a") as f:
             f.write(
-                f"epoch = {trainer.current_epoch}, train_loss: {train_avg:.6f}, "
-                f"valid_loss: {val_avg:.6f}, sparsity: {sparsity:.6f}\n"
-                )
+                f"epoch: {trainer.current_epoch}, "
+                f"train_loss: {train_avg:.4f}, "
+                f"valid_loss: {val_avg:.4f}, "
+                f"{self.monitor}: {monitor_val:.4f}, "
+                f"sparsity: {sparsity:.4f}\n"
+            )
