@@ -475,6 +475,27 @@ class CsvProcessor:
                                                      metadata=combined_metadatda,
                                                      speaker_id_col=speaker_id_col,
                                                      class_id=class_id)
+
+        # Log final duration statistics (uses segment_duration if pre-segmented, else recording_duration)
+        if self.verbose:
+            dur_col = 'segment_duration' if 'segment_duration' in final_df.columns else duration_col
+            if dur_col in final_df.columns:
+                total_hours = float(final_df[dur_col].sum()) / 3600.0 if len(final_df) else 0.0
+                # Log per dataset_name if available
+                if 'dataset_name' in final_df.columns:
+                    for ds_name, ds_group in final_df.groupby('dataset_name'):
+                        ds_hours = float(ds_group[dur_col].sum()) / 3600.0
+                        log.info(f"Final duration ({ds_name}): {ds_hours:.3f} hours")
+                        # Log per source within each dataset if available
+                        if 'source' in ds_group.columns:
+                            for src, src_hours in ds_group.groupby('source')[dur_col].sum().sort_index().items():
+                                log.info(f"  └─ {src}: {float(src_hours) / 3600.0:.3f} hours")
+                elif 'source' in final_df.columns:
+                    # No dataset_name but source exists
+                    for src, src_hours in final_df.groupby('source')[dur_col].sum().sort_index().items():
+                        log.info(f"Final duration ({src}): {float(src_hours) / 3600.0:.3f} hours")
+                log.info(f"Final duration (total): {total_hours:.3f} hours")
+
         return final_df, speaker_to_id_df
             
 

@@ -31,7 +31,8 @@ class CNCelebUtterance:
     speaker_id: str
     rel_filepath: str
     recording_duration: float
-    split: str
+    source: str  # Dataset origin: CN-Celeb_flac, CN-Celeb2_flac, etc.
+    split: str   # Actual split: data, dev, eval, etc.
     class_id: Union[int, float] = None
     dataset_name: str = DATASET_DEFAULTS.dataset_name
     sample_rate: int = DATASET_DEFAULTS.sample_rate
@@ -65,14 +66,16 @@ def process_audio_file(args_tuple):
     assert speaker_id.startswith('id'), f"Invalid speaker ID extracted: {speaker_id}"
     speaker_id = _format_global_speaker_id(speaker_id)
 
-    # Determine dataset version from root directory path
-    split_name = _determine_dataset_split(audio_path, cnceleb1_name, cnceleb2_name)
+    # Determine dataset source and actual split
+    source_name = _determine_source(audio_path, cnceleb1_name, cnceleb2_name)
+    split_name = _determine_split(rel_path)
     
     # Create utterance data
     return {
         'speaker_id': speaker_id,
         'rel_filepath': str(Path(root_dir.name) / rel_path),
         'recording_duration': info.duration,
+        'source': source_name,
         'split': split_name,
         'class_id': None,
         'dataset_name': DATASET_DEFAULTS.dataset_name,
@@ -86,8 +89,8 @@ def process_audio_file(args_tuple):
     }
 
 
-def _determine_dataset_split(audio_path: Path, cnceleb1_name: str, cnceleb2_name: Optional[str] = None) -> str:
-    """Determine the dataset split based on audio file path."""
+def _determine_source(audio_path: Path, cnceleb1_name: str, cnceleb2_name: Optional[str] = None) -> str:
+    """Determine the dataset source (CN-Celeb_flac, CN-Celeb2_flac) based on audio file path."""
     audio_path_str = str(audio_path)
     
     if cnceleb2_name and cnceleb2_name in audio_path_str:
@@ -95,7 +98,17 @@ def _determine_dataset_split(audio_path: Path, cnceleb1_name: str, cnceleb2_name
     elif cnceleb1_name in audio_path_str:
         return cnceleb1_name
     else:
-        raise ValueError(f"Could not determine dataset split from path: {audio_path}")
+        raise ValueError(f"Could not determine dataset source from path: {audio_path}")
+
+
+def _determine_split(rel_path: Path) -> str:
+    """Determine the actual split (data, dev, eval) from relative path."""
+    parts = rel_path.parts
+    if len(parts) >= 1:
+        first_part = parts[0]
+        if first_part in ['data', 'dev', 'eval']:
+            return first_part
+    return 'data'  # Default to 'data' if not determinable
 
 
 def _extract_speaker_id(rel_path: Path) -> Optional[str]:
@@ -297,23 +310,20 @@ class CNCelebProcessor:
                 log.warning(f"Concatenated file not found: {concat_path}")
                 continue
             
-            # Use original_split to preserve CN-Celeb1/CN-Celeb2 origin
+            # Use original_split to preserve CN-Celeb1/CN-Celeb2 origin as 'source'
             # Fall back to first source file's path if original_split not in mapping
-            original_split = row.get('original_split')
-            if pd.isna(original_split) and row.get('source_paths'):
+            original_source = row.get('original_split')  # This column stores dataset origin
+            if pd.isna(original_source) and row.get('source_paths'):
                 # Extract from first source path: "CN-Celeb_flac/data/..." -> "CN-Celeb_flac"
                 first_source = row['source_paths'].split(';')[0]
-                original_split = first_source.split('/')[0] if '/' in first_source else None
-            
-            # Create utterance dict for concatenated file
-            # Normalize rel_filepath to match original files: prefix with root_dir.name
-            rel_filepath = str(Path(self.root_dir.name) / row['output_path'])
+                original_source = first_source.split('/')[0] if '/' in first_source else None
             
             concat_utt = {
                 'speaker_id': _format_global_speaker_id(row['speaker_id']),
-                'rel_filepath': rel_filepath,
+                'rel_filepath': row['output_path'],
                 'recording_duration': row['duration'],
-                'split': original_split,  # Preserves original CN-Celeb1/CN-Celeb2 origin
+                'source': original_source,  # Dataset origin: CN-Celeb_flac or CN-Celeb2_flac
+                'split': 'data',  # Concatenated files are training data
                 'class_id': None,
                 'dataset_name': DATASET_DEFAULTS.dataset_name,
                 'sample_rate': self.sample_rate,
@@ -323,7 +333,6 @@ class CNCelebProcessor:
                 'speaker_name': None,
                 'text': None,
                 'is_concatenated': True,
-                # 'source_files': row['source_paths'],  # Already semicolon-delimited in CSV
             }
             concat_utterances.append(concat_utt)
         
