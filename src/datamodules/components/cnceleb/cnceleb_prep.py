@@ -108,7 +108,7 @@ def _determine_split(rel_path: Path) -> str:
         first_part = parts[0]
         if first_part in ['data', 'dev', 'eval']:
             return first_part
-    return 'data'  # Default to 'data' if not determinable
+    return 'unknown'  # Default to 'data' if not determinable
 
 
 def _extract_speaker_id(rel_path: Path) -> Optional[str]:
@@ -453,6 +453,20 @@ class CNCelebProcessor:
         else:
             log.info(f"Pre-segmentation disabled. Using full file metadata with random cropping during training.")
             dev_df = pd.DataFrame(utterances)
+
+        # Ensure split speaker lists exist (dev/test) and filter out any test speakers
+        try:
+            # This will populate self.test_spk_file (and dev_spk_file) based on dataset lists
+            self.save_split_speaker_lists()
+            if self.test_spk_file.exists():
+                with open(self.test_spk_file, 'r', encoding='utf-8') as f:
+                    test_speakers = {line.strip() for line in f if line.strip()}
+                if test_speakers:
+                    before = len(dev_df)
+                    dev_df = dev_df[~dev_df['speaker_id'].isin(test_speakers)]
+                    log.info(f"Filtered {before - len(dev_df)} rows from dev metadata belonging to test speakers")
+        except Exception as e:
+            log.warning(f"Could not filter test speakers from dev metadata: {e}")
 
         write_dataset_csv(dev_df, self.dev_metadata_file, sep=self.sep)
         log.info(f"Saved metadata for {len(dev_df)} {'segments' if self.use_pre_segmentation else 'files'} to {self.dev_metadata_file}")
