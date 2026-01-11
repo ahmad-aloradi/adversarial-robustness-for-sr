@@ -24,7 +24,6 @@ Usage:
         --cnceleb1 CN-Celeb_flac \
         --cnceleb2 CN-Celeb2_flac \
         --target_duration 5.0 \
-        --min_duration 0.5 \
         --output_dir data/cnceleb/concatenated \
         --mapping_file data/cnceleb/metadata/concat_mapping.map
 """
@@ -144,7 +143,6 @@ def scan_dataset(
 def group_short_files_by_speaker(
     files: List[AudioFileInfo],
     target_duration: float,
-    min_duration: float,
 ) -> Tuple[Dict[str, List[AudioFileInfo]], List[AudioFileInfo]]:
     """
     Group files by speaker, separating short files from long files.
@@ -157,10 +155,7 @@ def group_short_files_by_speaker(
     long_files: List[AudioFileInfo] = []
     
     for file_info in files:
-        if file_info.duration < min_duration:
-            # Too short even for concatenation, skip
-            continue
-        elif file_info.duration < target_duration:
+        if file_info.duration < target_duration:
             short_by_speaker[file_info.speaker_id].append(file_info)
         else:
             long_files.append(file_info)
@@ -171,7 +166,6 @@ def group_short_files_by_speaker(
 def create_concat_groups(
     short_by_speaker: Dict[str, List[AudioFileInfo]],
     target_duration: float,
-    min_concat_duration: float,
 ) -> List[ConcatGroup]:
     """
     Create groups of files to concatenate using greedy bin-packing.
@@ -181,8 +175,7 @@ def create_concat_groups(
     
     Args:
         short_by_speaker: Dict mapping speaker_id to list of short files
-        target_duration: Target duration for concatenated files
-        min_concat_duration: Minimum duration for a concat group to be valid
+        target_duration: Minimum duration threshold for concatenated files
         
     Returns:
         List of ConcatGroup objects, each containing files to concatenate
@@ -194,25 +187,22 @@ def create_concat_groups(
         sorted_files = sorted(files, key=lambda x: x.duration, reverse=True)
         
         current_group = ConcatGroup(speaker_id=speaker_id)
-        
+
         for file_info in sorted_files:
-            if current_group.total_duration + file_info.duration <= target_duration * 1.2:
-                # Add to current group (allow 20% overshoot)
-                current_group.add_file(file_info)
-            else:
-                # Save current group if valid and start new one
-                if current_group.total_duration >= min_concat_duration and len(current_group.source_files) > 1:
-                    groups.append(current_group)
-                elif len(current_group.source_files) == 1:
-                    # Single file that couldn't be grouped, will be handled separately
-                    pass
-                
+            current_group.add_file(file_info)
+
+            # Once we meet the minimum threshold, finalize the group.
+            if current_group.total_duration >= target_duration and len(current_group.source_files) > 1:
+                groups.append(current_group)
                 current_group = ConcatGroup(speaker_id=speaker_id)
-                current_group.add_file(file_info)
-        
-        # Don't forget the last group
-        if current_group.total_duration >= min_concat_duration and len(current_group.source_files) > 1:
-            groups.append(current_group)
+
+        # If we have leftover files that didn't reach the threshold, absorb them into
+        # the last valid group for this speaker (so target_duration acts as a minimum).
+        if current_group.source_files:
+            if groups:
+                groups[-1].source_files.extend(current_group.source_files)
+                groups[-1].total_duration += current_group.total_duration
+            # else: not enough material to reach target_duration for this speaker; skip
     
     return groups
 
@@ -300,14 +290,6 @@ def main():
         help="Target duration for concatenated files (seconds)"
     )
     parser.add_argument(
-        "--min_duration", type=float, default=0.5,
-        help="Minimum duration for a file to be considered (seconds)"
-    )
-    parser.add_argument(
-        "--min_concat_duration", type=float, default=2.0,
-        help="Minimum duration for a concatenated group to be valid (seconds)"
-    )
-    parser.add_argument(
         "--output_dir", type=str, required=True,
         help="Output directory for concatenated files"
     )
@@ -338,9 +320,7 @@ def main():
     print(f"=" * 60)
     print(f"Root directory: {root_dir}")
     print(f"Sub-datasets: {sub_datasets}")
-    print(f"Target duration: {args.target_duration}s")
-    print(f"Min duration: {args.min_duration}s")
-    print(f"Min concat duration: {args.min_concat_duration}s")
+    print(f"Target duration (minimum): {args.target_duration}s")
     print(f"Output directory: {output_dir}")
     print(f"Mapping file: {mapping_file}")
     print()
@@ -353,7 +333,7 @@ def main():
     # Step 2: Group short files by speaker
     print("\nStep 2: Grouping short files by speaker...")
     short_by_speaker, long_files = group_short_files_by_speaker(
-        all_files, args.target_duration, args.min_duration
+        all_files, args.target_duration
     )
     
     total_short = sum(len(files) for files in short_by_speaker.values())
@@ -363,7 +343,7 @@ def main():
     # Step 3: Create concatenation groups
     print("\nStep 3: Creating concatenation groups...")
     concat_groups = create_concat_groups(
-        short_by_speaker, args.target_duration, args.min_concat_duration
+        short_by_speaker, args.target_duration
     )
     print(f"Created {len(concat_groups)} concatenation groups")
     
