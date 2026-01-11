@@ -186,6 +186,7 @@ class CNCelebMetadataPreparer(BaseMetadataPreparer):
             segment_overlap=dataset.segment_overlap,
             min_segment_duration=dataset.min_segment_duration,
             vad=dataset.get("vad", None),
+            concat_mapping_file=dataset.get("concat_mapping_file", None),
         )
             
         return processor
