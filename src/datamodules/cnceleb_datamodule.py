@@ -10,11 +10,13 @@ import hydra
 from src.datamodules.components.cnceleb.cnceleb_dataset import (
     CNCelebDataset, 
     CNCelebVerificationDataset, 
-    CNCelebEnroll,
+    CNCelebEnroll as CNCelebEnrollSingle,
+    CNCelebEnrollMulti,
     CNCelebTest,
     TrainCollate, 
     VerificationCollate,
-    EnrollCollate,
+    EnrollCollate as EnrollCollateSingle,
+    EnrollCollateMulti,
     TestCollate
 )
 
@@ -38,8 +40,10 @@ class CNCelebDataModule(LightningDataModule):
         self.train_data = None
         self.val_data = None
         self.test_data = None
-        self.enrollment_data = None
+        self.test_data_dict = {}  # For multiple test configurations
+        self.enrollment_data_dict = {}  # enrollment datasets by mode
         self.test_unique_data = None
+        self._enrollment_mode = self.hparams.dataset.get('enrollment_mode', 'both')
         
         self.csv_processor = CsvProcessor(
             verbose=self.hparams.dataset.get('verbose', True), 
@@ -118,13 +122,36 @@ class CNCelebDataModule(LightningDataModule):
             )
 
             # Prepare enrollment and unique test datasets for embedding computation
-            enroll_df['map_path'] = enroll_df['map_path'].apply(lambda x: x.split(';') if pd.notna(x) else [])
-
-            self.enrollment_data = CNCelebEnroll(
-                data_dir=self.hparams.dataset.data_dir,
-                sample_rate=self.hparams.dataset.sample_rate,
-                df=enroll_df
-            )
+            # Handle enrollment mode: 'multi', 'single', or 'both'
+            self._enrollment_mode = self.hparams.dataset.get('enrollment_mode', 'both')
+            
+            modes_to_setup = ['single', 'multi'] if self._enrollment_mode == 'both' else [self._enrollment_mode]
+            
+            for mode in modes_to_setup:
+                if mode == 'single':
+                    log.info("Setting up single-enrollment mode: first utterance per enrollment ID")
+                    self.enrollment_data_dict['cnceleb_single'] = CNCelebEnrollSingle(
+                        data_dir=self.hparams.dataset.data_dir,
+                        sample_rate=self.hparams.dataset.sample_rate,
+                        df=enroll_df.copy()
+                    )
+                else:  # multi
+                    log.info("Setting up multi-enrollment mode: all utterances per enrollment ID")
+                    enroll_df_multi = enroll_df.copy()
+                    enroll_df_multi['map_path'] = enroll_df_multi['map_path'].apply(
+                        lambda x: x.split(';') if pd.notna(x) else []
+                    )
+                    self.enrollment_data_dict['cnceleb_multi'] = CNCelebEnrollMulti(
+                        data_dir=self.hparams.dataset.data_dir,
+                        sample_rate=self.hparams.dataset.sample_rate,
+                        df=enroll_df_multi
+                    )
+                    
+            # Also create test_data_dict entries for each mode
+            for mode in modes_to_setup:
+                key = f'cnceleb_{mode}'
+                self.test_data_dict[key] = self.test_data
+            
             self.test_unique_data = CNCelebTest(
                 data_dir=self.hparams.dataset.data_dir,
                 sample_rate=self.hparams.dataset.sample_rate,
@@ -145,30 +172,52 @@ class CNCelebDataModule(LightningDataModule):
         return DataLoader(self.val_data, **self.hparams.loaders.val, collate_fn=TrainCollate())
 
     def test_dataloader(self):
-        return {
-            'cnceleb': DataLoader(self.test_data, **self.hparams.loaders.test, collate_fn=VerificationCollate())
-        }
+        """Return test dataloaders for each enrollment mode."""
+        loaders = {}
+        for key in self.test_data_dict:
+            loaders[key] = DataLoader(
+                self.test_data_dict[key], 
+                **self.hparams.loaders.test, 
+                collate_fn=VerificationCollate()
+            )
+        return loaders
     
-    def get_enroll_and_trial_dataloaders(self, *args, **kwargs):
+    def get_enroll_and_trial_dataloaders(self, test_filename: str = None, *args, **kwargs):
         """
         Return enrollment and test dataloaders for sv.py to process.
         This provides a standardized interface for embedding computation.
         
         Args:
-            test_filename: Name of the test set (e.g., 'cnceleb')
+            test_filename: Name of the test set (e.g., 'cnceleb_single', 'cnceleb_multi')
             
         Returns:
             Tuple of (enrollment_dataloader, test_unique_dataloader)
         """
-        if self.enrollment_data is None or self.test_unique_data is None:
+        if not self.enrollment_data_dict or self.test_unique_data is None:
             raise ValueError("Enrollment and test data not prepared. Call setup() first.")
+        
+        # Determine which enrollment mode to use based on test_filename
+        if test_filename is None:
+            # Default: use first available
+            test_filename = next(iter(self.enrollment_data_dict.keys()))
+        
+        if test_filename not in self.enrollment_data_dict:
+            raise ValueError(
+                f"Unknown test set: {test_filename}. "
+                f"Available: {list(self.enrollment_data_dict.keys())}"
+            )
                     
         # Use enrollment loader config for consistency with VoxCeleb
         loader_cfg = self.hparams.loaders.get('enrollment', self.hparams.loaders.test)
+        
+        # Select collate function based on mode in test_filename
+        is_single = 'single' in test_filename
+        enroll_collate = EnrollCollateSingle() if is_single else EnrollCollateMulti()
+        
         enrollment_dataloader = DataLoader(
-            self.enrollment_data,
+            self.enrollment_data_dict[test_filename],
             **loader_cfg,
-            collate_fn=EnrollCollate()
+            collate_fn=enroll_collate
         )
         
         test_unique_dataloader = DataLoader(
@@ -210,11 +259,13 @@ if __name__ == "__main__":
         test_loaders = cnceleb_dm.test_dataloader()
         print(f"Test returns {len(test_loaders)} loaders.")
 
-        test_loaders['cnceleb'].dataset.__getitem__(0)
+        # Smoke-test: fetch one item from the first available test loader
+        first_key = next(iter(test_loaders.keys()))
+        test_loaders[first_key].dataset.__getitem__(0)
 
         print("Getting enrollment and unique test dataloaders...")
         enroll_loader, test_unique_loader = cnceleb_dm.get_enroll_and_trial_dataloaders()
         print(f"Enrollment loader has {len(enroll_loader)} batches.")
-        print(f"Enrollment loader has {len(enroll_loader)} batches.")
+
     
     test_datamodule()

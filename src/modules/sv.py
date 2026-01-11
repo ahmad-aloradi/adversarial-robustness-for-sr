@@ -696,7 +696,7 @@ class SpeakerVerification(pl.LightningModule):
                 if len(embed.shape) == 3:  # [B, num_frames, embedding_dim]
                     embed = embed.mean(dim=1)  # [B, embedding_dim]
 
-                # Check if this is a multi-utterance enrollment batch (CNCeleb)
+                # Check if this is a multi-utterance enrollment batch (CNCeleb multi-mode)
                 if mode == 'enrollment' and hasattr(batch, 'utt_counts') and batch.utt_counts is not None:
                     # Aggregate embeddings per enroll_id using mean pooling
                     idx = 0
@@ -705,6 +705,9 @@ class SpeakerVerification(pl.LightningModule):
                         aggregated_embed = utt_embeds.mean(dim=0)  # [embed_dim]
                         embeddings_dict[enroll_id] = aggregated_embed
                         idx += count
+                elif mode == 'enrollment' and hasattr(batch, 'enroll_id') and batch.enroll_id is not None:
+                    # Single-enrollment mode with enroll_id (CNCeleb single-mode)
+                    embeddings_dict.update({eid: emb for eid, emb in zip(batch.enroll_id, embed)})
                 else:
                     # Standard single-utterance handling (test mode or VoxCeleb)
                     embeddings_dict.update({path: emb for path, emb in zip(batch.audio_path, embed)})

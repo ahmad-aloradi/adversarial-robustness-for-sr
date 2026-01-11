@@ -33,15 +33,21 @@ dataset:
   sample_rate: 16000
   min_duration: 0.5
   
+  # Enrollment mode for evaluation:
+  # - "multi": Use all utterances per enrollment ID (proper CNCeleb protocol)
+  # - "single": Use only the first utterance per enrollment ID (faster evaluation)
+  # - "both": Run both modes for comparison (default)
+  enrollment_mode: both
+  
   # --- Segmentation Strategy ---
   # - true: Generate segments with fixed boundaries in CSV (deterministic, full coverage)
   # - false: Store full file metadata, apply random cropping during training (augmentation)
   use_pre_segmentation: true
   
   # Segmentation parameters (only used if use_pre_segmentation=true)
-  segment_duration: 5.0  # Duration of each segment in seconds
+  segment_duration: 3.0  # Duration of each segment in seconds
   segment_overlap: 0.0  # Overlap between segments in seconds (0.0 = non-overlapping)
-  min_segment_duration: 2.0  # Minimum segment duration to be included
+  min_segment_duration: 1.0  # Minimum segment duration to be included
 
   # Random cropping parameter (only used if use_pre_segmentation=false)
   max_duration: 4.0  # Maximum duration for random cropping during training
@@ -55,7 +61,7 @@ dataset:
   # --- Optional VAD (applied at CSV level, before segmentation) ---
   vad:
     _target_: src.datamodules.preparation.vad.SileroCsvVad
-    enabled: true   # Master switch; when true, VAD rewrites rows via vad_start/vad_end
+    enabled: false   # Master switch; when true, VAD rewrites rows via vad_start/vad_end
     apply_to_splits: [dev]  # CNCeleb prep produces a dev metadata table (later split into train/val)
 
     # Model input/sample rate (should match your audio + pipeline expectations)
@@ -94,7 +100,7 @@ dataset:
 transforms: null
 
 # Placeholder, will be determined automatically by the CsvProcessor during data preparation
-num_classes: 2793
+num_classes: 2783 #2793
 
 loaders:
   train:
