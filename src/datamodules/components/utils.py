@@ -199,6 +199,11 @@ def segment_utterance(
             start_time += step_size
             continue
 
+        # Store recording_duration as the absolute end time of the usable audio,
+        # since start_time and end_time are absolute file timestamps.
+        # This ensures the dataloader can correctly validate segment boundaries.
+        absolute_recording_duration = base_start_time + recording_duration
+        
         segment = {
             'segment_id': f"{segment_prefix}_seg{segment_idx:04d}",
             'speaker_id': speaker_id,
@@ -206,7 +211,7 @@ def segment_utterance(
             'start_time': round(start_time_abs, 3),
             'end_time': round(end_time_abs, 3),
             'segment_duration': round(end_time - start_time, 3),
-            'recording_duration': recording_duration,
+            'recording_duration': round(absolute_recording_duration, 3),
             **{
                 k: v for k, v in original_row.items() if k not in [
                     'speaker_id', 'rel_filepath', 'recording_duration',

@@ -175,16 +175,7 @@ def _ensure_prefixed_identifier(raw_id: str) -> str:
 
 
 class CNCelebProcessor:
-
-    DATASET_PATHS = {
-        'wav_dir': 'voxceleb1_2',
-        'downloaded_metadata_dir': 'voxceleb_metadata/downloaded',
-        'vox_metadata': 'vox_meta.csv',
-        'speaker_lookup': 'speaker_lookup.csv',
-        'preprocess_stats_file': 'preprocess_stats.csv'
-    }
-
-    """Simplified CNCeleb dataset processor."""
+    """CNCeleb dataset processor."""
 
     def __init__(self, root_dir: Union[str, Path], artifacts_dir: Union[str, Path], 
                  cnceleb1: str, 

@@ -63,6 +63,7 @@ def _process_vox_wav(task_tuple: Tuple[str, Path, pd.DataFrame, str, float]):
     # Extract speaker info
     rel_path = wav_path.relative_to(wav_dir)
     speaker_id = f"{dataset_name}_{rel_path.parts[0]}"
+    assert speaker_id.startswith(dataset_name + '_id'), f"Unexpected speaker ID format: {speaker_id}"
     
     # Get metadata from DataFrame (fast indexed lookup)
     try:
