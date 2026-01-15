@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Concatenate short utterances from the same speaker to create longer audio files.
+Concatenate short utterances from the same speaker AND genre to create longer audio files.
 
 This script runs BEFORE the main CNCeleb preprocessing pipeline. It:
 1. Scans the dataset for audio files shorter than a target duration
-2. Groups short files by speaker
+2. Groups short files by (speaker_id, genre) - only concatenates files from same genre
 3. Concatenates them (greedy bin-packing) until they reach target duration
 4. Saves concatenated files to a separate directory (does NOT alter original data)
 5. Creates a CSV mapping file to track which files have been merged
@@ -13,9 +13,12 @@ The mapping file is then read by cnceleb_prep.py to:
 - Skip original short files that have been merged
 - Include the new concatenated files in preprocessing
 
+CNCeleb directory structure: data/{speaker_id}/{genre}-{recording}.flac
+Genre is extracted from filename prefix (e.g., "singing-01-002.flac" -> genre="singing")
+
 CSV format (pipe-separated):
-    output_path|source_paths|duration|speaker_id|original_split
-    
+    output_path|source_paths|duration|speaker_id|genre|dataset_source
+
 Where source_paths uses semicolon as delimiter for multiple paths.
 
 Usage:
@@ -29,7 +32,6 @@ Usage:
 """
 
 import argparse
-import sys
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -59,6 +61,7 @@ class AudioFileInfo:
     abs_path: Path
     rel_path: str  # Relative to sub-dataset root (e.g., CN-Celeb_flac)
     speaker_id: str
+    genre: str  # e.g., "singing", "speech", "interview"
     duration: float
     sample_rate: int
     sub_dataset: str  # e.g., "CN-Celeb_flac" or "CN-Celeb2_flac"
@@ -66,11 +69,12 @@ class AudioFileInfo:
 
 @dataclass
 class ConcatGroup:
-    """A group of files to be concatenated."""
+    """A group of files to be concatenated (same speaker AND genre)."""
     speaker_id: str
+    genre: str
     source_files: List[AudioFileInfo] = field(default_factory=list)
     total_duration: float = 0.0
-    
+
     def add_file(self, file_info: AudioFileInfo):
         """Add a file to this concatenation group."""
         self.source_files.append(file_info)
@@ -103,23 +107,36 @@ def scan_audio_file(args: Tuple[str, str, str]) -> Optional[AudioFileInfo]:
             f"File {abs_path} is not under sub-dataset root {sub_dataset_root}"
         ) from e
     
-    # Extract speaker ID from path
-    # Expected formats: data/id00010/... or dev/id00010/... or id00010/...
+    # Extract speaker ID and genre from path
+    # Expected format: data/{speaker_id}/{genre}-{recording}.flac
+    # Genre is the prefix of filename before first hyphen (e.g., "singing-01-002.flac" -> "singing")
     parts = rel_path.parts
     speaker_id = None
-    
+    genre = None
+
     if len(parts) >= 2 and parts[0] in ['data', 'dev']:
+        # data/id00010/singing-01-002.flac -> speaker=id00010
         speaker_id = parts[1]
     elif len(parts) >= 1 and parts[0].startswith('id'):
+        # id00010/singing-01-002.flac -> speaker=id00010
         speaker_id = parts[0]
-    
+
     if not speaker_id or not speaker_id.startswith('id'):
         raise ValidationError(f"Could not extract speaker ID from path: {rel_path}")
-        
+
+    # Extract genre from filename (e.g., "singing-01-002.flac" -> "singing")
+    filename = rel_path.name  # Get filename without directory
+    filename_stem = Path(filename).stem  # Remove .flac extension
+    if '-' in filename_stem:
+        genre = filename_stem.split('-')[0]
+    else:
+        raise ValidationError(f"Could not extract genre from filename: {filename}")
+
     return AudioFileInfo(
         abs_path=abs_path,
         rel_path=str(rel_path),
         speaker_id=speaker_id,
+        genre=genre,
         duration=info.duration,
         sample_rate=info.samplerate,
         sub_dataset=sub_dataset_name,
@@ -181,106 +198,138 @@ def scan_dataset(
     return results
 
 
-def group_short_files_by_speaker(
+def group_short_files_by_speaker_and_genre(
     files: List[AudioFileInfo],
     target_duration: float,
-) -> Tuple[Dict[str, List[AudioFileInfo]], List[AudioFileInfo]]:
+) -> Tuple[Dict[Tuple[str, str], List[AudioFileInfo]], List[AudioFileInfo]]:
     """
-    Group files by speaker, separating short files from long files.
-    
+    Group files by (speaker_id, genre), separating short files from long files.
+
     Args:
         files: List of all audio files
         target_duration: Duration threshold
-        
+
     Returns:
-        Tuple of (short_by_speaker, long_files)
+        Tuple of (short_by_speaker_genre, long_files)
+        where short_by_speaker_genre is keyed by (speaker_id, genre) tuple
     """
     if not files:
         raise ValidationError("Cannot group empty file list")
-    
+
     if target_duration <= 0:
         raise ValidationError(f"Invalid target_duration: {target_duration}")
-    
-    short_by_speaker: Dict[str, List[AudioFileInfo]] = defaultdict(list)
+
+    short_by_speaker_genre: Dict[Tuple[str, str], List[AudioFileInfo]] = defaultdict(list)
     long_files: List[AudioFileInfo] = []
-    
+
     for file_info in files:
         if file_info.duration < target_duration:
-            short_by_speaker[file_info.speaker_id].append(file_info)
+            key = (file_info.speaker_id, file_info.genre)
+            short_by_speaker_genre[key].append(file_info)
         else:
             long_files.append(file_info)
-    
-    return dict(short_by_speaker), long_files
+
+    return dict(short_by_speaker_genre), long_files
 
 
 def create_concat_groups(
-    short_by_speaker: Dict[str, List[AudioFileInfo]],
+    short_by_speaker_genre: Dict[Tuple[str, str], List[AudioFileInfo]],
     target_duration: float,
+    min_threshold: Optional[float] = None,
 ) -> List[ConcatGroup]:
     """
     Create groups of files to concatenate using greedy bin-packing.
-    
-    Files within each speaker are sorted by duration (longest first) and
-    greedily packed into groups until each group reaches target_duration.
-    Leftover files that don't reach the threshold are merged into the last
-    group for that speaker.
-    
+
+    Files within each (speaker_id, genre) group are sorted by duration (longest first)
+    and greedily packed into groups until each group reaches target_duration.
+    Leftover files that don't reach the target are either:
+    - Merged into the last group if one exists
+    - Created as a new group if they meet min_threshold (when specified)
+    - Reported as insufficient material otherwise
+
     Args:
-        short_by_speaker: Dict mapping speaker_id to list of short files
-        target_duration: Minimum duration threshold for concatenated files
-        
+        short_by_speaker_genre: Dict mapping (speaker_id, genre) to list of short files
+        target_duration: Target duration for concatenated files (preferred minimum)
+        min_threshold: Optional minimum threshold to create groups even if target not met.
+                      Groups with multiple files >= min_threshold will be included.
+
     Returns:
         List of ConcatGroup objects, each containing files to concatenate
     """
-    if not short_by_speaker:
-        raise ValidationError("Cannot create groups from empty speaker dictionary")
-    
+    if not short_by_speaker_genre:
+        raise ValidationError("Cannot create groups from empty speaker-genre dictionary")
+
+    # Use min_threshold if provided, otherwise fall back to target_duration
+    effective_min = min_threshold if min_threshold is not None else target_duration
+
     all_groups = []
-    speakers_without_groups = []
-    
-    for speaker_id, files in short_by_speaker.items():
+    groups_without_enough_material = []
+    groups_below_target_but_included = []
+
+    for (speaker_id, genre), files in short_by_speaker_genre.items():
         if not files:
             continue
-            
+
         # Sort by duration descending (pack largest first for better bin-packing)
         sorted_files = sorted(files, key=lambda x: x.duration, reverse=True)
-        
-        speaker_groups = []
-        current_group = ConcatGroup(speaker_id=speaker_id)
+
+        speaker_genre_groups = []
+        current_group = ConcatGroup(speaker_id=speaker_id, genre=genre)
 
         for file_info in sorted_files:
             current_group.add_file(file_info)
 
-            # Once we meet the minimum threshold with multiple files, finalize the group
-            if (current_group.total_duration >= target_duration and 
+            # Once we meet the target threshold with multiple files, finalize the group
+            if (current_group.total_duration >= target_duration and
                 len(current_group.source_files) > 1):
-                speaker_groups.append(current_group)
-                current_group = ConcatGroup(speaker_id=speaker_id)
+                speaker_genre_groups.append(current_group)
+                current_group = ConcatGroup(speaker_id=speaker_id, genre=genre)
 
-        # Handle leftover files: merge into last group for THIS speaker
+        # Handle leftover files
         if current_group.source_files:
-            if speaker_groups:
-                speaker_groups[-1].source_files.extend(current_group.source_files)
-                speaker_groups[-1].total_duration += current_group.total_duration
+            if speaker_genre_groups:
+                # Merge into last group
+                speaker_genre_groups[-1].source_files.extend(current_group.source_files)
+                speaker_genre_groups[-1].total_duration += current_group.total_duration
+            elif (len(current_group.source_files) > 1 and
+                  current_group.total_duration >= effective_min):
+                # No previous groups, but meets min_threshold with multiple files
+                speaker_genre_groups.append(current_group)
+                if min_threshold is not None and current_group.total_duration < target_duration:
+                    groups_below_target_but_included.append(
+                        f"{speaker_id}/{genre}: {len(current_group.source_files)} files, "
+                        f"total {current_group.total_duration:.2f}s"
+                    )
             else:
-                # No valid groups for this speaker
-                speakers_without_groups.append(
-                    f"{speaker_id}: {len(files)} files, "
-                    f"max duration {max(f.duration for f in files):.2f}s"
+                # Cannot create valid group (single file or below min_threshold)
+                total_dur = sum(f.duration for f in files)
+                groups_without_enough_material.append(
+                    f"{speaker_id}/{genre}: {len(files)} files, "
+                    f"total {total_dur:.2f}s"
                 )
-        
-        all_groups.extend(speaker_groups)
-    
-    # Report speakers without valid groups
-    if speakers_without_groups:
-        print(f"\nWARNING: {len(speakers_without_groups)} speakers have insufficient material "
-              f"to create groups (need {target_duration}s minimum):")
-        for info in speakers_without_groups[:5]:
+
+        all_groups.extend(speaker_genre_groups)
+
+    # Report groups included below target (informational)
+    if groups_below_target_but_included:
+        print(f"\nINFO: {len(groups_below_target_but_included)} groups included below target "
+              f"({target_duration}s) but above min_threshold ({effective_min}s):")
+        for info in groups_below_target_but_included[:5]:
             print(f"  - {info}")
-        if len(speakers_without_groups) > 5:
-            print(f"  ... and {len(speakers_without_groups) - 5} more speakers")
+        if len(groups_below_target_but_included) > 5:
+            print(f"  ... and {len(groups_below_target_but_included) - 5} more")
         print()
-    
+
+    # Report (speaker, genre) combinations without valid groups
+    if groups_without_enough_material:
+        print(f"\nWARNING: {len(groups_without_enough_material)} (speaker, genre) groups have "
+              f"insufficient material (need {effective_min}s min with 2+ files):")
+        for info in groups_without_enough_material[:5]:
+            print(f"  - {info}")
+        if len(groups_without_enough_material) > 5:
+            print(f"  ... and {len(groups_without_enough_material) - 5} more")
+        print()
+
     return all_groups
 
 
@@ -289,40 +338,47 @@ def concatenate_audio_files(
     root_dir: Path,
     output_dir: Path,
     group_idx: int,
-) -> Tuple[str, List[str], float, str]:
+) -> Tuple[str, List[str], float, str, str]:
     """
     Concatenate audio files in a group and save to output directory.
-    
+
     Args:
         group: ConcatGroup containing files to concatenate
         root_dir: Root directory (for computing relative paths)
         output_dir: Output directory for concatenated files
         group_idx: Index for naming the output file
-        
+
     Returns:
-        Tuple of (output_rel_path, source_rel_paths, total_duration, original_split)
+        Tuple of (output_rel_path, source_rel_paths, total_duration, genre, dataset_source)
     """
     if not group.source_files:
         raise ValidationError(f"Group {group_idx} has no source files")
-    
+
     if len(group.source_files) < 2:
         raise ValidationError(
             f"Group {group_idx} has only {len(group.source_files)} file(s), "
             f"need at least 2 for concatenation"
         )
-    
+
     # Verify all files are from the same speaker
     speaker_ids = set(f.speaker_id for f in group.source_files)
     if len(speaker_ids) > 1:
         raise ValidationError(
             f"Group {group_idx} contains files from multiple speakers: {speaker_ids}"
         )
-    
+
+    # Verify all files are from the same genre
+    genres = set(f.genre for f in group.source_files)
+    if len(genres) > 1:
+        raise ValidationError(
+            f"Group {group_idx} contains files from multiple genres: {genres}"
+        )
+
     # Read and concatenate audio
     audio_segments = []
     included_files = []
     sample_rate = 16000  # Default sample rate for CNCeleb
-    
+
     for file_info in group.source_files:
         audio, sr = sf.read(str(file_info.abs_path), dtype="float32")
         if sr != sample_rate:
@@ -333,49 +389,49 @@ def concatenate_audio_files(
 
         audio_segments.append(audio)
         included_files.append(file_info)
-    
+
     if not audio_segments:
         raise ConcatenationError(
             f"Group {group_idx}: No valid audio segments after reading files"
         )
-        
+
     # Concatenate all segments
     concatenated = np.concatenate(audio_segments)
     assert len(concatenated) > 0, "Concatenated audio should not be empty"
 
-    # Create output path
-    speaker_dir = output_dir / group.speaker_id
-    speaker_dir.mkdir(parents=True, exist_ok=True)
-    
+    # Create output path: output_dir/{speaker_id}/{genre}/concat_XXXXXX.flac
+    speaker_genre_dir = output_dir / group.speaker_id / group.genre
+    speaker_genre_dir.mkdir(parents=True, exist_ok=True)
+
     output_filename = f"concat_{group_idx:06d}.flac"
-    output_path = speaker_dir / output_filename
-    
+    output_path = speaker_genre_dir / output_filename
+
     # Save concatenated audio
-    sf.write(str(output_path), concatenated, sample_rate)    
+    sf.write(str(output_path), concatenated, sample_rate)
 
     # Verify the written file
     written_info = sf.info(str(output_path))
     expected_duration = len(concatenated) / sample_rate
     duration_diff = abs(written_info.duration - expected_duration)
     assert duration_diff < 0.01, f"Significant duration mismatch for {output_path}: "
-    
+
     # Compute relative paths for CSV
     output_rel_path = str(output_path.relative_to(root_dir))
     source_rel_paths = [
-        str(Path(f.sub_dataset) / f.rel_path) 
+        str(Path(f.sub_dataset) / f.rel_path)
         for f in included_files
     ]
-    
-    # Get original split from first source file
-    original_split = included_files[0].sub_dataset
+
+    # Get dataset source from first source file (e.g., CN-Celeb_flac or CN-Celeb2_flac)
+    dataset_source = included_files[0].sub_dataset
     actual_duration = len(concatenated) / sample_rate
-    return output_rel_path, source_rel_paths, actual_duration, original_split
+    return output_rel_path, source_rel_paths, actual_duration, group.genre, dataset_source
 
 
 def main():
     """Main entry point for the concatenation script."""
     parser = argparse.ArgumentParser(
-        description="Concatenate short utterances from the same speaker",
+        description="Concatenate short utterances from the same speaker AND genre",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
@@ -393,6 +449,12 @@ def main():
     parser.add_argument(
         "--target_duration", type=float, default=5.0,
         help="Target minimum duration for concatenated files (seconds)"
+    )
+    parser.add_argument(
+        "--min_threshold", type=float, default=None,
+        help="Minimum threshold to create concat even if target not met (seconds). "
+             "Groups with multiple files >= min_threshold will be included. "
+             "Default: None (only create groups that meet target_duration)"
     )
     parser.add_argument(
         "--output_dir", type=str, required=True,
@@ -417,7 +479,18 @@ def main():
     # Validate target duration
     if args.target_duration <= 0:
         raise ValidationError(f"Invalid target_duration: {args.target_duration}")
-    
+
+    # Validate min_threshold if provided
+    min_threshold = args.min_threshold
+    if min_threshold is not None:
+        if min_threshold <= 0:
+            raise ValidationError(f"Invalid min_threshold: {min_threshold}")
+        if min_threshold > args.target_duration:
+            raise ValidationError(
+                f"min_threshold ({min_threshold}) cannot be greater than "
+                f"target_duration ({args.target_duration})"
+            )
+
     # Determine number of parallel jobs
     n_jobs = args.n_jobs if args.n_jobs else min(cpu_count(), 8)
     if n_jobs < 1:
@@ -432,7 +505,9 @@ def main():
     print("=" * 60)
     print(f"Root directory: {root_dir}")
     print(f"Sub-datasets: {sub_datasets}")
-    print(f"Target duration (minimum): {args.target_duration}s")
+    print(f"Target duration: {args.target_duration}s")
+    if min_threshold is not None:
+        print(f"Min threshold: {min_threshold}s (include groups below target if >= this)")
     print(f"Output directory: {output_dir}")
     print(f"Mapping file: {mapping_file}")
     print(f"Parallel jobs: {n_jobs}")
@@ -442,23 +517,28 @@ def main():
     print("Step 1: Scanning audio files...")
     all_files = scan_dataset(root_dir, sub_datasets, n_jobs)
     print(f"Found {len(all_files)} valid audio files")
-    
-    # Step 2: Group short files by speaker
-    print("\nStep 2: Grouping short files by speaker...")
-    short_by_speaker, long_files = group_short_files_by_speaker(
+
+    # Step 2: Group short files by (speaker, genre)
+    print("\nStep 2: Grouping short files by (speaker, genre)...")
+    short_by_speaker_genre, long_files = group_short_files_by_speaker_and_genre(
         all_files, args.target_duration
     )
-    
-    total_short = sum(len(files) for files in short_by_speaker.values())
+
+    total_short = sum(len(files) for files in short_by_speaker_genre.values())
+    unique_speakers = len(set(k[0] for k in short_by_speaker_genre.keys()))
+    unique_genres = len(set(k[1] for k in short_by_speaker_genre.keys()))
     print(f"Found {total_short} short files (< {args.target_duration}s) "
-            f"across {len(short_by_speaker)} speakers")
+          f"across {len(short_by_speaker_genre)} (speaker, genre) groups")
+    print(f"  Unique speakers: {unique_speakers}, Unique genres: {unique_genres}")
     print(f"Found {len(long_files)} long files (>= {args.target_duration}s)")
-    
-    assert short_by_speaker, "No short files found for concatenation"
+
+    assert short_by_speaker_genre, "No short files found for concatenation"
 
     # Step 3: Create concatenation groups
     print("\nStep 3: Creating concatenation groups...")
-    concat_groups = create_concat_groups(short_by_speaker, args.target_duration)
+    concat_groups = create_concat_groups(
+        short_by_speaker_genre, args.target_duration, min_threshold
+    )
     assert concat_groups, "No concatenation groups created"
     print(f"Created {len(concat_groups)} concatenation groups")
 
@@ -468,24 +548,25 @@ def main():
         for f in group.source_files:
             files_to_merge.add(str(Path(f.sub_dataset) / f.rel_path))
     print(f"Total source files to be merged: {len(files_to_merge)}")
-    
+
     # Step 4: Perform concatenation
     print("\nStep 4: Concatenating audio files...")
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     mapping_rows = []
-    
+
     for idx, group in enumerate(tqdm(concat_groups, desc="Concatenating")):
-        output_rel_path, source_rel_paths, duration, original_split = concatenate_audio_files(
+        output_rel_path, source_rel_paths, duration, genre, dataset_source = concatenate_audio_files(
             group, root_dir, output_dir, idx
         )
-        
+
         mapping_rows.append({
             "output_path": output_rel_path,
             "source_paths": ";".join(source_rel_paths),
             "duration": duration,
             "speaker_id": group.speaker_id,
-            "original_split": original_split,
+            "genre": genre,
+            "dataset_source": dataset_source,
         })
     
     # Step 5: Save mapping file

@@ -8,8 +8,9 @@ dataset:
   cnceleb2: "CN-Celeb2_flac"  # Set to null to use only CNCeleb1
   
   # Base search directory where pre-generated metadata files can be found
-  base_search_dir: ${datamodule.dataset.data_dir}/metadata
-  
+  # Automatically selects vad_metadata if vad.enabled=true, else metadata
+  base_search_dir: ${datamodule.dataset.data_dir}/${oc.eval:"'vad_metadata' if ${datamodule.dataset.vad.enabled} else 'metadata'"}
+
   # Directory where artifacts like CSVs will be stored for this experiment
   artifacts_dir: ${hydra:runtime.output_dir}/cnceleb_artifacts
 
@@ -37,7 +38,7 @@ dataset:
   # - "multi": Use all utterances per enrollment ID (proper CNCeleb protocol)
   # - "single": Use only the first utterance per enrollment ID (faster evaluation)
   # - "both": Run both modes for comparison (default)
-  enrollment_mode: both
+  enrollment_mode: single
   
   # --- Segmentation Strategy ---
   # - true: Generate segments with fixed boundaries in CSV (deterministic, full coverage)
@@ -100,7 +101,7 @@ dataset:
 transforms: null
 
 # Placeholder, will be determined automatically by the CsvProcessor during data preparation
-num_classes: 2783 #2793
+num_classes: 2793
 
 loaders:
   train:

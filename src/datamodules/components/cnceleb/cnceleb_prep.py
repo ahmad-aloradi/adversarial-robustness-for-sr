@@ -301,9 +301,9 @@ class CNCelebProcessor:
                 log.warning(f"Concatenated file not found: {concat_path}")
                 continue
             
-            # Use original_split to preserve CN-Celeb1/CN-Celeb2 origin as 'source'
-            # Fall back to first source file's path if original_split not in mapping
-            original_source = row.get('original_split')  # This column stores dataset origin
+            # Use dataset_source to preserve CN-Celeb1/CN-Celeb2 origin as 'source'
+            # Fall back to first source file's path if dataset_source not in mapping
+            original_source = row.get('dataset_source')
             if pd.isna(original_source) and row.get('source_paths'):
                 # Extract from first source path: "CN-Celeb_flac/data/..." -> "CN-Celeb_flac"
                 first_source = row['source_paths'].split(';')[0]
@@ -792,7 +792,7 @@ if __name__ == "__main__":
     # Run the preprocessing pipeline
     dev_metadata = processor.generate_metadata()
     trials_df = processor.generate_trial_list()
-    processor.save_split_speaker_lists()
+    # Note: save_split_speaker_lists() is already called inside generate_metadata()
     processor.generate_enrollment_embeddings_list()
     processor.generate_unique_test_csv(trials_df)
     
