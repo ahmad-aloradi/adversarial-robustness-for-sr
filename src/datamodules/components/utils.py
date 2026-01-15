@@ -204,14 +204,25 @@ def segment_utterance(
         # This ensures the dataloader can correctly validate segment boundaries.
         absolute_recording_duration = base_start_time + recording_duration
         
+        # Compute num_frames at sample rate for precise loading
+        sample_rate = original_row.get('sample_rate')
+        if isinstance(sample_rate, str):
+            sample_rate = int(sample_rate)
+        
+        # IMPORTANT: int ensures we never request frames beyond what's available -> (pfs.seek error)
+        start_frame = int(start_time_abs * sample_rate)
+        end_frame = int(end_time_abs * sample_rate)
+        segment_num_frames = end_frame - start_frame
+        
         segment = {
             'segment_id': f"{segment_prefix}_seg{segment_idx:04d}",
             'speaker_id': speaker_id,
             'rel_filepath': rel_filepath,
-            'start_time': round(start_time_abs, 3),
-            'end_time': round(end_time_abs, 3),
-            'segment_duration': round(end_time - start_time, 3),
-            'recording_duration': round(absolute_recording_duration, 3),
+            'start_time': start_time_abs,
+            'end_time': end_time_abs,
+            'num_frames': segment_num_frames,
+            'segment_duration': segment_num_frames / sample_rate,
+            'recording_duration': absolute_recording_duration,
             **{
                 k: v for k, v in original_row.items() if k not in [
                     'speaker_id', 'rel_filepath', 'recording_duration',
@@ -818,7 +829,8 @@ class BaseDataset(Dataset):
         audio_processor: AudioProcessor,
         start_time: Optional[float] = None,
         end_time: Optional[float] = None,
-        max_samples: int = -1
+        num_frames: Optional[int] = None,
+        max_samples: int = -1,
     ) -> torch.Tensor:
         """
         Load and process audio with flexible segmentation options.
@@ -828,6 +840,7 @@ class BaseDataset(Dataset):
             audio_processor: AudioProcessor instance for processing
             start_time: Optional start time in seconds (for pre-segmentation)
             end_time: Optional end time in seconds (for pre-segmentation)
+            num_frames: Optional exact number of frames to load (avoids float precision issues)
             max_samples: Maximum samples for random cropping (ignored if start_time/end_time provided)
             
         Returns:
@@ -847,40 +860,47 @@ class BaseDataset(Dataset):
         assert (start_time is None and end_time is None) or (start_time is not None and end_time is not None), \
             "Either both start_time and end_time must be provided, or neither." 
         
-        # Case 1: Pre-segmentation - use provided start_time and end_time
+        # Case 1: Pre-segmentation - use provided start_time and num_frames
         if start_time is not None and end_time is not None:
-            # Validate against actual file length to prevent psf_fseek errors
-            start_frame = int(start_time * sr)
-            end_frame = int(end_time * sr)
+            # Use floor for start_frame to ensure we don't overshoot
+            frame_offset = int(start_time * sr)
+            
+            # Use num_frames directly if provided (from CSV), otherwise compute from end_time
+            if num_frames is not None:
+                frames_to_load = num_frames
+            else:
+                # Fallback: compute from times (may have precision issues)
+                end_frame = int(end_time * sr)
+                frames_to_load = max(0, end_frame - frame_offset)
             
             # Clamp to valid range
-            start_frame = min(start_frame, total_frames)
-            end_frame = min(end_frame, total_frames)
+            frame_offset = min(frame_offset, total_frames)
+            frames_to_load = min(frames_to_load, total_frames - frame_offset)
             
-            frame_offset = start_frame
-            num_frames = max(0, end_frame - start_frame)
-            
-            if num_frames == 0:
-                raise RuntimeError(f"Segment {start_time}-{end_time}s is outside file boundaries (length {total_frames/sr:.2f}s)")
+            if frames_to_load <= 0:
+                raise RuntimeError(
+                    f"Segment {start_time}-{end_time}s is outside file boundaries "
+                    f"(file duration: {total_frames/sr:.2f}s) for {audio_path}"
+                )
         
         # Case 2: Random cropping - calculate start_time and end_time randomly
         else:
             if max_samples == -1 or total_frames <= max_samples:
                 # Load entire file
                 frame_offset = 0
-                num_frames = total_frames
+                frames_to_load = total_frames
             else:
                 # Calculate random segment of max_samples length
                 max_offset = total_frames - max_samples
                 frame_offset = torch.randint(0, max_offset, (1,)).item()
-                num_frames = max_samples
+                frames_to_load = max_samples
         
-        # Load the calculated segment (works for both cases)
+        # Load audio
         try:
             waveform, sr = torchaudio.load(
                 str(audio_path),
                 frame_offset=frame_offset,
-                num_frames=num_frames
+                num_frames=frames_to_load
             )
         except Exception as e:
             msg = f"Failed to load audio file: {audio_path}. Error: {e}"
@@ -957,13 +977,19 @@ class BaseDataset(Dataset):
         
         if has_segments:
             # Pre-segmented: use explicit time boundaries
+            # Pass num_frames from CSV if available to avoid floating point precision issues
+            num_frames = row.get('num_frames', None)
+            if num_frames is not None:
+                num_frames = int(num_frames)
+            
             waveform = self._load_audio(
                 audio_path, 
                 self.audio_processor,
                 start_time=row['start_time'],
-                end_time=row['end_time']
+                end_time=row['end_time'],
+                num_frames=num_frames,
             )
-            actual_duration = row['end_time'] - row['start_time']
+            actual_duration = row['segment_duration'] if 'segment_duration' in row else (row['end_time'] - row['start_time'])
         else:
             # Random cropping: use max_samples
             waveform = self._load_audio(
