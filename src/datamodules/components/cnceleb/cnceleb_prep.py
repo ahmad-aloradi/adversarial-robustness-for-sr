@@ -261,18 +261,17 @@ class CNCelebProcessor:
         self.concat_mapping_df: Optional[pd.DataFrame] = None
         self.merged_source_files: Set[str] = set()
         self.concat_mapping_file = Path(concat_mapping_file) if concat_mapping_file else None
+        if self.concat_mapping_file is not None and not self.concat_mapping_file.exists():
+            raise FileNotFoundError(f"Concatenation mapping file not found: {self.concat_mapping_file}")
         
-        if self.concat_mapping_file and self.concat_mapping_file.exists():
-            log.info(f"Loading concatenation mapping from: {self.concat_mapping_file}")
-            self.concat_mapping_df = pd.read_csv(self.concat_mapping_file, sep='|')
-            # Build set of merged source files from semicolon-delimited source_paths column
-            for source_paths in self.concat_mapping_df['source_paths']:
-                for path in source_paths.split(';'):
-                    self.merged_source_files.add(path)
-            log.info(f"Loaded mapping with {len(self.concat_mapping_df)} concatenated files")
-            log.info(f"Will skip {len(self.merged_source_files)} merged source files")
-        elif self.concat_mapping_file:
-            log.warning(f"Concatenation mapping file not found: {self.concat_mapping_file}")
+        log.info(f"Loading concatenation mapping from: {self.concat_mapping_file}")
+        self.concat_mapping_df = pd.read_csv(self.concat_mapping_file, sep='|')
+        # Build set of merged source files from semicolon-delimited source_paths column
+        for source_paths in self.concat_mapping_df['source_paths']:
+            for path in source_paths.split(';'):
+                self.merged_source_files.add(path)
+        log.info(f"Loaded mapping with {len(self.concat_mapping_df)} concatenated files")
+        log.info(f"Will skip {len(self.merged_source_files)} merged source files")
     
     def _verify_sub_datasets(self):
         """Verify that the specified sub-datasets exist."""
