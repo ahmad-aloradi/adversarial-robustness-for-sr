@@ -748,21 +748,32 @@ class CNCelebProcessor:
 
 
 if __name__ == "__main__":
+    # Resolve data directory (check for HPC path first)
+    data_dir = f"{os.environ['HOME']}/adversarial-robustness-for-sr/data"
+    hpc_data_dir = Path(data_dir) / "datasets"
+    if hpc_data_dir.is_dir() and (hpc_data_dir / "cnceleb").is_dir():
+        data_dir = str(hpc_data_dir)
+
+    # Load Hydra config
     config = read_hydra_config(
         config_path='../../../configs',
         config_name='train.yaml',
         overrides=[
-            f"paths.data_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data",
-            'datamodule=datasets/cnceleb',
-            f"datamodule.dataset.artifacts_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data/cnceleb/metadata"
+            f"paths.data_dir={data_dir}",
+            "datamodule=datasets/cnceleb",
         ]
     )
     config = config.datamodule.dataset
     
+    # Set artifacts directory based on VAD setting
+    vad_enabled = config.get("vad.enabled", False)
+    artifacts_subdir = "vad_metadata" if vad_enabled else "metadata"
+    config.artifacts_dir = f"{data_dir}/cnceleb/{artifacts_subdir}"
+    
     # Resolve paths
     resolved_root = Path(config.data_dir).expanduser().resolve()
     resolved_artifacts = Path(config.artifacts_dir).expanduser().resolve()
-    
+
     # Handle optional cnceleb2 parameter
     cnceleb2 = config.cnceleb2 if hasattr(config, 'cnceleb2') and config.cnceleb2 else None
 

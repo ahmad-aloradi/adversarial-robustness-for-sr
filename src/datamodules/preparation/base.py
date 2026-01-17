@@ -231,6 +231,11 @@ def read_hydra_config(config_path: str = "conf", config_name: str = "config", ov
         OmegaConf configuration object
     """
     from hydra import initialize, compose
+    
+    # Register oc.eval resolver if not already registered (needed for config interpolations)
+    if not OmegaConf.has_resolver("oc.eval"):
+        OmegaConf.register_new_resolver("oc.eval", eval)
+    
     with initialize(version_base=None, config_path=config_path):
         cfg = compose(config_name=config_name, overrides=overrides)
         return cfg

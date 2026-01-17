@@ -57,7 +57,7 @@ dataset:
   # Path to mapping file from concat_short_utterances.py script
   # When provided, merged source files will be skipped and concatenated files will be included
   # Set to null to disable (default)
-  concat_mapping_file: ${datamodule.dataset.data_dir}/metadata/concat_mapping.map
+  concat_mapping_file: ${datamodule.dataset.base_search_dir}/concat_mapping.map
 
   # --- Optional VAD (applied at CSV level, before segmentation) ---
   vad:

@@ -620,18 +620,28 @@ class VoxCelebTestFilter:
 
 
 if __name__ == "__main__":
-    # Load configuration from Hydra YAML files (like LibriSpeech)
+    # Resolve data directory (check for HPC path first)
+    data_dir = f"{os.environ['HOME']}/adversarial-robustness-for-sr/data"
+    hpc_data_dir = Path(data_dir) / "datasets"
+    if hpc_data_dir.is_dir() and (hpc_data_dir / "voxceleb").is_dir():
+        data_dir = str(hpc_data_dir)
+
+    # Load Hydra config
     config = read_hydra_config(
         config_path='../../../configs',
         config_name='train.yaml',
         overrides=[
-            f"paths.data_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data",
-            'datamodule=datasets/voxceleb',
-            f"datamodule.dataset.voxceleb_artifacts_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data/voxceleb/voxceleb_metadata/metadata"
+            f"paths.data_dir={data_dir}",
+            "datamodule=datasets/voxceleb",
         ]
     )
     config = config.datamodule.dataset
     
+    # Set artifacts directory based on VAD setting
+    vad_enabled = config.get("vad.enabled", False)
+    artifacts_subdir = "vad_metadata" if vad_enabled else "metadata"
+    config.artifacts_dir = f"{data_dir}/voxceleb/voxceleb_metadata/{artifacts_subdir}"
+
     # Resolve paths
     resolved_root = Path(config.data_dir).expanduser().resolve()
     resolved_artifacts = Path(config.voxceleb_artifacts_dir).expanduser().resolve()
