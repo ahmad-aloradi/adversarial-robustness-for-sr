@@ -46,7 +46,7 @@ class SpeakerVerification(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(logger=False)
         self.logging_params = logging_params
-        self.data_augemntation = kwargs.get("data_augemntation", None)
+        self.data_augmentation = kwargs.get("data_augmentation", None)
         
         # Initialize metrics
         self._setup_metrics(metrics)
@@ -100,9 +100,9 @@ class SpeakerVerification(pl.LightningModule):
         self.classifier = instantiate(model.classifier)
 
         # Setup wav augmentation if configured
-        if self.data_augemntation is not None:
-            assert "wav_augmenter" in self.data_augemntation.augmentations, 'Expected augmentations.wav_augmenter when passing data_augemntation'
-            self.wav_augmenter = instantiate(self.data_augemntation.augmentations.wav_augmenter)
+        if self.data_augmentation is not None:
+            assert "wav_augmenter" in self.data_augmentation.augmentations, 'Expected augmentations.wav_augmenter when passing data_augmentation'
+            self.wav_augmenter = instantiate(self.data_augmentation.augmentations.wav_augmenter)
 
     def _setup_training_components(self, criterion: DictConfig, optimizer: DictConfig, lr_scheduler: DictConfig) -> None:
         """Initialize loss functions, optimizer and learning rate scheduler."""
