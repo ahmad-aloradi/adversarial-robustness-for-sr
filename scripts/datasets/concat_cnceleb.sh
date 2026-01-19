@@ -6,8 +6,11 @@ set -euo pipefail
 
 # Default paths
 ROOT_DIR="${1:-data/cnceleb}"
-OUTPUT_DIR="${2:-data/cnceleb/concatenated}"
-MAPPING_FILE="${3:-data/cnceleb/metadata/concat_mapping.map}"
+if [ -d "data/datasets/cnceleb" ]; then
+    ROOT_DIR="data/datasets/cnceleb"
+fi
+OUTPUT_DIR="${2:-$ROOT_DIR/concatenated}"
+MAPPING_FILE="${3:-$ROOT_DIR/vad_metadata/concat_mapping.map}"
 
 # Dataset subdirectory names
 CNCELEB1="${CNCELEB1:-CN-Celeb_flac}"
