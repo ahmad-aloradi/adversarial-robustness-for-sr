@@ -1,21 +1,26 @@
 # @package _global_
 
-# to execute this experiment run:
-# python train.py experiment=example
+# Wespeaker-style training configuration for CNCeleb
+# Implements optimizations from wespeaker's ECAPA-TDNN recipe:
+# - Large batch size (128) with PKSpeaker sampling
+# - SGD optimizer with high LR (0.1) + momentum
+# - Warmup + exponential decay LR schedule
+# - Progressive margin scheduling (0.0 → 0.2)
+# - Speed perturbation augmentation
+#
+# Usage:
+#   python train.py experiment=sv/sv_wespeaker datamodule=datasets/cnceleb
 
 defaults:
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
   - override /callbacks: default.yaml
-  - override /datamodule: datasets/voxceleb.yaml
+  - override /datamodule: datasets/cnceleb.yaml
   - override /module: sv.yaml
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
 
 
-# all parameters below will be merged with parameters from default configurations set above
-# this allows you to overwrite only specified parameters
-
-tags: ["data_augmentation", "${oc.eval:'\"${datamodule.dataset.data_dir}\".split(\"/\")[-1]'}", "sv"]
+tags: ["wespeaker", "${oc.eval:'\"${datamodule.dataset.data_dir}\".split(\"/\")[-1]'}", "sv"]
 seed: 42
 
 trainer:
@@ -32,16 +37,27 @@ callbacks:
     mode: max
     monitor: ${replace:"valid/__metric__"}
     patience: 8
+  # Progressive margin scheduler (wespeaker-style, scaled for 15 epochs)
+  margin_scheduler:
+    _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
+    initial_margin: 0.0
+    final_margin: 0.2
+    warmup_epochs: 2   # Wespeaker: 20 epochs out of 150 → 2 out of 15
+    start_epoch: 2     # Wespeaker: starts at epoch 20 → epoch 2
 
 datamodule:
   dataset:
     max_duration: 3.0
+    # # Larger batch via PKSpeaker sampling (16 speakers × 8 utterances = 128)
+    # batch_sampler:
+    #   num_speakers: 16
+    #   num_utterances: 8
 
   loaders:
     train:
-      batch_size: 16
-    valid:
-      batch_size: 16
+      batch_size: 128
+    val:
+      batch_size: 128
     test:
       batch_size: 8
     enrollment:
@@ -50,24 +66,34 @@ datamodule:
 module:
   normalize_test_scores: True
 
+  # Start with margin=0.0 (will be increased by margin_scheduler callback)
+  criterion:
+    aam:
+      _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
+      loss_fn:
+        _target_: speechbrain.nnet.losses.AdditiveAngularMargin
+        margin: 0.0
+        scale: 32.0
+
+  # Wespeaker-style LR schedule: warmup + exponential decay
   lr_scheduler:
     scheduler:
-      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-      mode: "max"
-      factor: 0.25
-      min_lr: 1.0e-6
-      patience: 2
-      verbose: True
+      _target_: src.utils.schedulers.WarmupExponentialLR
+      warmup_epochs: 1       # Wespeaker: 6 out of 150 → 1 out of 15
+      warmup_start_factor: 0.01
+      gamma: 0.80            # Aggressive decay for short training
     extras:
-      monitor: ${replace:"valid/__metric__"}
       interval: "epoch"
       frequency: 1
 
+  # Wespeaker-style SGD optimizer
   optimizer:
-    _target_: torch.optim.AdamW
+    _target_: torch.optim.SGD
     _partial_: True
-    lr: 1.0e-4
-    weight_decay: 1.0e-5
+    lr: 0.1
+    momentum: 0.9
+    nesterov: True
+    weight_decay: 1.0e-4
 
   ### Data for augmentation ###
   data_augmentation:
@@ -124,10 +150,10 @@ module:
             max_bandwidth_fraction: 1.5
             p: 0.5
             mode: per_example
-          # 5. Time chunk dropout
+          # 5. Time chunk dropout (shorter width for wespeaker)
           - _target_: torch_audiomentations.SpliceOut
             num_time_intervals: 5
-            max_width: 100
+            max_width: 25
             p: 0.5
             mode: per_example
 

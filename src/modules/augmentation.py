@@ -1,141 +1,72 @@
-"""GPU-native audio augmentation wrapper using torch-audiomentations.
+"""GPU-native audio augmentation using torch-audiomentations.
 
-Drop-in replacement for SpeechBrain's Augmenter with identical augmentations
-but GPU-native execution for significant speedup.
+Simplified augmentation pipeline leveraging built-in torch-audiomentations transforms
+for GPU-native execution with significant speedup over SpeechBrain's CPU-based Augmenter.
+
+Key design decisions:
+- Uses built-in torch-audiomentations transforms where available (BandStopFilter, SpliceOut)
+- Assumes mono audio (single channel) for simplicity and performance
+- Supports RIR amplitude normalization without amplifying noise levels
+- Uses per_example mode by default for independent sample augmentation
 """
+
 import csv
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+import torchaudio
 from torch import nn
 
-from torch_audiomentations import Compose, AddBackgroundNoise, ApplyImpulseResponse
+from torch_audiomentations import (
+    AddBackgroundNoise,
+    ApplyImpulseResponse,
+)
+
+from src import utils
+log = utils.get_pylogger(__name__)
 
 
-class DropChunk(nn.Module):
-    """Drop random chunks of audio (GPU-native, matches SpeechBrain's DropChunk)."""
+def _check_mono(waveforms: torch.Tensor, context: str = "") -> None:
+    """Verify waveforms are mono (single channel).
 
-    def __init__(
-        self,
-        drop_length_low: int = 1000,
-        drop_length_high: int = 2000,
-        drop_count_low: int = 1,
-        drop_count_high: int = 5,
-        p: float = 0.5,
-    ):
-        super().__init__()
-        self.drop_length_low = drop_length_low
-        self.drop_length_high = drop_length_high
-        self.drop_count_low = drop_count_low
-        self.drop_count_high = drop_count_high
-        self.p = p
-
-    def forward(self, waveforms: torch.Tensor, sample_rate: int | None = None) -> torch.Tensor:
-        """Apply random chunk dropping.
-
-        Args:
-            waveforms: (batch, channels, time) tensor
-            sample_rate: unused, for API compatibility
-        """
-        if torch.rand(1).item() > self.p:
-            return waveforms
-
-        batch_size, channels, length = waveforms.shape
-        output = waveforms.clone()
-
-        for i in range(batch_size):
-            n_drops = torch.randint(self.drop_count_low, self.drop_count_high + 1, (1,)).item()
-            for _ in range(n_drops):
-                drop_len = torch.randint(self.drop_length_low, min(self.drop_length_high + 1, length), (1,)).item()
-                start = torch.randint(0, max(1, length - drop_len), (1,)).item()
-                output[i, :, start : start + drop_len] = 0.0
-
-        return output
+    Args:
+        waveforms: (batch, channels, time) tensor
+        context: Optional context string for error message
+    """
+    if waveforms.ndim == 3 and waveforms.shape[1] != 1:
+        raise ValueError(
+            f"{context}Expected mono audio (1 channel), got {waveforms.shape[1]} channels. "
+            f"Shape: {waveforms.shape}"
+        )
 
 
-class DropFreq(nn.Module):
-    """Drop random frequency bands (GPU-native, matches SpeechBrain's DropFreq)."""
+def load_paths_from_csv(csv_file: str | Path) -> list[str]:
+    """Parse SpeechBrain-style annotation CSV and extract audio file paths.
 
-    def __init__(
-        self,
-        drop_freq_low: float = 0.0,
-        drop_freq_high: float = 1.0,
-        drop_freq_count_low: int = 1,
-        drop_freq_count_high: int = 3,
-        drop_freq_width: float = 0.05,
-        p: float = 0.5,
-    ):
-        super().__init__()
-        self.drop_freq_low = drop_freq_low
-        self.drop_freq_high = drop_freq_high
-        self.drop_freq_count_low = drop_freq_count_low
-        self.drop_freq_count_high = drop_freq_count_high
-        self.drop_freq_width = drop_freq_width
-        self.p = p
+    Looks for 'wav' or 'filepath' columns, or any column ending with .wav/.flac.
 
-    def forward(self, waveforms: torch.Tensor, sample_rate: int = 16000) -> torch.Tensor:
-        """Apply random frequency band dropping via notch filters.
+    Args:
+        csv_file: Path to CSV file
 
-        Args:
-            waveforms: (batch, channels, time) tensor
-            sample_rate: sample rate in Hz
-        """
-        if torch.rand(1).item() > self.p:
-            return waveforms
-
-        batch_size = waveforms.shape[0]
-        output = waveforms.clone()
-
-        for i in range(batch_size):
-            n_drops = torch.randint(self.drop_freq_count_low, self.drop_freq_count_high + 1, (1,)).item()
-            for _ in range(n_drops):
-                # Random center frequency (normalized 0-1)
-                center = torch.empty(1).uniform_(self.drop_freq_low, self.drop_freq_high).item()
-                low = max(0.0, center - self.drop_freq_width / 2)
-                high = min(1.0, center + self.drop_freq_width / 2)
-
-                # Apply notch filter in frequency domain
-                output[i] = self._apply_notch(output[i], low, high)
-
-        return output
-
-    def _apply_notch(self, waveform: torch.Tensor, low: float, high: float) -> torch.Tensor:
-        """Zero out frequency band [low, high] (normalized 0-1 = 0-Nyquist)."""
-        # FFT
-        spec = torch.fft.rfft(waveform, dim=-1)
-        n_freqs = spec.shape[-1]
-
-        # Create mask
-        low_bin = int(low * n_freqs)
-        high_bin = int(high * n_freqs)
-        mask = torch.ones(n_freqs, device=waveform.device)
-        mask[low_bin:high_bin] = 0.0
-
-        # Apply and inverse FFT
-        spec = spec * mask
-        return torch.fft.irfft(spec, n=waveform.shape[-1], dim=-1)
-
-
-def load_paths_from_speechbrain_csv(csv_file: str | Path) -> list[str]:
-    """Parse SpeechBrain's annotation CSV and return list of audio file paths."""
+    Returns:
+        List of audio file paths
+    """
     csv_file = Path(csv_file)
     if not csv_file.exists():
-        raise FileNotFoundError(f"Annotation CSV not found: {csv_file}")
+        raise FileNotFoundError(f"CSV not found: {csv_file}")
 
     paths = []
     with open(csv_file, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            # SpeechBrain CSVs typically have 'wav' or 'filepath' column
             if "wav" in row:
                 paths.append(row["wav"])
             elif "filepath" in row:
                 paths.append(row["filepath"])
             else:
-                # Try first column that looks like a path
                 for v in row.values():
-                    if v.endswith(".wav") or v.endswith(".flac"):
+                    if v.endswith((".wav", ".flac")):
                         paths.append(v)
                         break
 
@@ -145,170 +76,280 @@ def load_paths_from_speechbrain_csv(csv_file: str | Path) -> list[str]:
     return paths
 
 
-class GPUAugmenter(nn.Module):
-    """Drop-in replacement for SpeechBrain Augmenter with GPU-native operations.
+class SpeedPerturb(nn.Module):
+    """Speed perturbation via resampling (GPU-native).
 
-    Matches SpeechBrain's augmentation pipeline:
-    - AddNoise: Add background noise at random SNR
-    - AddReverb: Convolve with room impulse responses
-    - DropFreq: Zero out random frequency bands
-    - DropChunk: Zero out random time chunks
+    Applies random speed factors by resampling audio. Commonly used factors
+    are 0.9, 1.0, 1.1 (wespeaker-style) for speaker verification.
 
     Args:
         sample_rate: Audio sample rate
-        noise_csv: Path to SpeechBrain noise annotation CSV (or null to disable)
-        rir_csv: Path to SpeechBrain RIR annotation CSV (or null to disable)
-        enable_noise: Explicitly enable/disable noise augmentation
-        enable_reverb: Explicitly enable/disable reverb augmentation
-        enable_drop_freq: Enable/disable frequency dropout
-        enable_drop_chunk: Enable/disable chunk dropout
-        snr_low: Minimum SNR in dB for noise addition
-        snr_high: Maximum SNR in dB for noise addition
-        noise_prob: Probability of applying noise (per sample)
-        reverb_prob: Probability of applying reverb (per sample)
-        drop_freq_prob: Probability of applying DropFreq (per sample)
-        drop_chunk_prob: Probability of applying DropChunk (per sample)
-        concat_original: If True, concatenate original with augmented (doubles batch)
-        augment_prob: Probability of applying augmentation pipeline
-        drop_freq_low: Minimum normalized frequency for DropFreq
-        drop_freq_high: Maximum normalized frequency for DropFreq
-        drop_freq_count_low: Minimum number of frequency bands to drop
-        drop_freq_count_high: Maximum number of frequency bands to drop
-        drop_freq_width: Width of each dropped frequency band
-        drop_length_low: Minimum samples to drop in DropChunk
-        drop_length_high: Maximum samples to drop in DropChunk
-        drop_count_low: Minimum number of chunks to drop
-        drop_count_high: Maximum number of chunks to drop
+        speed_factors: Speed factors to randomly choose from
+        p: Probability of applying perturbation per sample
     """
 
     def __init__(
         self,
         sample_rate: int = 16000,
-        noise_csv: str | None = None,
-        rir_csv: str | None = None,
-        # Enable/disable individual augmentations
-        enable_noise: bool = True,
-        enable_reverb: bool = True,
-        enable_drop_freq: bool = True,
-        enable_drop_chunk: bool = True,
-        # Per-augmentation probabilities
-        noise_prob: float = 0.5,
-        reverb_prob: float = 0.5,
-        drop_freq_prob: float = 0.5,
-        drop_chunk_prob: float = 0.5,
-        # Noise params
-        snr_low: float = 0.0,
-        snr_high: float = 15.0,
-        concat_original: bool = True,
-        augment_prob: float = 1.0,
-        # DropFreq params (matching SpeechBrain defaults)
-        drop_freq_low: float = 0.0,
-        drop_freq_high: float = 1.0,
-        drop_freq_count_low: int = 1,
-        drop_freq_count_high: int = 3,
-        drop_freq_width: float = 0.05,
-        # DropChunk params (matching SpeechBrain defaults)
-        drop_length_low: int = 1000,
-        drop_length_high: int = 2000,
-        drop_count_low: int = 1,
-        drop_count_high: int = 5,
+        speed_factors: list[float] | None = None,
+        p: float = 0.5,
     ):
         super().__init__()
-        self.concat_original = concat_original
         self.sample_rate = sample_rate
-        self.augment_prob = augment_prob
+        self.speed_factors = speed_factors or [0.9, 1.0, 1.1]
+        self.p = p
 
-        transforms = []
-
-        # AddNoise - load from SpeechBrain CSV
-        if enable_noise and noise_csv is not None:
-            noise_paths = load_paths_from_speechbrain_csv(noise_csv)
-            transforms.append(
-                AddBackgroundNoise(
-                    background_paths=noise_paths,
-                    min_snr_in_db=snr_low,
-                    max_snr_in_db=snr_high,
-                    p=noise_prob,
+        # Pre-create resamplers for each non-unity speed factor
+        self._resamplers: dict[float, torchaudio.transforms.Resample] = {}
+        for speed in self.speed_factors:
+            if speed != 1.0:
+                self._resamplers[speed] = torchaudio.transforms.Resample(
+                    orig_freq=int(sample_rate * speed),
+                    new_freq=sample_rate,
                 )
+
+    def forward(self, waveforms: torch.Tensor, sample_rate: int | None = None) -> torch.Tensor:
+        """Apply speed perturbation.
+
+        Args:
+            waveforms: (batch, 1, time) mono audio tensor
+            sample_rate: Unused, for API compatibility
+
+        Returns:
+            Speed-perturbed waveforms (same shape as input)
+        """
+        _check_mono(waveforms, "SpeedPerturb: ")
+        batch_size, channels, length = waveforms.shape
+        assert channels == 1, "SpeedPerturb only supports mono audio."
+        device = waveforms.device
+
+        # Generate random decisions for entire batch
+        apply_mask = torch.rand(batch_size, device=device) <= self.p
+        if not apply_mask.any():
+            return waveforms
+
+        speed_indices = torch.randint(len(self.speed_factors), (batch_size,), device=device)
+        output = waveforms.clone()
+
+        # Process samples grouped by speed factor for efficiency
+        for speed_idx, speed in enumerate(self.speed_factors):
+            if speed == 1.0:
+                continue
+
+            mask = apply_mask & (speed_indices == speed_idx)
+            if not mask.any():
+                continue
+
+            indices = mask.nonzero(as_tuple=True)[0]
+            resampler = self._resamplers[speed].to(device)
+            resampled = resampler(waveforms[indices])
+
+            # Adjust to original length (pad or truncate)
+            new_length = resampled.shape[-1]
+            if new_length < length:
+                resampled = F.pad(resampled, (0, length - new_length))
+            elif new_length > length:
+                resampled = resampled[..., :length]
+
+            output[indices] = resampled
+
+        return output
+
+
+class NormalizedReverb(nn.Module):
+    """Reverb with peak amplitude normalization.
+
+    Wraps ApplyImpulseResponse to prevent energy boost from RIR convolution.
+    Normalizes output to match input peak amplitude.
+
+    Args:
+        ir_csv: Path to CSV with IR paths
+        sample_rate: Audio sample rate
+        p: Probability of applying reverb
+        normalize: Whether to normalize amplitude after convolution
+    """
+
+    def __init__(
+        self,
+        ir_csv: str | None = None,
+        sample_rate: int = 16000,
+        p: float = 0.5,
+        normalize: bool = True,
+    ):
+        super().__init__()
+        self.sample_rate = sample_rate
+        self.normalize = normalize
+        ir_paths = load_paths_from_csv(ir_csv)
+
+        self._reverb = ApplyImpulseResponse(
+            ir_paths=ir_paths,
+            p=p,
+            sample_rate=sample_rate,
+            mode="per_example",
+            output_type="tensor",
+        )
+
+    def forward(self, waveforms: torch.Tensor, sample_rate: int | None = None) -> torch.Tensor:
+        """Apply reverb with optional amplitude normalization."""
+        sr = sample_rate or self.sample_rate
+
+        if not self.normalize:
+            return self._reverb(waveforms, sample_rate=sr)
+
+        # Store original peak amplitudes
+        orig_peaks = waveforms.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+
+        # Apply reverb
+        output = self._reverb(waveforms, sample_rate=sr)
+
+        # Normalize to original peak amplitude
+        new_peaks = output.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+        return output * (orig_peaks / new_peaks)
+
+
+class NoiseFromCSV(nn.Module):
+    """Background noise augmentation from CSV file paths.
+
+    Wrapper around AddBackgroundNoise that loads paths from a SpeechBrain-style CSV.
+
+    Args:
+        noise_csv: Path to CSV with noise file paths
+        min_snr_db: Minimum SNR in dB
+        max_snr_db: Maximum SNR in dB
+        p: Probability of applying noise
+    """
+
+    def __init__(
+        self,
+        noise_csv: str,
+        min_snr_db: float = 0.0,
+        max_snr_db: float = 15.0,
+        p: float = 0.5,
+    ):
+        super().__init__()
+        noise_paths = load_paths_from_csv(noise_csv)
+
+        self._noise = AddBackgroundNoise(
+            background_paths=noise_paths,
+            min_snr_in_db=min_snr_db,
+            max_snr_in_db=max_snr_db,
+            p=p,
+            mode="per_example",
+        )
+
+    def forward(self, waveforms: torch.Tensor, sample_rate: int | None = None) -> torch.Tensor:
+        """Apply background noise."""
+        return self._noise(waveforms, sample_rate=sample_rate)
+
+
+class GPUAugmenter(nn.Module):
+    """GPU-native audio augmentation pipeline for speaker verification.
+
+    Generic pipeline that applies an ordered list of transforms.
+
+    Args:
+        sample_rate: Audio sample rate (default: 16000)
+        transforms: Ordered list of pre-instantiated transforms (via Hydra _target_)
+        concat_original: Concatenate original with augmented (doubles batch)
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        transforms: list[nn.Module] | None = None,
+        concat_original: bool = True,
+    ):
+        super().__init__()
+        self.sample_rate = sample_rate
+        self.concat_original = concat_original
+
+        # Validate and reorder transforms if needed
+        if transforms:
+            transforms = self._validate_and_reorder_transforms(transforms)
+
+        self.transforms = nn.ModuleList(transforms) if transforms else nn.ModuleList()
+
+    def _validate_and_reorder_transforms(
+        self, transforms: list[nn.Module]
+    ) -> list[nn.Module]:
+        """Check transform order and reorder if SpeedPerturb/NormalizedReverb are misplaced.
+
+        Correct order:
+        1. SpeedPerturb (first - changes signal length)
+        2. NormalizedReverb (before noise - to avoid amplifying it)
+        3. Everything else (noise, filters, etc.)
+        """
+        speed_perturb = None
+        normalized_reverb = None
+        others = []
+
+        for t in transforms:
+            if isinstance(t, SpeedPerturb):
+                speed_perturb = t
+            elif isinstance(t, NormalizedReverb):
+                normalized_reverb = t
+            else:
+                others.append(t)
+
+        # Build correct order
+        correct_order = []
+        if speed_perturb is not None:
+            correct_order.append(speed_perturb)
+        if normalized_reverb is not None:
+            correct_order.append(normalized_reverb)
+        correct_order.extend(others)
+
+        # Check if reordering occurred
+        if correct_order != transforms:
+            log.warning(
+                "GPUAugmenter: Transforms were reordered. "
+                "SpeedPerturb must be first (changes signal length), "
+                "NormalizedReverb must come before noise (to avoid amplifying it). "
+                f"New order: {[type(t).__name__ for t in correct_order]}"
             )
 
-        # AddReverb - load from SpeechBrain CSV
-        if enable_reverb and rir_csv is not None:
-            rir_paths = load_paths_from_speechbrain_csv(rir_csv)
-            transforms.append(
-                ApplyImpulseResponse(
-                    ir_paths=rir_paths,
-                    p=reverb_prob,
-                )
-            )
-
-        # DropFreq
-        if enable_drop_freq:
-            transforms.append(
-                DropFreq(
-                    drop_freq_low=drop_freq_low,
-                    drop_freq_high=drop_freq_high,
-                    drop_freq_count_low=drop_freq_count_low,
-                    drop_freq_count_high=drop_freq_count_high,
-                    drop_freq_width=drop_freq_width,
-                    p=drop_freq_prob,
-                )
-            )
-
-        # DropChunk
-        if enable_drop_chunk:
-            transforms.append(
-                DropChunk(
-                    drop_length_low=drop_length_low,
-                    drop_length_high=drop_length_high,
-                    drop_count_low=drop_count_low,
-                    drop_count_high=drop_count_high,
-                    p=drop_chunk_prob,
-                )
-            )
-
-        self.augment = Compose(transforms, p=augment_prob) if transforms else None
+        return correct_order
 
     def forward(
         self, waveforms: torch.Tensor, lengths: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Apply augmentation pipeline matching SpeechBrain's Augmenter interface.
+        """Apply augmentation pipeline.
 
         Args:
-            waveforms: (batch, time) or (batch, 1, time) audio tensor
+            waveforms: (batch, time) or (batch, 1, time) mono audio tensor
             lengths: Normalized lengths (0-1) for each sample
 
         Returns:
             Tuple of (augmented_waveforms, lengths). If concat_original=True,
             both are doubled in batch dimension.
         """
-        # Ensure 3D: (batch, channels, time)
+        # Ensure 3D: (batch, 1, time)
         needs_squeeze = False
         if waveforms.ndim == 2:
             waveforms = waveforms.unsqueeze(1)
             needs_squeeze = True
 
+        _check_mono(waveforms, "GPUAugmenter: ")
+
         # Store original for potential concatenation
         original = waveforms
 
-        # Apply augmentation pipeline (if any augmentations enabled)
-        if self.augment is not None:
-            augmented = self.augment(waveforms, sample_rate=self.sample_rate)
-        else:
-            augmented = waveforms
+        # Apply transforms in order
+        for transform in self.transforms:
+            waveforms = transform(waveforms, sample_rate=self.sample_rate)
 
         if needs_squeeze:
-            augmented = augmented.squeeze(1)
+            waveforms = waveforms.squeeze(1)
             original = original.squeeze(1)
 
         if self.concat_original:
-            augmented = torch.cat([original, augmented], dim=0)
+            waveforms = torch.cat([original, waveforms], dim=0)
             lengths = torch.cat([lengths, lengths], dim=0)
 
-        return augmented, lengths
+        return waveforms, lengths
 
     def replicate_labels(self, labels: torch.Tensor) -> torch.Tensor:
-        """Double labels when concat_original=True (matches SpeechBrain interface)."""
+        """Double labels when concat_original=True."""
         if self.concat_original:
             return torch.cat([labels, labels], dim=0)
         return labels

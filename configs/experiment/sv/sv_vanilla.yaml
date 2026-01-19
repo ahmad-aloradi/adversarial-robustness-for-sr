@@ -15,7 +15,7 @@ defaults:
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["voxceleb", "sv"]
+tags: ["${oc.eval:'\"${datamodule.dataset.data_dir}\".split(\"/\")[-1]'}", "sv"]
 seed: 42
 
 trainer:
@@ -72,4 +72,4 @@ module:
 logger:
   wandb:
     tags: ${tags}
-    group: "voxceleb"
+    group: ${oc.eval:"'${datamodule.dataset.data_dir}'.split('/')[-1]"}

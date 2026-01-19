@@ -89,14 +89,14 @@ dataset:
 
   # Set to null for default DataLoader batching.
   # Example (P speakers x K utterances):
-  batch_sampler:
-    _target_: src.datamodules.components.utils.PKSpeakerBatchSampler
-    _partial_: true
-    num_speakers: 8
-    num_utterances: 4
-    seed: ${seed}
-    shuffle: true
-    batches_per_epoch: null
+  batch_sampler: null
+    # _target_: src.datamodules.components.utils.PKSpeakerBatchSampler
+    # _partial_: true
+    # num_speakers: 8
+    # num_utterances: 4
+    # seed: ${seed}
+    # shuffle: true
+    # batches_per_epoch: null
 
 transforms: null
 
