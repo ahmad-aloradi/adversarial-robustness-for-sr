@@ -8,6 +8,19 @@ A research project investigating how model compression techniques (magnitude-bas
 
 Determine whether compressed speaker recognition models retain cross-domain robustness — if compression hurts generalization, the field needs to know before deploying pruned models.
 
+## Current Milestone: v0.1 Foundations
+
+**Goal:** Get baselines and compression methods working correctly before running the main experiments.
+
+**Target outcomes:**
+- CNCeleb baseline matches WeSpeaker reference (~7.8% EER, currently 10.8%)
+- Pruning implementation verified against reference (correct sparsity/accuracy tradeoff)
+- Bregman implementation verified against reference (correct behavior)
+
+**Approach:**
+- Focus on CNCeleb baseline first — systematic investigation of training recipe differences
+- Once baseline works, verify pruning and Bregman sequentially
+
 ## Requirements
 
 ### Validated
@@ -22,10 +35,14 @@ Determine whether compressed speaker recognition models retain cross-domain robu
 - ✓ Experiment tracking (WandB, Neptune, TensorBoard) — existing
 - ✓ VoicePrivacy attacker challenge implementation — existing
 
-### Active
+### Active (v0.1)
 
-- [ ] Working pruning implementation (bugs fixed, integration verified)
-- [ ] Working Bregman implementation (bugs fixed, integration verified)
+- [ ] CNCeleb baseline matching WeSpeaker reference (~7.8% EER)
+- [ ] Pruning implementation verified against reference
+- [ ] Bregman implementation verified against reference
+
+### Backlog (v1.0+)
+
 - [ ] Multi-architecture support (ECAPA-TDNN, ResNet, Transformer models)
 - [ ] Systematic experiment pipeline (all combinations of model × sparsity × dataset)
 - [ ] Fixed sparsity level configurations (e.g., 50%, 70%, 90%, 95%)
@@ -47,7 +64,10 @@ Determine whether compressed speaker recognition models retain cross-domain robu
 - Entry points: `src/train.py`, `src/eval.py`
 - Pruning callbacks: `src/callbacks/pruning/prune.py` (magnitude), `src/callbacks/pruning/bregman/` (Bregman)
 - Experiment configs: `configs/experiment/sv/`
-- Current issues: Pruning and Bregman implementations have unknown bugs and integration issues
+- Current issues:
+  - CNCeleb baseline at 10.8% EER vs WeSpeaker's 7.8% (3% gap)
+  - Gap likely from training recipe differences (front-end, preprocessing, augmentation, loss scaling)
+  - Pruning and Bregman implementations need verification against reference implementations
 
 **Paper Narrative:**
 - Core question: Does compression hurt cross-domain generalization?
@@ -74,4 +94,4 @@ Determine whether compressed speaker recognition models retain cross-domain robu
 | Multiple architectures (ECAPA, ResNet, Transformer) | Generalizability of findings | — Pending |
 
 ---
-*Last updated: 2026-01-19 after initialization*
+*Last updated: 2026-01-25 after v0.1 milestone initialization*
