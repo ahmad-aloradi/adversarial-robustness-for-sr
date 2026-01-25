@@ -169,7 +169,7 @@ class CNCelebDataModule(LightningDataModule):
 
     def val_dataloader(self):
         assert self.hparams.get('loaders') is not None, "CNCelebDataModule requires 'loaders' config"
-        return DataLoader(self.val_data, **self.hparams.loaders.val, collate_fn=TrainCollate())
+        return DataLoader(self.val_data, **self.hparams.loaders.valid, collate_fn=TrainCollate())
 
     def test_dataloader(self):
         """Return test dataloaders for each enrollment mode."""

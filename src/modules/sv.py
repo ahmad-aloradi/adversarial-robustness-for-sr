@@ -73,6 +73,10 @@ class SpeakerVerification(pl.LightningModule):
         # - Repeating dataset-level metrics in every CSV row is expensive/large; metrics are always saved to JSON.
         self.scores_csv_include_metrics: bool = bool(kwargs.get("scores_csv_include_metrics", True))
 
+        # Mean subtraction (centering) - subtracts global mean from embeddings before scoring
+        # This is a common technique used by WeSpeaker ("sub mean of vox2_dev")
+        self.subtract_mean: bool = bool(kwargs.get("subtract_mean", False))
+
     ############ Setup init ############
     def _setup_metrics(self, metrics: DictConfig) -> None:
         """Initialize all metrics for training, validation and testing."""
@@ -424,11 +428,25 @@ class SpeakerVerification(pl.LightningModule):
             # Load partial trial results if resuming
             trial_results, resume_batch_idx, resume_batch_paths = self._load_partial_trial_results(test_filename)
             
+            # Compute mean vector for centering (if enabled)
+            mean_vector = None
+            if self.subtract_mean:
+                if cohort_embeddings is not None:
+                    mean_vector = cohort_embeddings.mean(dim=0)
+                    log.info(f"Computed mean vector from cohort embeddings (shape: {mean_vector.shape})")
+                else:
+                    # Fallback: compute mean from enrollment + test embeddings
+                    all_embeds = list(enrol_embeds.values()) + list(test_embeds.values())
+                    all_embeds_tensor = torch.stack(all_embeds)
+                    mean_vector = all_embeds_tensor.mean(dim=0)
+                    log.info(f"Computed mean vector from enroll+test embeddings (shape: {mean_vector.shape})")
+
             # Store all data for this test set
             self.test_sets_data[test_filename] = {
                 'enrol_embeds': enrol_embeds,
                 'test_embeds': test_embeds,
                 'cohort_embeddings': cohort_embeddings,
+                'mean_vector': mean_vector,
                 'trial_results': trial_results,
                 'resume_batch_idx': resume_batch_idx,
                 'resume_batch_paths': resume_batch_paths
@@ -812,16 +830,17 @@ class SpeakerVerification(pl.LightningModule):
         
     def _trials_eval_step_multi_test(self, batch: VoxCelebVerificationItem, test_data: Dict):
         """Evaluation step for a specific test set.
-        
+
         For CNCeleb, enrollment embeddings are keyed by enroll_id (aggregated from
         multiple utterances). For VoxCeleb, they are keyed by enroll_path.
         """
         embeds = test_data['test_embeds']
         enrol_embeds = test_data['enrol_embeds']
         cohort_embeddings = test_data['cohort_embeddings']
-        
+        mean_vector = test_data.get('mean_vector')
+
         trial_embeddings = torch.stack([embeds[path] for path in batch.test_path])
-        
+
         # Determine whether to look up by enroll_id or enroll_path
         # CNCeleb uses enroll_id (aggregated multi-utterance), VoxCeleb uses enroll_path
         if hasattr(batch, 'enroll_id') and batch.enroll_id[0] is not None:
@@ -835,17 +854,28 @@ class SpeakerVerification(pl.LightningModule):
         else:
             enroll_embeddings = torch.stack([enrol_embeds[path] for path in batch.enroll_path])
 
+        # Apply mean subtraction (centering) if enabled
+        if mean_vector is not None:
+            mean_vector = mean_vector.to(enroll_embeddings.device)
+            enroll_embeddings = enroll_embeddings - mean_vector
+            trial_embeddings = trial_embeddings - mean_vector
+
         # Compute raw cosine similarity scores
         raw_scores = torch.nn.functional.cosine_similarity(enroll_embeddings, trial_embeddings)
-        
+
         # Apply AS-Norm if cohort embeddings are available (same cohort for all test sets)
         if cohort_embeddings is not None:
+            # Center cohort embeddings if mean subtraction is enabled
+            cohort_for_norm = cohort_embeddings
+            if mean_vector is not None:
+                cohort_for_norm = cohort_embeddings - mean_vector.to(cohort_embeddings.device)
+
             normalized_scores = []
             for i in range(trial_embeddings.shape[0]):
                 norm_score = AS_norm(score=raw_scores[i],
                                      enroll_embedding=enroll_embeddings[i, ...],
-                                     test_embedding=trial_embeddings[i, ...], 
-                                     cohort_embeddings=cohort_embeddings,
+                                     test_embedding=trial_embeddings[i, ...],
+                                     cohort_embeddings=cohort_for_norm,
                                      **self.scores_norm.scores_norm_params)
                 normalized_scores.append(norm_score)
             normalized_scores = torch.tensor(normalized_scores, device=raw_scores.device)
