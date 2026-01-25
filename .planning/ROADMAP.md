@@ -24,10 +24,10 @@ This milestone establishes verified baselines before compression experiments. We
   1. Trained model achieves EER of 8.5% or lower on CNCeleb eval set
   2. Training config uses correct epoch count, LR schedule reaches ~0.0001 final, margin timing is proportional
   3. Single reproducible command trains the model from scratch to target EER
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 01-01: TBD
+- [ ] 01-01-PLAN.md — Fix hyperparameters and validate EER target
 
 ### Phase 2: Pruning Verification
 **Goal**: Magnitude-based pruning produces expected sparsity and accuracy behavior
@@ -63,7 +63,7 @@ Phase 1 first, then Phases 2 and 3 in parallel: 1 -> (2 || 3)
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. CNCeleb Baseline | 0/TBD | Not started | - |
+| 1. CNCeleb Baseline | 0/1 | Planned | - |
 | 2. Pruning Verification | 0/TBD | Not started | - |
 | 3. Bregman Verification | 0/TBD | Not started | - |
 
