@@ -1,17 +1,22 @@
 # @package _global_
 
-# Wespeaker-style training configuration for CNCeleb
-# Implements optimizations from wespeaker's ECAPA-TDNN recipe:
+# WeSpeaker-style training configuration for CNCeleb
+# Implements optimizations from WeSpeaker's ECAPA-TDNN recipe:
 # - Large batch size (128) with PKSpeaker sampling
 # - SGD optimizer with high LR (0.1) + momentum
 # - Warmup + exponential decay LR schedule
-# - Progressive margin scheduling (0.0 → 0.2)
+# - Progressive margin scheduling (0.0 -> 0.2)
 # - Speed perturbation augmentation
 #
-# Scaling from WeSpeaker (8 GPUs, effective batch 1024, 150 epochs):
-# - 1 GPU with batch 128 = 8x more gradient steps per epoch
-# - Match total gradient updates: 150/8 ≈ 20 epochs
-# - Recalculate gamma to reach ~0.00005 final LR: 0.67^18 * 0.1 ≈ 0.00005
+# Proportional scaling from WeSpeaker (150 epochs, 8 GPUs):
+# - 50 epochs for practical training time
+# - LR warmup: 3 epochs (6/150 = 4% -> 50*0.04 = 2, rounded to 3)
+# - LR decay: gamma=0.913 to reach ~0.00015 final LR (0.1 * 0.913^47 = 0.00015)
+# - Margin start: epoch 7 (20/150 = 13% -> 50*0.13 = 6.5, rounded to 7)
+# - Margin warmup: 13 epochs to epoch 20 (ends at ~40% of training)
+#
+# Checkpoint averaging: save_top_k=10 for post-training model averaging
+# (see scripts/average_checkpoints.py or Plan 02 for averaging workflow)
 #
 # Usage:
 #   python train.py experiment=sv/sv_wespeaker datamodule=datasets/cnceleb
@@ -24,13 +29,17 @@ defaults:
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
 
-
-tags: ["wespeaker", "${oc.eval:'\"${datamodule.dataset.data_dir}\".split(\"/\")[-1]'}", "sv"]
+tags:
+  [
+    "wespeaker",
+    '${oc.eval:''"${datamodule.dataset.data_dir}".split("/")[-1]''}',
+    "sv",
+  ]
 seed: 42
 
 trainer:
-  min_epochs: 5
-  max_epochs: 20  # WeSpeaker 150 epochs / 8 GPUs = ~20 epochs for 1 GPU
+  min_epochs: 10
+  max_epochs: 50 # Proportional: WeSpeaker 150 epochs -> 50 for practical training
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 
@@ -38,18 +47,19 @@ callbacks:
   model_checkpoint:
     mode: max
     monitor: ${replace:"valid/__metric__"}
+    save_top_k: 10 # Save last 10 checkpoints for averaging (WeSpeaker uses avg of 10)
   early_stopping:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    patience: 6  # Proportional for 20 epochs
-  # Progressive margin scheduler (wespeaker-style, scaled for 20 epochs)
-  # WeSpeaker: margin starts at epoch 20/150=13%, warmup 20 epochs (13%)
+    patience: 15 # Proportional: 8 -> 15 for 50 epochs
+  # Progressive margin scheduler (WeSpeaker-style, scaled for 50 epochs)
+  # WeSpeaker: margin starts at epoch 20/150=13%, warmup 20 epochs to epoch 40
   margin_scheduler:
     _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
     initial_margin: 0.0
     final_margin: 0.2
-    warmup_epochs: 3   # 20 * 0.13 ≈ 3 epochs
-    start_epoch: 3     # 20 * 0.13 ≈ epoch 3
+    warmup_epochs: 13 # 50 * 20/150 = 6.7, increased to 13 for stability
+    start_epoch: 7 # 50 * 0.13 = 6.5, rounded to 7
 
 datamodule:
   dataset:
@@ -71,7 +81,7 @@ datamodule:
 
 module:
   normalize_test_scores: True
-  subtract_mean: True         # subtract global mean from embeddings before scoring (centering)
+  subtract_mean: True # subtract global mean from embeddings before scoring (centering)
 
   # Start with margin=0.0 (will be increased by margin_scheduler callback)
   criterion:
@@ -82,20 +92,20 @@ module:
         margin: 0.0
         scale: 32.0
 
-  # Wespeaker-style LR schedule: warmup + exponential decay
-  # LR: 0.0 → 0.1 (warmup, 2 epochs) → 0.00005 (gamma decay, 18 epochs)
-  # gamma=0.67: 0.1 * 0.67^18 ≈ 0.00005 (matches WeSpeaker final LR)
+  # WeSpeaker-style LR schedule: warmup + exponential decay
+  # LR: 0.0 -> 0.1 (warmup, 3 epochs) -> ~0.00015 (gamma decay, 47 epochs)
+  # gamma=0.913: 0.1 * 0.913^47 = 0.00015 (close to WeSpeaker's 0.00005)
   lr_scheduler:
     scheduler:
       _target_: src.utils.schedulers.WarmupExponentialLR
-      warmup_epochs: 2       # WeSpeaker: 6/150=4% → 20*0.04≈1, round to 2
-      warmup_start_factor: 0.0  # WeSpeaker: warm_from_zero=True
-      gamma: 0.67            # Decay to ~0.00005 final LR
+      warmup_epochs: 3 # WeSpeaker: 6/150=4% -> 50*0.04=2, rounded to 3
+      warmup_start_factor: 0.0 # WeSpeaker: warm_from_zero=True
+      gamma: 0.913 # Decay to ~0.00015 final LR after 47 post-warmup epochs
     extras:
       interval: "epoch"
       frequency: 1
 
-  # Wespeaker-style SGD optimizer
+  # WeSpeaker-style SGD optimizer
   optimizer:
     _target_: torch.optim.SGD
     _partial_: True
@@ -106,12 +116,11 @@ module:
 
   ### Data for augmentation ###
   data_augmentation:
-
     noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
     rir_dataset_url: https://www.dropbox.com/scl/fi/linhy77c36mu10965a836/RIRs.zip?rlkey=pg9cu8vrpn2u173vhiqyu743u&dl=1
     data_folder_rir_noises: ${paths.data_dir}/RIRS_NOISES
     noise_annotation: ${hydra:runtime.output_dir}/noise.csv
-    rir_annotation:  ${hydra:runtime.output_dir}/reverb.csv
+    rir_annotation: ${hydra:runtime.output_dir}/reverb.csv
 
     prepare_noise_data:
       _target_: speechbrain.augment.preparation.prepare_dataset_from_URL
