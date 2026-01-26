@@ -57,8 +57,6 @@ class SpeakerVerification(pl.LightningModule):
         # Setup training components
         self._setup_training_components(criterion, optimizer, lr_scheduler)
         
-        # Freeze pretrained components (Ignore for now)
-
         # Initialize text embedding cache with appropriate limits
         self._embeds_cache_config = model.get("embedding_cache", {})
         self._max_cache_size = self._embeds_cache_config.get("max_size", 500000)
@@ -66,8 +64,7 @@ class SpeakerVerification(pl.LightningModule):
         
         # Embeddings norm configs
         self.normalize_test_scores = kwargs.get("normalize_test_scores", False)
-        self.scores_norm = kwargs.get("scores_norm",
-                                      OmegaConf.create({"embeds_metric_params": {}, "scores_norm_params": {}}))
+        self.scores_norm_params = kwargs.get("scores_norm_params", {})
 
         # Test-time artifact controls
         # - Repeating dataset-level metrics in every CSV row is expensive/large; metrics are always saved to JSON.

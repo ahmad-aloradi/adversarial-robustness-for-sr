@@ -16,8 +16,8 @@
 # - Margin start: 14% of training (20/150)
 # - Margin warmup: 26% of training (ends at 40%)
 #
-# Checkpoint averaging: save_top_k=10 for post-training model averaging
-# (see scripts/average_checkpoints.py or Plan 02 for averaging workflow)
+# Checkpoint averaging: save_top_k=10 and auto-average at fit end
+# (handled by a PyTorch Lightning callback in this experiment)
 #
 # Usage:
 #   python train.py experiment=sv/sv_wespeaker datamodule=datasets/cnceleb
@@ -50,6 +50,10 @@ callbacks:
     mode: max
     monitor: ${replace:"valid/__metric__"}
     save_top_k: 10 # Save last 10 checkpoints for averaging (WeSpeaker uses avg of 10)
+  checkpoint_averaging:
+    _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
+    num_checkpoints: 10
+    output_filename: averaged_top{num}.ckpt
   early_stopping:
     mode: max
     monitor: ${replace:"valid/__metric__"}
@@ -161,21 +165,21 @@ module:
             noise_csv: ${module.data_augmentation.noise_annotation}
             min_snr_db: 0
             max_snr_db: 15
-            p: 0.5
-          # 4. Frequency dropout (band-stop filter)
-          - _target_: torch_audiomentations.BandStopFilter
-            min_center_frequency: 200
-            max_center_frequency: 4000
-            min_bandwidth_fraction: 0.5
-            max_bandwidth_fraction: 1.5
-            p: 0.5
-            mode: per_example
-          # 5. Time chunk dropout (shorter width for wespeaker)
-          - _target_: torch_audiomentations.SpliceOut
-            num_time_intervals: 5
-            max_width: 25
-            p: 0.5
-            mode: per_example
+            p: 0.6
+          # # 4. Frequency dropout (band-stop filter)
+          # - _target_: torch_audiomentations.BandStopFilter
+          #   min_center_frequency: 200
+          #   max_center_frequency: 4000
+          #   min_bandwidth_fraction: 0.5
+          #   max_bandwidth_fraction: 1.5
+          #   p: 0.5
+          #   mode: per_example
+          # # 5. Time chunk dropout (shorter width for wespeaker)
+          # - _target_: torch_audiomentations.SpliceOut
+          #   num_time_intervals: 5
+          #   max_width: 25
+          #   p: 0.5
+          #   mode: per_example
 
 logger:
   wandb:

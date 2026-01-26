@@ -10,7 +10,8 @@ import hydra
 from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import DictConfig, OmegaConf
-from pytorch_lightning import Callback
+from pytorch_lightning import Callback, Trainer
+from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers.logger import Logger as PLLogger
 from pytorch_lightning.utilities import rank_zero_only
 
@@ -435,3 +436,44 @@ def load_pickle(pickle_path: Union[str, Path]) -> dict:
         stats = pickle.load(f)
     print(f"Statistics loaded from {pickle_path}")
     return stats
+
+
+def _resolve_test_ckpt_path(trainer: Trainer) -> Optional[str]:
+    """Prefer an averaged checkpoint (if present) for testing.
+
+    Falls back to the best checkpoint if no averaged checkpoint is found.
+    """
+    from src.callbacks.checkpoint_averaging import CheckpointAveraging
+
+    ckpt_cb = getattr(trainer, "checkpoint_callback", None)
+    if ckpt_cb is None:
+        for cb in trainer.callbacks:
+            if isinstance(cb, ModelCheckpoint):
+                ckpt_cb = cb
+                break
+
+    avg_cb = None
+    for cb in trainer.callbacks:
+        if isinstance(cb, CheckpointAveraging):
+            avg_cb = cb
+            break
+
+    if avg_cb is not None and ckpt_cb is not None:
+        num = avg_cb.num_checkpoints
+        if num is None and ckpt_cb.best_k_models:
+            num = len(ckpt_cb.best_k_models)
+
+        if num is not None:
+            try:
+                filename = avg_cb.output_filename.format(num=num)
+            except Exception:
+                filename = avg_cb.output_filename
+
+            avg_path = Path(ckpt_cb.dirpath or trainer.default_root_dir) / filename
+            if avg_path.exists():
+                return str(avg_path)
+
+    if ckpt_cb is not None:
+        return ckpt_cb.best_model_path or None
+
+    return None

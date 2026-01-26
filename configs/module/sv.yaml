@@ -57,10 +57,6 @@ logging_params:
 ### score normalization ###
 normalize_test_scores: ???   # apply score normalization or not
 subtract_mean: False         # subtract global mean from embeddings before scoring (centering)
-scores_norm:
-  embeds_metric_params:
-    num_speakers_in_cohort: 6000
-    min_utts_per_speaker: 7
-  scores_norm_params:
-    topk: 10000
-    min_cohort_size: 3000
+scores_norm_params:
+  topk: 600
+  min_cohort_size: 1

@@ -68,13 +68,9 @@ def AS_norm(score: float,
 
 **Current config in `sv.yaml`:**
 ```yaml
-scores_norm:
-  embeds_metric_params:
-    num_speakers_in_cohort: 600
-    min_utts_per_speaker: 10
-  scores_norm_params:
-    topk: 600           # Currently 600
-    min_cohort_size: 1
+scores_norm_params:
+topk: 600           # Currently 600
+min_cohort_size: 1
 ```
 
 **Current config in `sv_wespeaker.yaml`:**
