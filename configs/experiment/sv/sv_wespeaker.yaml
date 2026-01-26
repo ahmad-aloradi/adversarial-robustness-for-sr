@@ -8,18 +8,20 @@
 # - Progressive margin scheduling (0.0 -> 0.2)
 # - Speed perturbation augmentation
 #
-# Proportional scaling from WeSpeaker (150 epochs, 8 GPUs):
-# - 50 epochs for practical training time
-# - LR warmup: 3 epochs (6/150 = 4% -> 50*0.04 = 2, rounded to 3)
-# - LR decay: gamma=0.913 to reach ~0.00015 final LR (0.1 * 0.913^47 = 0.00015)
-# - Margin start: epoch 7 (20/150 = 13% -> 50*0.13 = 6.5, rounded to 7)
-# - Margin warmup: 13 epochs to epoch 20 (ends at ~40% of training)
+# All schedule parameters are computed relative to max_epochs using oc.eval,
+# so you can adjust training length and everything scales automatically.
+# Based on WeSpeaker 150-epoch recipe proportions:
+# - LR warmup: 4% of training (6/150)
+# - LR decay: gamma computed to reach ~0.0001 final LR
+# - Margin start: 14% of training (20/150)
+# - Margin warmup: 26% of training (ends at 40%)
 #
 # Checkpoint averaging: save_top_k=10 for post-training model averaging
 # (see scripts/average_checkpoints.py or Plan 02 for averaging workflow)
 #
 # Usage:
 #   python train.py experiment=sv/sv_wespeaker datamodule=datasets/cnceleb
+#   python train.py experiment=sv/sv_wespeaker trainer.max_epochs=30  # shorter run
 
 defaults:
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
@@ -38,8 +40,8 @@ tags:
 seed: 42
 
 trainer:
-  min_epochs: 10
-  max_epochs: 50 # Proportional: WeSpeaker 150 epochs -> 50 for practical training
+  max_epochs: 50 # Change this to adjust training length (all schedules auto-scale)
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% minimum
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 
@@ -51,15 +53,15 @@ callbacks:
   early_stopping:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    patience: 15 # Proportional: 8 -> 15 for 50 epochs
-  # Progressive margin scheduler (WeSpeaker-style, scaled for 50 epochs)
-  # WeSpeaker: margin starts at epoch 20/150=13%, warmup 20 epochs to epoch 40
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'} # ~30% of epochs
+  # Progressive margin scheduler (WeSpeaker-style, auto-scaled to max_epochs)
+  # WeSpeaker: margin starts at 14%, warmup 26% of training (ends at 40%)
   margin_scheduler:
     _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
     initial_margin: 0.0
     final_margin: 0.2
-    warmup_epochs: 13 # 50 * 20/150 = 6.7, increased to 13 for stability
-    start_epoch: 7 # 50 * 0.13 = 6.5, rounded to 7
+    start_epoch: ${oc.eval:'int(${trainer.max_epochs} * 0.14)'} # 14% into training
+    warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.26)'} # 26% duration (ends at 40%)
 
 datamodule:
   dataset:
@@ -92,15 +94,15 @@ module:
         margin: 0.0
         scale: 32.0
 
-  # WeSpeaker-style LR schedule: warmup + exponential decay
-  # LR: 0.0 -> 0.1 (warmup, 3 epochs) -> ~0.00015 (gamma decay, 47 epochs)
-  # gamma=0.913: 0.1 * 0.913^47 = 0.00015 (close to WeSpeaker's 0.00005)
+  # WeSpeaker-style LR schedule: warmup + exponential decay (auto-scaled)
+  # LR: 0.0 -> 0.1 (warmup, 4% of epochs) -> ~0.0001 (gamma decay)
+  # gamma computed to reach final_lr=0.0001 from initial_lr=0.1
   lr_scheduler:
     scheduler:
       _target_: src.utils.schedulers.WarmupExponentialLR
-      warmup_epochs: 3 # WeSpeaker: 6/150=4% -> 50*0.04=2, rounded to 3
+      warmup_epochs: ${oc.eval:'max(1, int(${trainer.max_epochs} * 0.04))'} # 4% warmup
       warmup_start_factor: 0.0 # WeSpeaker: warm_from_zero=True
-      gamma: 0.913 # Decay to ~0.00015 final LR after 47 post-warmup epochs
+      gamma: ${oc.eval:'pow(0.001, 1.0 / (${trainer.max_epochs} - max(1, int(${trainer.max_epochs} * 0.04))))'} # decay to 0.0001
     extras:
       interval: "epoch"
       frequency: 1
