@@ -25,6 +25,7 @@
 
 defaults:
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
+  - /module/scoring: as_norm
   - override /callbacks: default.yaml
   - override /datamodule: datasets/cnceleb.yaml
   - override /module: sv.yaml
@@ -40,7 +41,7 @@ tags:
 seed: 42
 
 trainer:
-  max_epochs: 50 # Change this to adjust training length (all schedules auto-scale)
+  max_epochs: 150 # Change this to adjust training length (all schedules auto-scale)
   min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% minimum
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
@@ -69,7 +70,9 @@ callbacks:
 
 datamodule:
   dataset:
-    max_duration: 3.0
+    segment_duration: 2.0
+    max_duration: 2.0
+    use_pre_segmentation: False
     # # Larger batch via PKSpeaker sampling (16 speakers × 8 utterances = 128)
     # batch_sampler:
     #   num_speakers: 16
@@ -86,9 +89,6 @@ datamodule:
       batch_size: 8
 
 module:
-  normalize_test_scores: True
-  subtract_mean: True # subtract global mean from embeddings before scoring (centering)
-
   # Start with margin=0.0 (will be increased by margin_scheduler callback)
   criterion:
     aam:
@@ -166,20 +166,6 @@ module:
             min_snr_db: 0
             max_snr_db: 15
             p: 0.6
-          # # 4. Frequency dropout (band-stop filter)
-          # - _target_: torch_audiomentations.BandStopFilter
-          #   min_center_frequency: 200
-          #   max_center_frequency: 4000
-          #   min_bandwidth_fraction: 0.5
-          #   max_bandwidth_fraction: 1.5
-          #   p: 0.5
-          #   mode: per_example
-          # # 5. Time chunk dropout (shorter width for wespeaker)
-          # - _target_: torch_audiomentations.SpliceOut
-          #   num_time_intervals: 5
-          #   max_width: 25
-          #   p: 0.5
-          #   mode: per_example
 
 logger:
   wandb:

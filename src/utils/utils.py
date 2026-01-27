@@ -458,20 +458,10 @@ def _resolve_test_ckpt_path(trainer: Trainer) -> Optional[str]:
             avg_cb = cb
             break
 
-    if avg_cb is not None and ckpt_cb is not None:
-        num = avg_cb.num_checkpoints
-        if num is None and ckpt_cb.best_k_models:
-            num = len(ckpt_cb.best_k_models)
-
-        if num is not None:
-            try:
-                filename = avg_cb.output_filename.format(num=num)
-            except Exception:
-                filename = avg_cb.output_filename
-
-            avg_path = Path(ckpt_cb.dirpath or trainer.default_root_dir) / filename
-            if avg_path.exists():
-                return str(avg_path)
+    if avg_cb is not None and avg_cb.averaged_ckpt_path:
+        avg_path = Path(avg_cb.averaged_ckpt_path)
+        if avg_path.exists():
+            return str(avg_path)
 
     if ckpt_cb is not None:
         return ckpt_cb.best_model_path or None

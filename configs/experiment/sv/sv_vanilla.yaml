@@ -5,17 +5,17 @@
 
 defaults:
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
+  - /module/scoring: default
   - override /callbacks: default.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
 
-
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["${oc.eval:'\"${datamodule.dataset.data_dir}\".split(\"/\")[-1]'}", "sv"]
+tags: ['${oc.eval:''"${datamodule.dataset.data_dir}".split("/")[-1]''}', "sv"]
 seed: 42
 
 trainer:
@@ -48,8 +48,6 @@ datamodule:
       batch_size: 8
 
 module:
-  normalize_test_scores: True
-
   lr_scheduler:
     scheduler:
       _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
@@ -68,7 +66,7 @@ module:
     _partial_: True
     lr: 1.0e-4
     weight_decay: 1.0e-5
-  
+
 logger:
   wandb:
     tags: ${tags}

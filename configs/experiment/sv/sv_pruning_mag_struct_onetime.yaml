@@ -4,11 +4,12 @@
 # python train.py experiment=sv/sv_pruning_mag_unstruct_onetime
 
 defaults:
-  - _self_  
+  - _self_
   - /module/sv_model: wespeaker_pretrained_ecapa_tdnn.yaml
-  - override /callbacks: 
-    - default.yaml
-    - checkpoint_handler.yaml
+  - /module/scoring: default
+  - override /callbacks:
+      - default.yaml
+      - checkpoint_handler.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml
   - override /trainer: gpu.yaml
@@ -17,7 +18,13 @@ defaults:
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["${oc.eval:'\"${datamodule.dataset.data_dir}\".split(\"/\")[-1]'}", "ln_structured_pruning", "onetime_pruning", "sv"]
+tags:
+  [
+    '${oc.eval:''"${datamodule.dataset.data_dir}".split("/")[-1]''}',
+    "ln_structured_pruning",
+    "onetime_pruning",
+    "sv",
+  ]
 seed: 42
 
 trainer:
@@ -34,21 +41,21 @@ callbacks:
     mode: max
     monitor: ${replace:"valid/__metric__"}
     patience: 8
-    
+
   model_pruning:
     _target_: src.callbacks.pruning.prune.MagnitudePruner
     pruning_fn: ln_structured
-    amount: 0.9  # 90% pruning applied before fine-tuning
+    amount: 0.9 # 90% pruning applied before fine-tuning
     use_global_unstructured: false
     apply_pruning: true
     make_pruning_permanent: true
     use_lottery_ticket_hypothesis: false
     resample_parameters: false
     parameters_to_prune: null
-    pruning_dim: 1  # Dimension along which to prune for structured pruning methods (0 = channels, 1 = filters)
-    pruning_norm: 1  # Norm to use for structured pruning methods (e.g., 1 for L1 norm)
+    pruning_dim: 1 # Dimension along which to prune for structured pruning methods (0 = channels, 1 = filters)
+    pruning_norm: 1 # Norm to use for structured pruning methods (e.g., 1 for L1 norm)
     verbose: 1
-    pruning_trigger: pre_training  # Apply pruning once before fine-tuning starts
+    pruning_trigger: pre_training # Apply pruning once before fine-tuning starts
     scheduled_pruning: false
     final_amount: null
     epochs_to_ramp: null
@@ -69,10 +76,7 @@ datamodule:
     enrollment:
       batch_size: 8
 
-### score normalization ###
 module:
-  normalize_test_scores: False
-
   lr_scheduler:
     scheduler:
       _target_: torch.optim.lr_scheduler.ReduceLROnPlateau

@@ -1,6 +1,6 @@
-from typing import Any, List, Optional, Tuple
-import sys
 import os
+import sys
+from typing import Any, List, Optional, Tuple
 
 import hydra
 import pyrootutils
@@ -54,7 +54,10 @@ _HYDRA_PARAMS = {
     "config_path": str(root / "configs"),
     "config_name": "train.yaml",
 }
-from src import utils   # noqa: E501
+
+from src import utils  # noqa: E501
+from src.utils.utils import _resolve_test_ckpt_path  # noqa: E501
+
 log = utils.get_pylogger(__name__)
 
 from src.utils.augmentation_utils import prepare_speechbrain_augmentation
@@ -106,9 +109,7 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
 
     # Init loggers
     log.info("Instantiating loggers...")
-    logger: List[PLLogger] = utils.instantiate_loggers(
-        cfg.get("logger")
-    )
+    logger: List[PLLogger] = utils.instantiate_loggers(cfg.get("logger"))
 
     # Init lightning ddp plugins
     log.info("Instantiating plugins...")
@@ -152,14 +153,13 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     # Test the model
     if cfg.get("test"):
         log.info("Starting testing!")
-        ckpt_path = trainer.checkpoint_callback.best_model_path
-        if ckpt_path == "":
+        ckpt_path = _resolve_test_ckpt_path(trainer)
+        if not ckpt_path:
             log.warning(
-                "Best ckpt not found! Using current weights for testing..."
+                "No averaged/best ckpt found! Using current weights for testing..."
             )
-            ckpt_path = None
         trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
-        log.info(f"Best ckpt path: {ckpt_path}")
+        log.info(f"Test ckpt path: {ckpt_path}")
 
     test_metrics = trainer.callback_metrics
 
@@ -179,7 +179,7 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
     return metric_dict, object_dict
 
 
-@utils.register_custom_resolvers(**_HYDRA_PARAMS | {'overrides': sys.argv[1:]})
+@utils.register_custom_resolvers(**_HYDRA_PARAMS | {"overrides": sys.argv[1:]})
 @hydra.main(**_HYDRA_PARAMS)
 def main(cfg: DictConfig) -> Optional[float]:
 

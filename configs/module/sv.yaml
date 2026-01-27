@@ -9,11 +9,6 @@ model:
   audio_encoder: ???
   classifier: ???
 
-# ### caching ###
-#   embedding_cache:
-#     max_size: 500000
-#     bypass_warmup: True
-    
 ### criteria and metrics ###
 criterion:
   aam: &_amm_
@@ -29,7 +24,7 @@ criterion:
   loss: ${module.criterion.train_criterion}
 
 metrics:
-  train: 
+  train:
     _target_: "torchmetrics.Accuracy"
     task: "multiclass"
     num_classes: ${datamodule.num_classes}
@@ -53,10 +48,13 @@ logging_params:
   sync_dist: True
   prog_bar: True
 
-
-### score normalization ###
-normalize_test_scores: ???   # apply score normalization or not
-subtract_mean: False         # subtract global mean from embeddings before scoring (centering)
-scores_norm_params:
-  topk: 600
-  min_cohort_size: 1
+### scoring pipeline ###
+scoring:
+  enrollment_aggregation: mean # "mean" or "length_weighted"
+  mean_source: none # "cohort" or "none"
+  norm_method: as_norm # "as_norm" or "none"
+  cohort:
+    speaker_level: true
+    topk_speakers: 300
+    min_size: 100
+    max_size: null

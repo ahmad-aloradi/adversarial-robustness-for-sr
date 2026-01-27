@@ -4,8 +4,9 @@
 # python train.py experiment=example
 
 defaults:
-  - _self_  
+  - _self_
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
+  - /module/scoring: default
   - override /callbacks: default.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml
@@ -15,7 +16,13 @@ defaults:
 # all parameters below will be merged with parameters from default configurations set above
 # this allows you to overwrite only specified parameters
 
-tags: ["${oc.eval:'\"${datamodule.dataset.data_dir}\".split(\"/\")[-1]'}", "Bregman_learning", "sv", "Adabreg"]
+tags:
+  [
+    '${oc.eval:''"${datamodule.dataset.data_dir}".split("/")[-1]''}',
+    "Bregman_learning",
+    "sv",
+    "Adabreg",
+  ]
 seed: 42
 
 trainer:
@@ -32,12 +39,12 @@ callbacks:
     mode: max
     monitor: ${replace:"valid/__metric__"}
     patience: 8
-    
+
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-30
     verbose: 2
-    console_log_frequency: 1e5  # Frequency for console output (verbose >= 2)
+    console_log_frequency: 1e5 # Frequency for console output (verbose >= 2)
     # Global lambda scheduler configuration.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
@@ -66,10 +73,7 @@ datamodule:
     enrollment:
       batch_size: 8
 
-### score normalization ###
 module:
-  normalize_test_scores: False
-
   lr_scheduler:
     scheduler:
       _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
@@ -84,13 +88,13 @@ module:
       frequency: 1
 
   optimizer:
-  # # Option1 Linbreg
-  #   _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
-  #   _partial_: True
-  #   momentum: 0.0
-  #   lr: 1e-4
+    # # Option1 Linbreg
+    #   _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
+    #   _partial_: True
+    #   momentum: 0.0
+    #   lr: 1e-4
 
-  # Option2 Adabreg
+    # Option2 Adabreg
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
     _partial_: true
     lr: 1e-4
@@ -104,16 +108,16 @@ module:
         param_names: ["weight"]
         # Match any module name containing 'conv'
         module_name_patterns:
-          - '.*conv.*'
+          - ".*conv.*"
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1L2Conv
-            lamda: 1e-2  # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
+            lamda: 1e-2 # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
           lambda_scale: 1.0
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99  # Initial sparsity
+          sparsity_rate: 0.99 # Initial sparsity
 
       # Group 2a: Prunable Linear Layers (catch all torch.nn.Linear regardless of name)
       - name: linear_layers
@@ -123,18 +127,18 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1e-2  # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
+            lamda: 1e-2 # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
           lambda_scale: 1.0 # Scale factor for the global lambda
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99  # Initial sparsity
+          sparsity_rate: 0.99 # Initial sparsity
 
       # Group 2b: Catch classifier by exact module name match
       - name: classifier
         layer_types: ["speechbrain.lobes.models.ECAPA_TDNN.Classifier"]
         module_name_patterns:
-          - '^classifier$'  # Exact match for module named "classifier"
+          - "^classifier$" # Exact match for module named "classifier"
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
@@ -143,12 +147,18 @@ module:
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99  # Initial sparsity
+          sparsity_rate: 0.99 # Initial sparsity
 
       # Group 3: Pruning-sensitive Layers (Not Pruned!)
       - name: norm_params
-        layer_types: ['torch.nn.BatchNorm1d', 'torch.nn.BatchNorm2d', 'torch.nn.layernorm.LayerNorm','torch.nn.GroupNorm']
-        module_name_patterns: ['.*norm.*','.*pos_enc.*', .*head.*]
+        layer_types:
+          [
+            "torch.nn.BatchNorm1d",
+            "torch.nn.BatchNorm2d",
+            "torch.nn.layernorm.LayerNorm",
+            "torch.nn.GroupNorm",
+          ]
+        module_name_patterns: [".*norm.*", ".*pos_enc.*", .*head.*]
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
@@ -156,15 +166,15 @@ module:
 
       # Group 4: Biases
       - name: bias_params
-        layer_types: ['torch.nn.Linear', 'torch.nn.Conv1d','torch.nn.Conv2d']
+        layer_types: ["torch.nn.Linear", "torch.nn.Conv1d", "torch.nn.Conv2d"]
         module_name_patterns: [".*"]
         param_names: ["bias"]
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1e-2  # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
+            lamda: 1e-2 # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
           lambda_scale: 1.0 # Scale factor for the global lambda
-          
+
       # Group 5: Fallback  (i.e., it catches what's left over) (MUST BE LAST)
       - name: fallback
         # Mark this as the fallback "other" layers types.
@@ -173,12 +183,12 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1e-2  # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
+            lamda: 1e-2 # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
           lambda_scale: 1.0 # Scale factor for the global lambda
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99  # Initial sparsity
+          sparsity_rate: 0.99 # Initial sparsity
 
 logger:
   wandb:

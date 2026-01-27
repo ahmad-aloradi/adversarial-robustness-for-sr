@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, List, Optional, Tuple
 
 import torch
-from pytorch_lightning import Callback, Trainer, LightningModule
+from pytorch_lightning import Callback, LightningModule, Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.utilities import rank_zero_only
 
 from src import utils
-
 
 log = utils.get_pylogger(__name__)
 
@@ -18,20 +17,22 @@ class CheckpointAveraging(Callback):
     """Average top-k checkpoints at the end of fit.
 
     This uses PyTorch Lightning's callback hooks and the ModelCheckpoint
-    callback to locate the best checkpoints, then writes an averaged checkpoint.
+    callback to locate the best checkpoints, then writes an averaged
+    checkpoint.
     """
 
     def __init__(
         self,
-        num_checkpoints: Optional[int] = 10,
+        num_checkpoints: int | None = 10,
         output_filename: str = "averaged_top{num}.ckpt",
     ) -> None:
         super().__init__()
         self.num_checkpoints = num_checkpoints
         self.output_filename = output_filename
+        self.averaged_ckpt_path: str | None = None
 
     @staticmethod
-    def _find_model_checkpoint(trainer: Trainer) -> Optional[ModelCheckpoint]:
+    def _find_model_checkpoint(trainer: Trainer) -> ModelCheckpoint | None:
         if getattr(trainer, "checkpoint_callback", None) is not None:
             return trainer.checkpoint_callback
 
@@ -42,10 +43,10 @@ class CheckpointAveraging(Callback):
 
     @staticmethod
     def _sort_best_k(
-        best_k_models: Dict[str, torch.Tensor],
+        best_k_models: dict[str, torch.Tensor],
         mode: str,
-    ) -> List[Tuple[str, float]]:
-        items: List[Tuple[str, float]] = []
+    ) -> list[tuple[str, float]]:
+        items: list[tuple[str, float]] = []
         for path, score in best_k_models.items():
             if not path:
                 continue
@@ -60,24 +61,34 @@ class CheckpointAveraging(Callback):
     def on_fit_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
         ckpt_cb = self._find_model_checkpoint(trainer)
         if ckpt_cb is None:
-            log.warning("Checkpoint averaging skipped: no ModelCheckpoint callback found.")
+            log.warning(
+                "Checkpoint averaging skipped: no ModelCheckpoint callback found."
+            )
             return
 
         if not ckpt_cb.best_k_models:
-            log.warning("Checkpoint averaging skipped: no best_k_models recorded.")
+            log.warning(
+                "Checkpoint averaging skipped: no best_k_models recorded."
+            )
             return
 
         sorted_items = self._sort_best_k(ckpt_cb.best_k_models, ckpt_cb.mode)
         if not sorted_items:
-            log.warning("Checkpoint averaging skipped: best_k_models empty after filtering.")
+            log.warning(
+                "Checkpoint averaging skipped: best_k_models empty after filtering."
+            )
             return
 
         if self.num_checkpoints is not None:
             sorted_items = sorted_items[: self.num_checkpoints]
 
-        ckpt_paths = [Path(p).expanduser() for p, _ in sorted_items if Path(p).exists()]
+        ckpt_paths = [
+            Path(p).expanduser() for p, _ in sorted_items if Path(p).exists()
+        ]
         if not ckpt_paths:
-            log.warning("Checkpoint averaging skipped: no checkpoint files found on disk.")
+            log.warning(
+                "Checkpoint averaging skipped: no checkpoint files found on disk."
+            )
             return
 
         log.info(
@@ -85,8 +96,8 @@ class CheckpointAveraging(Callback):
             + ", ".join(p.name for p in ckpt_paths)
         )
 
-        avg_state: Dict[str, torch.Tensor] = {}
-        float_keys: List[str] = []
+        avg_state: dict[str, torch.Tensor] = {}
+        float_keys: list[str] = []
         num = len(ckpt_paths)
 
         # Load first checkpoint to initialize
@@ -123,5 +134,6 @@ class CheckpointAveraging(Callback):
         output_path = output_dir / output_name
         first_ckpt["state_dict"] = avg_state
         torch.save(first_ckpt, output_path)
+        self.averaged_ckpt_path = str(output_path)
 
         log.info(f"Saved averaged checkpoint to: {output_path}")

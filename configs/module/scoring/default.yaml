@@ -1,0 +1,43 @@
+# Scoring pipeline configuration for speaker verification.
+#
+# The scoring pipeline handles the complete test-time evaluation flow:
+# 1. Enrollment aggregation - combining multi-utterance enrollments
+# 2. Mean centering - subtracting cohort mean from embeddings
+# 3. Score normalization - AS-Norm (Adaptive Symmetric Normalization)
+#
+# Usage in experiment config:
+#   defaults:
+#     - /module/scoring: default
+#
+#   module:
+#     scoring:
+#       norm_method: as_norm
+#       mean_source: cohort
+
+# Enrollment aggregation method for multi-utterance enrollments
+# Options: "mean" (default), "length_weighted"
+enrollment_aggregation: mean
+
+# Mean centering: "cohort" or "none"
+mean_source: none
+
+# Score normalization: "as_norm" or "none"
+norm_method: as_norm
+
+# Cohort configuration for AS-Norm and mean centering
+cohort:
+  # Whether to average embeddings per speaker before normalization
+  # When true: cohort = {speaker_avg_embeddings}, top-K operates on speakers
+  # When false: cohort = {all_utterance_embeddings}, top-K on utterances
+  speaker_level: true
+
+  # Number of top speakers (or utterances if speaker_level=false) for AS-Norm
+  # WeSpeaker default: 300, Kaldi: 200-400
+  topk_speakers: 300
+
+  # Minimum cohort size (speakers if speaker_level=true)
+  # Raises error if cohort is smaller than this
+  min_size: 100
+
+  # Maximum cohort size (for memory efficiency, null = unlimited)
+  max_size: null
