@@ -32,6 +32,9 @@ Usage:
 """
 
 import argparse
+import shutil
+import subprocess
+import tempfile
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -42,7 +45,53 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import soundfile as sf
+import torch
+import torchaudio
 from tqdm.auto import tqdm
+
+
+def _check_flac_cli():
+    """Check if flac CLI is available."""
+    return shutil.which('flac') is not None
+
+
+def _save_flac_with_seek_support(output_path: Path, audio: np.ndarray, sample_rate: int):
+    """
+    Save audio as FLAC with proper seek table support.
+
+    Uses torchaudio (which typically uses sox or ffmpeg backend) instead of
+    soundfile/libsndfile, as libsndfile creates incomplete seek tables that
+    cause random seek failures.
+
+    Falls back to flac CLI if available, then to soundfile as last resort.
+    """
+    # Convert to torch tensor (torchaudio expects [channels, samples])
+    audio_tensor = torch.from_numpy(audio).unsqueeze(0).float()
+
+    # Try torchaudio first (uses sox/ffmpeg backend which creates proper seek tables)
+    try:
+        torchaudio.save(str(output_path), audio_tensor, sample_rate, format="flac")
+        return
+    except Exception:
+        pass
+
+    # Try flac CLI if available
+    if _check_flac_cli():
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+            tmp_wav = tmp.name
+        try:
+            sf.write(tmp_wav, audio, sample_rate)
+            result = subprocess.run(
+                ['flac', '-f', '-s', '--best', '-o', str(output_path), tmp_wav],
+                capture_output=True
+            )
+            if result.returncode == 0:
+                return
+        finally:
+            Path(tmp_wav).unlink(missing_ok=True)
+
+    # Last resort: soundfile (may have seek issues)
+    sf.write(str(output_path), audio, sample_rate)
 
 
 class ConcatenationError(Exception):
@@ -406,8 +455,8 @@ def concatenate_audio_files(
     output_filename = f"concat_{group_idx:06d}.flac"
     output_path = speaker_genre_dir / output_filename
 
-    # Save concatenated audio
-    sf.write(str(output_path), concatenated, sample_rate)
+    # Save with proper seek table support (tries torchaudio, then flac CLI, then soundfile)
+    _save_flac_with_seek_support(output_path, concatenated, sample_rate)
 
     # Verify the written file
     written_info = sf.info(str(output_path))
@@ -428,6 +477,60 @@ def concatenate_audio_files(
     return output_rel_path, source_rel_paths, actual_duration, group.genre, dataset_source
 
 
+def fix_existing_flac_files(directory: Path, n_jobs: int = 8):
+    """
+    Re-encode existing FLAC files to fix seek table issues.
+
+    This function re-encodes FLAC files in-place using torchaudio,
+    which creates proper seek tables that support random access.
+
+    Usage:
+        fix_existing_flac_files(Path("/path/to/concatenated"))
+    """
+    flac_files = list(directory.rglob("*.flac"))
+    print(f"Found {len(flac_files)} FLAC files to re-encode")
+
+    def reencode_file(flac_path: Path) -> bool:
+        """Re-encode a single FLAC file in place using torchaudio."""
+        try:
+            # Load with soundfile (reading works fine)
+            audio, sr = sf.read(str(flac_path), dtype='float32')
+
+            # Save to temp file with torchaudio (creates proper seek tables)
+            with tempfile.NamedTemporaryFile(suffix='.flac', delete=False) as tmp:
+                tmp_path = tmp.name
+
+            audio_tensor = torch.from_numpy(audio).unsqueeze(0).float()
+            torchaudio.save(tmp_path, audio_tensor, sr, format="flac")
+
+            # Verify the new file is valid
+            new_info = sf.info(tmp_path)
+            if abs(new_info.frames - len(audio)) > 1:
+                Path(tmp_path).unlink(missing_ok=True)
+                return False
+
+            # Replace original with re-encoded file
+            shutil.move(tmp_path, flac_path)
+            return True
+        except Exception:
+            if 'tmp_path' in locals():
+                Path(tmp_path).unlink(missing_ok=True)
+            return False
+
+    success = 0
+    failed = 0
+
+    # Process sequentially to avoid torchaudio threading issues
+    for flac_path in tqdm(flac_files, desc="Re-encoding"):
+        if reencode_file(flac_path):
+            success += 1
+        else:
+            failed += 1
+            print(f"Failed to re-encode: {flac_path}")
+
+    print(f"\nRe-encoded {success} files, {failed} failures")
+
+
 def main():
     """Main entry point for the concatenation script."""
     parser = argparse.ArgumentParser(
@@ -435,12 +538,12 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
-        "--root_dir", type=str, required=True,
-        help="Root directory containing CNCeleb datasets"
+        "--root_dir", type=str, default=None,
+        help="Root directory containing CNCeleb datasets (not required with --fix_existing)"
     )
     parser.add_argument(
-        "--cnceleb1", type=str, required=True,
-        help="Name of CNCeleb1 subdirectory (e.g., CN-Celeb_flac)"
+        "--cnceleb1", type=str, default=None,
+        help="Name of CNCeleb1 subdirectory (e.g., CN-Celeb_flac) (not required with --fix_existing)"
     )
     parser.add_argument(
         "--cnceleb2", type=str, default=None,
@@ -458,24 +561,46 @@ def main():
     )
     parser.add_argument(
         "--output_dir", type=str, required=True,
-        help="Output directory for concatenated files"
+        help="Output directory for concatenated files (or directory to fix with --fix_existing)"
     )
     parser.add_argument(
-        "--mapping_file", type=str, required=True,
-        help="Path to save the CSV mapping file"
+        "--mapping_file", type=str, default=None,
+        help="Path to save the CSV mapping file (not required with --fix_existing)"
     )
     parser.add_argument(
         "--n_jobs", type=int, default=None,
         help="Number of parallel jobs (default: min(cpu_count(), 8))"
     )
-    
+    parser.add_argument(
+        "--fix_existing", action="store_true",
+        help="Re-encode existing FLAC files in output_dir to fix seek table issues. "
+             "Use this to fix previously created concatenated files that have random seek failures."
+    )
+
     args = parser.parse_args()
-    
+
     # Resolve paths
-    root_dir = Path(args.root_dir).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
+
+    # Handle --fix_existing mode
+    if args.fix_existing:
+        if not output_dir.exists():
+            raise ValidationError(f"Output directory does not exist: {output_dir}")
+        n_jobs = args.n_jobs if args.n_jobs else min(cpu_count(), 8)
+        fix_existing_flac_files(output_dir, n_jobs=n_jobs)
+        return
+
+    # Validate required arguments for normal operation
+    if not args.root_dir:
+        parser.error("--root_dir is required unless using --fix_existing")
+    if not args.cnceleb1:
+        parser.error("--cnceleb1 is required unless using --fix_existing")
+    if not args.mapping_file:
+        parser.error("--mapping_file is required unless using --fix_existing")
+
+    root_dir = Path(args.root_dir).expanduser().resolve()
     mapping_file = Path(args.mapping_file).expanduser().resolve()
-    
+
     # Validate target duration
     if args.target_duration <= 0:
         raise ValidationError(f"Invalid target_duration: {args.target_duration}")

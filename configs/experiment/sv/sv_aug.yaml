@@ -118,20 +118,20 @@ module:
             min_snr_db: 0
             max_snr_db: 15
             p: 0.5
-          # 4. Frequency dropout (band-stop filter)
-          - _target_: torch_audiomentations.BandStopFilter
-            min_center_frequency: 200
-            max_center_frequency: 4000
-            min_bandwidth_fraction: 0.5
-            max_bandwidth_fraction: 1.5
-            p: 0.5
-            mode: per_example
-          # 5. Time chunk dropout
-          - _target_: torch_audiomentations.SpliceOut
-            num_time_intervals: 5
-            max_width: 100
-            p: 0.5
-            mode: per_example
+          # # 4. Frequency dropout (band-stop filter)
+          # - _target_: torch_audiomentations.BandStopFilter
+          #   min_center_frequency: 200
+          #   max_center_frequency: 4000
+          #   min_bandwidth_fraction: 0.5
+          #   max_bandwidth_fraction: 1.5
+          #   p: 0.5
+          #   mode: per_example
+          # # 5. Time chunk dropout
+          # - _target_: torch_audiomentations.SpliceOut
+          #   num_time_intervals: 5
+          #   max_width: 100
+          #   p: 0.5
+          #   mode: per_example
 
 logger:
   wandb:
