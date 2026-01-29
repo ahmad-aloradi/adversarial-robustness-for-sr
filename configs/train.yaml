@@ -53,3 +53,7 @@ seed: 42
 
 # name of the run, accessed by loggers
 name: "lightning-template-0.1.0"
+
+# default trainer overrides
+trainer:
+  check_val_every_n_epoch: 1

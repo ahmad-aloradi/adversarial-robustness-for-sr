@@ -176,7 +176,7 @@ lr_scheduler:
     gamma: 0.913               # Decay to ~0.0001-0.0002 final
   extras:
     interval: "epoch"
-    frequency: 1
+    frequency: ${trainer.check_val_every_n_epoch}
 ```
 
 ### Margin Schedule Configuration (Fixed)
@@ -346,7 +346,7 @@ module:
       gamma: 0.913                  # CHANGED: 0.80 -> 0.913
     extras:
       interval: "epoch"
-      frequency: 1
+      frequency: ${trainer.check_val_every_n_epoch}
 
   optimizer:
     _target_: torch.optim.SGD

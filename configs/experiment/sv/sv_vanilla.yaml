@@ -59,7 +59,7 @@ module:
     extras:
       monitor: ${replace:"valid/__metric__"}
       interval: "epoch"
-      frequency: 1
+      frequency: ${trainer.check_val_every_n_epoch}
 
   optimizer:
     _target_: torch.optim.AdamW

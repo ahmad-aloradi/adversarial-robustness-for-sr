@@ -903,9 +903,19 @@ class BaseDataset(Dataset):
                 num_frames=frames_to_load
             )
         except Exception as e:
-            msg = f"Failed to load audio file: {audio_path}. Error: {e}"
-            log.error(msg)
-            raise RuntimeError(msg) from e
+            # Some FLAC files have incomplete seek tables, causing psf_fseek() failures
+            # when using frame_offset. Fallback: load entire file and slice in memory.
+            if frame_offset > 0 and "fseek" in str(e).lower():
+                log.debug(
+                    f"Seek failed for {audio_path}, falling back to full load + slice"
+                )
+                waveform, sr = torchaudio.load(str(audio_path))
+                end_frame = frame_offset + frames_to_load
+                waveform = waveform[:, frame_offset:end_frame]
+            else:
+                msg = f"Failed to load audio file: {audio_path}. Error: {e}"
+                log.error(msg)
+                raise RuntimeError(msg) from e
         
         waveform = waveform.squeeze(0)  # Remove channel dimension
         

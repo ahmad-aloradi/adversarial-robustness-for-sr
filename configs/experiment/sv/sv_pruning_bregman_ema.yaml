@@ -44,7 +44,7 @@ callbacks:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-30
     verbose: 2
-    console_log_frequency: 1e5 # Frequency for console output (verbose >= 2)
+    console_log_frequency: 1e10 # Frequency for console output (verbose >= 2)
     # Global lambda scheduler configuration.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
@@ -85,7 +85,7 @@ module:
     extras:
       monitor: ${replace:"valid/__metric__"}
       interval: "epoch"
-      frequency: 1
+      frequency: ${trainer.check_val_every_n_epoch}
 
   optimizer:
     # # Option1 Linbreg
