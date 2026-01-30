@@ -46,7 +46,7 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None.
+1. Fix CNCeleb FLAC decoding errors in prep script (tooling)
 
 ### Blockers/Concerns
 
