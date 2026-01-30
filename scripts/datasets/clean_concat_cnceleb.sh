@@ -11,7 +11,7 @@ if [ -d "data/datasets/cnceleb" ]; then
 fi
 
 OUTPUT_DIR="${2:-$ROOT_DIR/concatenated}"
-MAPPING_FILE="${3:-$ROOT_DIR/vad_metadata/concat_mapping.map}"
+MAPPING_FILE="${3:-$ROOT_DIR/metadata/concat_mapping.map}"
 
 echo "🧹 Cleaning up CNCeleb concatenation artifacts"
 echo "   Output directory: $OUTPUT_DIR"
@@ -28,8 +28,8 @@ fi
 
 # Remove concatenated files directory
 if [ -d "$OUTPUT_DIR" ]; then
-    # Count files before deletion
-    FILE_COUNT=$(find "$OUTPUT_DIR" -type f -name "*.flac" 2>/dev/null | wc -l)
+    # Count files before deletion (WAV files - concatenated files are saved as WAV)
+    FILE_COUNT=$(find "$OUTPUT_DIR" -type f -name "*.wav" 2>/dev/null | wc -l)
     rm -rf "$OUTPUT_DIR"
     echo "   ✓ Removed $FILE_COUNT concatenated audio files from $OUTPUT_DIR"
 else

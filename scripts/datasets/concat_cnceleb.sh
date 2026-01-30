@@ -1,6 +1,8 @@
 #!/bin/bash
 # Concatenate short utterances for CNCeleb dataset
-# This script should be run BEFORE prep_cnceleb.sh
+# Can be run standalone or automatically via: CONCAT=1 ./scripts/datasets/prep_cnceleb.sh
+#
+# Concatenated files are saved as WAV (not FLAC) to avoid seek table issues.
 
 set -euo pipefail
 
@@ -46,8 +48,8 @@ fi
 eval "$CMD"
 
 echo ""
-echo "✅ Concatenation completed successfully"
+echo "✅ Concatenation completed successfully (output: WAV format)"
 echo ""
 echo "Next steps:"
-echo "   1. Run prep_cnceleb.sh with the concat_mapping parameter"
-echo "   2. Example: CONCAT_MAPPING=$MAPPING_FILE ./scripts/datasets/prep_cnceleb.sh"
+echo "   1. Run the Python preparation script (or it will be run automatically if using prep_cnceleb.sh)"
+echo "   2. Ensure concat_mapping_file in cnceleb.yaml config points to: $MAPPING_FILE"
