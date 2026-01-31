@@ -11,6 +11,7 @@ This milestone establishes verified baselines before compression experiments. We
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
 - [ ] **Phase 1: CNCeleb Baseline** - Fix training config, achieve EER within 1% of WeSpeaker reference
+- [ ] **Phase 1.1: Eval Auto-Config (INSERTED)** - Complete eval.py checkpoint averaging implementation
 - [ ] **Phase 2: Pruning Verification** - Verify magnitude pruning at 30-90% sparsity levels (parallel with Phase 3)
 - [ ] **Phase 3: Bregman Verification** - Compare Bregman implementation against reference (parallel with Phase 2)
 
@@ -29,6 +30,19 @@ This milestone establishes verified baselines before compression experiments. We
 Plans:
 - [ ] 01-01-PLAN.md — Fix hyperparameters and validate EER target (Wave 1)
 - [ ] 01-02-PLAN.md — Create checkpoint averaging script (Wave 2)
+
+### Phase 1.1: Eval Auto-Config from Experiment Directory (INSERTED)
+**Goal**: Complete eval.py implementation to automatically parse and apply configs from experiment directories
+**Depends on**: Phase 1 (uses trained models from baseline)
+**Requirements**: EVAL-01
+**Success Criteria** (what must be TRUE):
+  1. Running `python src/eval.py exp_dir=logs/train/runs/2026-01-27_16-00-10` automatically loads all training configs
+  2. Checkpoint averaging (`use_avg_ckpt=True`) works correctly with the TODO implementation completed
+  3. All eval-specific overrides (predict, ckpt_path, etc.) properly merge with experiment configs
+**Plans**: 1 plan
+
+Plans:
+- [ ] 01.1-01-PLAN.md — Extract checkpoint averaging utility and wire into eval.py
 
 ### Phase 2: Pruning Verification
 **Goal**: Magnitude-based pruning produces expected sparsity and accuracy behavior
@@ -60,15 +74,16 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phase 1 first, then Phases 2 and 3 in parallel: 1 -> (2 || 3)
+Phase 1 first, then Phase 1.1, then Phases 2 and 3 in parallel: 1 -> 1.1 -> (2 || 3)
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. CNCeleb Baseline | 0/2 | Planned | - |
+| 1.1 Eval Auto-Config (INSERTED) | 0/1 | Planned | - |
 | 2. Pruning Verification | 0/TBD | Not started | - |
 | 3. Bregman Verification | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-01-25*
-*Last updated: 2026-01-26 - Added checkpoint averaging plan (01-02)*
+*Last updated: 2026-01-31 - Planned Phase 1.1 (1 plan)*
 *Milestone: v0.1 Foundations*
