@@ -9,29 +9,29 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 
 ## Current Position
 
-Phase: 1 of 3 (CNCeleb Baseline)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-01-25 - Roadmap created
+Phase: 1.1 of 3 (Eval Auto-Config from Experiment Directory)
+Plan: 1 of 1 in current phase
+Status: Phase 1.1 complete
+Last activity: 2026-01-31 - Completed 01.1-01-PLAN.md
 
-Progress: [..........] 0%
+Progress: [█.........] 10%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0 hours
+- Total plans completed: 1
+- Average duration: 3 minutes
+- Total execution time: 0.05 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 1.1 | 1 | 3 min | 3 min |
 
 **Recent Trend:**
-- Last 5 plans: -
-- Trend: -
+- Last 5 plans: 3m
+- Trend: First plan complete
 
 *Updated after each plan completion*
 
@@ -42,7 +42,14 @@ Progress: [..........] 0%
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
-- None yet
+| Phase | Decision | Choice | Impact |
+|-------|----------|--------|--------|
+| 01.1-01 | Checkpoint averaging utility | Extract from callback into standalone function | Enables eval.py checkpoint averaging without callback infrastructure |
+| 01.1-01 | Import location | Use package-level import (utils.average_checkpoints) | Cleaner code following Python conventions |
+
+### Roadmap Evolution
+
+- Phase 1.1 inserted after Phase 1: Eval Auto-Config from Experiment Directory (URGENT) - Complete partial eval.py implementation for automatic config parsing
 
 ### Pending Todos
 
@@ -54,6 +61,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-01-25
-Stopped at: Roadmap created, ready to plan Phase 1
+Last session: 2026-01-31
+Stopped at: Completed 01.1-01-PLAN.md (Phase 1.1 complete)
 Resume file: None
