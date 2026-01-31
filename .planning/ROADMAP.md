@@ -11,7 +11,7 @@ This milestone establishes verified baselines before compression experiments. We
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
 - [ ] **Phase 1: CNCeleb Baseline** - Fix training config, achieve EER within 1% of WeSpeaker reference
-- [ ] **Phase 1.1: Eval Auto-Config (INSERTED)** - Complete eval.py checkpoint averaging implementation
+- [x] **Phase 1.1: Eval Auto-Config (INSERTED)** - Complete eval.py checkpoint averaging implementation ✓
 - [ ] **Phase 2: Pruning Verification** - Verify magnitude pruning at 30-90% sparsity levels (parallel with Phase 3)
 - [ ] **Phase 3: Bregman Verification** - Compare Bregman implementation against reference (parallel with Phase 2)
 
@@ -42,7 +42,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 01.1-01-PLAN.md — Extract checkpoint averaging utility and wire into eval.py
+- [x] 01.1-01-PLAN.md — Extract checkpoint averaging utility and wire into eval.py ✓
 
 ### Phase 2: Pruning Verification
 **Goal**: Magnitude-based pruning produces expected sparsity and accuracy behavior
@@ -79,11 +79,11 @@ Phase 1 first, then Phase 1.1, then Phases 2 and 3 in parallel: 1 -> 1.1 -> (2 |
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. CNCeleb Baseline | 0/2 | Planned | - |
-| 1.1 Eval Auto-Config (INSERTED) | 0/1 | Planned | - |
+| 1.1 Eval Auto-Config (INSERTED) | 1/1 | ✓ Complete | 2026-01-31 |
 | 2. Pruning Verification | 0/TBD | Not started | - |
 | 3. Bregman Verification | 0/TBD | Not started | - |
 
 ---
 *Roadmap created: 2026-01-25*
-*Last updated: 2026-01-31 - Planned Phase 1.1 (1 plan)*
+*Last updated: 2026-01-31 - Completed Phase 1.1*
 *Milestone: v0.1 Foundations*
