@@ -204,16 +204,21 @@ class CNCelebProcessor:
             raise ValueError("cnceleb1 is mandatory and cannot be None")
         
         # Build sub_datasets list from cnceleb1 and cnceleb2
-        self.sub_datasets = [cnceleb1]
-        if cnceleb2 is not None:
-            self.sub_datasets.append(cnceleb2)
+        self.sub_datasets = [cnceleb1, cnceleb2]
 
         # Store the sub-dataset roots for verification
         self.sub_dataset_roots = [self.root_dir / d for d in self.sub_datasets]
         self._verify_sub_datasets()
 
+        # Determine audio file extension from dataset name (expects 'flac' or 'wav' in name)
+        lower1 = cnceleb1.lower()
+        self.audio_ext = 'flac' if 'flac' in lower1 else 'wav' if 'wav' in lower1 else None
+        if self.audio_ext is None:
+            raise ValueError("Could not determine audio extension from cnceleb1 value (expected 'flac' or 'wav' in name)")
+        assert (self.audio_ext in cnceleb2.lower()), "cnceleb2 must use the same audio extension as cnceleb1"
+
         self.cnceleb1_dirpath = self.root_dir / cnceleb1
-        self.cnceleb2_dirpath = self.root_dir / cnceleb2 if cnceleb2 is not None else None
+        self.cnceleb2_dirpath = self.root_dir / cnceleb2
 
         self.artifacts_dir = Path(artifacts_dir)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -234,14 +239,13 @@ class CNCelebProcessor:
         self.trials_lst_file = self.cnceleb1_dirpath / 'eval' / 'lists' / 'trials.lst'
         self.test_lst_file = self.cnceleb1_dirpath / 'eval' / 'lists' / 'test.lst'
         self.cnceleb1_dev_lst_file = self.cnceleb1_dirpath / 'dev' / 'dev.lst'
-        self.cnceleb2_dev_lst_file = self.cnceleb2_dirpath / 'spk.lst' if self.cnceleb2_dirpath else None
+        self.cnceleb2_dev_lst_file = self.cnceleb2_dirpath / 'spk.lst'
 
         assert self.enroll_map_file.exists(), f"Enrollment map file not found: {self.enroll_map_file}"
         assert self.enroll_lst_file.exists(), f"Enrollment list file not found: {self.enroll_lst_file}"
         assert self.trials_lst_file.exists(), f"Trials list file not found: {self.trials_lst_file}"
         assert self.cnceleb1_dev_lst_file.exists(), f"dev.lst in CN-Celeb1 not found: {self.cnceleb1_dev_lst_file}"
-        if self.cnceleb2_dev_lst_file:
-            assert self.cnceleb2_dev_lst_file.exists(), f"spk.lst in CN-Celeb2 not found: {self.cnceleb2_dev_lst_file}"
+        assert self.cnceleb2_dev_lst_file.exists(), f"spk.lst in CN-Celeb2 not found: {self.cnceleb2_dev_lst_file}"
 
         log.info(f"Initialized CNCelebProcessor:")
         log.info(f"  Root: {self.root_dir}")
@@ -352,8 +356,8 @@ class CNCelebProcessor:
             ]
             
             for scan_dir in scan_dirs:
-                audio_files = list(scan_dir.rglob('*.flac'))
-                assert audio_files, f"No audio files found in {scan_dir}"
+                audio_files = list(scan_dir.rglob(f'*.{self.audio_ext}'))
+                assert audio_files, f"No audio files found in {scan_dir} (looking for '*.{self.audio_ext}')"
                 log.info(f"Found {len(audio_files)} audio files in {scan_dir}")
                 
                 for f in audio_files:
@@ -470,26 +474,26 @@ class CNCelebProcessor:
         # CNCeleb1 trial paths are like "test/id00800-singing-01-001.wav"
         # But actual files are in "eval/test/id00800-singing-01-001.flac"
         
-        # Add .flac extension if not present
-        if not trial_path.endswith('.flac'):
-            trial_path_flac = Path(trial_path).with_suffix('.flac')
+        # Add the configured audio extension if not present
+        if not trial_path.endswith(f'.{self.audio_ext}'):
+            trial_path_with_ext = Path(trial_path).with_suffix(f'.{self.audio_ext}')
         else:
-            trial_path_flac = Path(trial_path)
+            trial_path_with_ext = Path(trial_path)
                     
-        path = self.cnceleb1_dirpath / 'eval' / trial_path_flac
+        path = self.cnceleb1_dirpath / 'eval' / trial_path_with_ext
         assert path.exists(), f"File not found: {path}"
         rel_path = self.cnceleb1_dirpath.name / path.relative_to(self.cnceleb1_dirpath)
         return str(rel_path)
 
     def _find_audio_map_files(self, trial_path: str) -> str:
         """Find the actual audio file path from trial path - CNCeleb specific logic."""        
-        # Add .flac extension if not present
-        if not trial_path.endswith('.flac'):
-            trial_path_flac = Path(trial_path).with_suffix('.flac')
+        # Add the configured audio extension if not present
+        if not trial_path.endswith(f'.{self.audio_ext}'):
+            trial_path_with_ext = Path(trial_path).with_suffix(f'.{self.audio_ext}')
         else:
-            trial_path_flac = Path(trial_path)
+            trial_path_with_ext = Path(trial_path)
 
-        path = self.cnceleb1_dirpath / 'data' / trial_path_flac
+        path = self.cnceleb1_dirpath / 'data' / trial_path_with_ext        
         assert path.exists(), f"File not found: {path}"
         rel_path = self.cnceleb1_dirpath.name / path.relative_to(self.cnceleb1_dirpath)
         return str(rel_path)
@@ -600,14 +604,11 @@ class CNCelebProcessor:
         with open(self.cnceleb1_dev_lst_file, 'r', encoding='utf-8') as f:
             cn1_dev_speakers = [_format_global_speaker_id(line.strip()) for line in f if line.strip()]
 
-        if self.cnceleb2_dev_lst_file and self.cnceleb2_dev_lst_file.exists():
-            log.info(f"Reading additional dev speakers from: {self.cnceleb2_dev_lst_file}")
-            with open(self.cnceleb2_dev_lst_file, 'r', encoding='utf-8') as f:
-                cn2_dev_speakers = [_format_global_speaker_id(line.strip()) for line in f if line.strip()]
-            dev_speakers = sorted(set(cn1_dev_speakers + cn2_dev_speakers))
-        else:
-            dev_speakers = sorted(set(cn1_dev_speakers))
-        
+        log.info(f"Reading additional dev speakers from: {self.cnceleb2_dev_lst_file}")
+        with open(self.cnceleb2_dev_lst_file, 'r', encoding='utf-8') as f:
+            cn2_dev_speakers = [_format_global_speaker_id(line.strip()) for line in f if line.strip()]
+
+        dev_speakers = sorted(set(cn1_dev_speakers + cn2_dev_speakers))        
         log.info(f"Total dev speakers found: {len(dev_speakers)}")
 
         # Test speakers from test list
@@ -776,9 +777,6 @@ if __name__ == "__main__":
     resolved_root = Path(config.data_dir).expanduser().resolve()
     resolved_artifacts = Path(config.artifacts_dir).expanduser().resolve()
 
-    # Handle optional cnceleb2 parameter
-    cnceleb2 = config.cnceleb2 if hasattr(config, 'cnceleb2') and config.cnceleb2 else None
-
     processor = CNCelebProcessor(
         root_dir=resolved_root,
         artifacts_dir=resolved_artifacts,
@@ -788,7 +786,7 @@ if __name__ == "__main__":
         test_unique_csv_path=Path(config.test_unique_csv_path),
         dev_spk_file=Path(config.dev_spk_file),
         test_spk_file=Path(config.test_spk_file),
-        cnceleb2=cnceleb2,
+        cnceleb2=config.cnceleb2,
         verbose=config.verbose,
         sep=config.sep,
         sample_rate=config.sample_rate,

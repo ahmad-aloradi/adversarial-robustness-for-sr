@@ -13,8 +13,8 @@ The mapping file is then read by cnceleb_prep.py to:
 - Skip original short files that have been merged
 - Include the new concatenated files in preprocessing
 
-CNCeleb directory structure: data/{speaker_id}/{genre}-{recording}.flac
-Genre is extracted from filename prefix (e.g., "singing-01-002.flac" -> genre="singing")
+CNCeleb directory structure: data/{speaker_id}/{genre}-{recording}.{extensions}
+Genre is extracted from filename prefix (e.g., "singing-01-002.{extensions}" -> genre="singing")
 
 CSV format (pipe-separated):
     output_path|source_paths|duration|speaker_id|genre|dataset_source
@@ -24,8 +24,8 @@ Where source_paths uses semicolon as delimiter for multiple paths.
 Usage:
     python scripts/datasets/concat_short_utterances.py \
         --root_dir data/cnceleb \
-        --cnceleb1 CN-Celeb_flac \
-        --cnceleb2 CN-Celeb2_flac \
+        --cnceleb1 CN-Celeb_{extensions} \
+        --cnceleb2 CN-Celeb2_{extensions} \
         --target_duration 5.0 \
         --output_dir data/cnceleb/concatenated \
         --mapping_file data/cnceleb/metadata/concat_mapping.map
@@ -33,7 +33,6 @@ Usage:
 
 import argparse
 import shutil
-import subprocess
 import tempfile
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -45,53 +44,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import soundfile as sf
-import torch
-import torchaudio
 from tqdm.auto import tqdm
-
-
-def _check_flac_cli():
-    """Check if flac CLI is available."""
-    return shutil.which('flac') is not None
-
-
-def _save_flac_with_seek_support(output_path: Path, audio: np.ndarray, sample_rate: int):
-    """
-    Save audio as FLAC with proper seek table support.
-
-    Uses torchaudio (which typically uses sox or ffmpeg backend) instead of
-    soundfile/libsndfile, as libsndfile creates incomplete seek tables that
-    cause random seek failures.
-
-    Falls back to flac CLI if available, then to soundfile as last resort.
-    """
-    # Convert to torch tensor (torchaudio expects [channels, samples])
-    audio_tensor = torch.from_numpy(audio).unsqueeze(0).float()
-
-    # Try torchaudio first (uses sox/ffmpeg backend which creates proper seek tables)
-    try:
-        torchaudio.save(str(output_path), audio_tensor, sample_rate, format="flac")
-        return
-    except Exception:
-        pass
-
-    # Try flac CLI if available
-    if _check_flac_cli():
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-            tmp_wav = tmp.name
-        try:
-            sf.write(tmp_wav, audio, sample_rate)
-            result = subprocess.run(
-                ['flac', '-f', '-s', '--best', '-o', str(output_path), tmp_wav],
-                capture_output=True
-            )
-            if result.returncode == 0:
-                return
-        finally:
-            Path(tmp_wav).unlink(missing_ok=True)
-
-    # Last resort: soundfile (may have seek issues)
-    sf.write(str(output_path), audio, sample_rate)
 
 
 class ConcatenationError(Exception):
@@ -108,12 +61,12 @@ class ValidationError(Exception):
 class AudioFileInfo:
     """Information about an audio file."""
     abs_path: Path
-    rel_path: str  # Relative to sub-dataset root (e.g., CN-Celeb_flac)
+    rel_path: str  # Relative to sub-dataset root (e.g., CN-Celeb_{extensions})
     speaker_id: str
     genre: str  # e.g., "singing", "speech", "interview"
     duration: float
     sample_rate: int
-    sub_dataset: str  # e.g., "CN-Celeb_flac" or "CN-Celeb2_flac"
+    sub_dataset: str  # e.g., "CN-Celeb_{extensions}" or "CN-Celeb2_{extensions}"
 
 
 @dataclass
@@ -157,25 +110,25 @@ def scan_audio_file(args: Tuple[str, str, str]) -> Optional[AudioFileInfo]:
         ) from e
     
     # Extract speaker ID and genre from path
-    # Expected format: data/{speaker_id}/{genre}-{recording}.flac
-    # Genre is the prefix of filename before first hyphen (e.g., "singing-01-002.flac" -> "singing")
+    # Expected format: data/{speaker_id}/{genre}-{recording}.{extensions}
+    # Genre is the prefix of filename before first hyphen (e.g., "singing-01-002.{extensions}" -> "singing")
     parts = rel_path.parts
     speaker_id = None
     genre = None
 
     if len(parts) >= 2 and parts[0] in ['data', 'dev']:
-        # data/id00010/singing-01-002.flac -> speaker=id00010
+        # data/id00010/singing-01-002.{extensions} -> speaker=id00010
         speaker_id = parts[1]
     elif len(parts) >= 1 and parts[0].startswith('id'):
-        # id00010/singing-01-002.flac -> speaker=id00010
+        # id00010/singing-01-002.{extensions} -> speaker=id00010
         speaker_id = parts[0]
 
     if not speaker_id or not speaker_id.startswith('id'):
         raise ValidationError(f"Could not extract speaker ID from path: {rel_path}")
 
-    # Extract genre from filename (e.g., "singing-01-002.flac" -> "singing")
+    # Extract genre from filename (e.g., "singing-01-002.{extensions}" -> "singing")
     filename = rel_path.name  # Get filename without directory
-    filename_stem = Path(filename).stem  # Remove .flac extension
+    filename_stem = Path(filename).stem  # Remove .{extensions} extension
     if '-' in filename_stem:
         genre = filename_stem.split('-')[0]
     else:
@@ -195,6 +148,7 @@ def scan_audio_file(args: Tuple[str, str, str]) -> Optional[AudioFileInfo]:
 def scan_dataset(
     root_dir: Path,
     sub_datasets: List[str],
+    extensions: str,
     n_jobs: int = 8,
 ) -> List[AudioFileInfo]:
     """
@@ -221,10 +175,10 @@ def scan_dataset(
         # Check for data directory
         data_dir = sub_root / 'data'
         assert sub_root.exists(), f"Sub-dataset directory does not exist: {sub_root}"            
-        audio_files = list(data_dir.rglob('*.flac'))
+        audio_files = list(data_dir.rglob(f'*{extensions}'))
 
         if not audio_files:
-            raise ValidationError(f"WARNING: No .flac files found in {data_dir}")
+            raise ValidationError(f"WARNING: No {extensions} files found in {data_dir}")
         else:
             print(f"Found {len(audio_files)} audio files in {data_dir}")
     
@@ -387,6 +341,7 @@ def concatenate_audio_files(
     root_dir: Path,
     output_dir: Path,
     group_idx: int,
+    extensions: str,
 ) -> Tuple[str, List[str], float, str, str]:
     """
     Concatenate audio files in a group and save to output directory.
@@ -448,15 +403,13 @@ def concatenate_audio_files(
     concatenated = np.concatenate(audio_segments)
     assert len(concatenated) > 0, "Concatenated audio should not be empty"
 
-    # Create output path: output_dir/{speaker_id}/{genre}/concat_XXXXXX.flac
+    # Create output path: output_dir/{speaker_id}/{genre}/concat_XXXXXX{extensions}
     speaker_genre_dir = output_dir / group.speaker_id / group.genre
     speaker_genre_dir.mkdir(parents=True, exist_ok=True)
 
-    output_filename = f"concat_{group_idx:06d}.flac"
+    output_filename = f"concat_{group_idx:06d}{extensions}"
     output_path = speaker_genre_dir / output_filename
-
-    # Save with proper seek table support (tries torchaudio, then flac CLI, then soundfile)
-    _save_flac_with_seek_support(output_path, concatenated, sample_rate)
+    sf.write(str(output_path), concatenated, sample_rate)
 
     # Verify the written file
     written_info = sf.info(str(output_path))
@@ -471,64 +424,10 @@ def concatenate_audio_files(
         for f in included_files
     ]
 
-    # Get dataset source from first source file (e.g., CN-Celeb_flac or CN-Celeb2_flac)
+    # Get dataset source from first source file (e.g., CN-Celeb_{extensions} or CN-Celeb2_{extensions})
     dataset_source = included_files[0].sub_dataset
     actual_duration = len(concatenated) / sample_rate
     return output_rel_path, source_rel_paths, actual_duration, group.genre, dataset_source
-
-
-def fix_existing_flac_files(directory: Path, n_jobs: int = 8):
-    """
-    Re-encode existing FLAC files to fix seek table issues.
-
-    This function re-encodes FLAC files in-place using torchaudio,
-    which creates proper seek tables that support random access.
-
-    Usage:
-        fix_existing_flac_files(Path("/path/to/concatenated"))
-    """
-    flac_files = list(directory.rglob("*.flac"))
-    print(f"Found {len(flac_files)} FLAC files to re-encode")
-
-    def reencode_file(flac_path: Path) -> bool:
-        """Re-encode a single FLAC file in place using torchaudio."""
-        try:
-            # Load with soundfile (reading works fine)
-            audio, sr = sf.read(str(flac_path), dtype='float32')
-
-            # Save to temp file with torchaudio (creates proper seek tables)
-            with tempfile.NamedTemporaryFile(suffix='.flac', delete=False) as tmp:
-                tmp_path = tmp.name
-
-            audio_tensor = torch.from_numpy(audio).unsqueeze(0).float()
-            torchaudio.save(tmp_path, audio_tensor, sr, format="flac")
-
-            # Verify the new file is valid
-            new_info = sf.info(tmp_path)
-            if abs(new_info.frames - len(audio)) > 1:
-                Path(tmp_path).unlink(missing_ok=True)
-                return False
-
-            # Replace original with re-encoded file
-            shutil.move(tmp_path, flac_path)
-            return True
-        except Exception:
-            if 'tmp_path' in locals():
-                Path(tmp_path).unlink(missing_ok=True)
-            return False
-
-    success = 0
-    failed = 0
-
-    # Process sequentially to avoid torchaudio threading issues
-    for flac_path in tqdm(flac_files, desc="Re-encoding"):
-        if reencode_file(flac_path):
-            success += 1
-        else:
-            failed += 1
-            print(f"Failed to re-encode: {flac_path}")
-
-    print(f"\nRe-encoded {success} files, {failed} failures")
 
 
 def main():
@@ -538,16 +437,16 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
-        "--root_dir", type=str, default=None,
-        help="Root directory containing CNCeleb datasets (not required with --fix_existing)"
+        "--root_dir", type=str, required=True,
+        help="Root directory containing CNCeleb datasets"
     )
     parser.add_argument(
-        "--cnceleb1", type=str, default=None,
-        help="Name of CNCeleb1 subdirectory (e.g., CN-Celeb_flac) (not required with --fix_existing)"
+        "--cnceleb1", type=str, required=True,
+        help="Name of CNCeleb1 subdirectory (e.g., CN-Celeb_flac)"
     )
     parser.add_argument(
-        "--cnceleb2", type=str, default=None,
-        help="Name of CNCeleb2 subdirectory (optional)"
+        "--cnceleb2", type=str, required=True,
+        help="Name of CNCeleb2 subdirectory"
     )
     parser.add_argument(
         "--target_duration", type=float, default=5.0,
@@ -561,43 +460,21 @@ def main():
     )
     parser.add_argument(
         "--output_dir", type=str, required=True,
-        help="Output directory for concatenated files (or directory to fix with --fix_existing)"
+        help="Output directory for concatenated files"
     )
     parser.add_argument(
-        "--mapping_file", type=str, default=None,
-        help="Path to save the CSV mapping file (not required with --fix_existing)"
+        "--mapping_file", type=str, required=True,
+        help="Path to save the CSV mapping file"
     )
     parser.add_argument(
         "--n_jobs", type=int, default=None,
         help="Number of parallel jobs (default: min(cpu_count(), 8))"
-    )
-    parser.add_argument(
-        "--fix_existing", action="store_true",
-        help="Re-encode existing FLAC files in output_dir to fix seek table issues. "
-             "Use this to fix previously created concatenated files that have random seek failures."
     )
 
     args = parser.parse_args()
 
     # Resolve paths
     output_dir = Path(args.output_dir).expanduser().resolve()
-
-    # Handle --fix_existing mode
-    if args.fix_existing:
-        if not output_dir.exists():
-            raise ValidationError(f"Output directory does not exist: {output_dir}")
-        n_jobs = args.n_jobs if args.n_jobs else min(cpu_count(), 8)
-        fix_existing_flac_files(output_dir, n_jobs=n_jobs)
-        return
-
-    # Validate required arguments for normal operation
-    if not args.root_dir:
-        parser.error("--root_dir is required unless using --fix_existing")
-    if not args.cnceleb1:
-        parser.error("--cnceleb1 is required unless using --fix_existing")
-    if not args.mapping_file:
-        parser.error("--mapping_file is required unless using --fix_existing")
-
     root_dir = Path(args.root_dir).expanduser().resolve()
     mapping_file = Path(args.mapping_file).expanduser().resolve()
 
@@ -622,13 +499,19 @@ def main():
         raise ValidationError(f"Invalid n_jobs: {n_jobs}")
     
     # Build sub-dataset list
-    sub_datasets = [args.cnceleb1, args.cnceleb2] if args.cnceleb2 else [args.cnceleb1]
+    sub_datasets = [args.cnceleb1, args.cnceleb2]
+
+    # derive audio file extensions
+    extensions = '.' + sub_datasets[0].split('_')[-1]
+    if len(sub_datasets) > 1:
+        assert extensions == '.' + sub_datasets[1].split('_')[-1]
     
     # Print configuration
     print("=" * 60)
-    print("Concatenating short utterances for CNCeleb")
+    print(f"Concatenating short utterances for CNCeleb")
     print("=" * 60)
     print(f"Root directory: {root_dir}")
+    print(f"Extensions: {extensions}")
     print(f"Sub-datasets: {sub_datasets}")
     print(f"Target duration: {args.target_duration}s")
     if min_threshold is not None:
@@ -640,7 +523,7 @@ def main():
     
     # Step 1: Scan all audio files
     print("Step 1: Scanning audio files...")
-    all_files = scan_dataset(root_dir, sub_datasets, n_jobs)
+    all_files = scan_dataset(root_dir, sub_datasets, extensions, n_jobs)
     print(f"Found {len(all_files)} valid audio files")
 
     # Step 2: Group short files by (speaker, genre)
@@ -682,7 +565,7 @@ def main():
 
     for idx, group in enumerate(tqdm(concat_groups, desc="Concatenating")):
         output_rel_path, source_rel_paths, duration, genre, dataset_source = concatenate_audio_files(
-            group, root_dir, output_dir, idx
+            group, root_dir, output_dir, idx, extensions
         )
 
         mapping_rows.append({

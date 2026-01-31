@@ -4,12 +4,13 @@
 
 set -euo pipefail
 
-# Default paths (same as concat_cnceleb.sh)
-ROOT_DIR="${1:-data/cnceleb}"
+# Default ROOT_DIR
+default_path="data/cnceleb"
 if [ -d "data/datasets/cnceleb" ]; then
-    ROOT_DIR="data/datasets/cnceleb"
+    default_path="data/datasets/cnceleb"
 fi
 
+ROOT_DIR="${1:-$default_path}"
 OUTPUT_DIR="${2:-$ROOT_DIR/concatenated}"
 MAPPING_FILE="${3:-$ROOT_DIR/metadata/concat_mapping.map}"
 

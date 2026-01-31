@@ -4,8 +4,8 @@ dataset:
   # Base directory for the combined CNCeleb datasets
   data_dir: ${paths.data_dir}/cnceleb
   # CNCeleb1 is mandatory, CNCeleb2 is optional
-  cnceleb1: "CN-Celeb_flac"
-  cnceleb2: "CN-Celeb2_flac" # Set to null to use only CNCeleb1
+  cnceleb1: "CN-Celeb_wav"
+  cnceleb2: "CN-Celeb2_wav"
 
   # Base search directory where pre-generated metadata files can be found
   # Automatically selects vad_metadata if vad.enabled=true, else metadata
