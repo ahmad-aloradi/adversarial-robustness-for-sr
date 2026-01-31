@@ -1,9 +1,11 @@
-from typing import List, Tuple
 import sys
+from pathlib import Path
+from typing import List, Tuple
 
 import hydra
 import pyrootutils
-from omegaconf import DictConfig
+import yaml
+from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning import (
     LightningDataModule,
     LightningModule,
@@ -53,8 +55,74 @@ _HYDRA_PARAMS = {
     "config_path": str(root / "configs"),
     "config_name": "eval.yaml",
 }
-from src import utils   # noqa: E501
+from src import utils  # noqa: E501
+
 log = utils.get_pylogger(__name__)
+
+
+def _apply_exp_dir_config(cfg: DictConfig) -> DictConfig:
+    exp_dir_value = cfg.get("exp_dir")
+    if not exp_dir_value:
+        return cfg
+
+    exp_dir = Path(str(exp_dir_value)).expanduser().resolve()
+    exp_cfg_path = exp_dir / ".hydra" / "config.yaml"
+    if not exp_cfg_path.exists():
+        raise FileNotFoundError(f"Missing experiment config: {exp_cfg_path}")
+
+    exp_cfg = OmegaConf.load(exp_cfg_path)
+
+    # Preserve eval-specific settings
+    for key in [
+        "predict",
+        "use_avg_ckpt",
+        "ckpt_path",
+        "ckpt_dir",
+        "ckpt_avg_num",
+        "ckpt_avg_min",
+        "extras",
+        "paths",
+        "tags",
+    ]:
+        if cfg.get(key) is not None:
+            OmegaConf.update(exp_cfg, key, cfg.get(key), merge=True)
+
+    exp_cfg.task_name = "eval"
+
+    if not cfg.get("keep_logger"):
+        exp_cfg.logger = None
+
+    if exp_cfg.get("use_avg_ckpt") and not exp_cfg.get("ckpt_dir"):
+        exp_cfg.ckpt_dir = str(exp_dir / "checkpoints")
+
+    artifacts_dirs = sorted(exp_dir.glob("*_artifacts"))
+    if artifacts_dirs:
+        OmegaConf.update(
+            exp_cfg,
+            "datamodule.dataset.artifacts_dir",
+            artifacts_dirs[0].as_posix(),
+            merge=True,
+        )
+
+    noise_csv = exp_dir / "noise.csv"
+    if noise_csv.exists():
+        OmegaConf.update(
+            exp_cfg,
+            "module.data_augmentation.noise_annotation",
+            noise_csv.as_posix(),
+            merge=True,
+        )
+
+    reverb_csv = exp_dir / "reverb.csv"
+    if reverb_csv.exists():
+        OmegaConf.update(
+            exp_cfg,
+            "module.data_augmentation.rir_annotation",
+            reverb_csv.as_posix(),
+            merge=True,
+        )
+
+    return exp_cfg
 
 
 @utils.task_wrapper
@@ -70,7 +138,7 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
         objects.
     """
 
-    assert cfg.ckpt_path
+    cfg = _apply_exp_dir_config(cfg)
 
     utils.log_gpu_memory_metadata()
 
@@ -92,9 +160,7 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
     )
 
     log.info("Instantiating loggers...")
-    logger: List[PLLogger] = utils.instantiate_loggers(
-        cfg.get("logger")
-    )
+    logger: List[PLLogger] = utils.instantiate_loggers(cfg.get("logger"))
 
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")
     trainer: Trainer = hydra.utils.instantiate(cfg.trainer, logger=logger)
@@ -111,9 +177,63 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
         log.info("Logging hyperparameters!")
         utils.log_hyperparameters(object_dict)
 
-    # # Log metadata
-    # log.info("Logging metadata!")
-    # utils.log_metadata(cfg)
+    # checkpoint resolution: direct path or average of last N checkpoints
+    ckpt_path = cfg.get("ckpt_path")
+    if ckpt_path:
+        ckpt_path = Path(str(ckpt_path)).expanduser()
+        if ckpt_path.exists():
+            cfg.ckpt_path = str(ckpt_path)
+        else:
+            log.warning(f"Checkpoint path not found: {ckpt_path}")
+            ckpt_path = None
+    else:
+        ckpt_path = None
+
+    if not ckpt_path:
+        if not cfg.get("use_avg_ckpt"):
+            raise ValueError(
+                "ckpt_path is missing or invalid and use_avg_ckpt is False"
+            )
+
+        ckpt_dir = cfg.get("ckpt_dir")
+        if not ckpt_dir:
+            raise ValueError("use_avg_ckpt=True requires ckpt_dir to be set")
+
+        ckpt_dir = Path(str(ckpt_dir)).expanduser()
+        if not ckpt_dir.exists():
+            raise ValueError(f"Checkpoint directory not found: {ckpt_dir}")
+
+        candidates = sorted(
+            (
+                p
+                for p in ckpt_dir.glob("*.ckpt")
+                if not p.name.startswith("averaged_") and p.name != "last.ckpt"
+            ),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+        if len(candidates) < cfg["ckpt_avg_min"]:
+            raise ValueError(
+                f"Not enough checkpoints to average: found {len(candidates)}, "
+                f"need at least {cfg['ckpt_avg_min']}."
+            )
+
+        candidates = candidates[: cfg["ckpt_avg_num"]]
+        output_path = ckpt_dir / f"averaged_top{len(candidates)}.ckpt"
+
+        log.info(
+            f"Averaging {len(candidates)} checkpoints: {[p.name for p in candidates]}"
+        )
+        averaged = utils.average_checkpoints(candidates, output_path)
+
+        if not averaged:
+            raise ValueError("Failed to create averaged checkpoint")
+        cfg.ckpt_path = averaged
+
+    if not cfg.ckpt_path:
+        raise ValueError("No valid ckpt path found for testing!")
+    log.info(f"Test ckpt path: {cfg.ckpt_path}")
 
     if cfg.get("predict"):
         log.info("Starting predicting!")
@@ -141,7 +261,82 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
     return metric_dict, object_dict
 
 
-@utils.register_custom_resolvers(**_HYDRA_PARAMS | {'overrides': sys.argv[1:]})
+def _inject_exp_dir_overrides() -> None:
+    """Inject a training run's Hydra overrides into sys.argv so that
+    configuration composition (done during resolver registration) sees the same
+    overrides the run used.
+
+    This prevents missing/interpolation errors
+    when composing `eval.yaml` together with the experiment overrides.
+    """
+    exp_arg = None
+    for arg in sys.argv[1:]:
+        if arg.startswith("exp_dir="):
+            exp_arg = arg
+            break
+
+    if not exp_arg:
+        return
+
+    exp_dir = Path(exp_arg.split("=", 1)[1]).expanduser().resolve()
+    overrides_path = exp_dir / ".hydra" / "overrides.yaml"
+
+    if not overrides_path.exists():
+        return
+
+    with overrides_path.open("r") as handle:
+        data = yaml.safe_load(handle) or []
+    if not isinstance(data, list):
+        return
+
+    # If keep_logger was explicitly passed on CLI, keep logger overrides
+    keep_logger = any(
+        (
+            a.startswith("keep_logger=")
+            and a.split("=", 1)[1].lower() in ["1", "true"]
+        )
+        for a in sys.argv[1:]
+    )
+
+    new_overrides = []
+    for item in data:
+        s = str(item)
+        if not keep_logger and (
+            s.startswith("logger=") or s.startswith("logger.")
+        ):
+            continue
+        if s.startswith("experiment="):
+            new_overrides.append("+" + s)
+        else:
+            new_overrides.append(s)
+
+    artifacts_dirs = sorted(exp_dir.glob("*_artifacts"))
+    if artifacts_dirs:
+        new_overrides.append(
+            f"datamodule.dataset.artifacts_dir={artifacts_dirs[0].as_posix()}"
+        )
+
+    noise_csv = exp_dir / "noise.csv"
+    if noise_csv.exists():
+        new_overrides.append(
+            f"module.data_augmentation.noise_annotation={noise_csv.as_posix()}"
+        )
+
+    reverb_csv = exp_dir / "reverb.csv"
+    if reverb_csv.exists():
+        new_overrides.append(
+            f"module.data_augmentation.rir_annotation={reverb_csv.as_posix()}"
+        )
+
+    for ov in new_overrides:
+        if ov not in sys.argv:
+            sys.argv.append(ov)
+
+
+_inject_exp_dir_overrides()
+
+
+@utils.register_custom_resolvers(**_HYDRA_PARAMS | {"overrides": sys.argv[1:]})
 @hydra.main(**_HYDRA_PARAMS)
 def main(cfg: DictConfig) -> None:
     evaluate(cfg)
