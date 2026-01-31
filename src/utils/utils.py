@@ -467,3 +467,54 @@ def _resolve_test_ckpt_path(trainer: Trainer) -> Optional[str]:
         return ckpt_cb.best_model_path or None
 
     return None
+
+
+def average_checkpoints(
+    checkpoint_paths: list[Path],
+    output_path: Path,
+) -> str:
+    """Average multiple checkpoint files into a single checkpoint.
+
+    Loads checkpoints, averages floating-point tensors, and saves the result.
+    Non-floating-point tensors are copied from the first checkpoint.
+
+    Args:
+        checkpoint_paths: List of checkpoint file paths to average
+        output_path: Path where averaged checkpoint will be saved
+
+    Returns:
+        str: Path to the saved averaged checkpoint
+    """
+    import torch
+
+    avg_state: dict[str, torch.Tensor] = {}
+    float_keys: list[str] = []
+    num = len(checkpoint_paths)
+
+    # Load first checkpoint to initialize
+    first_ckpt = torch.load(checkpoint_paths[0], map_location="cpu")
+    state_dict = first_ckpt.get("state_dict", {})
+    for k, v in state_dict.items():
+        if torch.is_tensor(v) and torch.is_floating_point(v):
+            avg_state[k] = v.clone().float()
+            float_keys.append(k)
+        else:
+            avg_state[k] = v.clone() if torch.is_tensor(v) else v
+
+    # Accumulate remaining checkpoints
+    for ckpt_path in checkpoint_paths[1:]:
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        state_dict = ckpt.get("state_dict", {})
+        for k in float_keys:
+            if k in state_dict and torch.is_tensor(state_dict[k]):
+                avg_state[k] += state_dict[k].float()
+
+    # Average
+    for k in float_keys:
+        avg_state[k] = avg_state[k] / float(num)
+
+    # Save averaged checkpoint
+    first_ckpt["state_dict"] = avg_state
+    torch.save(first_ckpt, output_path)
+
+    return str(output_path)
