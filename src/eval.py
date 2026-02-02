@@ -87,6 +87,16 @@ def _apply_exp_dir_config(cfg: DictConfig) -> DictConfig:
         if cfg.get(key) is not None:
             OmegaConf.update(exp_cfg, key, cfg.get(key), merge=True)
 
+    # Preserve any CLI overrides (e.g., batch_size, num_workers)
+    for arg in sys.argv[1:]:
+        if "=" not in arg or arg.startswith("exp_dir="):
+            continue
+        key = arg.lstrip("+~").split("=")[0]
+        # Use OmegaConf.select to get nested keys like "datamodule.loaders.train.batch_size"
+        value = OmegaConf.select(cfg, key)
+        if value is not None:
+            OmegaConf.update(exp_cfg, key, value, merge=True)
+
     exp_cfg.task_name = "eval"
 
     if not cfg.get("keep_logger"):
@@ -123,6 +133,130 @@ def _apply_exp_dir_config(cfg: DictConfig) -> DictConfig:
         )
 
     return exp_cfg
+
+
+def _resolve_checkpoint(cfg: DictConfig) -> str:
+    """Resolve checkpoint path from config.
+
+    Supports two modes:
+    1. use_avg_ckpt=True: Average top N checkpoints from ckpt_dir
+       - Reuses existing averaged checkpoint if available
+    2. use_avg_ckpt=False: Use explicit ckpt_path
+    """
+    if cfg.get("use_avg_ckpt"):
+        return _resolve_averaged_checkpoint(cfg)
+
+    ckpt_path = cfg.get("ckpt_path")
+    if not ckpt_path:
+        raise ValueError("ckpt_path is required when use_avg_ckpt is False")
+
+    ckpt_path = Path(str(ckpt_path)).expanduser()
+    if not ckpt_path.exists():
+        raise ValueError(f"Checkpoint not found: {ckpt_path}")
+
+    # Temporary safeguard against using last.ckpt 
+    # -> later: delete this field since it is inherited from resming exps in training
+    if 'last' in str(ckpt_path):
+        raise ValueError(f"Invalid checkpoint file: {ckpt_path}")
+    
+    return str(ckpt_path)
+
+
+def _extract_metric_from_checkpoint(ckpt_path: Path) -> float | None:
+    """Extract the metric value from a checkpoint filename.
+
+    Expected format: epochxxx-loss_validx.xxx-metric_validx.xxx.ckpt
+    Returns the metric_valid value, or None if parsing fails.
+    """
+    import re
+
+    match = re.search(r"metric_valid([0-9]+(?:\.[0-9]+)?)", ckpt_path.name)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _resolve_averaged_checkpoint(cfg: DictConfig) -> str:
+    """Average top N checkpoints or reuse existing averaged checkpoint."""
+    ckpt_dir = cfg.get("ckpt_dir")
+    if not ckpt_dir:
+        raise ValueError("use_avg_ckpt=True requires ckpt_dir to be set")
+
+    ckpt_dir = Path(str(ckpt_dir)).expanduser()
+    if not ckpt_dir.exists():
+        raise ValueError(f"Checkpoint directory not found: {ckpt_dir}")
+
+    avg_num = cfg.get("ckpt_avg_num", 10)
+    avg_min = cfg.get("ckpt_avg_min", 2)
+
+    # Check for existing averaged checkpoint
+    existing_avg = ckpt_dir / f"averaged_top{avg_num}.ckpt"
+    if existing_avg.exists():
+        log.info(f"Reusing existing averaged checkpoint: {existing_avg}")
+        return str(existing_avg)
+
+    else:
+        # Find candidate checkpoints (exclude averaged and last.ckpt)
+        log.warning(
+            f"No averaged checkpoint found at {ckpt_dir}. Creating a new averaged ckpt."
+        )
+        all_candidates = [
+            p
+            for p in ckpt_dir.glob("*.ckpt")
+            if not p.name.startswith("averaged_") and p.name != "last.ckpt"
+        ]
+
+        # Determine checkpoint mode from config (max = higher is better, min = lower is better)
+        # Default to "max" for metric (accuracy-like metrics)
+        assert cfg.callbacks.get("model_checkpoint") is not None
+        ckpt_mode = cfg.callbacks.model_checkpoint.get("mode")
+        assert ckpt_mode in ["min", "max"], "model_checkpoint.mode must be 'min' or 'max'"
+        
+        # Try to sort by metric value extracted from filename
+        candidates_with_metric = [
+            (p, _extract_metric_from_checkpoint(p)) for p in all_candidates
+        ]
+        candidates_with_valid_metric = [
+            (p, m) for p, m in candidates_with_metric if m is not None
+        ]
+
+        if candidates_with_valid_metric:
+            # Sort by metric value: descending for "max" mode, ascending for "min" mode
+            reverse_sort = ckpt_mode == "max"
+            candidates_with_valid_metric.sort(key=lambda x: x[1], reverse=reverse_sort)
+            candidates = [p for p, _ in candidates_with_valid_metric]
+            log.info(
+                f"Sorting checkpoints by metric value (mode={ckpt_mode}), "
+                f"best metric: {candidates_with_valid_metric[0][1]}"
+            )
+        else:
+            # Fallback to modification time if no metric values can be extracted
+            log.warning(
+                "Could not extract metric values from checkpoint filenames, "
+                "falling back to modification time"
+            )
+            candidates = sorted(
+                all_candidates,
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+
+        if len(candidates) < avg_min:
+            raise ValueError(
+                f"Not enough checkpoints to average: found {len(candidates)}, "
+                f"need at least {avg_min}"
+            )
+
+        candidates = candidates[:avg_num]
+        output_path = ckpt_dir / f"averaged_top{len(candidates)}.ckpt"
+
+        log.info(f"Averaging {len(candidates)} checkpoints: {[p.name for p in candidates]}")
+        averaged = utils.average_checkpoints(candidates, output_path)
+
+        if not averaged:
+            raise ValueError("Failed to create averaged checkpoint")
+
+        return str(averaged)
 
 
 @utils.task_wrapper
@@ -177,62 +311,7 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
         log.info("Logging hyperparameters!")
         utils.log_hyperparameters(object_dict)
 
-    # checkpoint resolution: direct path or average of last N checkpoints
-    ckpt_path = cfg.get("ckpt_path")
-    if ckpt_path:
-        ckpt_path = Path(str(ckpt_path)).expanduser()
-        if ckpt_path.exists():
-            cfg.ckpt_path = str(ckpt_path)
-        else:
-            log.warning(f"Checkpoint path not found: {ckpt_path}")
-            ckpt_path = None
-    else:
-        ckpt_path = None
-
-    if not ckpt_path:
-        if not cfg.get("use_avg_ckpt"):
-            raise ValueError(
-                "ckpt_path is missing or invalid and use_avg_ckpt is False"
-            )
-
-        ckpt_dir = cfg.get("ckpt_dir")
-        if not ckpt_dir:
-            raise ValueError("use_avg_ckpt=True requires ckpt_dir to be set")
-
-        ckpt_dir = Path(str(ckpt_dir)).expanduser()
-        if not ckpt_dir.exists():
-            raise ValueError(f"Checkpoint directory not found: {ckpt_dir}")
-
-        candidates = sorted(
-            (
-                p
-                for p in ckpt_dir.glob("*.ckpt")
-                if not p.name.startswith("averaged_") and p.name != "last.ckpt"
-            ),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-
-        if len(candidates) < cfg["ckpt_avg_min"]:
-            raise ValueError(
-                f"Not enough checkpoints to average: found {len(candidates)}, "
-                f"need at least {cfg['ckpt_avg_min']}."
-            )
-
-        candidates = candidates[: cfg["ckpt_avg_num"]]
-        output_path = ckpt_dir / f"averaged_top{len(candidates)}.ckpt"
-
-        log.info(
-            f"Averaging {len(candidates)} checkpoints: {[p.name for p in candidates]}"
-        )
-        averaged = utils.average_checkpoints(candidates, output_path)
-
-        if not averaged:
-            raise ValueError("Failed to create averaged checkpoint")
-        cfg.ckpt_path = averaged
-
-    if not cfg.ckpt_path:
-        raise ValueError("No valid ckpt path found for testing!")
+    cfg.ckpt_path = _resolve_checkpoint(cfg)
     log.info(f"Test ckpt path: {cfg.ckpt_path}")
 
     if cfg.get("predict"):
@@ -329,7 +408,15 @@ def _inject_exp_dir_overrides() -> None:
         )
 
     for ov in new_overrides:
-        if ov not in sys.argv:
+        # Extract key from override (strip leading +/~ and get part before =)
+        key = ov.lstrip("+~").split("=")[0]
+        # Check if user already specified this key on CLI
+        user_has_key = any(
+            arg.lstrip("+~").split("=")[0] == key
+            for arg in sys.argv[1:]
+            if "=" in arg
+        )
+        if not user_has_key:
             sys.argv.append(ov)
 
 

@@ -4,6 +4,7 @@ defaults:
   - _self_
   - datamodule: datasets/vpc.yaml # choose datamodule with `test_dataloader()` for evaluation
   - module: vpc.yaml
+  - callbacks: none.yaml
   - logger: null
   - trainer: default.yaml
   - paths: default.yaml
@@ -12,6 +13,13 @@ defaults:
 
 task_name: "eval"
 predict: False
+
+exp_dir: null
+keep_logger: false
+use_avg_ckpt: false
+ckpt_dir: null
+ckpt_avg_num: 10
+ckpt_avg_min: 2
 
 tags: ["dev"]
 

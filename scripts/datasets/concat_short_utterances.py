@@ -32,8 +32,6 @@ Usage:
 """
 
 import argparse
-import shutil
-import tempfile
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field

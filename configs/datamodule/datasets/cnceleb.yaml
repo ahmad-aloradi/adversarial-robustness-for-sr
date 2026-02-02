@@ -51,7 +51,7 @@ dataset:
   min_segment_duration: 1.0 # Minimum segment duration to be included
 
   # Random cropping parameter (only used if use_pre_segmentation=false)
-  max_duration: 4.0 # Maximum duration for random cropping during training
+  max_duration: 3.0 # Maximum duration for random cropping during training
 
   # --- Optional Concatenation of Short Utterances ---
   # Path to mapping file from concat_short_utterances.py script

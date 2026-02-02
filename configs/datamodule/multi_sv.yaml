@@ -104,8 +104,8 @@ datasets:
       _target_: src.datamodules.cnceleb_datamodule.CNCelebDataModule
       dataset:
         data_dir: ${paths.data_dir}/cnceleb
-        cnceleb1: "CN-Celeb_flac"
-        cnceleb2: "CN-Celeb2_flac"
+        cnceleb1: "CN-Celeb_wav"
+        cnceleb2: "CN-Celeb2_wav"
         base_search_dir: ${datamodule.datasets.cnceleb.datamodule.dataset.data_dir}/metadata
         artifacts_dir: ${hydra:runtime.output_dir}/cnceleb_artifacts
         dev_metadata_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/cnceleb_dev.csv

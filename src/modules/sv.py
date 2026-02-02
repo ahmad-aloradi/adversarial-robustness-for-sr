@@ -15,6 +15,10 @@ from tqdm import tqdm
 
 from src import utils
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
+from src.datamodules.components.utils import (
+    BaseDataset,
+    FullUtteranceCohortDataset,
+)
 from src.datamodules.components.voxceleb.voxceleb_dataset import (
     TrainCollate,
     VoxcelebItem,
@@ -546,13 +550,14 @@ class SpeakerVerification(pl.LightningModule):
         """Get the per-dataset cohort embeddings cache path.
 
         Stored once per experiment to avoid mixing datasets.
+        Uses 'full_utt' suffix to distinguish from legacy segment-based caches.
         """
         cache_root = (
             Path(self.trainer.default_root_dir)
             / "test_artifacts"
             / "_cohort_cache"
         )
-        return cache_root / f"{base_dataset}_test_cohort_embeds_cache.pt"
+        return cache_root / f"{base_dataset}_cohort_full_utt.pt"
 
     def _save_embeddings_cache(
         self, test_filename: str, enrol_embeds: dict, test_embeds: dict
@@ -831,44 +836,11 @@ class SpeakerVerification(pl.LightningModule):
             cache[base_dataset] = cached_data
             return cache[base_dataset]
 
-        collate_fn = None
+        # Ensure train_data is populated
+        if getattr(train_dm, "train_data", None) is None:
+            train_dm.setup(stage="fit")
 
-        # Ensure the datamodule exposes cohort datasets even if training is disabled
-        if hasattr(train_dm, "ensure_cohort_datasets_for_normalization"):
-            train_dm.ensure_cohort_datasets_for_normalization()
-
-        # If the datamodule can set up fit stage lazily, do it to populate train_data
-        if (not hasattr(train_dm, "train_data")) or (
-            getattr(train_dm, "train_data", None) is None
-        ):
-            setup_fn = getattr(train_dm, "setup", None)
-            if callable(setup_fn):
-                setup_fn(stage="fit")
-
-        train_dataset = None
-        if hasattr(train_dm, "get_train_dataset"):
-            train_dataset = train_dm.get_train_dataset(base_dataset)
-        elif hasattr(train_dm, "_train_sets"):
-            train_dataset = next(
-                (
-                    ds
-                    for name, ds in getattr(train_dm, "_train_sets")
-                    if name == base_dataset
-                ),
-                None,
-            )
-        elif hasattr(train_dm, "train_data"):
-            train_dataset = getattr(train_dm, "train_data")
-        # Fall back to pulling dataset from the train dataloader if available
-        if train_dataset is None and hasattr(train_dm, "train_dataloader"):
-            try:
-                loader = train_dm.train_dataloader()
-                train_dataset = getattr(loader, "dataset", None)
-                if collate_fn is None and hasattr(loader, "collate_fn"):
-                    collate_fn = loader.collate_fn
-            except Exception:
-                pass
-
+        train_dataset = train_dm.train_data
         if train_dataset is None:
             raise ValueError(
                 f"Score normalization requires training data for '{base_dataset}', "
@@ -876,23 +848,27 @@ class SpeakerVerification(pl.LightningModule):
             )
 
         log.info(f"Computing cohort embeddings for '{base_dataset}'...")
-        if hasattr(train_dm, "get_train_collate"):
-            collate_fn = train_dm.get_train_collate(base_dataset)
+
+        # Always wrap with FullUtteranceCohortDataset to ensure full utterances
+        # This handles both pre-segmented data (multiple segments per file) and
+        # random cropping mode (max_duration would otherwise crop during loading)
+        if isinstance(train_dataset, BaseDataset):
+            cohort_dataset = FullUtteranceCohortDataset(train_dataset)
+        else:
+            log.warning(
+                f"Training dataset for '{base_dataset}' is not a BaseDataset; "
+                "cohort embeddings may use chunked audio"
+            )
+            cohort_dataset = train_dataset
+
+        loader_cfg = train_dm.hparams.loaders.train
         cohort_loader = DataLoader(
-            train_dataset,
-            batch_size=getattr(
-                train_dm.hparams.loaders.train, "batch_size", 64
-            ),
-            num_workers=getattr(
-                train_dm.hparams.loaders.train, "num_workers", 0
-            ),
+            cohort_dataset,
+            batch_size=getattr(loader_cfg, "batch_size", 64),
+            num_workers=getattr(loader_cfg, "num_workers", 0),
             shuffle=False,
-            pin_memory=getattr(
-                train_dm.hparams.loaders.train, "pin_memory", False
-            ),
-            collate_fn=collate_fn
-            or getattr(train_dm, "_train_collate", None)
-            or TrainCollate(),
+            pin_memory=getattr(loader_cfg, "pin_memory", False),
+            collate_fn=TrainCollate(),
         )
         cohort_data = self._compute_cohort_embeddings(cohort_loader)
         cache[base_dataset] = cohort_data

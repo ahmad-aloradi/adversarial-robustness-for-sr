@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Convert FLAC audio files to WAV format using sox.
+"""Convert FLAC audio files to WAV format.
 
 Based on WeSpeaker's flac2wav.py but adapted for this project's structure.
-Uses sox instead of ffmpeg for more robust FLAC decoding (handles malformed
-seek tables and other FLAC issues that cause ffmpeg to fail).
+Uses sox by default for more robust FLAC decoding (handles malformed
+seek tables and other FLAC issues). Falls back to soundfile if sox is
+not available.
 
 Usage:
     python scripts/datasets/flac2wav.py --dataset_dir data/cnceleb/CN-Celeb_flac
@@ -11,11 +12,21 @@ Usage:
 """
 
 import argparse
+import shutil
 import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+import numpy as np
+import soundfile as sf
 from tqdm import tqdm
+
+# Target format
+TARGET_SAMPLE_RATE = 16000
+TARGET_SUBTYPE = "PCM_16"  # 16-bit
+
+# Check if sox is available at module load
+SOX_AVAILABLE = shutil.which("sox") is not None
 
 
 def find_flac_files(dataset_dir: Path) -> list[tuple[Path, Path]]:
@@ -59,13 +70,60 @@ def find_flac_files(dataset_dir: Path) -> list[tuple[Path, Path]]:
     return conversions
 
 
-def convert_flac_to_wav(args: tuple[Path, Path]) -> tuple[Path, bool, str]:
-    """Convert a single FLAC file to WAV using sox.
+def _convert_with_sox(flac_path: Path, wav_path: Path) -> tuple[bool, str]:
+    """Convert FLAC to WAV using sox."""
+    # sox -t flac input.flac -t wav -r 16k -b 16 output.wav channels 1
+    cmd = [
+        "sox",
+        "-t", "flac", str(flac_path),
+        "-t", "wav",
+        "-r", "16k",
+        "-b", "16",
+        str(wav_path),
+        "channels", "1",
+    ]
 
-    Sox is more tolerant of malformed FLAC files than ffmpeg, handling:
-    - Invalid seek tables
-    - Corrupted frame headers
-    - Truncated files
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return (False, result.stderr.strip())
+    return (True, "")
+
+
+def _convert_with_soundfile(flac_path: Path, wav_path: Path) -> tuple[bool, str]:
+    """Convert FLAC to WAV using soundfile (libsndfile).
+
+    Resamples to 16kHz mono 16-bit PCM to match sox output.
+    """
+    # Read FLAC file
+    audio, sample_rate = sf.read(flac_path, dtype="float32")
+
+    # Convert to mono if stereo
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+
+    # Resample if needed
+    if sample_rate != TARGET_SAMPLE_RATE:
+        # Simple linear interpolation resampling
+        duration = len(audio) / sample_rate
+        target_length = int(duration * TARGET_SAMPLE_RATE)
+        indices = np.linspace(0, len(audio) - 1, target_length)
+        audio = np.interp(indices, np.arange(len(audio)), audio)
+
+    # Write WAV file (16-bit PCM)
+    sf.write(wav_path, audio, TARGET_SAMPLE_RATE, subtype=TARGET_SUBTYPE)
+    return (True, "")
+
+
+def convert_flac_to_wav(args: tuple[Path, Path]) -> tuple[Path, bool, str]:
+    """Convert a single FLAC file to WAV.
+
+    Uses sox if available (more tolerant of malformed FLAC files),
+    otherwise falls back to soundfile.
 
     Args:
         args: Tuple of (flac_path, wav_path)
@@ -79,27 +137,13 @@ def convert_flac_to_wav(args: tuple[Path, Path]) -> tuple[Path, bool, str]:
     if wav_path.exists():
         return (flac_path, True, "skipped (exists)")
 
-    # sox -t flac input.flac -t wav -r 16k -b 16 output.wav channels 1
-    cmd = [
-        "sox",
-        "-t", "flac", str(flac_path),
-        "-t", "wav",
-        "-r", "16k",
-        "-b", "16",
-        str(wav_path),
-        "channels", "1",
-    ]
-
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if result.returncode != 0:
-            return (flac_path, False, result.stderr.strip())
-        return (flac_path, True, "")
+        if SOX_AVAILABLE:
+            success, error = _convert_with_sox(flac_path, wav_path)
+        else:
+            success, error = _convert_with_soundfile(flac_path, wav_path)
+
+        return (flac_path, success, error)
     except subprocess.TimeoutExpired:
         return (flac_path, False, "timeout")
     except Exception as e:
@@ -108,7 +152,7 @@ def convert_flac_to_wav(args: tuple[Path, Path]) -> tuple[Path, bool, str]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert FLAC files to WAV using sox",
+        description="Convert FLAC files to WAV (uses sox if available, otherwise soundfile)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -148,7 +192,8 @@ def main():
         print("All files already converted.")
         return
 
-    print(f"Converting {len(to_convert)} FLAC files to WAV (nj={args.nj})...")
+    backend = "sox" if SOX_AVAILABLE else "soundfile"
+    print(f"Converting {len(to_convert)} FLAC files to WAV using {backend} (nj={args.nj})...")
 
     # Convert in parallel
     failed = []

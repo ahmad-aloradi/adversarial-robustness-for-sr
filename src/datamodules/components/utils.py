@@ -1081,6 +1081,76 @@ class SimpleAudioDataset(Dataset):
         return waveforms_tensor, indices
 
 
+class FullUtteranceCohortDataset(Dataset):
+    """Wrapper dataset that loads full utterances for cohort embedding computation.
+
+    When training data uses pre-segmentation (multiple segments per file), this
+    wrapper deduplicates by file path and loads full audio content, ignoring
+    segment boundaries. This ensures cohort embeddings are computed from full
+    utterances rather than short chunks.
+    """
+
+    def __init__(self, base_dataset: BaseDataset):
+        """
+        Args:
+            base_dataset: A BaseDataset instance (may contain segmented data)
+        """
+        self.base_dataset = base_dataset
+        self.audio_processor = base_dataset.audio_processor
+        self.data_dir = base_dataset.data_dir
+
+        # Deduplicate by rel_filepath to get unique utterances
+        df = base_dataset.dataset
+        rel_filepath_col = BaseDataset.DATASET_CLS.REL_FILEPATH
+
+        # Group by file path and keep first row (for speaker_id, class_id, etc.)
+        self.unique_files = df.groupby(rel_filepath_col).first().reset_index()
+        log.info(
+            f"FullUtteranceCohortDataset: {len(df)} segments -> "
+            f"{len(self.unique_files)} unique utterances"
+        )
+
+    def __len__(self):
+        return len(self.unique_files)
+
+    def __getitem__(self, idx: int) -> DatasetItem:
+        row = self.unique_files.iloc[idx]
+        audio_path = self.data_dir / row[BaseDataset.DATASET_CLS.REL_FILEPATH]
+
+        # Load FULL file content (no segment boundaries)
+        waveform = BaseDataset._load_audio(
+            audio_path,
+            self.audio_processor,
+            start_time=None,
+            end_time=None,
+            max_samples=-1,  # Full file
+        )
+
+        # Get recording duration from file
+        try:
+            info = torchaudio.info(str(audio_path))
+            recording_duration = info.num_frames / info.sample_rate
+        except Exception:
+            recording_duration = waveform.shape[0] / self.audio_processor.sample_rate
+
+        # Handle class_id - may be None/NaN in pandas
+        class_id_val = row.get(BaseDataset.DATASET_CLS.CLASS_ID, None)
+        class_id = None if pd.isna(class_id_val) else int(class_id_val)
+
+        return DatasetItem(
+            audio=waveform,
+            speaker_id=row[BaseDataset.DATASET_CLS.SPEAKER_ID],
+            class_id=class_id,
+            audio_length=waveform.shape[0],
+            audio_path=str(audio_path),
+            country=row.get(BaseDataset.DATASET_CLS.NATIONALITY, None),
+            gender=row.get(BaseDataset.DATASET_CLS.GENDER, None),
+            sample_rate=self.audio_processor.sample_rate,
+            recording_duration=recording_duration,
+            text=row.get(BaseDataset.DATASET_CLS.TEXT, ''),
+        )
+
+
 class PKSpeakerBatchSampler(Sampler[List[int]]):
     """Batch sampler that yields batches with P speakers and K utterances each.
 
