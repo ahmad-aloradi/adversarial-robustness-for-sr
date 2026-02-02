@@ -1,27 +1,22 @@
 # @package _global_
 
-# WeSpeaker-style training configuration for CNCeleb
-# Implements optimizations from WeSpeaker's ECAPA-TDNN recipe:
-# - Large batch size (128) with PKSpeaker sampling
-# - SGD optimizer with high LR (0.1) + momentum
-# - Warmup + exponential decay LR schedule
-# - Progressive margin scheduling (0.0 -> 0.2)
-# - Speed perturbation augmentation
+# WeSpeaker-exact training configuration for CNCeleb
+# Matches WeSpeaker's ECAPA-TDNN_GLOB_c512 recipe from:
+# https://github.com/wenet-e2e/wespeaker/tree/master/examples/cnceleb/v2
 #
-# All schedule parameters are computed relative to max_epochs using oc.eval,
-# so you can adjust training length and everything scales automatically.
-# Based on WeSpeaker 150-epoch recipe proportions:
-# - LR warmup: 4% of training (6/150)
-# - LR decay: gamma computed to reach ~0.0001 final LR
-# - Margin start: 14% of training (20/150)
-# - Margin warmup: 26% of training (ends at 40%)
+# Key parameters (150 epochs):
+# - Model: ECAPA_TDNN_GLOB_c512 (not c1024)
+# - LR: 0.1 -> 0.00005 via ExponentialDecrease with 6-epoch warmup from zero
+# - Margin: 0.0 -> 0.2 exponential increase from epoch 20 to 40
+# - Batch size: 128
+# - SGD with momentum=0.9, nesterov=True, weight_decay=1e-4
+# - No early stopping (train full 150 epochs)
+# - Checkpoint averaging: last 10 checkpoints
 #
-# Checkpoint averaging: save_top_k=10 and auto-average at fit end
-# (handled by a PyTorch Lightning callback in this experiment)
+# Target: EER <= 8.5% on CNCeleb eval (WeSpeaker reference: 7.879%)
 #
 # Usage:
 #   python train.py experiment=sv/sv_wespeaker datamodule=datasets/cnceleb
-#   python train.py experiment=sv/sv_wespeaker trainer.max_epochs=30  # shorter run
 
 defaults:
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
@@ -41,8 +36,8 @@ tags:
 seed: 42
 
 trainer:
-  max_epochs: 150 # Change this to adjust training length (all schedules auto-scale)
-  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% minimum
+  max_epochs: 150 # WeSpeaker uses 150 epochs
+  min_epochs: 150 # No early stopping - train full duration
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 
@@ -50,23 +45,22 @@ callbacks:
   model_checkpoint:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    save_top_k: 10 # Save last 10 checkpoints for averaging (WeSpeaker uses avg of 10)
+    save_top_k: 10 # Save last 10 checkpoints for averaging
+    every_n_epochs: 5 # WeSpeaker: save_epoch_interval=5
   checkpoint_averaging:
     _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
     num_checkpoints: 10
     output_filename: averaged_top{num}.ckpt
-  early_stopping:
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'} # ~30% of epochs
-  # Progressive margin scheduler (WeSpeaker-style, auto-scaled to max_epochs)
-  # WeSpeaker: margin starts at 14%, warmup 26% of training (ends at 40%)
+  early_stopping: null # WeSpeaker trains full 150 epochs without early stopping
+  # Progressive margin scheduler (WeSpeaker-exact)
+  # WeSpeaker: margin 0.0->0.2, exponential increase, epoch 20-40
   margin_scheduler:
     _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
     initial_margin: 0.0
     final_margin: 0.2
-    start_epoch: ${oc.eval:'int(${trainer.max_epochs} * 0.14)'} # 14% into training
-    warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.26)'} # 26% duration (ends at 40%)
+    start_epoch: 20 # WeSpeaker: increase_start_epoch=20
+    warmup_epochs: 20 # WeSpeaker: fix_start_epoch=40, so 40-20=20 epochs
+    increase_type: exp # WeSpeaker: increase_type='exp'
 
 datamodule:
   dataset:
@@ -98,20 +92,22 @@ module:
         margin: 0.0
         scale: 32.0
 
-  # WeSpeaker-style LR schedule: warmup + exponential decay (auto-scaled)
-  # LR: 0.0 -> 0.1 (warmup, 4% of epochs) -> ~0.0001 (gamma decay)
-  # gamma computed to reach final_lr=0.0001 from initial_lr=0.1
+  # WeSpeaker-exact LR schedule: warmup + exponential decay
+  # WeSpeaker formula: lr = initial_lr * exp((epoch/total) * log(final_lr/initial_lr))
+  # For our gamma-based scheduler: gamma = (final_lr/initial_lr)^(1/(epochs-warmup))
+  # WeSpeaker: initial_lr=0.1, final_lr=0.00005, warmup=6, epochs=150
+  # gamma = (0.00005/0.1)^(1/144) = 0.0005^(1/144) = 0.9479
   lr_scheduler:
     scheduler:
       _target_: src.utils.schedulers.WarmupExponentialLR
-      warmup_epochs: ${oc.eval:'max(1, int(${trainer.max_epochs} * 0.04))'} # 4% warmup
+      warmup_epochs: 6 # WeSpeaker: warm_up_epoch=6
       warmup_start_factor: 0.0 # WeSpeaker: warm_from_zero=True
-      gamma: ${oc.eval:'pow(0.001, 1.0 / (${trainer.max_epochs} - max(1, int(${trainer.max_epochs} * 0.04))))'} # decay to 0.0001
+      gamma: 0.9486 # Decay to 0.00005 final LR: (0.00005/0.1)^(1/144)
     extras:
       interval: "epoch"
       frequency: ${trainer.check_val_every_n_epoch}
 
-  # WeSpeaker-style SGD optimizer
+  # WeSpeaker-exact SGD optimizer
   optimizer:
     _target_: torch.optim.SGD
     _partial_: True

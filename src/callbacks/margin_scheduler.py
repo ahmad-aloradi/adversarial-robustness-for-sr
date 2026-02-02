@@ -11,7 +11,7 @@ class ProgressiveMarginScheduler(Callback):
 
     Implements wespeaker-style progressive margin scheduling:
     - Start with initial_margin (default 0.0) at start_epoch
-    - Linearly increase to final_margin (default 0.2) over warmup_epochs
+    - Increase to final_margin over warmup_epochs using linear or exponential curve
     - Hold at final_margin for the rest of training
 
     This allows easier learning in early epochs when the model hasn't learned
@@ -20,26 +20,31 @@ class ProgressiveMarginScheduler(Callback):
     Args:
         initial_margin: Starting margin value (default: 0.0)
         final_margin: Target margin value (default: 0.2)
-        warmup_epochs: Number of epochs to ramp margin (default: 2, scaled for ~15 epochs)
-        start_epoch: Epoch to start increasing margin (default: 2, scaled for ~15 epochs)
+        warmup_epochs: Number of epochs to ramp margin (default: 20)
+        start_epoch: Epoch to start increasing margin (default: 20)
+        increase_type: Type of increase curve ('linear' or 'exp'). Default: 'exp'
+            'linear': margin = initial + alpha * (final - initial)
+            'exp': margin = initial + (1 - exp(alpha * log(1e-3))) * (final - initial)
+                   (matches WeSpeaker's MarginScheduler)
 
     Note:
-        Defaults are scaled for ~15 epoch training. For longer training (e.g., 150 epochs),
-        use warmup_epochs=20 and start_epoch=20 to match wespeaker's original schedule.
+        For WeSpeaker 150-epoch recipe: start_epoch=20, warmup_epochs=20, increase_type='exp'
     """
 
     def __init__(
         self,
         initial_margin: float = 0.0,
         final_margin: float = 0.2,
-        warmup_epochs: int = 2,
-        start_epoch: int = 2,
+        warmup_epochs: int = 20,
+        start_epoch: int = 20,
+        increase_type: str = "exp",
     ):
         super().__init__()
         self.initial_margin = initial_margin
         self.final_margin = final_margin
         self.warmup_epochs = warmup_epochs
         self.start_epoch = start_epoch
+        self.increase_type = increase_type
 
     def _get_margin(self, epoch: int) -> float:
         """Calculate margin for the given epoch."""
@@ -50,11 +55,25 @@ class ProgressiveMarginScheduler(Callback):
         if progress_epoch >= self.warmup_epochs:
             return self.final_margin
 
-        # Linear interpolation
+        # Calculate progress ratio (0 to 1)
         alpha = progress_epoch / self.warmup_epochs
-        return self.initial_margin + alpha * (self.final_margin - self.initial_margin)
 
-    def _update_margin(self, pl_module: pl.LightningModule, margin: float) -> None:
+        if self.increase_type == "exp":
+            # WeSpeaker exponential formula:
+            # ratio = 1.0 - exp(alpha * log(1e-3)) * 1.0
+            # This creates a curve that starts slow and accelerates
+            ratio = 1.0 - math.exp(alpha * math.log(1e-3))
+        else:
+            # Linear interpolation
+            ratio = alpha
+
+        return self.initial_margin + ratio * (
+            self.final_margin - self.initial_margin
+        )
+
+    def _update_margin(
+        self, pl_module: pl.LightningModule, margin: float
+    ) -> None:
         """Update the margin in the AAM loss function."""
         # Access the loss function through train_criterion
         criterion = pl_module.train_criterion

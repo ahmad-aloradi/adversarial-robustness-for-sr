@@ -100,6 +100,7 @@ def load_wespeaker_model(
             "redimnetb6": "wespeaker.models.redimnet.ReDimNetB6",
             "dfresnet237": "wespeaker.models.gemini_dfresnet.Gemini_DF_ResNet237",
             "eres2net34_aug": "wespeaker.models.eres2net.ERes2Net34_aug",
+            "ecapa_tdnn_glob_c512": "wespeaker.models.ecapa_tdnn.ECAPA_TDNN_GLOB_c512",
             "ecapa_tdnn_glob_c1024": "wespeaker.models.ecapa_tdnn.ECAPA_TDNN_GLOB_c1024",
         }
 
