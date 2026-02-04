@@ -11,12 +11,12 @@
 # 4. Raw cosine similarity computed
 # 5. AS-Norm applied using top-K most similar cohort speakers
 
-enrollment_aggregation: length_weighted
-mean_source: cohort
-norm_method: as_norm
+enrollment_aggregation: mean
+mean_source: null
+norm_method: null
 
 cohort:
   speaker_level: true
-  topk_speakers: 600
+  topk_speakers: 300
   min_size: 100
   max_size: null

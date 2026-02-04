@@ -16,6 +16,9 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
+from src import utils
+log = utils.get_pylogger(__name__)
+
 
 class EnrollmentAggregation(str, Enum):
     """Methods for aggregating multi-utterance enrollments."""
@@ -74,13 +77,13 @@ class ScoringConfig:
     """
 
     # Enrollment aggregation: "mean" or "length_weighted"
-    enrollment_aggregation: str = "mean"
+    enrollment_aggregation: Optional[str] = None
 
     # Mean centering: "cohort" (recommended) or "none"
-    mean_source: str = "cohort"
+    mean_source: Optional[str] = None
 
     # Score normalization: "as_norm" (recommended) or "none"
-    norm_method: str = "as_norm"
+    norm_method: Optional[str] = None
 
     # Cohort configuration (used for both centering and AS-Norm)
     cohort: CohortConfig = field(default_factory=CohortConfig)
@@ -110,14 +113,23 @@ class ScoringPipeline:
 
     EPS = 1e-9
 
+    def l2_normalize(self, embedding: torch.Tensor) -> torch.Tensor:
+        """L2-normalize embeddings along the last dimension."""
+        return F.normalize(embedding, p=2, dim=-1, eps=self.EPS)
+
     def __init__(self, config: ScoringConfig):
+        if config.enrollment_aggregation is None:
+            log.warning("enrollment_aggregation not set; defaulting to 'mean' -> This may affect the multi mode only")
+            config.enrollment_aggregation = EnrollmentAggregation.MEAN.value
+        if config.mean_source is None:
+            config.mean_source = MeanSource.NONE.value
+        if config.norm_method is None:
+            config.norm_method = NormMethod.NONE.value
         self.config = config
         self.mean_vector: Optional[torch.Tensor] = None
         self.cohort_embeddings: Optional[torch.Tensor] = None
         self._cohort_speaker_ids: Optional[torch.Tensor] = None
-        self._speaker_cohort: Optional[
-            torch.Tensor
-        ] = None  # Per-speaker averaged
+        self._speaker_cohort: Optional[torch.Tensor] = None  # Per-speaker averaged
 
     def set_cohort(
         self,
@@ -187,17 +199,20 @@ class ScoringPipeline:
             Single aggregated embedding [embed_dim]
         """
         method = EnrollmentAggregation(self.config.enrollment_aggregation)
+        embeddings = self.l2_normalize(embeddings)
 
         if method == EnrollmentAggregation.MEAN:
-            return embeddings.mean(dim=0)
+            aggregated = embeddings.mean(dim=0)
+            return self.l2_normalize(aggregated)
 
         elif method == EnrollmentAggregation.LENGTH_WEIGHTED:
             if lengths is None:
                 raise ValueError(
                     "lengths required for length_weighted aggregation"
                 )
-            weights = lengths.float() / lengths.sum()
-            return (embeddings * weights.unsqueeze(-1)).sum(dim=0)
+            weights = (lengths.float() / lengths.sum()).to(embeddings.device)
+            aggregated = (embeddings * weights.unsqueeze(-1)).sum(dim=0)
+            return self.l2_normalize(aggregated)
 
         else:
             raise ValueError(f"Unknown aggregation method: {method}")
@@ -343,7 +358,7 @@ class ScoringPipeline:
         test_embedding: torch.Tensor,
         return_raw: bool = False,
     ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
-        """Complete scoring pipeline: center → raw score → normalize.
+        """Complete scoring pipeline: aggregate (if multi enroll) → L2-norm → center → L2-norm → score → normalize.
 
         This is the main entry point for scoring trials.
 
@@ -358,6 +373,10 @@ class ScoringPipeline:
         # Apply centering
         centered_enroll = self.center(enroll_embedding)
         centered_test = self.center(test_embedding)
+
+        # L2-normalize embeddings
+        centered_enroll = self.l2_normalize(centered_enroll)
+        centered_test = self.l2_normalize(centered_test)
 
         # Compute raw score
         raw_score = self.compute_raw_score(centered_enroll, centered_test)
@@ -403,9 +422,9 @@ def build_scoring_pipeline(config: Optional[Dict] = None) -> ScoringPipeline:
     config = config or {}
     cohort_cfg = CohortConfig(**config.get("cohort", {}))
     scoring_cfg = ScoringConfig(
-        enrollment_aggregation=config.get("enrollment_aggregation", "mean"),
-        mean_source=config.get("mean_source", "cohort"),
-        norm_method=config.get("norm_method", "as_norm"),
+        enrollment_aggregation=config.get("enrollment_aggregation"),
+        mean_source=config.get("mean_source"),
+        norm_method=config.get("norm_method"),
         cohort=cohort_cfg,
     )
     return ScoringPipeline(scoring_cfg)

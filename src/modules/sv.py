@@ -363,6 +363,7 @@ class SpeakerVerification(pl.LightningModule):
                 )
                 log.info(
                     f"Configured scoring pipeline for '{test_filename}': "
+                    f"enrollment_aggregation={scoring_pipeline.config.enrollment_aggregation}, "
                     f"norm={scoring_pipeline.config.norm_method}, "
                     f"mean_source={scoring_pipeline.config.mean_source}"
                 )
@@ -680,11 +681,12 @@ class SpeakerVerification(pl.LightningModule):
             return False
         return True
 
-    def _compute_embeddings(self, dataloader, mode: str = "test") -> dict:
+    def _compute_embeddings(self, dataloader, mode: str) -> dict:
         """Compute embeddings for test or enrollment data.
 
         For enrollment mode with CNCeleb multi-utterance enrollments, this method
-        aggregates embeddings per enroll_id using mean pooling.
+        aggregates embeddings per enroll_id using the scoring pipeline's configured
+        aggregation method (mean or length_weighted).
 
         Args:
             dataloader: DataLoader yielding batches
@@ -702,7 +704,10 @@ class SpeakerVerification(pl.LightningModule):
                 embed = outputs["embeds"]
                 # Handle frame-level embeddings (if applicable)
                 if len(embed.shape) == 3:  # [B, num_frames, embedding_dim]
-                    embed = embed.mean(dim=1)  # [B, embedding_dim]
+                    raise NotImplementedError(
+                        "Frame-level embeddings not supported in _compute_embeddings"
+                    )
+                    # embed = embed.mean(dim=1)  # [B, embedding_dim]
 
                 # Check if this is a multi-utterance enrollment batch (CNCeleb multi-mode)
                 if (
@@ -710,17 +715,15 @@ class SpeakerVerification(pl.LightningModule):
                     and hasattr(batch, "utt_counts")
                     and batch.utt_counts is not None
                 ):
-                    # Aggregate embeddings per enroll_id using mean pooling
+                    # Aggregate embeddings per enroll_id using scoring pipeline
+                    # This respects the enrollment_aggregation config (mean or length_weighted)
                     idx = 0
-                    for enroll_id, count in zip(
-                        batch.enroll_id, batch.utt_counts
-                    ):
-                        utt_embeds = embed[
-                            idx : idx + count
-                        ]  # [count, embed_dim]
-                        aggregated_embed = utt_embeds.mean(
-                            dim=0
-                        )  # [embed_dim]
+                    for enroll_id, count in zip(batch.enroll_id, batch.utt_counts):
+                        utt_embeds = embed[idx : idx + count]  # [count, embed_dim]
+                        utt_lengths = batch.audio_length[idx : idx + count]  # [count]
+                        aggregated_embed = self.scoring_pipeline.aggregate_enrollment(
+                            utt_embeds, lengths=utt_lengths
+                        )
                         embeddings_dict[enroll_id] = aggregated_embed
                         idx += count
                 elif (

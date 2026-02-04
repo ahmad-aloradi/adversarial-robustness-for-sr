@@ -60,6 +60,46 @@ from src import utils  # noqa: E501
 log = utils.get_pylogger(__name__)
 
 
+import re
+
+# Pattern to match cluster-specific paths (e.g., /home/woody/dsnf/dsnf101h/...)
+_CLUSTER_PATH_PATTERN = re.compile(r".*/dsnf101h/.*?/(train|eval)/runs/[^/]+")
+
+
+def _fix_cluster_path(value: str, exp_dir: Path) -> str:
+    """Replace cluster path with exp_dir if it matches the pattern."""
+    if "dsnf101h" in value:
+        fixed = _CLUSTER_PATH_PATTERN.sub(str(exp_dir), value)
+        return fixed
+    return value
+
+
+def _fix_cluster_paths_in_config(cfg: DictConfig, exp_dir: Path) -> None:
+    """Replace cluster-specific paths (e.g., dsnf101h) with the actual exp_dir.
+    
+    This handles cases where the original training was done on a cluster with
+    different paths that don't exist on the current machine.
+    """
+    
+    def recursive_fix(node: DictConfig, parent_key: str = "") -> None:
+        """Recursively fix paths in the config."""
+        for key in node:
+            full_key = f"{parent_key}.{key}" if parent_key else key
+            value = node[key]
+            if isinstance(value, str) and "dsnf101h" in value:
+                try:
+                    fixed = _fix_cluster_path(value, exp_dir)
+                    if fixed != value:
+                        log.info(f"Fixed cluster path: {value} -> {fixed}")
+                    node[key] = fixed
+                except Exception:
+                    pass  # Skip read-only or interpolated values
+            elif isinstance(value, DictConfig):
+                recursive_fix(value, full_key)
+    
+    recursive_fix(cfg)
+
+
 def _apply_exp_dir_config(cfg: DictConfig) -> DictConfig:
     exp_dir_value = cfg.get("exp_dir")
     if not exp_dir_value:
@@ -71,6 +111,9 @@ def _apply_exp_dir_config(cfg: DictConfig) -> DictConfig:
         raise FileNotFoundError(f"Missing experiment config: {exp_cfg_path}")
 
     exp_cfg = OmegaConf.load(exp_cfg_path)
+    
+    # Fix cluster-specific paths before further processing
+    _fix_cluster_paths_in_config(exp_cfg, exp_dir)
 
     # Preserve eval-specific settings
     for key in [
@@ -153,11 +196,6 @@ def _resolve_checkpoint(cfg: DictConfig) -> str:
     ckpt_path = Path(str(ckpt_path)).expanduser()
     if not ckpt_path.exists():
         raise ValueError(f"Checkpoint not found: {ckpt_path}")
-
-    # Temporary safeguard against using last.ckpt 
-    # -> later: delete this field since it is inherited from resming exps in training
-    if 'last' in str(ckpt_path):
-        raise ValueError(f"Invalid checkpoint file: {ckpt_path}")
     
     return str(ckpt_path)
 
@@ -340,35 +378,35 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
     return metric_dict, object_dict
 
 
-def _inject_exp_dir_overrides() -> None:
-    """Inject a training run's Hydra overrides into sys.argv so that
-    configuration composition (done during resolver registration) sees the same
-    overrides the run used.
-
-    This prevents missing/interpolation errors
-    when composing `eval.yaml` together with the experiment overrides.
-    """
+def _resolve_exp_dir_from_argv() -> Path | None:
     exp_arg = None
     for arg in sys.argv[1:]:
         if arg.startswith("exp_dir="):
             exp_arg = arg
             break
+        if arg.startswith("ckpt_path="):
+            exp_dir = Path(arg.split("=", 1)[1]).resolve().parents[1]
+            exp_arg = f"exp_dir={exp_dir.as_posix()}"
+            break
 
     if not exp_arg:
-        return
+        return None
 
-    exp_dir = Path(exp_arg.split("=", 1)[1]).expanduser().resolve()
+    return Path(exp_arg.split("=", 1)[1]).expanduser().resolve()
+
+
+def _load_exp_overrides(exp_dir: Path) -> list[str]:
     overrides_path = exp_dir / ".hydra" / "overrides.yaml"
-
     if not overrides_path.exists():
-        return
+        return []
 
     with overrides_path.open("r") as handle:
         data = yaml.safe_load(handle) or []
-    if not isinstance(data, list):
-        return
+    return [str(item) for item in data] if isinstance(data, list) else []
 
-    # If keep_logger was explicitly passed on CLI, keep logger overrides
+
+def _sanitize_overrides_for_eval(overrides: list[str], exp_dir: Path) -> list[str]:
+    """Filter training-only overrides and fix cluster paths for eval."""
     keep_logger = any(
         (
             a.startswith("keep_logger=")
@@ -377,40 +415,70 @@ def _inject_exp_dir_overrides() -> None:
         for a in sys.argv[1:]
     )
 
-    new_overrides = []
-    for item in data:
-        s = str(item)
+    training_only_prefixes = (
+        "trainer",
+        "trainer.num_sanity_val_steps=",
+        "datamodule.loaders.train.",
+        "datamodule.loaders.val",
+        "ckpt_path=", # Skip training resume checkpoint from overrides
+        "name=",
+    )
+
+    sanitized: list[str] = []
+    for s in overrides:
+        # Drop training-only overrides
+        if s.startswith(training_only_prefixes):
+            continue
+
+        # Skip invalid bare-path overrides
+        if "=" not in s:
+            if s.startswith("/") or (
+                not s.startswith("~") and not s.startswith("+")
+            ):
+                print(f"[eval.py] Skipping invalid override from overrides.yaml: {s}")
+                continue
+
+        # Skip logger overrides unless explicitly requested
         if not keep_logger and (
             s.startswith("logger=") or s.startswith("logger.")
         ):
             continue
+
+        # Fix cluster paths or drop paths.* overrides to use local defaults
+        if "dsnf101h" in s:
+            key = s.split("=", 1)[0]
+            if key.startswith("paths."):
+                print(f"[eval.py] Skipping cluster paths override: {s}")
+                continue
+            s = _fix_cluster_path(s, exp_dir)
+
         if s.startswith("experiment="):
-            new_overrides.append("+" + s)
+            sanitized.append("+" + s)
         else:
-            new_overrides.append(s)
+            sanitized.append(s)
 
-    artifacts_dirs = sorted(exp_dir.glob("*_artifacts"))
-    if artifacts_dirs:
-        new_overrides.append(
-            f"datamodule.dataset.artifacts_dir={artifacts_dirs[0].as_posix()}"
-        )
+    artifacts_dirs = [p for p in exp_dir.glob("*_artifacts") 
+                      if not p.name.startswith("_") and not p.name.startswith("test")
+                      ]
+    assert len(artifacts_dirs) == 1, "Multiple artifacts dirs found!"
+    sanitized.append(
+        f"datamodule.dataset.artifacts_dir={artifacts_dirs[0].as_posix()}"
+    )
 
-    noise_csv = exp_dir / "noise.csv"
-    if noise_csv.exists():
-        new_overrides.append(
-            f"module.data_augmentation.noise_annotation={noise_csv.as_posix()}"
-        )
+    return sanitized
 
-    reverb_csv = exp_dir / "reverb.csv"
-    if reverb_csv.exists():
-        new_overrides.append(
-            f"module.data_augmentation.rir_annotation={reverb_csv.as_posix()}"
-        )
+
+def _inject_exp_dir_overrides() -> None:
+    """Inject sanitized overrides for eval into sys.argv."""
+    exp_dir = _resolve_exp_dir_from_argv()
+    if not exp_dir:
+        return
+
+    overrides = _load_exp_overrides(exp_dir)
+    new_overrides = _sanitize_overrides_for_eval(overrides, exp_dir)
 
     for ov in new_overrides:
-        # Extract key from override (strip leading +/~ and get part before =)
         key = ov.lstrip("+~").split("=")[0]
-        # Check if user already specified this key on CLI
         user_has_key = any(
             arg.lstrip("+~").split("=")[0] == key
             for arg in sys.argv[1:]
@@ -420,8 +488,34 @@ def _inject_exp_dir_overrides() -> None:
             sys.argv.append(ov)
 
 
-_inject_exp_dir_overrides()
+def _filter_invalid_argv_overrides() -> None:
+    """Remove invalid bare-path arguments from sys.argv that would cause Hydra parse errors.
+    
+    Hydra expects overrides in key=value format. Bare paths like '/path/to/ckpt'
+    that were incorrectly saved to overrides.yaml or passed on CLI will cause
+    OverrideParseException. This function filters them out.
+    """
+    filtered = [sys.argv[0]]  # Keep the script name
+    for arg in sys.argv[1:]:
+        # Skip bare paths (start with / and no =)
+        if arg.startswith("/") and "=" not in arg:
+            print(f"[eval.py] Removing invalid CLI argument (bare path): {arg}")
+            continue
+        filtered.append(arg)
+    sys.argv[:] = filtered
 
+
+def _log_final_overrides() -> None:
+    """Log the final overrides that will be passed to Hydra/composition."""
+    final = sys.argv[1:]
+    log.info(f"Final CLI overrides passed to Hydra: {final}")
+    # Also print so it's visible when logger isn't configured yet
+    print(f"[eval.py] Final CLI overrides passed to Hydra: {final}")
+
+
+_inject_exp_dir_overrides()
+_filter_invalid_argv_overrides()
+_log_final_overrides()
 
 @utils.register_custom_resolvers(**_HYDRA_PARAMS | {"overrides": sys.argv[1:]})
 @hydra.main(**_HYDRA_PARAMS)
