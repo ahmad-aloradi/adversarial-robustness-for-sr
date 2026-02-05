@@ -101,6 +101,8 @@ dataset:
 
 transforms: null
 
+# Base speaker count before speed perturbation expansion
+_base_num_classes: 2793
 # Placeholder, will be determined automatically by the CsvProcessor during data preparation
 num_classes: 2793
 

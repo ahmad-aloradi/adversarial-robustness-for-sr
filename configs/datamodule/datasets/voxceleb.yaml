@@ -76,6 +76,8 @@ dataset:
 
 transforms: null
 
+# Base speaker count before speed perturbation expansion
+_base_num_classes: 7205
 num_classes: 7205
 
 loaders:

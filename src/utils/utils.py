@@ -381,17 +381,22 @@ def register_custom_resolvers(
                 return_hydra_config=True,
                 overrides=overrides if overrides else [],
             )
-        cfg_tmp = cfg.copy()
-        loss = load_loss(cfg_tmp.module.criterion.loss)
-        metric, metric_best, _ = load_metrics(cfg_tmp.module.metrics)
-        GlobalHydra.instance().clear()
+        
+        if cfg.module.criterion.loss:
+            cfg_tmp = cfg.copy()
+            loss = load_loss(cfg_tmp.module.criterion.loss)
+            metric, metric_best, _ = load_metrics(cfg_tmp.module.metrics)
+            GlobalHydra.instance().clear()
 
-        OmegaConf.register_new_resolver(
-            "replace",
-            lambda item: item.replace("__loss__", loss.__class__.__name__)
-            .replace("__metric__", metric.__class__.__name__)
-            .replace("__metric_best__", metric_best.__class__.__name__),
-        )
+            OmegaConf.register_new_resolver(
+                "replace",
+                lambda item: item.replace("__loss__", loss.__class__.__name__)
+                .replace("__metric__", metric.__class__.__name__)
+                .replace("__metric_best__", metric_best.__class__.__name__),
+            )
+        else:
+            # cfg_tmp.module.criterion.loss is done for testing
+            log.warning(f'cfg_tmp.module.criterion.loss is set to {cfg_tmp.module.criterion.loss}')
 
     def decorator(function: Callable) -> Callable:
         @wraps(function)

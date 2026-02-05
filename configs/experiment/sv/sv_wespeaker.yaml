@@ -1,22 +1,27 @@
 # @package _global_
 
-# WeSpeaker-exact training configuration for CNCeleb
+# WeSpeaker-style training configuration for CNCeleb
 # Matches WeSpeaker's ECAPA-TDNN_GLOB_c512 recipe from:
 # https://github.com/wenet-e2e/wespeaker/tree/master/examples/cnceleb/v2
 #
-# Key parameters (150 epochs):
-# - Model: ECAPA_TDNN_GLOB_c512 (not c1024)
-# - LR: 0.1 -> 0.00005 via ExponentialDecrease with 6-epoch warmup from zero
-# - Margin: 0.0 -> 0.2 exponential increase from epoch 20 to 40
-# - Batch size: 128
-# - SGD with momentum=0.9, nesterov=True, weight_decay=1e-4
-# - No early stopping (train full 150 epochs)
-# - Checkpoint averaging: last 10 checkpoints
+# All schedule parameters are computed relative to max_epochs using oc.eval,
+# so you can adjust training length and everything scales automatically.
+# Based on WeSpeaker 150-epoch recipe proportions:
+# - LR warmup: 4% of training (6/150)
+# - LR decay: gamma computed to reach 0.00005 final LR
+# - Margin start: 13.3% of training (20/150)
+# - Margin warmup: 13.3% of training (ends at 26.7%)
+# - Margin curve: exponential (WeSpeaker increase_type='exp')
+#
+# Key differences from default:
+# - Model: ECAPA_TDNN_GLOB_c512 (smaller, matches WeSpeaker CNCeleb recipe)
+# - Checkpoint averaging: save_top_k=10 and auto-average at fit end
 #
 # Target: EER <= 8.5% on CNCeleb eval (WeSpeaker reference: 7.879%)
 #
 # Usage:
 #   python train.py experiment=sv/sv_wespeaker datamodule=datasets/cnceleb
+#   python train.py experiment=sv/sv_wespeaker trainer.max_epochs=50  # shorter run
 
 defaults:
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
@@ -36,8 +41,8 @@ tags:
 seed: 42
 
 trainer:
-  max_epochs: 150 # WeSpeaker uses 150 epochs
-  min_epochs: 150 # No early stopping - train full duration
+  max_epochs: 30 # Change this to adjust training length (all schedules auto-scale)
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% minimum
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 
@@ -51,26 +56,31 @@ callbacks:
     _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
     num_checkpoints: 10
     output_filename: averaged_top{num}.ckpt
-  early_stopping: null # WeSpeaker trains full 150 epochs without early stopping
-  # Progressive margin scheduler (WeSpeaker-exact)
-  # WeSpeaker: margin 0.0->0.2, exponential increase, epoch 20-40
+  early_stopping:
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'} # ~30% of epochs
+  # Progressive margin scheduler (WeSpeaker-style, auto-scaled to max_epochs)
+  # WeSpeaker: margin starts at 13% (20/150), ends at 27% (40/150), exponential curve
   margin_scheduler:
     _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
     initial_margin: 0.0
     final_margin: 0.2
-    start_epoch: 20 # WeSpeaker: increase_start_epoch=20
-    warmup_epochs: 20 # WeSpeaker: fix_start_epoch=40, so 40-20=20 epochs
+    start_epoch: ${oc.eval:'int(${trainer.max_epochs} * 0.133)'} # 13.3% into training (WeSpeaker: 20/150)
+    warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.133)'} # 13.3% duration (WeSpeaker: 20 epochs)
     increase_type: exp # WeSpeaker: increase_type='exp'
 
 datamodule:
   dataset:
-    segment_duration: 2.0
-    max_duration: 2.0
-    use_pre_segmentation: False
+    segment_duration: 3.0
+    max_duration: 3.0
+    use_pre_segmentation: True
     # # Larger batch via PKSpeaker sampling (16 speakers × 8 utterances = 128)
     # batch_sampler:
     #   num_speakers: 16
     #   num_utterances: 8
+  # Auto-scale: base speakers × number of speed factors
+  num_classes: ${oc.eval:'${datamodule._base_num_classes} * len(${module.data_augmentation.augmentations.wav_augmenter.speed_perturb.speed_factors})'}
 
   loaders:
     train:
@@ -92,17 +102,15 @@ module:
         margin: 0.0
         scale: 32.0
 
-  # WeSpeaker-exact LR schedule: warmup + exponential decay
-  # WeSpeaker formula: lr = initial_lr * exp((epoch/total) * log(final_lr/initial_lr))
-  # For our gamma-based scheduler: gamma = (final_lr/initial_lr)^(1/(epochs-warmup))
-  # WeSpeaker: initial_lr=0.1, final_lr=0.00005, warmup=6, epochs=150
-  # gamma = (0.00005/0.1)^(1/144) = 0.0005^(1/144) = 0.9479
+  # WeSpeaker-style LR schedule: warmup + exponential decay (auto-scaled)
+  # LR: 0.0 -> 0.1 (warmup, 4% of epochs) -> 0.00005 (gamma decay)
+  # gamma computed to reach final_lr=0.00005 from initial_lr=0.1
   lr_scheduler:
     scheduler:
       _target_: src.utils.schedulers.WarmupExponentialLR
-      warmup_epochs: 6 # WeSpeaker: warm_up_epoch=6
+      warmup_epochs: ${oc.eval:'max(1, int(${trainer.max_epochs} * 0.04))'} # 4% warmup (WeSpeaker: 6/150)
       warmup_start_factor: 0.0 # WeSpeaker: warm_from_zero=True
-      gamma: 0.9486 # Decay to 0.00005 final LR: (0.00005/0.1)^(1/144)
+      gamma: ${oc.eval:'pow(0.0005, 1.0 / (${trainer.max_epochs} - max(1, int(${trainer.max_epochs} * 0.04))))'} # decay to 0.00005
     extras:
       interval: "epoch"
       frequency: ${trainer.check_val_every_n_epoch}
@@ -143,25 +151,30 @@ module:
         _target_: src.modules.augmentation.GPUAugmenter
         sample_rate: ${datamodule.dataset.sample_rate}
         concat_original: true
-        # Transforms applied in order - ordering controlled here, not in code
+        # Speed perturbation with virtual speakers: each (speaker, speed)
+        # pair becomes a unique class at runtime (no CSV expansion needed)
+        speed_perturb:
+          _target_: src.modules.augmentation.SpeedPerturb
+          sample_rate: ${datamodule.dataset.sample_rate}
+          speed_factors: [0.9, 1.0, 1.1]
+          virtual_speakers: true
+          num_base_classes: ${datamodule._base_num_classes}
+          p: 1.0
+        # Noise and reverb are mutually exclusive (WeSpeaker strategy)
         transforms:
-          # 1. Speed perturbation (applied first - changes signal length)
-          - _target_: src.modules.augmentation.SpeedPerturb
-            sample_rate: ${datamodule.dataset.sample_rate}
-            speed_factors: [0.9, 1.0, 1.1]
-            p: 1.0
-          # 2. Reverb with normalization (before noise to avoid amplifying it)
-          - _target_: src.modules.augmentation.NormalizedReverb
-            ir_csv: ${module.data_augmentation.rir_annotation}
-            sample_rate: ${datamodule.dataset.sample_rate}
-            p: 0.6
-            normalize: true
-          # 3. Background noise
-          - _target_: src.modules.augmentation.NoiseFromCSV
-            noise_csv: ${module.data_augmentation.noise_annotation}
-            min_snr_db: 0
-            max_snr_db: 15
-            p: 0.6
+          - _target_: src.modules.augmentation.MutuallyExclusive
+            p: 1.0  # Always apply one — concat_original provides the clean copy
+            transforms:
+              - _target_: src.modules.augmentation.NormalizedReverb
+                ir_csv: ${module.data_augmentation.rir_annotation}
+                sample_rate: ${datamodule.dataset.sample_rate}
+                p: 1.0  # Controlled by MutuallyExclusive wrapper
+                normalize: true
+              - _target_: src.modules.augmentation.NoiseFromCSV
+                noise_csv: ${module.data_augmentation.noise_annotation}
+                min_snr_db: 0
+                max_snr_db: 15
+                p: 1.0  # Controlled by MutuallyExclusive wrapper
 
 logger:
   wandb:
