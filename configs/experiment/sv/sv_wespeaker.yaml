@@ -6,7 +6,7 @@
 #
 # All schedule parameters are computed relative to max_epochs using oc.eval,
 # so you can adjust training length and everything scales automatically.
-# Based on WeSpeaker 150-epoch recipe proportions:
+# The scale is designed to match WeSpeaker 150-epoch recipe proportions:
 # - LR warmup: 4% of training (6/150)
 # - LR decay: gamma computed to reach 0.00005 final LR
 # - Margin start: 13.3% of training (20/150)
@@ -15,7 +15,7 @@
 #
 # Key differences from default:
 # - Model: ECAPA_TDNN_GLOB_c512 (smaller, matches WeSpeaker CNCeleb recipe)
-# - Checkpoint averaging: save_top_k=10 and auto-average at fit end
+# - Checkpoint averaging: save_top_k 10% and auto-average at fit end
 #
 # Target: EER <= 8.5% on CNCeleb eval (WeSpeaker reference: 7.879%)
 #
@@ -41,7 +41,7 @@ tags:
 seed: 42
 
 trainer:
-  max_epochs: 30 # Change this to adjust training length (all schedules auto-scale)
+  max_epochs: 50 # Change this to adjust training length (all schedules auto-scale)
   min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% minimum
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
@@ -50,11 +50,11 @@ callbacks:
   model_checkpoint:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    save_top_k: 10 # Save last 10 checkpoints for averaging
-    every_n_epochs: 5 # WeSpeaker: save_epoch_interval=5
+    save_top_k: ${oc.eval:'max(2, int(${trainer.max_epochs} * 0.1))'} # Default: Save top-5 checkpoints for averaging
+    every_n_epochs: 1
   checkpoint_averaging:
     _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
-    num_checkpoints: 10
+    num_checkpoints: ${callbacks.model_checkpoint.save_top_k} # Average the top K checkpoints
     output_filename: averaged_top{num}.ckpt
   early_stopping:
     mode: max
@@ -85,7 +85,7 @@ datamodule:
   loaders:
     train:
       batch_size: 128
-    val:
+    valid:
       batch_size: 128
     test:
       batch_size: 8

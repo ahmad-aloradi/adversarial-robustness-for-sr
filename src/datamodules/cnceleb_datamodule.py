@@ -257,10 +257,9 @@ class CNCelebDataModule(LightningDataModule):
                 f"Available: {list(self.enrollment_data_dict.keys())}"
             )
 
-        # Use enrollment loader config for consistency with VoxCeleb
-        loader_cfg = self.hparams.loaders.get(
-            "enrollment", self.hparams.loaders.test
-        )
+        # Use enrollment loader config -> enroll batch_size is smaller to accomodate their length
+        assert "enrollment" in self.hparams.loaders, "Enrollment loader config is required"
+        loader_cfg = self.hparams.loaders.get("enrollment")
 
         # Select collate function based on mode in test_filename
         is_concatenated = "concatenated" in test_filename

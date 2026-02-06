@@ -24,6 +24,7 @@ from torch_audiomentations import (
 )
 
 from src import utils
+
 log = utils.get_pylogger(__name__)
 
 
@@ -83,11 +84,15 @@ class SpeedPerturb(nn.Module):
 
     When ``virtual_speakers=True``, returns ``(waveforms, speed_indices)``
     so the caller can remap class labels at runtime — each (speaker, speed)
-    pair becomes a unique virtual class. No CSV expansion needed.
+    pair becomes a unique virtual class.  1.0 is always moved to index 0
+    internally so that ``speed_index * N + class_id`` keeps labels [0, N)
+    for unperturbed audio, matching validation labels regardless of the
+    ordering in the config.
 
     Args:
         sample_rate: Audio sample rate
-        speed_factors: Speed factors to choose from
+        speed_factors: Speed factors to choose from (must include 1.0
+            when virtual_speakers=True; order does not matter)
         p: Probability of applying perturbation
         virtual_speakers: If True, return speed indices for label remapping
         num_base_classes: Number of original speaker classes (required
@@ -100,23 +105,31 @@ class SpeedPerturb(nn.Module):
         speed_factors: list[float],
         virtual_speakers: bool,
         num_base_classes: int,
-        p: float = 0.5,
+        p: float = 1.0,
     ):
         super().__init__()
         self.sample_rate = sample_rate
-        self.speed_factors = speed_factors or [0.9, 1.0, 1.1]
+        self.speed_factors = list(speed_factors or [0.9, 1.0, 1.1])
         self.p = p
         self.virtual_speakers = virtual_speakers
 
         if virtual_speakers:
-            assert num_base_classes is not None, (
-                "num_base_classes is required when virtual_speakers=True"
-            )
-            assert 1.0 in self.speed_factors, (
-                "speed_factors must include 1.0 for virtual speakers"
-            )
+            assert (
+                num_base_classes is not None
+            ), "num_base_classes is required when virtual_speakers=True"
+            assert (
+                1.0 in self.speed_factors
+            ), "speed_factors must include 1.0 for virtual speakers"
+            # IMPORTANT: Move 1.0 to index 0 so that speed_index=0 → label
+            # offset 0 → validation labels [0, N) stay aligned.
+            unity_pos = self.speed_factors.index(1.0)
+            if unity_pos != 0:
+                self.speed_factors[0], self.speed_factors[unity_pos] = (
+                    self.speed_factors[unity_pos],
+                    self.speed_factors[0],
+                )
             self.num_base_classes = num_base_classes
-            self._unity_index = self.speed_factors.index(1.0)
+            self._unity_index = 0
 
         # Pre-create resamplers for each non-unity speed factor
         self._resamplers: dict[float, torchaudio.transforms.Resample] = {}
@@ -147,6 +160,7 @@ class SpeedPerturb(nn.Module):
         assert channels == 1, "SpeedPerturb only supports mono audio."
         device = waveforms.device
 
+        # TODO: maybe deprecate p and apply_mask (?) -> control through speed factors
         apply_mask = torch.rand(batch_size, device=device) <= self.p
         speed_indices = torch.randint(
             len(self.speed_factors), (batch_size,), device=device
@@ -221,7 +235,9 @@ class NormalizedReverb(nn.Module):
             output_type="tensor",
         )
 
-    def forward(self, waveforms: torch.Tensor, sample_rate: int | None = None) -> torch.Tensor:
+    def forward(
+        self, waveforms: torch.Tensor, sample_rate: int | None = None
+    ) -> torch.Tensor:
         """Apply reverb with optional amplitude normalization."""
         sr = sample_rate or self.sample_rate
 
@@ -269,7 +285,9 @@ class NoiseFromCSV(nn.Module):
             mode="per_example",
         )
 
-    def forward(self, waveforms: torch.Tensor, sample_rate: int | None = None) -> torch.Tensor:
+    def forward(
+        self, waveforms: torch.Tensor, sample_rate: int | None = None
+    ) -> torch.Tensor:
         """Apply background noise."""
         return self._noise(waveforms, sample_rate=sample_rate)
 
@@ -297,7 +315,9 @@ class MutuallyExclusive(nn.Module):
         self.transforms = nn.ModuleList(transforms)
         self.p = p
 
-    def forward(self, waveforms: torch.Tensor, sample_rate: int | None = None) -> torch.Tensor:
+    def forward(
+        self, waveforms: torch.Tensor, sample_rate: int | None = None
+    ) -> torch.Tensor:
         """Apply exactly one transform per sample.
 
         Args:
@@ -317,9 +337,7 @@ class MutuallyExclusive(nn.Module):
             return waveforms
 
         # Assign each active sample a random transform index
-        transform_indices = torch.randint(
-            n_transforms, (batch_size,), device=device
-        )
+        transform_indices = torch.randint(n_transforms, (batch_size,), device=device)
 
         output = waveforms.clone()
 
@@ -466,6 +484,8 @@ class GPUAugmenter(nn.Module):
         When speed_perturb has virtual_speakers=True, each (speaker, speed)
         pair gets a unique class:
             virtual_class = speed_index * num_base_classes + original_class
+        Because 1.0 is always at index 0, unperturbed audio keeps labels
+        in [0, N) — matching validation labels.
         """
         if self._speed_indices is not None:
             labels = (
