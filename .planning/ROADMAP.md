@@ -14,6 +14,7 @@ This milestone establishes verified baselines before compression experiments. We
 - [x] **Phase 1.1: Eval Auto-Config (INSERTED)** - Complete eval.py checkpoint averaging implementation ✓
 - [ ] **Phase 2: Pruning Verification** - Verify magnitude pruning at 30-90% sparsity levels (parallel with Phase 3)
 - [ ] **Phase 3: Bregman Verification** - Compare Bregman implementation against reference (parallel with Phase 2)
+- [ ] **Phase 4: Verify Pruning & Bregman Correctness** - Fix pruning validation-during-ramp bugs, verify Bregman lambda update frequency
 
 ## Phase Details
 
@@ -71,10 +72,29 @@ Plans:
 Plans:
 - [ ] 03-01: TBD
 
+### Phase 4: Verify Pruning & Bregman Correctness
+**Goal**: Fix known bugs in pruning callback and verify Bregman lambda update correctness
+**Depends on**: Phase 1 (need working baseline)
+**Requirements**: PRUNE-01, BREG-01
+**Success Criteria** (what must be TRUE):
+  1. Pruning callback suppresses validation (EarlyStopping + ModelCheckpoint) while sparsity < target, even when `check_val_every_n_epoch` triggers validation
+  2. No spurious "New best score" recorded during sparsity ramp-up phase
+  3. Bregman lambda updates occur at correct frequency matching reference implementation
+  4. All verification tests pass for both pruning and Bregman behaviors
+**Plans**: 2 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — Fix pruning validation suppression via limit_val_batches + tests (Wave 1)
+- [ ] 04-02-PLAN.md — Verify Bregman lambda update correctness + tests (Wave 1)
+
+**Known Issues (from logs):**
+1. With `check_val_every_n_epoch=5`, validation still runs every epoch during pruning ramp — "New best score" recorded at low sparsity (e.g., 0.001 accuracy at epoch 3, then 0.005 at epoch 18)
+2. Bregman lambda update frequency needs verification against reference (github.com/TimRoith/BregmanLearning)
+
 ## Progress
 
 **Execution Order:**
-Phase 1 first, then Phase 1.1, then Phases 2 and 3 in parallel: 1 -> 1.1 -> (2 || 3)
+Phase 1 first, then Phase 1.1, then Phases 2 and 3 in parallel, then Phase 4: 1 -> 1.1 -> (2 || 3) -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -82,8 +102,9 @@ Phase 1 first, then Phase 1.1, then Phases 2 and 3 in parallel: 1 -> 1.1 -> (2 |
 | 1.1 Eval Auto-Config (INSERTED) | 1/1 | ✓ Complete | 2026-01-31 |
 | 2. Pruning Verification | 0/TBD | Not started | - |
 | 3. Bregman Verification | 0/TBD | Not started | - |
+| 4. Verify Pruning & Bregman Correctness | 0/2 | Planned | - |
 
 ---
 *Roadmap created: 2026-01-25*
-*Last updated: 2026-01-31 - Completed Phase 1.1*
+*Last updated: 2026-02-06 - Added Phase 4 (Verify Pruning & Bregman Correctness)*
 *Milestone: v0.1 Foundations*
