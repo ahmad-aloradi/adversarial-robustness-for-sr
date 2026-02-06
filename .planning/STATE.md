@@ -10,26 +10,26 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 ## Current Position
 
 Phase: 4 of 4 (Verify Pruning & Bregman Correctness)
-Plan: 1 of 2 executed
-Status: In progress
-Last activity: 2026-02-06 - Completed 04-01-PLAN.md (Fix Pruning Validation Suppression)
+Plan: 2 of 2 executed
+Status: Phase complete
+Last activity: 2026-02-06 - Completed 04-02-PLAN.md (Bregman Lambda Verification Tests)
 
-Progress: [███.......] 28% (Phase 1 nearly done, Phase 4 partial progress)
+Progress: [███.......] 30% (Phase 1 nearly done, Phase 4 complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed (GSD): 2
+- Total plans completed (GSD): 3
 - Plans completed outside GSD: ~4 major changes
-- Average duration: 2.7 min
-- Total execution time: 5.3 min
+- Average duration: 3.1 min
+- Total execution time: 9.3 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1.1 | 1 | 3.0 min | 3.0 min |
-| 4 | 1 | 2.3 min | 2.3 min |
+| 4 | 2 | 6.3 min | 3.2 min |
 
 *Updated after each plan completion*
 
@@ -65,6 +65,7 @@ Recent decisions affecting current work:
 | 01 (manual) | Augmentation strategy | Mutually exclusive RIR/noise + virtual speakers post-resampling | Matches WeSpeaker recipe more closely |
 | 04-01 | Validation suppression mechanism | Use trainer.limit_val_batches=0 instead of callback state manipulation | Direct trainer control prevents validation execution entirely, avoiding compute waste and misleading logs |
 | 04-01 | Restoration timing | Restore validation when new_sparsity >= (final_amount - 1e-4) | Ensures validation resumes exactly when target sparsity is reached |
+| 04-02 | Lambda volatility metric | Measure EMA effectiveness via direction change count, not variance | When sparsity oscillates around target, EMA prevents lambda direction reversals (increase/decrease flip-flopping) |
 
 ### Roadmap Evolution
 
@@ -81,6 +82,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-02-06T17:38:14Z
-Stopped at: Completed 04-01-PLAN.md - Fixed pruning validation suppression
+Last session: 2026-02-06T17:40:47Z
+Stopped at: Completed 04-02-PLAN.md - Bregman lambda verification tests (Phase 4 complete)
 Resume file: None
