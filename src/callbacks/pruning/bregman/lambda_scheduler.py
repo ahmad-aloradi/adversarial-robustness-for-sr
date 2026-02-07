@@ -15,9 +15,10 @@ class LambdaScheduler:
     called from a batch-end hook). Optionally, it applies exponential moving average
     (EMA) smoothing to sparsity readings to reduce oscillations.
 
-    The scheduler also supports scheduled target relaxation, where target_sparsity
+    The scheduler also supports a scheduled target mode, where target_sparsity
     evolves from an initial value to a final value over N epochs (linear or constant
-    schedule). This allows the model to gradually gain capacity during training.
+    schedule). Typically used to ramp sparsity upward (e.g., 0.0 → 0.9), mirroring
+    how magnitude pruning gradually increases sparsity during training.
 
     Parameters
     ----------
@@ -41,9 +42,9 @@ class LambdaScheduler:
         Schedule type for target relaxation ("linear" or "constant").
         When None, target_sparsity is fixed.
     initial_target_sparsity : float, optional
-        Starting target sparsity for scheduled mode (required if schedule_type is set)
+        Starting target sparsity for scheduled mode (e.g., 0.0; required if schedule_type is set)
     final_target_sparsity : float, optional
-        Ending target sparsity for scheduled mode (required if schedule_type is set)
+        Ending target sparsity for scheduled mode (e.g., 0.9; required if schedule_type is set)
     epochs_to_ramp : int, default=10
         Number of epochs for the schedule to complete
     """
@@ -263,13 +264,8 @@ class LambdaScheduler:
                 )
                 target = 1.0 - current_remaining
 
-            # Clamp
-            target = min(
-                max(target, 0.0),
-                max(
-                    self._initial_target_sparsity, self._final_target_sparsity
-                ),
-            )
+            # Clamp (match PruningScheduler: clamp to final_target_sparsity)
+            target = min(max(target, 0.0), self._final_target_sparsity)
         else:
             raise ValueError(f"Unknown schedule_type: {self._schedule_type}")
 
