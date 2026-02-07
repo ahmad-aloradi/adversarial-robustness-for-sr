@@ -51,14 +51,14 @@ callbacks:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
       initial_lambda: 1e-2
-      target_sparsity: 0.99 # Ignored when schedule is active, but kept for schema consistency
+      target_sparsity: 0.9 # Ignored when schedule is active; kept for schema consistency
       acceleration_factor: .25
       min_lambda: 1e-6
       max_lambda: 1e1
-      # Scheduled target relaxation
+      # Scheduled target: ramp sparsity upward from 0% to target
       schedule_type: linear
-      initial_target_sparsity: 0.99 # Match initial model sparsity
-      final_target_sparsity: 0.9 # Desired operational sparsity
+      initial_target_sparsity: 0.0 # Start with no sparsity target
+      final_target_sparsity: 0.9 # Ramp up to desired target sparsity
       epochs_to_ramp: 10
 
 datamodule:
