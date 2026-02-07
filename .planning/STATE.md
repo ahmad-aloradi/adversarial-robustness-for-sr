@@ -10,26 +10,26 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 ## Current Position
 
 Phase: 4 of 4 (Verify Pruning & Bregman Correctness)
-Plan: 2 of 2 executed
+Plan: 3 of 3 executed
 Status: Phase complete
-Last activity: 2026-02-06 - Completed 04-02-PLAN.md (Bregman Lambda Verification Tests)
+Last activity: 2026-02-07 - Completed 04-03-PLAN.md (Bregman Scheduled Target Relaxation)
 
 Progress: [███.......] 30% (Phase 1 nearly done, Phase 4 complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed (GSD): 3
+- Total plans completed (GSD): 4
 - Plans completed outside GSD: ~4 major changes
-- Average duration: 3.1 min
-- Total execution time: 9.3 min
+- Average duration: 3.8 min
+- Total execution time: 16.3 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1.1 | 1 | 3.0 min | 3.0 min |
-| 4 | 2 | 6.3 min | 3.2 min |
+| 4 | 3 | 13.3 min | 4.4 min |
 
 *Updated after each plan completion*
 
@@ -66,6 +66,9 @@ Recent decisions affecting current work:
 | 04-01 | Validation suppression mechanism | Use trainer.limit_val_batches=0 instead of callback state manipulation | Direct trainer control prevents validation execution entirely, avoiding compute waste and misleading logs |
 | 04-01 | Restoration timing | Restore validation when new_sparsity >= (final_amount - 1e-4) | Ensures validation resumes exactly when target sparsity is reached |
 | 04-02 | Lambda volatility metric | Measure EMA effectiveness via direction change count, not variance | When sparsity oscillates around target, EMA prevents lambda direction reversals (increase/decrease flip-flopping) |
+| 04-03 | Schedule formula accuracy | LambdaScheduler matches PruningScheduler within 1e-9 | Ensures Bregman scheduled target behaves identically to magnitude pruning scheduled sparsity |
+| 04-03 | Validation suppression pattern | Reuse limit_val_batches=0 pattern with guard-based restoration | Consistent with MagnitudePruner from 04-01; prevents repeated restoration attempts |
+| 04-03 | Domain relaxation | Allow initial_target_sparsity=0.0 | Enables cross-check tests across full domain; Bregman context typically uses >0 but verification needs 0.0 |
 
 ### Roadmap Evolution
 
@@ -82,6 +85,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-02-06T17:40:47Z
-Stopped at: Completed 04-02-PLAN.md - Bregman lambda verification tests (Phase 4 complete)
+Last session: 2026-02-07T11:46:32Z
+Stopped at: Completed 04-03-PLAN.md - Bregman scheduled target relaxation (Phase 4 complete)
 Resume file: None
