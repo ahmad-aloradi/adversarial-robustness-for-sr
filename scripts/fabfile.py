@@ -27,7 +27,8 @@ PATH_PROJECT = '~/adversarial-robustness-for-sr'  # project folder on the hpc cl
 CONDA_ENV = 'comfort'
 
 WOODY_DIR = f'/home/woody/{env.user[: 4]}/{env.user}'
-RESULTS_DIR = os.path.join(WOODY_DIR, 'results')
+VAULT_DIR = f'/home/vault/{env.user[: 4]}/{env.user}'
+RESULTS_DIR = os.path.join(VAULT_DIR, 'results')
 DATA_DIR = os.path.join(WOODY_DIR, 'datasets')
 
 # Speaker-verification datasets packaged as fast-to-extract .tar.zst files.
@@ -656,8 +657,7 @@ def run_sv(transfer_data='false'):
     """
     transfer_data_bool = transfer_data.lower() in ('true', '1', 'yes')
 
-    BATCH_SIZE = 32
-    max_duration = 3.0
+    BATCH_SIZE = 128
 
     settings = {
         'script_name': 'src/train.py',
@@ -674,88 +674,119 @@ def run_sv(transfer_data='false'):
 
     experiments = [
         'sv_pruning_bregman',
+        'sv_pruning_bregman_ema',
+        'sv_pruning_bregman_scheduled',
         'sv_pruning_mag_struct_onetime',
         'sv_pruning_mag_unstruct_onetime',
         'sv_pruning_mag_struct',
         'sv_pruning_mag_unstruct',
+        'sv_wespeaker'
         'sv_vanilla',
         'sv_aug'
     ]
     
     # Get SV models from config directory
     config_dir = '../configs/module/sv_model'
-    if os.path.exists(config_dir):
-        sv_models = [
-            model.split('.')[0] for model in os.listdir(config_dir)
-            if model.endswith('.yaml') and
-            model.startswith('speechbrain') and
-            'pretrained' not in model
-            # if model.endswith('.yaml') and
-            # model.startswith('wespeaker') and
-            # 'pretrained' not in model and
-            # 'redimnet' not in model and
-            # 'eres2net34' not in model
-        ]
-    else:
-        print(f"Warning: Config directory {config_dir} not found, using default model list")
-        sv_models = ['wespeaker_pretrained_ecapa_tdnn']
+    assert os.path.exists(config_dir), f"Config directory {config_dir} does not exist"
+    sv_models = ['wespeaker_ecapa_tdnn']
+    ramp_up_experiments = ['sv_pruning_bregman_scheduled', 
+                           'sv_pruning_mag_struct', 
+                           'sv_pruning_mag_unstruct']
 
     for experiment in experiments:
-        max_epochs = 30 if 'pruning' in experiment and 'onetime' not in experiment else 20
-
         for sv_model in sv_models:
-            dataset_name = "multi_sv"
-            # dataset_name = "datasets/cnceleb"
+            for dataset_name in ["datasets/voxceleb", "datasets/cnceleb"]:
+            # for dataset_name in ["datasets/cnceleb"]:
+                virtual_spks = 'False' if dataset_name == "datasets/voxceleb" else 'True'
+                
+                #  Handling epochs 
+                ############################################################
+                epochs_to_ramp = None                
+                if dataset_name == "datasets/cnceleb":
+                    max_epochs = 50
+                    if  experiment in ramp_up_experiments:
+                        epochs_to_ramp = 20
+                        max_epochs += epochs_to_ramp
+                elif dataset_name == "datasets/voxceleb":
+                    max_epochs = 20
+                    if experiment in ramp_up_experiments:
+                        epochs_to_ramp = 10
+                        max_epochs += epochs_to_ramp
+                elif dataset_name == "multi_sv":
+                    max_epochs = 20
+                    if experiment in ramp_up_experiments:
+                        epochs_to_ramp = 10
+                        max_epochs += epochs_to_ramp
+                else:
+                    raise ValueError(f"Unexpected dataset name: {dataset_name}")
+                ############################################################
 
-            # Handling of special cases:
-            # 1. batch_size of 32 does not fit for resnet293 on the A100! --> use 16
-            batch_size = BATCH_SIZE if 'resnet293' not in sv_model else BATCH_SIZE // 2
-            # 2. cannot use pruning with certain models 
-            if 'pruning' in experiment:
-                if (
-                    sv_model == 'speechbrain_pretrained_ecapa_tdnn' or
-                    sv_model == 'pretraiend_ecapa2' # serialized implementation
-                ):
+                # Handling of special cases:
+                # 1. batch_size of 32 does not fit for resnet293 on the A100! --> use 16
+                batch_size = BATCH_SIZE if 'resnet293' not in sv_model else BATCH_SIZE // 2
+                # 2. cannot use pruning with certain models 
+                if 'pruning' in experiment:
+                    if (
+                        sv_model == 'speechbrain_pretrained_ecapa_tdnn' or
+                        sv_model == 'pretraiend_ecapa2' # serialized implementation
+                    ):
+                        print(f"\nSkipping {experiment} with {sv_model} - pruning not supported for this model!!\n")
+                        continue
+
+                # shared settings
+                ############################################################
+                job_name = f"{experiment}-{sv_model}-{os.path.basename(dataset_name)}-virtual_spks-{virtual_spks}-bs{batch_size}-max_epochs{max_epochs}"
+                settings['job_name'] = job_name
+                name = os.path.basename(dataset_name) + os.sep + job_name
+
+                script_arguments = {
+                    'datamodule': dataset_name,
+                    'experiment': f'sv/{experiment}',
+                    'module': 'sv',
+                    'trainer': 'gpu',
+                    'name': name,
+                    'module/sv_model': sv_model,
+                    'logger': 'many_loggers.yaml',
+                    'datamodule.loaders.train.batch_size': batch_size,
+                    'datamodule.loaders.valid.batch_size': batch_size,
+                    'trainer.max_epochs': max_epochs,
+                    'paths.log_dir': f'{RESULTS_DIR}',
+                    'hydra.run.dir': f'{RESULTS_DIR}/train/runs/{name}',
+                    "trainer.num_sanity_val_steps": 0,
+                }
+
+                ############################################################
+                # Handle virtual speakers setting for CN-Celeb vs VoxCeleb
+                script_arguments.update({
+                    'module.data_augmentation.augmentations.wav_augmenter.speed_perturb.virtual_speakers': virtual_spks,
+                })
+
+                # handle epochs to ramp
+                if epochs_to_ramp:
+                    epochs_to_ramp_key = 'callbacks.model_pruning.lambda_scheduler.epochs_to_ramp' if 'bregman_scheduled' in experiment else 'callbacks.model_pruning.epochs_to_ramp'
+                    script_arguments.update({epochs_to_ramp_key: epochs_to_ramp})
+
+                # Jobs submission logic (skipping already running/pending jobs, resuming from checkpoint, skipping if testing is already complete)
+                ############################################################
+                # Skip if job is already running or pending
+                if check_running_pending(job_name):
+                    print(f"Skipping {job_name} - already running or pending")
                     continue
 
-            job_name = f"{experiment}-{sv_model}-{os.path.basename(dataset_name)}-max_dur{max_duration}-bs{BATCH_SIZE}"
-            settings['job_name'] = job_name
-            name = os.path.basename(dataset_name) + os.sep + job_name
+                # Skip job if the testing phase is done
+                if check_test_artifacts_complete(script_arguments['hydra.run.dir']):
+                    print(f"Skipping {job_name} - testing already complete")
+                    continue
 
-            script_arguments = {
-                'datamodule': dataset_name,
-                'experiment': f'sv/{experiment}',
-                'module': 'sv',
-                'trainer': 'gpu',
-                'name': name,
-                'module/sv_model': sv_model,
-                'logger': 'tensorboard.yaml',
-                'datamodule.loaders.train.batch_size': batch_size,
-                'datamodule.loaders.valid.batch_size': batch_size,
-                'trainer.max_epochs': max_epochs,
-                'paths.log_dir': f'{RESULTS_DIR}',
-                'hydra.run.dir': f'{RESULTS_DIR}/train/runs/{name}',
-                "trainer.num_sanity_val_steps": 0,
-            }
+                # Check for existing checkpoint
+                last_ckpt = os.path.join(script_arguments['hydra.run.dir'], 'checkpoints/last.ckpt')
+                if check_file_exists(last_ckpt):
+                    script_arguments['ckpt_path'] = last_ckpt
+                    print(f"Resuming {job_name} from checkpoint")
 
-            # Skip if job is already running or pending
-            if check_running_pending(job_name):
-                print(f"Skipping {job_name} - already running or pending")
-                continue
+                bash_script = create_sv_bash_script(settings, script_arguments, transfer_data=transfer_data_bool)
+                run_bash_script(bash_script)
+                # print(bash_script)
 
-            # Skip job if the testing phase is done
-            if check_test_artifacts_complete(script_arguments['hydra.run.dir']):
-                print(f"Skipping {job_name} - testing already complete")
-                continue
-
-            # Check for existing checkpoint
-            last_ckpt = os.path.join(script_arguments['hydra.run.dir'], 'checkpoints/last.ckpt')
-            if check_file_exists(last_ckpt):
-                script_arguments['ckpt_path'] = last_ckpt
-                print(f"Resuming {job_name} from checkpoint")
-
-            bash_script = create_sv_bash_script(settings, script_arguments, transfer_data=transfer_data_bool)
-            run_bash_script(bash_script)
-
-            print(f"Submitted job: {job_name} (transfer_data={transfer_data_bool})")
-            time.sleep(0.1)
+                print(f"Submitted job: {job_name} (transfer_data={transfer_data_bool})")
+                time.sleep(0.1)

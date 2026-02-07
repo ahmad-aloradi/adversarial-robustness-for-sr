@@ -79,8 +79,8 @@ datamodule:
     # batch_sampler:
     #   num_speakers: 16
     #   num_utterances: 8
-  # Auto-scale: base speakers × number of speed factors
-  num_classes: ${oc.eval:'${datamodule._base_num_classes} * len(${module.data_augmentation.augmentations.wav_augmenter.speed_perturb.speed_factors})'}
+  # Auto-scale only when virtual speakers are enabled
+  num_classes: ${oc.eval:'(${module.data_augmentation.augmentations.wav_augmenter.speed_perturb.virtual_speakers}) and (${datamodule._base_num_classes} * len(${module.data_augmentation.augmentations.wav_augmenter.speed_perturb.speed_factors})) or ${datamodule._base_num_classes}'}
 
   loaders:
     train:
