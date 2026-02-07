@@ -206,8 +206,7 @@ class LambdaScheduler:
     def _validate_sparsity(self, current_sparsity: float) -> None:
         """Validate a sparsity reading.
 
-        In Bregman context, sparsity is expected to be strictly positive
-        Expected domain: a finite float in (0.0, 1.0].
+        Expected domain: a finite float in [0.0, 1.0].
         """
         if not isinstance(current_sparsity, Real):
             raise TypeError(
@@ -218,10 +217,9 @@ class LambdaScheduler:
             raise ValueError(
                 f"current_sparsity must be finite, got {current_sparsity}"
             )
-        if current_sparsity <= 0.0 or current_sparsity > 1.0:
+        if current_sparsity < 0.0 or current_sparsity > 1.0:
             raise ValueError(
-                f"current_sparsity must be in (0.0, 1.0], got {current_sparsity}. "
-                "In Bregman framework we expect the model to start sparse (sparsity > 0)."
+                f"current_sparsity must be in [0.0, 1.0], got {current_sparsity}."
             )
 
     def update_target(self, current_epoch: int) -> float:
@@ -332,12 +330,12 @@ class LambdaScheduler:
         self.use_ema = state["use_ema"]
         self.ema_decay_factor = float(state["ema_decay_factor"])
 
-        # Restore schedule state (backward compatible)
-        self._schedule_type = state.get("_schedule_type")
-        self._initial_target_sparsity = state.get("_initial_target_sparsity")
-        self._final_target_sparsity = state.get("_final_target_sparsity")
-        self._epochs_to_ramp = state.get("_epochs_to_ramp", 10)
-        self._schedule_epoch = state.get("_schedule_epoch", 0)
+        # Restore schedule state
+        self._schedule_type = state["_schedule_type"]
+        self._initial_target_sparsity = state["_initial_target_sparsity"]
+        self._final_target_sparsity = state["_final_target_sparsity"]
+        self._epochs_to_ramp = state["_epochs_to_ramp"]
+        self._schedule_epoch = state["_schedule_epoch"]
 
         sparsity_ema_str = (
             f"{self._ema_smoothed_sparsity:.4f}"

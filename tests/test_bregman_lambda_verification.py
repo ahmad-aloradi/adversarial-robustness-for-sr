@@ -294,16 +294,16 @@ def test_validation_rejects_invalid_sparsity():
         initial_lambda=1e-3,
     )
 
-    # Assert: sparsity <= 0 raises ValueError
-    with pytest.raises(ValueError, match="must be in \\(0.0, 1.0\\]"):
-        scheduler.step(0.0)
-
-    with pytest.raises(ValueError, match="must be in \\(0.0, 1.0\\]"):
+    # Assert: sparsity < 0 raises ValueError
+    with pytest.raises(ValueError, match="must be in \\[0.0, 1.0\\]"):
         scheduler.step(-0.1)
 
     # Assert: sparsity > 1 raises ValueError
-    with pytest.raises(ValueError, match="must be in \\(0.0, 1.0\\]"):
+    with pytest.raises(ValueError, match="must be in \\[0.0, 1.0\\]"):
         scheduler.step(1.5)
+
+    # Assert: 0.0 is valid (model can start dense)
+    scheduler.step(0.0)
 
     # Assert: NaN raises ValueError
     with pytest.raises(ValueError, match="must be finite"):

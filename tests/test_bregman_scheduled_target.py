@@ -208,9 +208,8 @@ def test_schedule_checkpoint_save_restore():
     assert abs(original_target - restored_target) < 1e-9
 
 
-def test_schedule_checkpoint_backward_compatibility():
-    """Old checkpoints without schedule fields load gracefully."""
-    # Create scheduler with schedule
+def test_schedule_checkpoint_missing_keys_raises():
+    """Old checkpoints without schedule fields raise KeyError."""
     scheduler = LambdaScheduler(
         schedule_type="linear",
         initial_target_sparsity=0.0,
@@ -230,12 +229,8 @@ def test_schedule_checkpoint_backward_compatibility():
         "ema_decay_factor": 0.9,
     }
 
-    scheduler.load_state(old_state)
-
-    # Should default to fixed mode (no schedule)
-    assert scheduler._schedule_type is None
-    assert not scheduler.is_scheduled
-    assert scheduler.schedule_complete
+    with pytest.raises(KeyError):
+        scheduler.load_state(old_state)
 
 
 # =============================================================================
