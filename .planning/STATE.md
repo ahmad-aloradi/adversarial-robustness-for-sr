@@ -12,7 +12,7 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 Phase: 4 of 4 (Verify Pruning & Bregman Correctness)
 Plan: 3 of 3 executed
 Status: Phase complete
-Last activity: 2026-02-07 - Completed 04-03-PLAN.md (Bregman Scheduled Target Relaxation)
+Last activity: 2026-02-07 - Fixed 04-03 scheduled target direction (upward ramp, not downward relaxation)
 
 Progress: [███.......] 30% (Phase 1 nearly done, Phase 4 complete)
 
@@ -68,7 +68,7 @@ Recent decisions affecting current work:
 | 04-02 | Lambda volatility metric | Measure EMA effectiveness via direction change count, not variance | When sparsity oscillates around target, EMA prevents lambda direction reversals (increase/decrease flip-flopping) |
 | 04-03 | Schedule formula accuracy | LambdaScheduler matches PruningScheduler within 1e-9 | Ensures Bregman scheduled target behaves identically to magnitude pruning scheduled sparsity |
 | 04-03 | Validation suppression pattern | Reuse limit_val_batches=0 pattern with guard-based restoration | Consistent with MagnitudePruner from 04-01; prevents repeated restoration attempts |
-| 04-03 | Domain relaxation | Allow initial_target_sparsity=0.0 | Enables cross-check tests across full domain; Bregman context typically uses >0 but verification needs 0.0 |
+| 04-03 | Scheduled target direction | Ramp upward (0.0→0.9), not downward (0.99→0.9) | Matches magnitude pruning: start at low sparsity, increase to target |
 
 ### Roadmap Evolution
 
@@ -86,5 +86,5 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-07T11:46:32Z
-Stopped at: Completed 04-03-PLAN.md - Bregman scheduled target relaxation (Phase 4 complete)
+Stopped at: Fixed 04-03 scheduled target direction (upward ramp 0.0→0.9, not downward 0.99→0.9)
 Resume file: None
