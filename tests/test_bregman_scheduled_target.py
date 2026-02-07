@@ -24,16 +24,16 @@ from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
 def test_linear_schedule_target_evolves():
     """Linear schedule evolves target_sparsity monotonically from initial to
-    final."""
+    final (upward ramp)."""
     scheduler = LambdaScheduler(
         schedule_type="linear",
-        initial_target_sparsity=0.99,
+        initial_target_sparsity=0.0,
         final_target_sparsity=0.9,
         epochs_to_ramp=10,
     )
 
     # Initial state
-    assert scheduler.target_sparsity == 0.99
+    assert scheduler.target_sparsity == 0.0
     assert scheduler.is_scheduled
     assert not scheduler.schedule_complete
 
@@ -42,20 +42,20 @@ def test_linear_schedule_target_evolves():
         target = scheduler.update_target(epoch)
         targets.append(target)
         # Expected formula: initial + (final - initial) * (epoch + 1) / epochs_to_ramp
-        expected = 0.99 + (0.9 - 0.99) * (epoch + 1) / 10
+        expected = 0.0 + (0.9 - 0.0) * (epoch + 1) / 10
         assert (
             abs(target - expected) < 1e-9
         ), f"Epoch {epoch}: {target} != {expected}"
 
-    # After epoch 0: closer to 0.99 than 0.9
-    assert 0.9 < targets[0] < 0.99
+    # After epoch 0: closer to 0.0 than 0.9
+    assert 0.0 < targets[0] < 0.9
 
     # After epoch 9: equals final target
     assert abs(targets[9] - 0.9) < 1e-9
 
-    # Target decreases monotonically
+    # Target increases monotonically (ramping upward)
     for i in range(1, len(targets)):
-        assert targets[i] <= targets[i - 1]
+        assert targets[i] >= targets[i - 1]
 
     # Schedule is complete
     assert scheduler.schedule_complete
@@ -93,7 +93,7 @@ def test_schedule_holds_final_target_after_ramp():
     """After ramp completes, target stays at final_target_sparsity."""
     scheduler = LambdaScheduler(
         schedule_type="linear",
-        initial_target_sparsity=0.99,
+        initial_target_sparsity=0.0,
         final_target_sparsity=0.9,
         epochs_to_ramp=5,
     )
@@ -130,50 +130,50 @@ def test_fixed_mode_unaffected():
 
 
 def test_lambda_chases_moving_target():
-    """Lambda adjusts as target evolves during scheduled mode."""
+    """Lambda adjusts as target evolves during scheduled mode (upward ramp)."""
     scheduler = LambdaScheduler(
         schedule_type="linear",
-        initial_target_sparsity=0.99,
+        initial_target_sparsity=0.0,
         final_target_sparsity=0.9,
         epochs_to_ramp=5,
         acceleration_factor=0.25,
         use_ema=False,
     )
 
-    # Epoch 0: target ~0.982, sparsity=0.985 (above target)
+    # Epoch 0: target ~0.18, sparsity=0.5 (above target)
     scheduler.update_target(0)
     target_epoch_0 = scheduler.target_sparsity
     initial_lambda = scheduler.get_lambda()
 
     # Step with sparsity above target -> lambda should decrease
     for _ in range(20):
-        scheduler.step(0.985)
+        scheduler.step(0.5)
 
     assert (
         scheduler.get_lambda() < initial_lambda
     ), "Lambda should decrease when sparsity > target"
 
-    # Epoch 4: target evolves to 0.9, same sparsity=0.985 now much higher above target
+    # Epoch 4: target evolves to 0.9, same sparsity=0.5 now BELOW target
     scheduler.update_target(4)
     target_epoch_4 = scheduler.target_sparsity
-    assert target_epoch_4 < target_epoch_0  # Target moved lower
+    assert target_epoch_4 > target_epoch_0  # Target moved higher (upward ramp)
 
     lambda_before = scheduler.get_lambda()
-    # Step with same sparsity -> lambda should decrease more aggressively
+    # Step with sparsity below target -> lambda should INCREASE
     for _ in range(20):
-        scheduler.step(0.985)
+        scheduler.step(0.5)
 
     assert (
-        scheduler.get_lambda() < lambda_before
-    ), "Lambda should decrease as target moves further below current sparsity"
+        scheduler.get_lambda() > lambda_before
+    ), "Lambda should increase when sparsity < target (target ramped above)"
 
 
 def test_schedule_checkpoint_save_restore():
     """Checkpoint save/restore preserves schedule state."""
-    # Create scheduler and run for 5 epochs
+    # Create scheduler and run for 5 epochs (upward ramp)
     scheduler = LambdaScheduler(
         schedule_type="linear",
-        initial_target_sparsity=0.99,
+        initial_target_sparsity=0.0,
         final_target_sparsity=0.9,
         epochs_to_ramp=10,
     )
@@ -191,7 +191,7 @@ def test_schedule_checkpoint_save_restore():
     # Create new scheduler and load state
     scheduler_restored = LambdaScheduler(
         schedule_type="linear",
-        initial_target_sparsity=0.99,
+        initial_target_sparsity=0.0,
         final_target_sparsity=0.9,
         epochs_to_ramp=10,
     )
@@ -213,7 +213,7 @@ def test_schedule_checkpoint_backward_compatibility():
     # Create scheduler with schedule
     scheduler = LambdaScheduler(
         schedule_type="linear",
-        initial_target_sparsity=0.99,
+        initial_target_sparsity=0.0,
         final_target_sparsity=0.9,
         epochs_to_ramp=10,
     )
@@ -245,10 +245,10 @@ def test_schedule_checkpoint_backward_compatibility():
 
 def test_bregman_pruner_updates_target_each_epoch():
     """BregmanPruner calls update_target at on_train_epoch_start."""
-    # Create scheduled lambda scheduler
+    # Create scheduled lambda scheduler (upward ramp)
     lambda_scheduler = LambdaScheduler(
         schedule_type="linear",
-        initial_target_sparsity=0.99,
+        initial_target_sparsity=0.0,
         final_target_sparsity=0.9,
         epochs_to_ramp=5,
     )
@@ -281,16 +281,16 @@ def test_bregman_pruner_updates_target_each_epoch():
         pruner.on_train_epoch_start(trainer, pl_module)
         targets.append(lambda_scheduler.target_sparsity)
 
-    # Verify target evolved
+    # Verify target evolved (upward ramp)
     assert len(set(targets)) > 1, "Target should change across epochs"
-    assert targets[0] > targets[-1], "Target should decrease (relaxation)"
+    assert targets[-1] > targets[0], "Target should increase (upward ramp)"
 
 
 def test_bregman_pruner_suppresses_validation_during_ramp():
     """Validation is suppressed during schedule ramp, restored after."""
     lambda_scheduler = LambdaScheduler(
         schedule_type="linear",
-        initial_target_sparsity=0.99,
+        initial_target_sparsity=0.0,
         final_target_sparsity=0.9,
         epochs_to_ramp=5,
     )
@@ -377,7 +377,7 @@ def test_bregman_pruner_checkpoint_preserves_schedule_state():
     """BregmanPruner checkpoint saves and restores schedule state."""
     lambda_scheduler = LambdaScheduler(
         schedule_type="linear",
-        initial_target_sparsity=0.99,
+        initial_target_sparsity=0.0,
         final_target_sparsity=0.9,
         epochs_to_ramp=10,
     )
@@ -420,14 +420,14 @@ def test_bregman_pruner_checkpoint_preserves_schedule_state():
     sched_state = checkpoint["lambda_scheduler_state"]
     assert sched_state["_schedule_type"] == "linear"
     assert sched_state["_schedule_epoch"] == schedule_epoch_at_save
-    assert sched_state["_initial_target_sparsity"] == 0.99
+    assert sched_state["_initial_target_sparsity"] == 0.0
     assert sched_state["_final_target_sparsity"] == 0.9
     assert sched_state["_epochs_to_ramp"] == 10
 
     # Create new pruner with scheduled lambda scheduler
     lambda_scheduler_new = LambdaScheduler(
         schedule_type="linear",
-        initial_target_sparsity=0.99,
+        initial_target_sparsity=0.0,
         final_target_sparsity=0.9,
         epochs_to_ramp=10,
     )
@@ -449,7 +449,7 @@ def test_bregman_pruner_checkpoint_preserves_schedule_state():
     pruner_new.on_train_epoch_start(trainer, pl_module)
 
     # Verify schedule continues correctly
-    expected_target_epoch_3 = 0.99 + (0.9 - 0.99) * 4 / 10
+    expected_target_epoch_3 = 0.0 + (0.9 - 0.0) * 4 / 10
     assert (
         abs(lambda_scheduler_new.target_sparsity - expected_target_epoch_3)
         < 1e-9
