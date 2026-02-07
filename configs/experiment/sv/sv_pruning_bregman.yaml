@@ -113,7 +113,7 @@ module:
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99 # Initial sparsity
+          sparsity_rate: 0.0
 
       # Group 2a: Prunable Linear Layers (catch all torch.nn.Linear regardless of name)
       - name: linear_layers
@@ -128,7 +128,7 @@ module:
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99 # Initial sparsity
+          sparsity_rate: 0.0
 
       # Group 2b: Catch classifier by exact module name match
       - name: classifier
@@ -143,7 +143,7 @@ module:
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99 # Initial sparsity
+          sparsity_rate: 0.0
 
       # Group 3: Pruning-sensitive Layers (Not Pruned!)
       - name: norm_params
@@ -184,7 +184,7 @@ module:
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99 # Initial sparsity
+          sparsity_rate: 0.0
 
 logger:
   wandb:
