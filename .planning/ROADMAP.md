@@ -14,7 +14,7 @@ This milestone establishes verified baselines before compression experiments. We
 - [x] **Phase 1.1: Eval Auto-Config (INSERTED)** - Complete eval.py checkpoint averaging implementation ✓
 - [ ] **Phase 2: Pruning Verification** - Verify magnitude pruning at 30-90% sparsity levels (parallel with Phase 3)
 - [ ] **Phase 3: Bregman Verification** - Compare Bregman implementation against reference (parallel with Phase 2)
-- [x] **Phase 4: Verify Pruning & Bregman Correctness** - Fix pruning validation-during-ramp bugs, verify Bregman lambda update frequency ✓
+- [ ] **Phase 4: Verify Pruning & Bregman Correctness** - Fix pruning validation-during-ramp bugs, verify Bregman lambda update frequency, add scheduled target relaxation mode
 
 ## Phase Details
 
@@ -73,7 +73,7 @@ Plans:
 - [ ] 03-01: TBD
 
 ### Phase 4: Verify Pruning & Bregman Correctness
-**Goal**: Fix known bugs in pruning callback and verify Bregman lambda update correctness
+**Goal**: Fix known bugs in pruning callback, verify Bregman lambda update correctness, and add scheduled target relaxation mode for Bregman learning
 **Depends on**: Phase 1 (need working baseline)
 **Requirements**: PRUNE-01, BREG-01
 **Success Criteria** (what must be TRUE):
@@ -81,11 +81,14 @@ Plans:
   2. No spurious "New best score" recorded during sparsity ramp-up phase
   3. Bregman lambda updates occur at correct frequency matching reference implementation
   4. All verification tests pass for both pruning and Bregman behaviors
-**Plans**: 2 plans
+  5. Bregman LambdaScheduler supports scheduled target relaxation (target_sparsity evolves per-epoch)
+  6. Validation suppressed during Bregman target ramp, same pattern as magnitude pruning
+**Plans**: 3 plans
 
 Plans:
 - [x] 04-01-PLAN.md — Fix pruning validation suppression via limit_val_batches + tests (Wave 1) ✓
 - [x] 04-02-PLAN.md — Verify Bregman lambda update correctness + tests (Wave 1) ✓
+- [ ] 04-03-PLAN.md — Add scheduled target relaxation mode for Bregman learning (Wave 2)
 
 **Known Issues (from logs):**
 1. With `check_val_every_n_epoch=5`, validation still runs every epoch during pruning ramp — "New best score" recorded at low sparsity (e.g., 0.001 accuracy at epoch 3, then 0.005 at epoch 18)
@@ -102,9 +105,9 @@ Phase 1 first, then Phase 1.1, then Phases 2 and 3 in parallel, then Phase 4: 1 
 | 1.1 Eval Auto-Config (INSERTED) | 1/1 | ✓ Complete | 2026-01-31 |
 | 2. Pruning Verification | 0/TBD | Not started | - |
 | 3. Bregman Verification | 0/TBD | Not started | - |
-| 4. Verify Pruning & Bregman Correctness | 2/2 | ✓ Complete | 2026-02-06 |
+| 4. Verify Pruning & Bregman Correctness | 2/3 | In progress | - |
 
 ---
 *Roadmap created: 2026-01-25*
-*Last updated: 2026-02-06 - Phase 4 complete (Verify Pruning & Bregman Correctness)*
+*Last updated: 2026-02-07 - Phase 4 extended with 04-03 (Bregman scheduled target relaxation)*
 *Milestone: v0.1 Foundations*
