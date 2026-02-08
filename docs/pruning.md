@@ -24,12 +24,12 @@ Located in `src/callbacks/pruning/bregman/bregman_optimizers.py`:
 - **LinBreg**: Linear Bregman iteration optimizer
   - Momentum-based variant of standard gradient descent
   - Applies proximal operators for regularization
-  
+
 - **AdaBreg**: Adaptive Bregman iteration optimizer
   - Adam-style adaptive learning rates with Bregman regularization
   - Recommended for most use cases due to better convergence
 
-Both optimizers support **parameter groups** with different regularization strategies. By default we use (and recommend using) **AdaBreg**. 
+Both optimizers support **parameter groups** with different regularization strategies. By default we use (and recommend using) **AdaBreg**.
 
 #### 1.2 Bregman Regularizers
 
@@ -76,7 +76,7 @@ Note: Depending on many factors (Bregman optimizer type, `lr` value, `lr_schedul
 
 Located in `src/callbacks/pruning/bregman/utils/pruning_manager.py`:
 
-Manages parameter groups and applies structured/unstructured pruning based on sparsity thresholds (for the algorithm's initalization). The fine0grained control of initilization might be later deprecated and hardcode untructured pruning as it could be an overkill. 
+Manages parameter groups and applies structured/unstructured pruning based on sparsity thresholds (for the algorithm's initalization). The fine0grained control of initilization might be later deprecated and hardcode untructured pruning as it could be an overkill.
 
 #### 1.5 BregmanPruner Callback
 
@@ -97,7 +97,7 @@ See `configs/experiment/sv/sv_pruning_bregman.yaml` for a complete configuration
 callbacks:
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
-    sparsity_threshold: 1e-30
+    sparsity_threshold: 1e-12
     collect_metrics: true
     verbose: 2
     lambda_scheduler:
@@ -244,7 +244,7 @@ Located in `src/callbacks/pruning/checkpoint_handler.py`:
 
 It has two primary tasks:
 1. Handling the saving/loading ckpt when training was interrupted during training (e.g., loading state dict of the model and optimizer).
-2. It tracks the pruning schedule and ensures it is resumed from where it stopped. 
+2. It tracks the pruning schedule and ensures it is resumed from where it stopped.
 
 Both goals ensure seamless loading of pruned checkpoints into unpruned models:
 
@@ -291,7 +291,7 @@ The pruner manages PyTorch Lightning EarlyStopping and ModelCheckpoint callbacks
 ```python
 def _manage_metric_trackers(self, trainer, current_sparsity):
     target_reached = current_sparsity >= (self.final_amount - 1e-4)
-    
+
     if not target_reached:
         # Disable trackers during ramp-up
         for callback in trainer.callbacks:

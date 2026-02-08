@@ -327,7 +327,7 @@ def _make_bregman_pruner_and_mocks(target_sparsity=0.9, initial_lambda=1e-3):
         use_ema=False,
     )
     pruner = BregmanPruner(
-        sparsity_threshold=1e-30,
+        sparsity_threshold=1e-12,
         verbose=0,
         lambda_scheduler=scheduler,
     )
