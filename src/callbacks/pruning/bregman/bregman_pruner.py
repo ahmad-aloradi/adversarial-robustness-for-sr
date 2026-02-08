@@ -6,12 +6,16 @@ and allows it to become denser during training. The lambda scheduler adjusts
 regularization strength to drive sparsity toward a target level.
 """
 
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 from pytorch_lightning import Callback, LightningModule, Trainer
 from pytorch_lightning.utilities import rank_zero_only
 
 from src import utils
+from src.callbacks.pruning.shared_prune_utils import (
+    ValidationSuppressor,
+    compute_sparsity,
+)
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
 from .lambda_scheduler import LambdaScheduler
@@ -31,7 +35,7 @@ class BregmanPruner(Callback):
 
     def __init__(
         self,
-        sparsity_threshold: float = 1e-30,
+        sparsity_threshold: float = 1e-12,
         verbose: int = 1,
         lambda_scheduler: Optional[LambdaScheduler] = None,
         console_log_frequency: int = 100,
@@ -53,7 +57,7 @@ class BregmanPruner(Callback):
         self._initialized = False
         self._ckpt_scheduler_state: Optional[dict] = None
         self._ckpt_last_sparsity: Optional[float] = None
-        self._original_limit_val_batches: Optional[int] = None
+        self._suppressor = ValidationSuppressor()
 
     # -------------------------------------------------------------------------
     # Lightning hooks
@@ -101,25 +105,13 @@ class BregmanPruner(Callback):
 
         # Update scheduled target (no-op if fixed mode)
         if self.lambda_scheduler.is_scheduled:
-            new_target = self.lambda_scheduler.update_target(
-                trainer.current_epoch
-            )
+            self.lambda_scheduler.update_target(trainer.current_epoch)
 
-            # Validation suppression during schedule ramp
-            if not self.lambda_scheduler.schedule_complete:
-                # Save original limit_val_batches ONCE on first ramp epoch
-                if self._original_limit_val_batches is None:
-                    self._original_limit_val_batches = (
-                        trainer.limit_val_batches
-                    )
-                trainer.limit_val_batches = 0
-            elif self._original_limit_val_batches is not None:
-                # Guard: only restore ONCE, then clear the saved value
-                trainer.limit_val_batches = self._original_limit_val_batches
-                self._original_limit_val_batches = None
-                log.info(
-                    "Bregman target schedule complete. Restoring validation."
-                )
+        # Validation suppression: suppress while sparsity < target
+        # Works for both scheduled mode (during ramp) and fixed-target mode
+        current_sparsity = self._overall_sparsity()
+        target = self.lambda_scheduler.target_sparsity
+        self._suppressor.check(trainer, current_sparsity, target)
 
     def on_train_batch_end(
         self,
@@ -146,19 +138,6 @@ class BregmanPruner(Callback):
         ):
             self._log_to_console(trainer)
 
-    def on_validation_epoch_start(self, trainer, pl_module):
-        """Log a CRITICAL warning if sparsity is less than the target."""
-        current_sparsity = self._compute_overall_sparsity()
-        tolerance = 5e-3
-
-        # Log a warning and skip validation if sparsity is below target
-        if self.lambda_scheduler is not None:
-            target_sparsity = self.lambda_scheduler.target_sparsity
-            if current_sparsity < target_sparsity - tolerance:
-                log.critical(
-                    f"Validation is done for sparsity {current_sparsity} < target {target_sparsity}!!!"
-                )
-
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
@@ -166,27 +145,32 @@ class BregmanPruner(Callback):
         if not self._initialized or self.verbose == 0:
             return
         log.info(
-            f"Epoch {trainer.current_epoch}: Sparsity = {self._compute_overall_sparsity():.3%}"
+            f"Epoch {trainer.current_epoch}: Sparsity = {self._overall_sparsity():.3%}"
         )
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
     ) -> None:
-        """Save scheduler state to checkpoint."""
+        """Save scheduler and suppressor state to checkpoint."""
         if self.lambda_scheduler is not None:
             checkpoint[
                 "lambda_scheduler_state"
             ] = self.lambda_scheduler.get_state()
-            checkpoint[
-                "bregman_last_sparsity"
-            ] = self._compute_overall_sparsity()
+            checkpoint["bregman_last_sparsity"] = self._overall_sparsity()
+        checkpoint[
+            "validation_suppression_state"
+        ] = self._suppressor.state_dict()
 
     def on_load_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
     ) -> None:
-        """Load scheduler state from checkpoint (before on_fit_start)."""
+        """Load scheduler and suppressor state from checkpoint."""
         self._ckpt_scheduler_state = checkpoint.get("lambda_scheduler_state")
         self._ckpt_last_sparsity = checkpoint.get("bregman_last_sparsity")
+        if "validation_suppression_state" in checkpoint:
+            self._suppressor.load_state_dict(
+                checkpoint["validation_suppression_state"]
+            )
 
     # -------------------------------------------------------------------------
     # Scheduler management
@@ -217,7 +201,7 @@ class BregmanPruner(Callback):
 
     def _step_lambda_scheduler(self, trainer: Trainer) -> None:
         """Step the scheduler and update regularizer lambdas."""
-        current_sparsity = self._compute_overall_sparsity()
+        current_sparsity = self._overall_sparsity()
 
         # On first step after resume, pass the cached sparsity for EMA initialization
         last_sparsity = self._ckpt_last_sparsity
@@ -244,30 +228,12 @@ class BregmanPruner(Callback):
                 group["reg"].lamda = current_lambda * scale
 
     # -------------------------------------------------------------------------
-    # Sparsity computation
+    # Sparsity
     # -------------------------------------------------------------------------
 
-    def _compute_overall_sparsity(self) -> float:
-        """Compute sparsity across all pruned parameters."""
+    def _overall_sparsity(self) -> float:
         params = self.manager.get_pruned_parameters()
-        return self._compute_sparsity(params)
-
-    def _compute_group_sparsity(self, params: List) -> float:
-        """Compute sparsity for a specific parameter group."""
-        return self._compute_sparsity(params)
-
-    def _compute_sparsity(self, params: List) -> float:
-        """Compute fraction of near-zero parameters."""
-        if not params:
-            return 0.0
-        params = [p for p in params if p.requires_grad]
-        if not params:
-            return 0.0
-        total = sum(p.numel() for p in params)
-        zeros = sum(
-            (p.abs() <= self.sparsity_threshold).sum().item() for p in params
-        )
-        return zeros / max(1, total)
+        return compute_sparsity(params, threshold=self.sparsity_threshold)
 
     # -------------------------------------------------------------------------
     # Logging
@@ -292,7 +258,7 @@ class BregmanPruner(Callback):
             pl_module, "logging_params", default_logging_params
         )
 
-        sparsity = self._compute_overall_sparsity()
+        sparsity = self._overall_sparsity()
         pl_module.log("bregman/sparsity", sparsity, **logging_params)
 
         if self.lambda_scheduler:
@@ -318,7 +284,7 @@ class BregmanPruner(Callback):
     def _log_to_console(self, trainer: Trainer) -> None:
         """Log sparsity info to console (controlled by
         console_log_frequency)."""
-        sparsity = self._compute_overall_sparsity()
+        sparsity = self._overall_sparsity()
         msg = f"Step {trainer.global_step}: sparsity={sparsity:.3%}"
         if self.lambda_scheduler:
             msg += f", lambda={self.lambda_scheduler.get_lambda():.4f}"
@@ -362,10 +328,12 @@ class BregmanPruner(Callback):
         log.info("Current sparsity by group:")
         for group in self.manager.processed_groups:
             name = group["config"].get("name", "unnamed")
-            sparsity = self._compute_group_sparsity(group["params"])
+            sparsity = compute_sparsity(
+                group["params"], threshold=self.sparsity_threshold
+            )
             log.info(f"  {name}: {sparsity:.3%}")
 
-        log.info(f"Overall sparsity: {self._compute_overall_sparsity():.3%}")
+        log.info(f"Overall sparsity: {self._overall_sparsity():.3%}")
         log.info("=== End Configuration ===")
 
     @rank_zero_only
