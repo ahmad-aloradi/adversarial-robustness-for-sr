@@ -344,7 +344,6 @@ def test_bregman_pruner_updates_lambda_per_batch():
     # Mock initialization state
     pruner._initialized = True
     pruner.manager = MagicMock()
-    pruner._compute_overall_sparsity = MagicMock(return_value=0.5)
 
     # Create mock trainer with one optimizer
     mock_param = torch.nn.Parameter(torch.randn(10, 10))
@@ -400,7 +399,6 @@ def test_bregman_pruner_propagates_lambda_to_optimizer():
     # Mock initialization state
     pruner._initialized = True
     pruner.manager = MagicMock()
-    pruner._compute_overall_sparsity = MagicMock(return_value=0.5)
 
     # Create RegL1 instance with initial lamda
     reg = RegL1(lamda=0.01)
@@ -449,7 +447,6 @@ def test_bregman_pruner_respects_lambda_scale():
     # Mock initialization state
     pruner._initialized = True
     pruner.manager = MagicMock()
-    pruner._compute_overall_sparsity = MagicMock(return_value=0.5)
 
     # Create RegL1 instance
     reg = RegL1(lamda=0.01)

@@ -252,6 +252,8 @@ def test_bregman_pruner_updates_target_each_epoch():
 
     # Mock trainer and module
     trainer = Mock()
+    trainer.limit_val_batches = 1.0
+    trainer.callbacks = []
     pl_module = Mock()
 
     # Mock pruning_manager
@@ -282,7 +284,7 @@ def test_bregman_pruner_updates_target_each_epoch():
 
 
 def test_bregman_pruner_suppresses_validation_during_ramp():
-    """Validation is suppressed during schedule ramp, restored after."""
+    """Validation is suppressed during schedule ramp when sparsity < target."""
     lambda_scheduler = LambdaScheduler(
         schedule_type="linear",
         initial_target_sparsity=0.0,
@@ -296,11 +298,12 @@ def test_bregman_pruner_suppresses_validation_during_ramp():
     trainer = Mock()
     pl_module = Mock()
     trainer.limit_val_batches = 1.0
+    trainer.callbacks = []
 
-    # Mock pruning_manager
+    # Non-zero params: sparsity ~0%, always below evolving target
     mock_manager = Mock(spec=PruningManager)
     mock_manager.get_pruned_parameters.return_value = [
-        torch.nn.Parameter(torch.zeros(10, 10))
+        torch.nn.Parameter(torch.randn(10, 10))
     ]
     mock_manager.processed_groups = []
     pl_module.pruning_manager = mock_manager
@@ -312,29 +315,85 @@ def test_bregman_pruner_suppresses_validation_during_ramp():
     trainer.ckpt_path = None
     pruner.on_fit_start(trainer, pl_module)
 
-    # During ramp (epochs 0-3): validation suppressed
-    for epoch in range(4):
+    # Epoch 0: target ramps from 0.0, first update → target ~0.18
+    # Sparsity ~0% < target ~0.18 → suppressed
+    # (Note: epoch 0 target = 0.0 + 0.9 * 1/5 = 0.18; sparsity ~0 < 0.18 - 0.005)
+    trainer.current_epoch = 0
+    pruner.on_train_epoch_start(trainer, pl_module)
+    # At epoch 0, target after update_target(0) = 0.18, sparsity ~0%
+    assert (
+        trainer.limit_val_batches == 0
+    ), "Epoch 0: validation should be suppressed (sparsity < target)"
+
+    # Epochs 1-4: target keeps rising, sparsity stays ~0% → still suppressed
+    for epoch in range(1, 5):
         trainer.current_epoch = epoch
         pruner.on_train_epoch_start(trainer, pl_module)
         assert (
             trainer.limit_val_batches == 0
         ), f"Epoch {epoch}: validation should be suppressed"
 
-    # After ramp completes (epoch 4): validation restored
-    trainer.current_epoch = 4
+    # Now simulate sparsity reaching final target: set ~90% sparsity
+    # (within BregmanPruner's 1% tolerance of 90% target)
+    params = mock_manager.get_pruned_parameters.return_value
+    with torch.no_grad():
+        # 10x10 = 100 elements; zero out 90 → 90% sparsity (exactly at target)
+        params[0].data.zero_()
+        params[0].data.view(-1)[:10] = 1.0  # 90/100 = 90% zeros
+    # Sparsity is now 90%, within ±1% of 0.9 target
+
+    trainer.current_epoch = 5
     pruner.on_train_epoch_start(trainer, pl_module)
-    assert trainer.limit_val_batches == 1.0, "Validation should be restored"
+    assert (
+        trainer.limit_val_batches == 1.0
+    ), "Validation should be restored when sparsity reaches target"
 
     # Subsequent epochs: no change (guard prevents repeated restoration)
-    for epoch in range(5, 10):
+    for epoch in range(6, 10):
         trainer.current_epoch = epoch
         original_val = trainer.limit_val_batches
         pruner.on_train_epoch_start(trainer, pl_module)
         assert trainer.limit_val_batches == original_val
 
 
-def test_bregman_pruner_no_suppression_in_fixed_mode():
-    """Fixed-target mode does not suppress validation."""
+def test_bregman_pruner_suppresses_validation_in_fixed_mode():
+    """Fixed-target mode suppresses validation when sparsity < target."""
+    lambda_scheduler = LambdaScheduler(target_sparsity=0.9)
+
+    pruner = BregmanPruner(lambda_scheduler=lambda_scheduler)
+
+    # Mock trainer and module
+    trainer = Mock()
+    pl_module = Mock()
+    trainer.limit_val_batches = 1.0
+    trainer.callbacks = []
+
+    # Non-zero params → sparsity well below 0.9 target
+    mock_manager = Mock(spec=PruningManager)
+    mock_manager.get_pruned_parameters.return_value = [
+        torch.nn.Parameter(torch.randn(10, 10))
+    ]
+    mock_manager.processed_groups = []
+    pl_module.pruning_manager = mock_manager
+
+    # Initialize
+    mock_optimizer = Mock()
+    mock_optimizer.param_groups = []
+    trainer.optimizers = [mock_optimizer]
+    trainer.ckpt_path = None
+    pruner.on_fit_start(trainer, pl_module)
+
+    # Sparsity < target → validation suppressed
+    trainer.current_epoch = 0
+    pruner.on_train_epoch_start(trainer, pl_module)
+    assert (
+        trainer.limit_val_batches == 0
+    ), "Validation should be suppressed when sparsity < target in fixed mode"
+
+
+def test_bregman_pruner_no_suppression_when_sparsity_at_target():
+    """No suppression when sparsity is within tolerance of target (fixed
+    mode)."""
     lambda_scheduler = LambdaScheduler(target_sparsity=0.9)
 
     pruner = BregmanPruner(lambda_scheduler=lambda_scheduler)
@@ -344,11 +403,12 @@ def test_bregman_pruner_no_suppression_in_fixed_mode():
     pl_module = Mock()
     trainer.limit_val_batches = 1.0
 
-    # Mock pruning_manager
+    # Create param with ~90.5% sparsity (within BregmanPruner's 1% tolerance of 90%)
+    param = torch.nn.Parameter(torch.ones(200))
+    with torch.no_grad():
+        param.data[:181] = 0.0  # 181/200 = 90.5% sparsity
     mock_manager = Mock(spec=PruningManager)
-    mock_manager.get_pruned_parameters.return_value = [
-        torch.nn.Parameter(torch.zeros(10, 10))
-    ]
+    mock_manager.get_pruned_parameters.return_value = [param]
     mock_manager.processed_groups = []
     pl_module.pruning_manager = mock_manager
 
@@ -359,13 +419,56 @@ def test_bregman_pruner_no_suppression_in_fixed_mode():
     trainer.ckpt_path = None
     pruner.on_fit_start(trainer, pl_module)
 
-    # Run several epochs
+    # Sparsity (90.5%) within ±1% of target (90%) → no suppression
     for epoch in range(10):
         trainer.current_epoch = epoch
         pruner.on_train_epoch_start(trainer, pl_module)
         assert (
             trainer.limit_val_batches == 1.0
-        ), f"Epoch {epoch}: validation should not be suppressed in fixed mode"
+        ), f"Epoch {epoch}: validation should not be suppressed when sparsity ≈ target"
+
+
+def test_bregman_pruner_restores_validation_when_sparsity_reaches_target():
+    """In fixed-target mode, validation restores when sparsity reaches
+    target."""
+    lambda_scheduler = LambdaScheduler(target_sparsity=0.9)
+
+    pruner = BregmanPruner(lambda_scheduler=lambda_scheduler)
+
+    # Mock trainer and module
+    trainer = Mock()
+    pl_module = Mock()
+    trainer.limit_val_batches = 1.0
+    trainer.callbacks = []
+
+    # Start with non-zero params (low sparsity)
+    param = torch.nn.Parameter(torch.randn(200))
+    mock_manager = Mock(spec=PruningManager)
+    mock_manager.get_pruned_parameters.return_value = [param]
+    mock_manager.processed_groups = []
+    pl_module.pruning_manager = mock_manager
+
+    # Initialize
+    mock_optimizer = Mock()
+    mock_optimizer.param_groups = []
+    trainer.optimizers = [mock_optimizer]
+    trainer.ckpt_path = None
+    pruner.on_fit_start(trainer, pl_module)
+
+    # Epoch 0: sparsity < target → suppressed
+    trainer.current_epoch = 0
+    pruner.on_train_epoch_start(trainer, pl_module)
+    assert trainer.limit_val_batches == 0
+
+    # Simulate sparsity reaching ~90.5% (within 1% band of 90% target)
+    with torch.no_grad():
+        param.data[:181] = 0.0  # 181/200 = 90.5%
+
+    trainer.current_epoch = 1
+    pruner.on_train_epoch_start(trainer, pl_module)
+    assert (
+        trainer.limit_val_batches == 1.0
+    ), "Validation should be restored when sparsity reaches target"
 
 
 def test_bregman_pruner_checkpoint_preserves_schedule_state():
@@ -381,6 +484,7 @@ def test_bregman_pruner_checkpoint_preserves_schedule_state():
 
     # Mock trainer and module
     trainer = Mock()
+    trainer.callbacks = []
     pl_module = Mock()
 
     # Mock pruning_manager
@@ -409,6 +513,13 @@ def test_bregman_pruner_checkpoint_preserves_schedule_state():
     # Save checkpoint
     checkpoint = {}
     pruner.on_save_checkpoint(trainer, pl_module, checkpoint)
+
+    # Verify suppressor state in checkpoint
+    assert "validation_suppression_state" in checkpoint
+    sup_state = checkpoint["validation_suppression_state"]
+    assert "suppressed" in sup_state
+    assert "original_limit_val_batches" in sup_state
+    assert "original_save_top_k" in sup_state
 
     # Verify schedule state in checkpoint
     assert "lambda_scheduler_state" in checkpoint
@@ -448,4 +559,103 @@ def test_bregman_pruner_checkpoint_preserves_schedule_state():
     assert (
         abs(lambda_scheduler_new.target_sparsity - expected_target_epoch_3)
         < 1e-9
+    )
+
+
+# =============================================================================
+# Inverse-scale Bregman tests (start sparse, grow denser toward target)
+# =============================================================================
+
+
+def test_bregman_inverse_scale_suppression_and_restore():
+    """Inverse-scale Bregman: start 99% sparse, approach 90% target.
+
+    This is the primary Bregman mode where the model starts nearly fully
+    sparse and allows weights to emerge during training. Validation should
+    be suppressed while sparsity is far from target (99% >> 90% + tolerance),
+    then restored when sparsity drops to within tolerance of 90%.
+    """
+    lambda_scheduler = LambdaScheduler(target_sparsity=0.9)
+
+    pruner = BregmanPruner(lambda_scheduler=lambda_scheduler, tolerance=0.01)
+
+    trainer = Mock()
+    pl_module = Mock()
+    trainer.limit_val_batches = 1.0
+    trainer.callbacks = []
+
+    # Start at ~99% sparsity (99 out of 100 elements are zero)
+    param = torch.nn.Parameter(torch.zeros(100))
+    with torch.no_grad():
+        param.data[0] = 1.0  # Only 1 nonzero → 99% sparse
+    mock_manager = Mock(spec=PruningManager)
+    mock_manager.get_pruned_parameters.return_value = [param]
+    mock_manager.processed_groups = []
+    pl_module.pruning_manager = mock_manager
+
+    # Initialize
+    mock_optimizer = Mock()
+    mock_optimizer.param_groups = []
+    trainer.optimizers = [mock_optimizer]
+    trainer.ckpt_path = None
+    pruner.on_fit_start(trainer, pl_module)
+
+    # Epoch 0: sparsity=99%, target=90%, diff=9% > tolerance=1% → suppressed
+    trainer.current_epoch = 0
+    pruner.on_train_epoch_start(trainer, pl_module)
+    assert (
+        trainer.limit_val_batches == 0
+    ), "Validation should be suppressed (99% far from 90% target)"
+
+    # Simulate sparsity gradually decreasing (weights emerging)
+    # Epoch 1: still at 95% sparse → still suppressed
+    with torch.no_grad():
+        param.data[:5] = 1.0  # 5 nonzero → 95% sparse
+    trainer.current_epoch = 1
+    pruner.on_train_epoch_start(trainer, pl_module)
+    assert (
+        trainer.limit_val_batches == 0
+    ), "Validation should be suppressed (95% still far from 90%)"
+
+    # Epoch 2: sparsity drops to 90.5% (within 1% tolerance) → restored
+    with torch.no_grad():
+        param.data.zero_()
+        param.data[:10] = 1.0  # 10 nonzero out of 100 → 90% sparse
+        # Actually need 9.5 nonzero for 90.5% sparse — use 200 elements
+    # Re-create param for cleaner math
+    param2 = torch.nn.Parameter(torch.zeros(200))
+    with torch.no_grad():
+        param2.data[:19] = 1.0  # 19/200 nonzero → 90.5% sparse
+    mock_manager.get_pruned_parameters.return_value = [param2]
+
+    trainer.current_epoch = 2
+    pruner.on_train_epoch_start(trainer, pl_module)
+    assert (
+        trainer.limit_val_batches == 1.0
+    ), "Validation should be restored (90.5% within 1% of 90% target)"
+
+
+def test_bregman_inverse_scale_lambda_decreases():
+    """When model is too sparse (above target), lambda should decrease.
+
+    For inverse-scale Bregman: current_sparsity=0.99 > target=0.9, so the
+    scheduler should decrease lambda to lower the soft-thresholding barrier,
+    allowing more weights to emerge from zero.
+    """
+    scheduler = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1e-2,
+        acceleration_factor=0.25,
+        use_ema=False,
+    )
+
+    initial_lambda = scheduler.get_lambda()
+
+    # Feed sparsity readings above target (inverse-scale scenario)
+    for _ in range(20):
+        scheduler.step(0.99)
+
+    assert scheduler.get_lambda() < initial_lambda, (
+        "Lambda should decrease when sparsity (99%) > target (90%) — "
+        "lower lambda lets weights emerge from zero in Bregman learning"
     )

@@ -39,6 +39,7 @@ class BregmanPruner(Callback):
         verbose: int = 1,
         lambda_scheduler: Optional[LambdaScheduler] = None,
         console_log_frequency: int = 100,
+        tolerance: float = 0.01,
     ):
         """
         Args:
@@ -57,7 +58,7 @@ class BregmanPruner(Callback):
         self._initialized = False
         self._ckpt_scheduler_state: Optional[dict] = None
         self._ckpt_last_sparsity: Optional[float] = None
-        self._suppressor = ValidationSuppressor()
+        self._suppressor = ValidationSuppressor(tolerance=tolerance)
 
     # -------------------------------------------------------------------------
     # Lightning hooks

@@ -83,12 +83,13 @@ Plans:
   4. All verification tests pass for both pruning and Bregman behaviors
   5. Bregman LambdaScheduler supports scheduled target relaxation (target_sparsity evolves per-epoch)
   6. Validation suppressed during Bregman target ramp, same pattern as magnitude pruning
-**Plans**: 3 plans
+**Plans**: 4 plans
 
 Plans:
 - [x] 04-01-PLAN.md — Fix pruning validation suppression via limit_val_batches + tests (Wave 1) ✓
 - [x] 04-02-PLAN.md — Verify Bregman lambda update correctness + tests (Wave 1) ✓
 - [x] 04-03-PLAN.md — Add scheduled target relaxation mode for Bregman learning (Wave 2) ✓
+- [x] 04-04-PLAN.md — Unify sparsity computation and thresholds (Wave 1, gap closure) ✓
 
 **Known Issues (from logs):**
 1. With `check_val_every_n_epoch=5`, validation still runs every epoch during pruning ramp — "New best score" recorded at low sparsity (e.g., 0.001 accuracy at epoch 3, then 0.005 at epoch 18)
@@ -105,9 +106,9 @@ Phase 1 first, then Phase 1.1, then Phases 2 and 3 in parallel, then Phase 4: 1 
 | 1.1 Eval Auto-Config (INSERTED) | 1/1 | ✓ Complete | 2026-01-31 |
 | 2. Pruning Verification | 0/TBD | Not started | - |
 | 3. Bregman Verification | 0/TBD | Not started | - |
-| 4. Verify Pruning & Bregman Correctness | 3/3 | ✓ Complete | 2026-02-07 |
+| 4. Verify Pruning & Bregman Correctness | 4/4 | ✓ Complete | 2026-02-08 |
 
 ---
 *Roadmap created: 2026-01-25*
-*Last updated: 2026-02-07 - Phase 4 extended with 04-03 (Bregman scheduled target relaxation)*
+*Last updated: 2026-02-08 - Phase 4 gap closure: unified sparsity computation and thresholds (04-04)*
 *Milestone: v0.1 Foundations*

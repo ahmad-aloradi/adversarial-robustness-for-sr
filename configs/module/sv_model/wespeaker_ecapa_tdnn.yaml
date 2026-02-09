@@ -22,7 +22,7 @@ audio_encoder:
   _target_: torch.nn.Sequential
   _args_:
     - _target_: src.utils.hf_utils.load_wespeaker_model
-      model_name: "ecapa_tdnn_glob_c512"
+      model_name: "ecapa_tdnn_glob_c512" # "ecapa_tdnn_glob_c1024" "ecapa_tdnn_glob_c512"
       repo_id: null
       checkpoint_filename: null
       model_args:

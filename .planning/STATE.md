@@ -10,26 +10,26 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 ## Current Position
 
 Phase: 4 of 4 (Verify Pruning & Bregman Correctness)
-Plan: 3 of 3 executed
+Plan: 4 of 4 executed
 Status: Phase complete
-Last activity: 2026-02-07 - Fixed 04-03 scheduled target direction (upward ramp, not downward relaxation)
+Last activity: 2026-02-08 - Completed 04-04 (unified sparsity computation and thresholds)
 
 Progress: [███.......] 30% (Phase 1 nearly done, Phase 4 complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed (GSD): 4
+- Total plans completed (GSD): 5
 - Plans completed outside GSD: ~4 major changes
-- Average duration: 3.8 min
-- Total execution time: 16.3 min
+- Average duration: 3.7 min
+- Total execution time: 19.2 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1.1 | 1 | 3.0 min | 3.0 min |
-| 4 | 3 | 13.3 min | 4.4 min |
+| 4 | 4 | 16.2 min | 4.1 min |
 
 *Updated after each plan completion*
 
@@ -68,7 +68,10 @@ Recent decisions affecting current work:
 | 04-02 | Lambda volatility metric | Measure EMA effectiveness via direction change count, not variance | When sparsity oscillates around target, EMA prevents lambda direction reversals (increase/decrease flip-flopping) |
 | 04-03 | Schedule formula accuracy | LambdaScheduler matches PruningScheduler within 1e-9 | Ensures Bregman scheduled target behaves identically to magnitude pruning scheduled sparsity |
 | 04-03 | Validation suppression pattern | Reuse limit_val_batches=0 pattern with guard-based restoration | Consistent with MagnitudePruner from 04-01; prevents repeated restoration attempts |
-| 04-03 | Scheduled target direction | Ramp upward (0.0→0.9), not downward (0.99→0.9) | Matches magnitude pruning: start at low sparsity, increase to target |
+| 04-03 | Scheduled target direction | Ramp upward (0.0→0.9) in scheduled-target mode only | sv_pruning_bregman_scheduled starts dense; primary Bregman config uses fixed target at 0.9 with initial sparsity 0.99 (inverse-scale) |
+| 04-04 | Remove dead ParameterManager.compute_sparsity | Delete method and import | Zero callers in codebase, shared_prune_utils provides canonical implementation |
+| 04-04 | Align Bregman threshold to magnitude pruning | Change from 1e-30 to 1e-12 | Consistent sparsity reporting across both pruning methods |
+| 04-04 | EpochSummaryLogger sparsity computation | Use shared compute_sparsity utility | Eliminate code duplication, single source of truth |
 
 ### Roadmap Evolution
 
@@ -85,6 +88,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-02-07T11:46:32Z
-Stopped at: Fixed 04-03 scheduled target direction (upward ramp 0.0→0.9, not downward 0.99→0.9)
+Last session: 2026-02-08T02:28:49Z
+Stopped at: Completed 04-04-PLAN.md (unified sparsity computation and thresholds)
 Resume file: None

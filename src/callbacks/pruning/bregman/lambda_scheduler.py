@@ -17,8 +17,10 @@ class LambdaScheduler:
 
     The scheduler also supports a scheduled target mode, where target_sparsity
     evolves from an initial value to a final value over N epochs (linear or constant
-    schedule). Typically used to ramp sparsity upward (e.g., 0.0 → 0.9), mirroring
-    how magnitude pruning gradually increases sparsity during training.
+    schedule). This is used by the ``sv_pruning_bregman_scheduled`` config to
+    ramp sparsity upward from a dense start (0.0 → 0.9), mirroring magnitude
+    pruning. The primary Bregman config uses a fixed target instead: the model
+    starts at high sparsity (e.g. 99%) and grows denser toward the target (e.g. 90%).
 
     Parameters
     ----------

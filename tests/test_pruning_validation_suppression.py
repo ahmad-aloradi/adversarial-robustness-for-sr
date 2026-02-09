@@ -148,23 +148,14 @@ def test_early_stopping_reset_on_target_reached():
     early_stopping.best_score = torch.tensor(0.5)
     trainer.callbacks = [early_stopping]
 
-    # Run through ramp (epochs 0-4)
-    # At epoch 4, target is NOT yet reached because schedule_map[4] < final_amount
-    # We need epoch 5 to reach target
+    # Run through ramp (epochs 0-4) — suppressor.check() runs in on_train_epoch_start
     for epoch in range(5):
         trainer.current_epoch = epoch
         pruner.on_train_epoch_start(trainer, model)
-        pl_module = MagicMock(spec=LightningModule)
-        pl_module.log = MagicMock()
-        pruner.on_train_epoch_end(trainer, pl_module)
 
-    # At this point, EarlyStopping should still be getting reset each epoch (disabled mode)
     # Now continue to epoch 5 where target is actually reached
     trainer.current_epoch = 5
     pruner.on_train_epoch_start(trainer, model)
-    pl_module = MagicMock(spec=LightningModule)
-    pl_module.log = MagicMock()
-    pruner.on_train_epoch_end(trainer, pl_module)
 
     # EarlyStopping should be reset when validation is re-enabled
     assert early_stopping.wait_count == 0, "Expected wait_count to be reset"
@@ -185,13 +176,10 @@ def test_model_checkpoint_save_top_k_restored():
     )
     trainer.callbacks = [checkpoint]
 
-    # Run through ramp-up (should disable save_top_k)
+    # Run through ramp-up — suppressor.check() runs in on_train_epoch_start
     for epoch in range(3):
         trainer.current_epoch = epoch
         pruner.on_train_epoch_start(trainer, model)
-        pl_module = MagicMock(spec=LightningModule)
-        pl_module.log = MagicMock()
-        pruner.on_train_epoch_end(trainer, pl_module)
 
     # During ramp, save_top_k should be 0
     assert (
@@ -202,9 +190,6 @@ def test_model_checkpoint_save_top_k_restored():
     for epoch in range(5, 7):
         trainer.current_epoch = epoch
         pruner.on_train_epoch_start(trainer, model)
-        pl_module = MagicMock(spec=LightningModule)
-        pl_module.log = MagicMock()
-        pruner.on_train_epoch_end(trainer, pl_module)
 
     # After target reached, save_top_k should be restored to original
     assert (

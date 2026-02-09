@@ -1,14 +1,16 @@
 from typing import Any, Dict, List, Optional, Tuple
 
-import torch
 import torch.nn as nn
 import torch.nn.utils.prune as pytorch_prune
 from pytorch_lightning import Callback, LightningModule, Trainer
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 from src.callbacks.pruning.checkpoint_handler import PrunedCheckpointHandler
 from src.callbacks.pruning.parameter_manager import ParameterManager
 from src.callbacks.pruning.scheduler import PruningScheduler
+from src.callbacks.pruning.shared_prune_utils import (
+    ValidationSuppressor,
+    compute_sparsity,
+)
 from src.utils import get_pylogger
 
 logger = get_pylogger(__name__)
@@ -85,9 +87,7 @@ class MagnitudePruner(Callback):
         # State
         self._target_params = []
         self._logged_overview = False
-        self._trackers_disabled = False
-        self._original_save_top_k = {}
-        self._original_limit_val_batches = None
+        self._suppressor = ValidationSuppressor()
 
         # Temp state for logging
         self._current_epoch_target = 0.0
@@ -134,6 +134,11 @@ class MagnitudePruner(Callback):
             state = checkpoint["magnitude_pruner_state"]
             self.scheduled = state.get("scheduled", self.scheduled)
 
+            if "validation_suppression_state" in state:
+                self._suppressor.load_state_dict(
+                    state["validation_suppression_state"]
+                )
+
             if self.scheduled:
                 if "scheduler_state" not in state:
                     raise RuntimeError(
@@ -161,6 +166,7 @@ class MagnitudePruner(Callback):
     ) -> None:
         state = {
             "scheduled": self.scheduled,
+            "validation_suppression_state": self._suppressor.state_dict(),
         }
         if self.scheduled and self.scheduler:
             state["scheduler_state"] = self.scheduler.state_dict()
@@ -191,7 +197,7 @@ class MagnitudePruner(Callback):
         self._current_epoch_target = target_amount
 
         # 2. Measure Current State
-        current_sparsity = self.manager.compute_sparsity(self._target_params)
+        current_sparsity = compute_sparsity(self._target_params)
 
         # 3. Apply Pruning
         # We enforce the target if we are below it OR if we need to clean up Identity artifacts (resumption).
@@ -211,7 +217,7 @@ class MagnitudePruner(Callback):
         self._apply_pruning(target_amount)
 
         # Verify
-        new_sparsity = self.manager.compute_sparsity(self._target_params)
+        new_sparsity = compute_sparsity(self._target_params)
         self._verify_sparsity_jump(
             current_sparsity, new_sparsity, target_amount
         )
@@ -224,30 +230,13 @@ class MagnitudePruner(Callback):
 
         # 4. Manage validation suppression during ramp-up
         if self.scheduled:
-            target_reached = new_sparsity >= (self.final_amount - 1e-4)
-
-            if not target_reached:
-                # Suppress validation during ramp-up
-                if self._original_limit_val_batches is None:
-                    # Save original value only once
-                    self._original_limit_val_batches = (
-                        trainer.limit_val_batches
-                    )
-                trainer.limit_val_batches = 0
-            elif self._original_limit_val_batches is not None:
-                # Restore validation when target reached
-                trainer.limit_val_batches = self._original_limit_val_batches
-                self._original_limit_val_batches = None
-                if self.verbose:
-                    logger.info(
-                        "Target sparsity reached. Restoring validation."
-                    )
+            self._suppressor.check(trainer, new_sparsity, self.final_amount)
 
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         """Logs metrics and manages trackers AFTER training step."""
-        current_sparsity = self.manager.compute_sparsity(self._target_params)
+        current_sparsity = compute_sparsity(self._target_params)
 
         # 1. Log Metrics (Recorder)
         if hasattr(pl_module, "log"):
@@ -266,9 +255,6 @@ class MagnitudePruner(Callback):
                 f"Target={self._current_epoch_target:.2%} | "
                 f"Result={current_sparsity:.2%} | Status: {self._last_status}"
             )
-
-        # 3. Manage Trackers
-        self._manage_metric_trackers(trainer, current_sparsity)
 
     def on_train_end(
         self, trainer: Trainer, pl_module: LightningModule
@@ -347,74 +333,3 @@ class MagnitudePruner(Callback):
         except Exception as e:
             logger.error(f"Pruning application failed: {e}")
             raise e
-
-    def _manage_metric_trackers(
-        self, trainer: Trainer, current_sparsity: float
-    ):
-        if not self.scheduled:
-            return
-
-        # Enable if we have reached the final target (within tolerance)
-        target_reached = current_sparsity >= (self.final_amount - 1e-4)
-
-        if not target_reached:
-            # --- DISABLE ---
-            if not self._trackers_disabled:
-                if self.verbose:
-                    logger.info(
-                        f"Epoch {trainer.current_epoch}: Disabling EarlyStopping & Checkpoint logic (Sparsity {current_sparsity:.2%} < Target {self.final_amount:.2%})."
-                    )
-                for idx, callback in enumerate(trainer.callbacks):
-                    if isinstance(callback, ModelCheckpoint):
-                        self._original_save_top_k[
-                            id(callback)
-                        ] = callback.save_top_k
-                        callback.save_top_k = 0
-                self._trackers_disabled = True
-
-            for callback in trainer.callbacks:
-                if isinstance(callback, EarlyStopping):
-                    self._reset_early_stopping(callback)
-        else:
-            # --- ENABLE ---
-            if self._trackers_disabled:
-                if self.verbose:
-                    logger.info(
-                        f"Epoch {trainer.current_epoch}: Final target reached ({current_sparsity:.2%}). Re-enabling EarlyStopping & Checkpoint logic."
-                    )
-                for idx, callback in enumerate(trainer.callbacks):
-                    if isinstance(callback, ModelCheckpoint):
-                        if id(callback) in self._original_save_top_k:
-                            callback.save_top_k = self._original_save_top_k[
-                                id(callback)
-                            ]
-                        self._reset_model_checkpoint(callback)
-                    if isinstance(callback, EarlyStopping):
-                        self._reset_early_stopping(callback)
-                self._trackers_disabled = False
-
-    def _reset_early_stopping(self, cb):
-        cb.wait_count = 0
-        cb.stopped_epoch = 0
-        extreme_val = self._get_extreme_value(cb.mode)
-        if isinstance(cb.best_score, torch.Tensor):
-            cb.best_score = torch.tensor(
-                extreme_val, device=cb.best_score.device
-            )
-        else:
-            cb.best_score = torch.tensor(extreme_val)
-
-    def _reset_model_checkpoint(self, cb):
-        cb.best_k_models = {}
-        cb.kth_best_model_path = ""
-        extreme_val = self._get_extreme_value(cb.mode)
-        if isinstance(cb.best_model_score, torch.Tensor):
-            cb.kth_value = torch.tensor(
-                extreme_val, device=cb.best_model_score.device
-            )
-        else:
-            cb.kth_value = torch.tensor(extreme_val)
-        cb.best_model_score = cb.kth_value
-
-    def _get_extreme_value(self, mode: str) -> float:
-        return float("inf") if mode == "min" else float("-inf")
