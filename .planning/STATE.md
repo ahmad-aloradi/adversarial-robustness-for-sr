@@ -5,30 +5,32 @@
 See: .planning/PROJECT.md (updated 2026-01-25)
 
 **Core value:** Determine whether compressed speaker recognition models retain cross-domain robustness
-**Current focus:** Phase 4 - Verify Pruning & Bregman Correctness
+**Current focus:** Phases 2 & 3 - Pruning & Bregman Verification (ready to start)
 
 ## Current Position
 
-Phase: 4 of 4 (Verify Pruning & Bregman Correctness)
-Plan: 4 of 4 executed
-Status: Phase complete
-Last activity: 2026-02-08 - Completed 04-04 (unified sparsity computation and thresholds)
+Phase: 3 (Bregman Verification) - Plan 01 complete
+Plan: 03-01 complete (Bregman experiment tooling)
+Status: Phase 3 started - experiment runner and analysis tools ready
+Last activity: 2026-02-09 - Completed 03-01-PLAN.md (experiment runner + analysis tools)
 
-Progress: [███.......] 30% (Phase 1 nearly done, Phase 4 complete)
+Progress: [██████▓...] 67% (Phase 1 complete, Phase 1.1 complete, Phase 2 started, Phase 3 started, Phase 4 complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed (GSD): 5
+- Total plans completed (GSD): 7
 - Plans completed outside GSD: ~4 major changes
-- Average duration: 3.7 min
-- Total execution time: 19.2 min
+- Average duration: 3.5 min
+- Total execution time: 26.0 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1.1 | 1 | 3.0 min | 3.0 min |
+| 2 | 1 | 3.1 min | 3.1 min |
+| 3 | 1 | 3.7 min | 3.7 min |
 | 4 | 4 | 16.2 min | 4.1 min |
 
 *Updated after each plan completion*
@@ -42,7 +44,7 @@ Progress: [███.......] 30% (Phase 1 nearly done, Phase 4 complete)
 3. **[Major] Scoring normalization fix** — Fixed normalization bugs in `src/modules/scoring.py` (L187-219). Embeddings now properly L2-normalized after centering and after aggregation. Best model achieves **9.5% EER** (target: 8.5%)
 4. **[Important] Augmentation overhaul** — Done. Updated augmentations to use mutually exclusive RIR/noise and virtual speakers after resampling (WeSpeaker style). Virtual speaker label mismatch bug fixed (1.0 speed moved to index 0). Verified correct behavior.
 
-### Best Model Configuration (9.5% EER)
+### Best Model Configuration (8.86% EER)
 
 ```
 VAD + sv_wespeaker + all augs (+ specaugment)
@@ -72,6 +74,7 @@ Recent decisions affecting current work:
 | 04-04 | Remove dead ParameterManager.compute_sparsity | Delete method and import | Zero callers in codebase, shared_prune_utils provides canonical implementation |
 | 04-04 | Align Bregman threshold to magnitude pruning | Change from 1e-30 to 1e-12 | Consistent sparsity reporting across both pruning methods |
 | 04-04 | EpochSummaryLogger sparsity computation | Use shared compute_sparsity utility | Eliminate code duplication, single source of truth |
+- [Phase 03-01]: Auto-detect validation metrics dynamically instead of hardcoding EER/Accuracy
 
 ### Roadmap Evolution
 
@@ -84,10 +87,10 @@ Recent decisions affecting current work:
 
 ### Blockers/Concerns
 
-- EER at 9.5% vs target 8.5% — 1% gap remaining. May need longer training (currently 20 epochs, WeSpeaker uses 50) or further hyperparameter tuning
+- None — baseline accepted at 8.86% EER
 
 ## Session Continuity
 
-Last session: 2026-02-08T02:28:49Z
-Stopped at: Completed 04-04-PLAN.md (unified sparsity computation and thresholds)
+Last session: 2026-02-09
+Stopped at: Completed 02-01-PLAN.md (CNCeleb pruning config + verification tests)
 Resume file: None
