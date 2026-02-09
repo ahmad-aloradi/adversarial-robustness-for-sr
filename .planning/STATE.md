@@ -9,20 +9,20 @@ See: .planning/PROJECT.md (updated 2026-01-25)
 
 ## Current Position
 
-Phase: 3 (Bregman Verification) - Plan 01 complete
-Plan: 03-01 complete (Bregman experiment tooling)
-Status: Phase 3 started - experiment runner and analysis tools ready
-Last activity: 2026-02-09 - Completed 03-01-PLAN.md (experiment runner + analysis tools)
+Phase: 3 (Bregman Verification) - Plan 02 complete
+Plan: 03-02 complete (Bregman optimizer and mini-training tests)
+Status: Phase 3 in progress - test suite verifies Bregman correctness
+Last activity: 2026-02-09 - Completed 03-02-PLAN.md (16 tests for Bregman optimizer/regularizer correctness + mini-training integration)
 
-Progress: [██████▓...] 67% (Phase 1 complete, Phase 1.1 complete, Phase 2 started, Phase 3 started, Phase 4 complete)
+Progress: [██████▓...] 68% (Phase 1 complete, Phase 1.1 complete, Phase 2 started, Phase 3 in progress, Phase 4 complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed (GSD): 7
+- Total plans completed (GSD): 8
 - Plans completed outside GSD: ~4 major changes
-- Average duration: 3.5 min
-- Total execution time: 26.0 min
+- Average duration: 3.9 min
+- Total execution time: 31.7 min
 
 **By Phase:**
 
@@ -30,7 +30,7 @@ Progress: [██████▓...] 67% (Phase 1 complete, Phase 1.1 complete, 
 |-------|-------|-------|----------|
 | 1.1 | 1 | 3.0 min | 3.0 min |
 | 2 | 1 | 3.1 min | 3.1 min |
-| 3 | 1 | 3.7 min | 3.7 min |
+| 3 | 2 | 9.4 min | 4.7 min |
 | 4 | 4 | 16.2 min | 4.1 min |
 
 *Updated after each plan completion*
@@ -76,7 +76,10 @@ Recent decisions affecting current work:
 | 04-04 | EpochSummaryLogger sparsity computation | Use shared compute_sparsity utility | Eliminate code duplication, single source of truth |
 | 02-01 | Use WarmupExponentialLR instead of ReduceLROnPlateau | WarmupExponentialLR for pruning scheduler | ReduceLROnPlateau incompatible with validation suppression during pruning ramp |
 | 02-01 | Extend max_epochs to 30 for pruning | 10 epochs ramp + 20 fine-tuning | Sufficient time for scheduled pruning and convergence at target sparsity |
-- [Phase 03-01]: Auto-detect validation metrics dynamically instead of hardcoding EER/Accuracy
+| 03-01 | Auto-detect validation metrics dynamically | Parse from wandb.Api().run() | Avoids hardcoding EER/Accuracy, supports arbitrary metrics |
+| 03-02 | Mock trainer for mini-training tests | Use unittest.mock.Mock | Real Trainer has read-only properties, Mock provides full control |
+| 03-02 | LinBreg test hyperparameters | Higher lr (0.1) and lambda (1.0) vs AdaBreg (0.01, 0.5) | LinBreg needs stronger regularization without adaptive moments |
+| 03-02 | Initial sparsity for integration tests | Start from moderate sparsity (0.6-0.99) | Prevents layer collapse with strong lambda in short test runs |
 
 ### Roadmap Evolution
 
@@ -94,5 +97,5 @@ Recent decisions affecting current work:
 ## Session Continuity
 
 Last session: 2026-02-09
-Stopped at: Completed 02-01-PLAN.md (CNCeleb pruning config + verification tests)
+Stopped at: Completed 03-02-PLAN.md (Bregman optimizer/regularizer correctness + mini-training integration tests)
 Resume file: None
