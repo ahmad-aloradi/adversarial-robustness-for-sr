@@ -74,6 +74,8 @@ Recent decisions affecting current work:
 | 04-04 | Remove dead ParameterManager.compute_sparsity | Delete method and import | Zero callers in codebase, shared_prune_utils provides canonical implementation |
 | 04-04 | Align Bregman threshold to magnitude pruning | Change from 1e-30 to 1e-12 | Consistent sparsity reporting across both pruning methods |
 | 04-04 | EpochSummaryLogger sparsity computation | Use shared compute_sparsity utility | Eliminate code duplication, single source of truth |
+| 02-01 | Use WarmupExponentialLR instead of ReduceLROnPlateau | WarmupExponentialLR for pruning scheduler | ReduceLROnPlateau incompatible with validation suppression during pruning ramp |
+| 02-01 | Extend max_epochs to 30 for pruning | 10 epochs ramp + 20 fine-tuning | Sufficient time for scheduled pruning and convergence at target sparsity |
 - [Phase 03-01]: Auto-detect validation metrics dynamically instead of hardcoding EER/Accuracy
 
 ### Roadmap Evolution
