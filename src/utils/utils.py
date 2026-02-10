@@ -1,4 +1,5 @@
 import argparse
+import shutil
 import pickle
 import warnings
 from functools import wraps
@@ -441,6 +442,22 @@ def load_pickle(pickle_path: Union[str, Path]) -> dict:
         stats = pickle.load(f)
     print(f"Statistics loaded from {pickle_path}")
     return stats
+
+
+def rename_yaml(path, new_name):
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path.rename(path.with_name(new_name))
+
+
+def copy_yaml(src, dst):
+    src, dst = Path(src), Path(dst)
+    if not src.is_file():
+        raise FileNotFoundError(src)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return dst
 
 
 def _resolve_test_ckpt_path(trainer: Trainer) -> Optional[str]:
