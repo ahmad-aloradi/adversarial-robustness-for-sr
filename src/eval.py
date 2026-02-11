@@ -262,77 +262,80 @@ def _resolve_averaged_checkpoint(cfg: DictConfig) -> str:
     if not ckpt_dir.exists():
         raise ValueError(f"Checkpoint directory not found: {ckpt_dir}")
 
-    avg_num = cfg.get("ckpt_avg_num", 5)
+    avg_num = cfg.get("ckpt_avg_num")  # None = use all available
     avg_min = cfg.get("ckpt_avg_min", 2)
 
     # Check for existing averaged checkpoint
-    existing_avg = ckpt_dir / f"averaged_top{avg_num}.ckpt"
-    if existing_avg.exists():
-        log.info(f"Reusing existing averaged checkpoint: {existing_avg}")
-        return str(existing_avg)
+    existing_avg = list(ckpt_dir.glob("averaged_top*.ckpt"))
+    if existing_avg:
+        # Use the one with the highest number
+        existing_avg.sort(key=lambda p: int(p.stem.split("top")[1]), reverse=True)
+        log.info(f"Reusing existing averaged checkpoint: {existing_avg[0]}")
+        return str(existing_avg[0])
 
-    else:
-        # Find candidate checkpoints (exclude averaged and last.ckpt)
-        log.warning(
-            f"No averaged checkpoint found at {ckpt_dir}. Creating a new averaged ckpt."
+    # Find candidate checkpoints (exclude averaged and last.ckpt)
+    log.warning(
+        f"No averaged checkpoint found at {ckpt_dir}. Creating a new averaged ckpt."
+    )
+    all_candidates = [
+        p
+        for p in ckpt_dir.glob("*.ckpt")
+        if not p.name.startswith("averaged_") and p.name != "last.ckpt"
+    ]
+
+    # Determine checkpoint mode from config (max = higher is better, min = lower is better)
+    # Default to "max" for metric (accuracy-like metrics)
+    assert cfg.callbacks.get("model_checkpoint") is not None
+    ckpt_mode = cfg.callbacks.model_checkpoint.get("mode")
+    assert ckpt_mode in ["min", "max"], "model_checkpoint.mode must be 'min' or 'max'"
+
+    # Try to sort by metric value extracted from filename
+    candidates_with_metric = [
+        (p, _extract_metric_from_checkpoint(p)) for p in all_candidates
+    ]
+    candidates_with_valid_metric = [
+        (p, m) for p, m in candidates_with_metric if m is not None
+    ]
+
+    if candidates_with_valid_metric:
+        # Sort by metric value: descending for "max" mode, ascending for "min" mode
+        reverse_sort = ckpt_mode == "max"
+        candidates_with_valid_metric.sort(key=lambda x: x[1], reverse=reverse_sort)
+        candidates = [p for p, _ in candidates_with_valid_metric]
+        log.info(
+            f"Sorting checkpoints by metric value (mode={ckpt_mode}), "
+            f"best metric: {candidates_with_valid_metric[0][1]}"
         )
-        all_candidates = [
-            p
-            for p in ckpt_dir.glob("*.ckpt")
-            if not p.name.startswith("averaged_") and p.name != "last.ckpt"
-        ]
+    else:
+        # Fallback to modification time if no metric values can be extracted
+        log.warning(
+            "Could not extract metric values from checkpoint filenames, "
+            "falling back to modification time"
+        )
+        candidates = sorted(
+            all_candidates,
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
 
-        # Determine checkpoint mode from config (max = higher is better, min = lower is better)
-        # Default to "max" for metric (accuracy-like metrics)
-        assert cfg.callbacks.get("model_checkpoint") is not None
-        ckpt_mode = cfg.callbacks.model_checkpoint.get("mode")
-        assert ckpt_mode in ["min", "max"], "model_checkpoint.mode must be 'min' or 'max'"
-        
-        # Try to sort by metric value extracted from filename
-        candidates_with_metric = [
-            (p, _extract_metric_from_checkpoint(p)) for p in all_candidates
-        ]
-        candidates_with_valid_metric = [
-            (p, m) for p, m in candidates_with_metric if m is not None
-        ]
+    if len(candidates) < avg_min:
+        raise ValueError(
+            f"Not enough checkpoints to average: found {len(candidates)}, "
+            f"need at least {avg_min}"
+        )
 
-        if candidates_with_valid_metric:
-            # Sort by metric value: descending for "max" mode, ascending for "min" mode
-            reverse_sort = ckpt_mode == "max"
-            candidates_with_valid_metric.sort(key=lambda x: x[1], reverse=reverse_sort)
-            candidates = [p for p, _ in candidates_with_valid_metric]
-            log.info(
-                f"Sorting checkpoints by metric value (mode={ckpt_mode}), "
-                f"best metric: {candidates_with_valid_metric[0][1]}"
-            )
-        else:
-            # Fallback to modification time if no metric values can be extracted
-            log.warning(
-                "Could not extract metric values from checkpoint filenames, "
-                "falling back to modification time"
-            )
-            candidates = sorted(
-                all_candidates,
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-
-        if len(candidates) < avg_min:
-            raise ValueError(
-                f"Not enough checkpoints to average: found {len(candidates)}, "
-                f"need at least {avg_min}"
-            )
-
+    if avg_num is not None:
         candidates = candidates[:avg_num]
-        output_path = ckpt_dir / f"averaged_top{avg_num}.ckpt"
+    actual_count = len(candidates)
+    output_path = ckpt_dir / f"averaged_top{actual_count}.ckpt"
 
-        log.info(f"Averaging {len(candidates)} checkpoints: {[p.name for p in candidates]}")
-        averaged = utils.average_checkpoints(candidates, output_path)
+    log.info(f"Averaging {actual_count} checkpoints: {[p.name for p in candidates]}")
+    averaged = utils.average_checkpoints(candidates, output_path)
 
-        if not averaged:
-            raise ValueError("Failed to create averaged checkpoint")
+    if not averaged:
+        raise ValueError("Failed to create averaged checkpoint")
 
-        return str(averaged)
+    return str(averaged)
 
 
 def _resolve_exp_dir_from_argv() -> Path | None:
@@ -566,8 +569,11 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
 
     if exp_dir_val and not ckpt_path_val:
         # No specific checkpoint → use averaged checkpoint from exp_dir
-        cfg.use_avg_ckpt = True
-        log.warning("No ckpt_path provided; defaulting to use_avg_ckpt=True")
+        if not cfg.get("use_avg_ckpt"):
+            cfg.use_avg_ckpt = True
+            log.warning(
+                "No ckpt_path provided; defaulting to use_avg_ckpt=True"
+            )
 
     cfg = _apply_exp_dir_config(cfg)
 

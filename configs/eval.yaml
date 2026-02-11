@@ -19,7 +19,7 @@ keep_logger: false
 use_training_configs: false  # Use training-time config snapshot from metadata/ if available
 use_avg_ckpt: false
 ckpt_dir: null
-ckpt_avg_num: 10
+ckpt_avg_num: null  # null = use all available candidates
 ckpt_avg_min: 2
 
 tags: ["dev"]
