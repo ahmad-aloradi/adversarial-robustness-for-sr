@@ -100,16 +100,11 @@ class BregmanPruner(Callback):
     def on_train_epoch_start(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
-        """Update scheduled target and manage validation suppression."""
+        """Manage validation suppression at epoch start."""
         if not self._initialized or self.lambda_scheduler is None:
             return
 
-        # Update scheduled target (no-op if fixed mode)
-        if self.lambda_scheduler.is_scheduled:
-            self.lambda_scheduler.update_target(trainer.current_epoch)
-
         # Validation suppression: suppress while sparsity < target
-        # Works for both scheduled mode (during ramp) and fixed-target mode
         current_sparsity = self._overall_sparsity()
         target = self.lambda_scheduler.target_sparsity
         self._suppressor.check(trainer, current_sparsity, target)
@@ -201,10 +196,12 @@ class BregmanPruner(Callback):
         )
 
     def _step_lambda_scheduler(self, trainer: Trainer) -> None:
-        """Step the scheduler and update regularizer lambdas."""
+        """Step the scheduler and update regularizer lambdas.
+            w_t+1 = max(w_t + δ(λ_old − λ_new) − δ·lr·grad_step, 0)
+        """
         current_sparsity = self._overall_sparsity()
 
-        # On first step after resume, pass the cached sparsity for EMA initialization
+        # On first step after resume, pass the cached sparsity
         last_sparsity = self._ckpt_last_sparsity
         if last_sparsity is not None:
             self._ckpt_last_sparsity = None  # Use only once
@@ -275,12 +272,6 @@ class BregmanPruner(Callback):
                 **lambda_params,
             )
 
-            ema_sparsity = self.lambda_scheduler.get_ema_smoothed_sparsity()
-            if ema_sparsity is not None:
-                pl_module.log(
-                    "bregman/ema_sparsity", ema_sparsity, **logging_params
-                )
-
     @rank_zero_only
     def _log_to_console(self, trainer: Trainer) -> None:
         """Log sparsity info to console (controlled by
@@ -300,15 +291,10 @@ class BregmanPruner(Callback):
         log.info("=== Bregman Configuration ===")
 
         if self.lambda_scheduler:
-            sched_info = f"Lambda Scheduler: target_sparsity={self.lambda_scheduler.target_sparsity}, "
-            sched_info += f"lambda={self.lambda_scheduler.get_lambda():.4f}"
-            if self.lambda_scheduler.is_scheduled:
-                sched_info += (
-                    f", schedule={self.lambda_scheduler._schedule_type}, "
-                    f"initial={self.lambda_scheduler._initial_target_sparsity}, "
-                    f"final={self.lambda_scheduler._final_target_sparsity}, "
-                    f"epochs_to_ramp={self.lambda_scheduler._epochs_to_ramp}"
-                )
+            sched_info = (
+                f"Lambda Scheduler: target_sparsity={self.lambda_scheduler.target_sparsity}, "
+                f"lambda={self.lambda_scheduler.get_lambda():.4f}"
+            )
             log.info(sched_info)
         else:
             log.info("Lambda Scheduler: None (static lambda mode)")

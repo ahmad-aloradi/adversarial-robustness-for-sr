@@ -23,7 +23,7 @@ OPTIONS:
     -h, --help             Show this help message
 
 EXAMPLES:
-    # Run default configuration (3 inverse-scale + 1 scheduled + 1 EMA)
+    # Run default configuration
     $0
 
     # Run only at 0.9 sparsity
@@ -118,37 +118,12 @@ for target in $TARGETS; do
     fi
 done
 
-# Wave 2: Scheduled experiment (ramps 0.0 → 0.9)
+# Wave 2: Warmup experiment with high initial `lr`
 echo "Wave 2: Scheduled experiment"
 echo "-----------------------------------"
 RUN_ID=$((RUN_ID + 1))
 RUN_NAME="scheduled_0.9"
 RUN_CMD="python src/train.py experiment=sv/sv_bregman_adabreg_warmup trainer.max_epochs=${EPOCHS} seed=${SEED} tags=[bregman_verify,scheduled,sparsity_0.9]"
-
-RUN_NAMES+=("$RUN_NAME")
-RUN_COMMANDS+=("$RUN_CMD")
-
-echo "[$RUN_ID] $RUN_NAME"
-echo "    $RUN_CMD"
-echo ""
-
-if [ "$DRY_RUN" = false ]; then
-    if eval "$RUN_CMD"; then
-        RUN_RESULTS+=("SUCCESS")
-        RUN_DIRS+=("check_logs")
-    else
-        EXIT_CODE=$?
-        RUN_RESULTS+=("FAILED (exit code: $EXIT_CODE)")
-        RUN_DIRS+=("N/A")
-    fi
-fi
-
-# Wave 3: EMA experiment (fixed target 0.9 with EMA smoothing)
-echo "Wave 3: EMA experiment"
-echo "-----------------------------------"
-RUN_ID=$((RUN_ID + 1))
-RUN_NAME="ema_0.9"
-RUN_CMD="python src/train.py experiment=sv/sv_bregman_adabreg callbacks.model_pruning.lambda_scheduler.use_ema=true trainer.max_epochs=${EPOCHS} seed=${SEED} tags=[bregman_verify,ema,sparsity_0.9]"
 
 RUN_NAMES+=("$RUN_NAME")
 RUN_COMMANDS+=("$RUN_CMD")

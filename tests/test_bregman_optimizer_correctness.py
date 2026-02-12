@@ -390,3 +390,106 @@ def test_adabreg_linbreg_both_induce_sparsity():
     ), f"LinBreg sparsity {sparsity_lin} should be > 0.05"
 
     # Both produce sparse solutions (exact values differ due to different update rules)
+
+
+# =============================================================================
+# Subgradient reinitialization tests
+# =============================================================================
+
+
+@pytest.mark.parametrize("OptimizerClass", [LinBreg, AdaBreg])
+def test_lambda_change_preserves_subgradients(OptimizerClass):
+    """Lambda updates must NOT modify subgradients.
+
+    The scheduler only sets reg.lamda — subgradients preserve accumulated
+    gradient history. The new lambda takes effect on the next prox step,
+    shifting the sparsity threshold without destroying Bregman's multi-step
+    gradient accumulation.
+    """
+    torch.manual_seed(0)
+    model = nn.Linear(20, 10)
+
+    old_lambda = 0.5
+    new_lambda = 1.2
+    delta = 1.0
+    reg = RegL1(lamda=old_lambda)
+    optimizer = OptimizerClass(model.parameters(), lr=0.01, reg=reg, delta=delta)
+
+    # Train a few steps to populate optimizer state and drift subgradients
+    for _ in range(30):
+        x = torch.randn(8, 20)
+        y = torch.randn(8, 10)
+        output = model(x)
+        loss = ((output - y) ** 2).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Snapshot subgradients before lambda change
+    subgrads_before = {}
+    for p in model.parameters():
+        state = optimizer.state.get(p)
+        if state is not None and "sub_grad" in state:
+            subgrads_before[p] = state["sub_grad"].clone()
+
+    # Update lambda (as _step_lambda_scheduler does — only changes reg.lamda)
+    reg.lamda = new_lambda
+
+    # Subgradients must be unchanged
+    for p, v_before in subgrads_before.items():
+        v_after = optimizer.state[p]["sub_grad"]
+        assert torch.equal(v_before, v_after), (
+            "Subgradients must not change when lambda is updated"
+        )
+
+
+@pytest.mark.parametrize("OptimizerClass", [LinBreg, AdaBreg])
+def test_lambda_increase_prunes_via_prox_threshold(OptimizerClass):
+    """Increasing lambda prunes weights by raising the prox threshold.
+
+    When lambda increases without subgradient modification, the next prox step
+    applies a higher threshold: p_new = max(p + δ(λ_old − λ_new) − δ·lr·grad, 0).
+    This naturally drives small weights to zero.
+    """
+    torch.manual_seed(42)
+    model = nn.Linear(50, 20)
+
+    delta = 1.0
+    reg = RegL1(lamda=0.1)
+    optimizer = OptimizerClass(model.parameters(), lr=0.01, reg=reg, delta=delta)
+
+    # Train to get a model with some weights near zero
+    for _ in range(50):
+        x = torch.randn(8, 50)
+        y = torch.randn(8, 20)
+        output = model(x)
+        loss = ((output - y) ** 2).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Count non-zero weights before lambda increase
+    nonzero_before = sum(
+        (p.data != 0).sum().item() for p in model.parameters()
+    )
+
+    # Increase lambda significantly
+    reg.lamda = 5.0
+
+    # Run one optimizer step with the new (higher) lambda
+    x = torch.randn(8, 50)
+    y = torch.randn(8, 20)
+    output = model(x)
+    loss = ((output - y) ** 2).mean()
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    # Count non-zero weights after — should have fewer (more pruned)
+    nonzero_after = sum(
+        (p.data != 0).sum().item() for p in model.parameters()
+    )
+
+    assert nonzero_after < nonzero_before, (
+        f"Lambda increase should prune weights: before={nonzero_before}, after={nonzero_after}"
+    )

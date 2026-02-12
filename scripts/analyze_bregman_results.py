@@ -31,7 +31,6 @@ def extract_metrics(run_dir: Path) -> Dict[str, Any]:
         - config: Hydra config dict
         - sparsity: DataFrame with columns [step, value]
         - global_lambda: DataFrame with columns [step, value]
-        - ema_sparsity: DataFrame with columns [step, value] (if available)
         - validation_metrics: Dict of {metric_name: DataFrame}
         - available_scalars: List of all scalar tags found
     """
@@ -70,7 +69,6 @@ def extract_metrics(run_dir: Path) -> Dict[str, Any]:
         "available_scalars": available_scalars,
         "sparsity": None,
         "global_lambda": None,
-        "ema_sparsity": None,
         "validation_metrics": {},
     }
 
@@ -85,13 +83,6 @@ def extract_metrics(run_dir: Path) -> Dict[str, Any]:
     if "bregman/global_lambda" in available_scalars:
         events = ea.Scalars("bregman/global_lambda")
         result["global_lambda"] = pd.DataFrame(
-            {"step": [e.step for e in events], "value": [e.value for e in events]}
-        )
-
-    # Extract EMA sparsity (if available)
-    if "bregman/ema_sparsity" in available_scalars:
-        events = ea.Scalars("bregman/ema_sparsity")
-        result["ema_sparsity"] = pd.DataFrame(
             {"step": [e.step for e in events], "value": [e.value for e in events]}
         )
 
@@ -177,13 +168,12 @@ def verify_experiment(
     else:
         checks["lambda_bounds"] = (None, "Lambda data not available")
 
-    # Check 4: Sparsity convergence (for EMA experiments)
-    ema_sparsity_df = metrics.get("ema_sparsity")
-    if ema_sparsity_df is not None:
+    # Check 4: Sparsity convergence
+    if sparsity_df is not None:
         # Calculate deltas
-        deltas = ema_sparsity_df["value"].diff().abs()
+        deltas = sparsity_df["value"].diff().abs()
         major_reversals = (deltas > 0.05).sum()
-        total_steps = len(ema_sparsity_df) - 1
+        total_steps = len(sparsity_df) - 1
         ratio = major_reversals / total_steps if total_steps > 0 else 0
         passed = ratio < 0.1
         checks["sparsity_convergence"] = (
@@ -191,7 +181,7 @@ def verify_experiment(
             f"Major reversals (|Δ| > 0.05): {major_reversals}/{total_steps} ({ratio*100:.1f}%)",
         )
     else:
-        checks["sparsity_convergence"] = (None, "EMA sparsity not available")
+        checks["sparsity_convergence"] = (None, "Sparsity data not available")
 
     return checks
 
@@ -220,7 +210,7 @@ def generate_comparison_table(
             tags = config.get("tags", [])
             config_type = "unknown"
             for tag in tags:
-                if tag in ["inverse_scale", "scheduled", "ema"]:
+                if tag in ["inverse_scale", "scheduled"]:
                     config_type = tag
                     break
 
