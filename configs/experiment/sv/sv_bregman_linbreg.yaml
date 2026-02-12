@@ -20,7 +20,6 @@ tags:
   [
     '${oc.eval:''"${datamodule.dataset.data_dir}".split("/")[-1]''}',
     "Bregman_learning",
-    "Bregman_scheduled",
     "sv",
     "Adabreg",
   ]
@@ -36,46 +35,78 @@ callbacks:
   model_checkpoint:
     mode: max
     monitor: ${replace:"valid/__metric__"}
+    save_top_k: ${oc.eval:'max(2, int(${trainer.max_epochs} * 0.1))'}
+    every_n_epochs: 1
+  checkpoint_averaging:
+    _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
+    num_checkpoints: ${callbacks.model_checkpoint.save_top_k}
+    output_filename: averaged_top{num}.ckpt
   early_stopping:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    patience: 8
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'}
+
+  margin_scheduler:
+    _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
+    initial_margin: 0.0
+    final_margin: 0.2
+    start_epoch: ${oc.eval:'int(${trainer.max_epochs} * 0.133)'}
+    warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.133)'}
+    increase_type: exp
 
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-12
     verbose: 2
     console_log_frequency: 1e10 # Frequency for console output (verbose >= 2)
+    tolerance: 0.01 # Tolerance of 1% means accept 89% if target is 90%
     # Global lambda scheduler configuration.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
-      initial_lambda: 1e-2
-      target_sparsity: 0.9 # Ignored when schedule is active; kept for schema consistency
-      acceleration_factor: .25
-      min_lambda: 1e-6
-      max_lambda: 1e1
-      # Scheduled target: ramp sparsity upward from 0% to target
-      schedule_type: linear
-      initial_target_sparsity: 0.0 # Start with no sparsity target
-      final_target_sparsity: 0.9 # Ramp up to desired target sparsity
-      epochs_to_ramp: 10
+      initial_lambda: 1.0
+      target_sparsity: 0.9
+      acceleration_factor: 0.05
+      min_lambda: 0.0
+      max_lambda: 100
 
 datamodule:
   dataset:
+    segment_duration: 3.0
     max_duration: 3.0
+    use_pre_segmentation: True
+
+  # Auto-scale only when virtual speakers are enabled
+  num_classes: ${oc.eval:'(${module.data_augmentation.augmentations.wav_augmenter.speed_perturb.virtual_speakers}) and (${datamodule._base_num_classes} * len(${module.data_augmentation.augmentations.wav_augmenter.speed_perturb.speed_factors})) or ${datamodule._base_num_classes}'}
 
   loaders:
     train:
-      batch_size: 64
+      batch_size: 32
     valid:
-      batch_size: 64
+      batch_size: 32
     test:
       batch_size: 8
     enrollment:
       batch_size: 8
 
 module:
+  criterion:
+    aam:
+      _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
+      loss_fn:
+        _target_: speechbrain.nnet.losses.AdditiveAngularMargin
+        margin: 0.0
+        scale: 32.0
+
+  # lr_scheduler:
+  #   scheduler:
+  #     _target_: src.utils.schedulers.WarmupExponentialLR
+  #     warmup_epochs: ${oc.eval:'max(1, int(${trainer.max_epochs} * 0.04))'}
+  #     warmup_start_factor: 0.0
+  #     gamma: ${oc.eval:'pow(0.0005, 1.0 / (${trainer.max_epochs} - max(1, int(${trainer.max_epochs} * 0.04))))'}
+  #   extras:
+  #     interval: "epoch"
+  #     frequency: ${trainer.check_val_every_n_epoch}
   lr_scheduler:
     scheduler:
       _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
@@ -90,16 +121,58 @@ module:
       frequency: ${trainer.check_val_every_n_epoch}
 
   optimizer:
-    # # Option1 Linbreg
-    #   _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
-    #   _partial_: True
-    #   momentum: 0.0
-    #   lr: 1e-4
+      _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
+      _partial_: True
+      momentum: 0.0
+      lr: 1e-3
 
-    # Option2 Adabreg
-    _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
-    _partial_: true
-    lr: 1e-4
+  data_augmentation:
+    noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
+    rir_dataset_url: https://www.dropbox.com/scl/fi/linhy77c36mu10965a836/RIRs.zip?rlkey=pg9cu8vrpn2u173vhiqyu743u&dl=1
+    data_folder_rir_noises: ${paths.data_dir}/RIRS_NOISES
+    noise_annotation: ${hydra:runtime.output_dir}/noise.csv
+    rir_annotation: ${hydra:runtime.output_dir}/reverb.csv
+
+    prepare_noise_data:
+      _target_: speechbrain.augment.preparation.prepare_dataset_from_URL
+      URL: ${module.data_augmentation.noise_dataset_url}
+      dest_folder: ${module.data_augmentation.data_folder_rir_noises}/noise
+      ext: wav
+      csv_file: ${module.data_augmentation.noise_annotation}
+
+    prepare_rir_data:
+      _target_: speechbrain.augment.preparation.prepare_dataset_from_URL
+      URL: ${module.data_augmentation.rir_dataset_url}
+      dest_folder: ${module.data_augmentation.data_folder_rir_noises}/rir
+      ext: wav
+      csv_file: ${module.data_augmentation.rir_annotation}
+
+    augmentations:
+      wav_augmenter:
+        _target_: src.modules.augmentation.GPUAugmenter
+        sample_rate: ${datamodule.dataset.sample_rate}
+        concat_original: true
+        speed_perturb:
+          _target_: src.modules.augmentation.SpeedPerturb
+          sample_rate: ${datamodule.dataset.sample_rate}
+          speed_factors: [0.9, 1.0, 1.1]
+          virtual_speakers: true
+          num_base_classes: ${datamodule._base_num_classes}
+          p: 1.0
+        transforms:
+          - _target_: src.modules.augmentation.MutuallyExclusive
+            p: 1.0
+            transforms:
+              - _target_: src.modules.augmentation.NormalizedReverb
+                ir_csv: ${module.data_augmentation.rir_annotation}
+                sample_rate: ${datamodule.dataset.sample_rate}
+                p: 1.0
+                normalize: true
+              - _target_: src.modules.augmentation.NoiseFromCSV
+                noise_csv: ${module.data_augmentation.noise_annotation}
+                min_snr_db: 0
+                max_snr_db: 15
+                p: 1.0
 
   model:
     pruning_groups:
@@ -114,12 +187,12 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1L2Conv
-            lamda: 1e-2 # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
+            lamda: 1.0 # Overridden by lambda_scheduler; set to match initial_lambda
           lambda_scale: 1.0
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.0
+          sparsity_rate: 0.99 # Initial sparsity
 
       # Group 2a: Prunable Linear Layers (catch all torch.nn.Linear regardless of name)
       - name: linear_layers
@@ -129,12 +202,12 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1e-2 # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
+            lamda: 1.0 # Overridden by lambda_scheduler; set to match initial_lambda
           lambda_scale: 1.0 # Scale factor for the global lambda
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.0
+          sparsity_rate: 0.99 # Initial sparsity
 
       # Group 2b: Catch classifier by exact module name match
       - name: classifier
@@ -149,7 +222,7 @@ module:
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.0
+          sparsity_rate: 0.99 # Initial sparsity
 
       # Group 3: Pruning-sensitive Layers (Not Pruned!)
       - name: norm_params
@@ -174,7 +247,7 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1e-2 # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
+            lamda: 1.0 # Overridden by lambda_scheduler; set to match initial_lambda
           lambda_scale: 1.0 # Scale factor for the global lambda
 
       # Group 5: Fallback  (i.e., it catches what's left over) (MUST BE LAST)
@@ -185,12 +258,12 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1e-2 # This will be overridden by lambda_scheduler if not None, set to match initial_lambda
+            lamda: 1.0 # Overridden by lambda_scheduler; set to match initial_lambda
           lambda_scale: 1.0 # Scale factor for the global lambda
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.0
+          sparsity_rate: 0.99 # Initial sparsity
 
 logger:
   wandb:

@@ -91,7 +91,7 @@ Orchestrates the entire Bregman learning process:
 
 ### Usage Example
 
-See `configs/experiment/sv/sv_pruning_bregman.yaml` for a complete configuration:
+See `configs/experiment/sv/sv_bregman_adabreg.yaml` for a complete configuration:
 
 ```yaml
 callbacks:
@@ -379,6 +379,6 @@ scripts/
 └── make_pruning_permanent.py      # Post-training weight fusion
 
 configs/experiment/sv/
-├── sv_pruning_bregman.yaml        # Bregman learning config
+├── sv_bregman_adabreg.yaml        # Bregman learning config (using adabreg)
 └── sv_pruning_magnitude.yaml      # Magnitude pruning config (if exists)
 ```

@@ -1,7 +1,7 @@
 """Shared validation/checkpoint suppression and sparsity utilities for pruners.
 
 ValidationSuppressor: Composition-based class that suppresses validation,
-ModelCheckpoint, and EarlyStopping during sparsity ramp-up.
+ModelCheckpoint, EarlyStopping, and ReduceLROnPlateau during sparsity ramp-up.
 
 compute_sparsity: Unified sparsity computation for both magnitude and Bregman
 pruning (handles raw Parameter lists and (Module, name) pairs).
@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.utilities.types import LRSchedulerConfig
 
 from src.utils import get_pylogger
 
@@ -69,18 +70,21 @@ def compute_sparsity(
 
 
 class ValidationSuppressor:
-    """Suppresses validation, ModelCheckpoint, and EarlyStopping during
-    sparsity ramp-up. Restores and resets trackers when target is reached.
+    """Suppresses validation, ModelCheckpoint, EarlyStopping, and
+    ReduceLROnPlateau during sparsity ramp-up. Restores and resets
+    trackers when target is reached.
 
     Intended to be instantiated internally by each pruner (composition).
     """
 
-    def __init__(self, tolerance: float = 1e-3):
+    def __init__(self, tolerance: float = 1e-2):
         self.tolerance = tolerance
         self._suppressed = False
         self._original_limit_val_batches = None
         # Keyed by monitor name for cross-process stability
         self._original_save_top_k: dict[str, int] = {}
+        self._original_es_check_on_train: dict[str, bool] = {}
+        self._original_lr_strict: dict[str, bool] = {}
 
     def check(
         self,
@@ -99,6 +103,11 @@ class ValidationSuppressor:
         elif not target_reached and self._suppressed:
             # Still suppressed — reset EarlyStopping each epoch
             self._reset_early_stoppings(trainer)
+            logger.info(
+                f"Validation still suppressed (sparsity {current_sparsity:.2%}"
+                f" outside target {target_sparsity:.2%}"
+                f" ± {self.tolerance:.1%})"
+            )
         elif target_reached and self._suppressed:
             # Transition: suppressed -> restored
             self._restore(trainer, current_sparsity, target_sparsity)
@@ -111,13 +120,22 @@ class ValidationSuppressor:
             "suppressed": self._suppressed,
             "original_limit_val_batches": self._original_limit_val_batches,
             "original_save_top_k": dict(self._original_save_top_k),
+            "original_es_check_on_train": dict(
+                self._original_es_check_on_train
+            ),
+            "original_lr_strict": dict(self._original_lr_strict),
         }
 
     def load_state_dict(self, state: dict) -> None:
-        # Strict — missing keys raise KeyError
         self._suppressed = state["suppressed"]
         self._original_limit_val_batches = state["original_limit_val_batches"]
         self._original_save_top_k = dict(state["original_save_top_k"])
+        self._original_es_check_on_train = dict(
+            state.get("original_es_check_on_train", {})
+        )
+        self._original_lr_strict = dict(
+            state.get("original_lr_strict", {})
+        )
 
     # -- Internal helpers ----------------------------------------------------
 
@@ -136,6 +154,24 @@ class ValidationSuppressor:
                 key = cb.monitor or ""
                 self._original_save_top_k[key] = cb.save_top_k
                 cb.save_top_k = 0
+            if isinstance(cb, EarlyStopping):
+                key = cb.monitor or ""
+                self._original_es_check_on_train[key] = (
+                    cb._check_on_train_epoch_end
+                )
+                # Disable: limit_val_batches=0 already prevents
+                # on_validation_end, so setting this to False prevents
+                # on_train_epoch_end check too — fully disabling ES.
+                cb._check_on_train_epoch_end = False
+
+        # Disable strict metric enforcement on ReduceLROnPlateau so
+        # Lightning skips the step (instead of crashing) when the
+        # monitored validation metric is absent.
+        for config in trainer.lr_scheduler_configs:
+            if config.reduce_on_plateau:
+                key = config.monitor or ""
+                self._original_lr_strict[key] = config.strict
+                config.strict = False
 
         self._suppressed = True
         logger.info(
@@ -162,11 +198,25 @@ class ValidationSuppressor:
                     cb.save_top_k = self._original_save_top_k[key]
                 _reset_model_checkpoint(cb)
             if isinstance(cb, EarlyStopping):
+                key = cb.monitor or ""
+                if key in self._original_es_check_on_train:
+                    cb._check_on_train_epoch_end = (
+                        self._original_es_check_on_train[key]
+                    )
                 _reset_early_stopping(cb)
+
+        # Restore strict metric enforcement on ReduceLROnPlateau
+        for config in trainer.lr_scheduler_configs:
+            if config.reduce_on_plateau:
+                key = config.monitor or ""
+                if key in self._original_lr_strict:
+                    config.strict = self._original_lr_strict[key]
 
         self._suppressed = False
         self._original_limit_val_batches = None
         self._original_save_top_k = {}
+        self._original_es_check_on_train = {}
+        self._original_lr_strict = {}
         logger.info(
             f"Validation restored (sparsity {current_sparsity:.2%}"
             f" reached target {target_sparsity:.2%})"

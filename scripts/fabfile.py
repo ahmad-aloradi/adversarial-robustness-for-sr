@@ -709,16 +709,20 @@ def run_sv(transfer_data="false"):
     }
 
     experiments = [
-        # 'sv_pruning_bregman',
-        "sv_pruning_bregman_ema",
-        "sv_pruning_bregman_scheduled",
-        # 'sv_pruning_mag_struct_onetime',
-        # 'sv_pruning_mag_unstruct_onetime',
-        # 'sv_pruning_mag_struct',
-        # 'sv_pruning_mag_unstruct',
-        # 'sv_wespeaker'
-        # 'sv_vanilla',
-        # 'sv_aug'
+        # #Bregman experiments
+        'sv_bregman_adabreg_warmup',
+        'sv_bregman_adabreg',
+        'sv_bregman_linbreg_warmup',
+        'sv_bregman_linbreg',
+        # #Pruning experiments
+        'sv_pruning_mag_struct_onetime',
+        'sv_pruning_mag_unstruct_onetime',
+        'sv_pruning_mag_struct',
+        'sv_pruning_mag_unstruct',
+        # #Baselines
+        'sv_wespeaker'
+        'sv_vanilla',
+        'sv_aug'
     ]
 
     # Get SV models from config directory
@@ -728,7 +732,6 @@ def run_sv(transfer_data="false"):
     ), f"Config directory {config_dir} does not exist"
     sv_models = ["wespeaker_ecapa_tdnn"]
     ramp_up_experiments = [
-        "sv_pruning_bregman_scheduled",
         "sv_pruning_mag_struct",
         "sv_pruning_mag_unstruct",
     ]
@@ -818,11 +821,7 @@ def run_sv(transfer_data="false"):
 
                 # handle epochs to ramp
                 if epochs_to_ramp:
-                    epochs_to_ramp_key = (
-                        "callbacks.model_pruning.lambda_scheduler.epochs_to_ramp"
-                        if "bregman_scheduled" in experiment
-                        else "callbacks.model_pruning.epochs_to_ramp"
-                    )
+                    epochs_to_ramp_key = "callbacks.model_pruning.epochs_to_ramp"
                     script_arguments.update(
                         {epochs_to_ramp_key: epochs_to_ramp}
                     )

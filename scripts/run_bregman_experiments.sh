@@ -96,7 +96,7 @@ echo "-----------------------------------"
 for target in $TARGETS; do
     RUN_ID=$((RUN_ID + 1))
     RUN_NAME="inverse_scale_${target}"
-    RUN_CMD="python src/train.py experiment=sv/sv_pruning_bregman callbacks.model_pruning.lambda_scheduler.target_sparsity=${target} trainer.max_epochs=${EPOCHS} seed=${SEED} tags=[bregman_verify,inverse_scale,sparsity_${target}]"
+    RUN_CMD="python src/train.py experiment=sv/sv_bregman_adabreg callbacks.model_pruning.lambda_scheduler.target_sparsity=${target} trainer.max_epochs=${EPOCHS} seed=${SEED} tags=[bregman_verify,inverse_scale,sparsity_${target}]"
 
     RUN_NAMES+=("$RUN_NAME")
     RUN_COMMANDS+=("$RUN_CMD")
@@ -123,7 +123,7 @@ echo "Wave 2: Scheduled experiment"
 echo "-----------------------------------"
 RUN_ID=$((RUN_ID + 1))
 RUN_NAME="scheduled_0.9"
-RUN_CMD="python src/train.py experiment=sv/sv_pruning_bregman_scheduled trainer.max_epochs=${EPOCHS} seed=${SEED} tags=[bregman_verify,scheduled,sparsity_0.9]"
+RUN_CMD="python src/train.py experiment=sv/sv_bregman_adabreg_warmup trainer.max_epochs=${EPOCHS} seed=${SEED} tags=[bregman_verify,scheduled,sparsity_0.9]"
 
 RUN_NAMES+=("$RUN_NAME")
 RUN_COMMANDS+=("$RUN_CMD")
@@ -148,7 +148,7 @@ echo "Wave 3: EMA experiment"
 echo "-----------------------------------"
 RUN_ID=$((RUN_ID + 1))
 RUN_NAME="ema_0.9"
-RUN_CMD="python src/train.py experiment=sv/sv_pruning_bregman_ema trainer.max_epochs=${EPOCHS} seed=${SEED} tags=[bregman_verify,ema,sparsity_0.9]"
+RUN_CMD="python src/train.py experiment=sv/sv_bregman_adabreg callbacks.model_pruning.lambda_scheduler.use_ema=true trainer.max_epochs=${EPOCHS} seed=${SEED} tags=[bregman_verify,ema,sparsity_0.9]"
 
 RUN_NAMES+=("$RUN_NAME")
 RUN_COMMANDS+=("$RUN_CMD")
