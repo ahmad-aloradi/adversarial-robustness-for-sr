@@ -45,7 +45,7 @@ class LambdaScheduler:
             raise ValueError(
                 f"acceleration_factor must be >= 0.0, got {acceleration_factor}"
             )
-        if min_lambda <= 0.0:
+        if min_lambda < 0.0:
             raise ValueError(f"min_lambda must be > 0.0, got {min_lambda}")
         if max_lambda < min_lambda:
             raise ValueError(

@@ -6,9 +6,9 @@
 defaults:
   - _self_
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
-  - /module/scoring: default
+  - /module/scoring: as_norm
   - override /callbacks: default.yaml
-  - override /datamodule: datasets/voxceleb.yaml
+  - override /datamodule: datasets/cnceleb.yaml
   - override /module: sv.yaml
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
@@ -26,8 +26,8 @@ tags:
 seed: 42
 
 trainer:
-  min_epochs: 10
-  max_epochs: 25
+  max_epochs: 50
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 
@@ -35,7 +35,7 @@ callbacks:
   model_checkpoint:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    save_top_k: ${oc.eval:'max(2, int(${trainer.max_epochs} * 0.1))'}
+    save_top_k: 5
     every_n_epochs: 1
   checkpoint_averaging:
     _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
@@ -64,11 +64,11 @@ callbacks:
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
-      initial_lambda: 1.0
+      initial_lambda: 1e-5
       target_sparsity: 0.9
       acceleration_factor: 0.05
       min_lambda: 0.0
-      max_lambda: 100
+      max_lambda: 1
 
 datamodule:
   dataset:
@@ -81,9 +81,9 @@ datamodule:
 
   loaders:
     train:
-      batch_size: 32
+      batch_size: 128
     valid:
-      batch_size: 32
+      batch_size: 128
     test:
       batch_size: 8
     enrollment:

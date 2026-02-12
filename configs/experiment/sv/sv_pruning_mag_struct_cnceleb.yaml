@@ -12,7 +12,7 @@
 #   ReduceLROnPlateau relies on validation metric monitoring which is suppressed
 #   during pruning ramp, so it will NOT work correctly. WarmupExponentialLR is
 #   epoch-based and works regardless of validation suppression.
-# - Extends max_epochs to 30 (10 epochs ramp + 20 epochs fine-tuning)
+# - Uses unified max_epochs=50 for fair baseline/Bregman/pruning comparison
 # - Keeps all sv_wespeaker augmentation settings and margin scheduling
 #
 # Usage:
@@ -40,8 +40,8 @@ tags:
 seed: 42
 
 trainer:
-  max_epochs: 30
-  min_epochs: 10
+  max_epochs: 50
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 
@@ -49,12 +49,16 @@ callbacks:
   model_checkpoint:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    save_top_k: ${oc.eval:'max(2, int(${trainer.max_epochs} * 0.1))'} # Save top 10% for averaging
+    save_top_k: 5 # Save top-5 checkpoints for averaging
     every_n_epochs: 1
+  checkpoint_averaging:
+    _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
+    num_checkpoints: 5
+    output_filename: averaged_top{num}.ckpt
   early_stopping:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    patience: 15
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'}
 
   # Progressive margin scheduler (same as sv_wespeaker)
   margin_scheduler:

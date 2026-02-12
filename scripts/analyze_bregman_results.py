@@ -210,7 +210,7 @@ def generate_comparison_table(
             tags = config.get("tags", [])
             config_type = "unknown"
             for tag in tags:
-                if tag in ["inverse_scale", "scheduled"]:
+                if tag in ["inverse_scale"]:
                     config_type = tag
                     break
 

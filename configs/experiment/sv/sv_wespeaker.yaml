@@ -50,7 +50,7 @@ callbacks:
   model_checkpoint:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    save_top_k: ${oc.eval:'max(2, int(${trainer.max_epochs} * 0.1))'} # Default: Save top-5 checkpoints for averaging
+    save_top_k: 5 # Save top-5 checkpoints for averaging
     every_n_epochs: 1
   checkpoint_averaging:
     _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
