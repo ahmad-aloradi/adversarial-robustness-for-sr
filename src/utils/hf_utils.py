@@ -38,6 +38,45 @@ def load_nemo_model(model_name: str, **kwargs: Any) -> nn.Module:
     return model
 
 
+def _load_wespeaker_pretrained(
+    model_dir: str, checkpoint_path: str
+) -> nn.Module:
+    """Load a pretrained WeSpeaker model, handling checkpoint key mismatches.
+
+    WeSpeaker checkpoints include a ``projection`` (classifier) layer that
+    is not part of the backbone architecture we instantiate.  Loading via
+    ``wespeaker.load_model_pt`` logs a warning for this expected
+    mismatch. We replicate its logic here so we can cleanly filter the key.
+    """
+    import yaml
+    from wespeaker.models.speaker_model import get_speaker_model
+
+    # Config file name varies across WeSpeaker repos
+    # (e.g. "config.yaml" vs "voxceleb_resnet152_LM.yaml").
+    yaml_files = [f for f in os.listdir(model_dir) if f.endswith(".yaml")]
+    assert len(yaml_files) == 1, (
+        f"Expected exactly 1 YAML config in {model_dir}, "
+        f"found: {yaml_files}"
+    )
+    with open(os.path.join(model_dir, yaml_files[0]), "r") as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+
+    model = get_speaker_model(config["model"])(**config["model_args"])
+
+    checkpoint = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=True
+    )
+    # The checkpoint's projection layer (classifier head) doesn't exist
+    # in the backbone — drop it so load_state_dict doesn't warn.
+    checkpoint = {
+        k: v
+        for k, v in checkpoint.items()
+        if not k.startswith("projection")
+    }
+    model.load_state_dict(checkpoint, strict=True)
+    return model
+
+
 def load_wespeaker_model(
     model_name: str,
     repo_id: str = None,
@@ -59,11 +98,11 @@ def load_wespeaker_model(
         PyTorch model (without Speaker wrapper).
     """
     try:
-        import wespeaker
         from huggingface_hub import snapshot_download
     except ImportError:
         raise ImportError(
-            "Please install required packages: pip install wespeaker huggingface_hub"
+            "Please install required packages: "
+            "pip install wespeaker huggingface_hub"
         )
 
     if repo_id is not None:
@@ -77,7 +116,7 @@ def load_wespeaker_model(
                 f"Available files: {os.listdir(model_dir)}"
             )
 
-        model = wespeaker.load_model_pt(model_dir)
+        model = _load_wespeaker_pretrained(model_dir, checkpoint_path)
         log.info(
             f"Successfully loaded pretrained WeSpeaker model from {repo_id}"
         )
@@ -94,6 +133,8 @@ def load_wespeaker_model(
         model_registry = {
             "campplus": "wespeaker.models.campplus.CAMPPlus",
             "resnet34": "wespeaker.models.resnet.ResNet34",
+            "resnet152": "wespeaker.models.resnet.ResNet152",
+            "resnet221": "wespeaker.models.resnet.ResNet221",
             "resnet293": "wespeaker.models.resnet.ResNet293",
             "redimnetb4": "wespeaker.models.redimnet.ReDimNetB4",
             "redimnetb5": "wespeaker.models.redimnet.ReDimNetB5",
