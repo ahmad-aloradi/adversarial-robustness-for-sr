@@ -84,27 +84,31 @@ loaders:
   train:
     batch_size: 32
     shuffle: True
-    num_workers: 4
+    num_workers: 8
     drop_last: True
-    pin_memory: False
+    pin_memory: True
+    persistent_workers: True
+    prefetch_factor: 3
 
   valid:
     batch_size: 32
     shuffle: False
-    num_workers: 4
+    num_workers: 8
     drop_last: False
-    pin_memory: False
+    pin_memory: True
+    persistent_workers: True
+    prefetch_factor: 3
 
   test:
     batch_size: 8
     shuffle: False
     num_workers: 4
     drop_last: False
-    pin_memory: False
+    pin_memory: True
 
   enrollment:
     batch_size: 8
     shuffle: False
     num_workers: 4
     drop_last: False
-    pin_memory: False
+    pin_memory: True
