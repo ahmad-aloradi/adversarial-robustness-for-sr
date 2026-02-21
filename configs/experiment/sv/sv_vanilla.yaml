@@ -19,8 +19,8 @@ tags: ['${oc.eval:''"${datamodule.dataset.data_dir}".split("/")[-1]''}', "sv"]
 seed: 42
 
 trainer:
-  min_epochs: 10
-  max_epochs: 15
+  max_epochs: 50 # Change this to adjust training length (all schedules auto-scale)
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% minimum
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 
@@ -28,26 +28,54 @@ callbacks:
   model_checkpoint:
     mode: max
     monitor: ${replace:"valid/__metric__"}
+    save_top_k: 5 # Save top-5 checkpoints for averaging
+    every_n_epochs: 1
+  checkpoint_averaging:
+    _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
+    num_checkpoints: ${callbacks.model_checkpoint.save_top_k} # Average the top K checkpoints
+    output_filename: averaged_top{num}.ckpt
   early_stopping:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    patience: 8
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'} # ~30% of epochs
+  # Progressive margin scheduler (WeSpeaker-style, auto-scaled to max_epochs)
+  # WeSpeaker: margin starts at 13% (20/150), ends at 27% (40/150), exponential curve
+  margin_scheduler:
+    _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
+    initial_margin: 0.0
+    final_margin: 0.2
+    start_epoch: ${oc.eval:'int(${trainer.max_epochs} * 0.133)'} # 13.3% into training (WeSpeaker: 20/150)
+    warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.133)'} # 13.3% duration (WeSpeaker: 20 epochs)
+    increase_type: exp # WeSpeaker: increase_type='exp'
 
 datamodule:
   dataset:
+    segment_duration: 3.0
     max_duration: 3.0
+    use_pre_segmentation: True
+  # Auto-scale only when virtual speakers are enabled
+  num_classes: ${oc.eval:'(${oc.select:module.data_augmentation.augmentations.wav_augmenter.speed_perturb.virtual_speakers,False}) and (${datamodule._base_num_classes} * len(${oc.select:module.data_augmentation.augmentations.wav_augmenter.speed_perturb.speed_factors,[]})) or ${datamodule._base_num_classes}'}
 
   loaders:
     train:
-      batch_size: 16
+      batch_size: 128
     valid:
-      batch_size: 16
+      batch_size: 128
     test:
       batch_size: 8
     enrollment:
       batch_size: 8
 
 module:
+  # Start with margin=0.0 (will be increased by margin_scheduler callback)
+  criterion:
+    aam:
+      _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
+      loss_fn:
+        _target_: speechbrain.nnet.losses.AdditiveAngularMargin
+        margin: 0.0
+        scale: 32.0
+
   lr_scheduler:
     scheduler:
       _target_: torch.optim.lr_scheduler.ReduceLROnPlateau

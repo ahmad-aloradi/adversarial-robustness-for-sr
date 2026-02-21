@@ -33,6 +33,7 @@ dataset:
   verbose: true
   sample_rate: 16000
   min_duration: 0.5
+  max_speakers: null # Keep all speakers; set to int to cap by total duration
 
   # Enrollment mode for evaluation:
   # - "concatenated": Use pre-concatenated enrollment file (enroll_path) - single embedding

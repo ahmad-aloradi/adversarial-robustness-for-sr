@@ -54,7 +54,9 @@ class CNCelebDataModule(LightningDataModule):
         )
 
         self.csv_processor = CsvProcessor(
-            verbose=self.hparams.dataset.get("verbose", True), fill_value="N/A"
+            verbose=self.hparams.dataset.get("verbose", True),
+            fill_value="N/A",
+            max_speakers=self.hparams.dataset.get("max_speakers", None),
         )
 
     @property
@@ -258,7 +260,9 @@ class CNCelebDataModule(LightningDataModule):
             )
 
         # Use enrollment loader config -> enroll batch_size is smaller to accomodate their length
-        assert "enrollment" in self.hparams.loaders, "Enrollment loader config is required"
+        assert (
+            "enrollment" in self.hparams.loaders
+        ), "Enrollment loader config is required"
         loader_cfg = self.hparams.loaders.get("enrollment")
 
         # Select collate function based on mode in test_filename

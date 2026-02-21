@@ -1,16 +1,16 @@
-from operator import itemgetter
-from typing import Iterator, Optional, Tuple, List, Dict, Union, Any
-from pathlib import Path
-import random
 import json
+import random
+from operator import itemgetter
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import pandas as pd
 import torch
 import torchaudio
 import torchaudio.functional as F
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
-from torch.nn.utils.rnn import pad_sequence
 
 from src.datamodules.components.common import BaseDatasetCols, DatasetItem
 from src.utils.pylogger import get_pylogger
@@ -25,7 +25,8 @@ def make_dataloader(
     collate_fn,
     batch_sampler_cfg=None,
 ) -> "torch.utils.data.DataLoader":
-    """Create a DataLoader with optional batch_sampler (e.g. PKSpeakerBatchSampler) + DDP support.
+    """Create a DataLoader with optional batch_sampler (e.g.
+    PKSpeakerBatchSampler) + DDP support.
 
     Args:
         dataset: The PyTorch Dataset to load from.
@@ -43,24 +44,44 @@ def make_dataloader(
         # Handle Hydra DictConfig: instantiate it (with _partial_=true it becomes a callable factory)
         if hasattr(batch_sampler_cfg, "_target_"):
             import hydra
+
             batch_sampler_cfg = hydra.utils.instantiate(batch_sampler_cfg)
 
         # If it's a partial/factory, call it with the dataset to get the actual sampler.
-        batch_sampler = batch_sampler_cfg(dataset) if callable(batch_sampler_cfg) else batch_sampler_cfg
+        batch_sampler = (
+            batch_sampler_cfg(dataset)
+            if callable(batch_sampler_cfg)
+            else batch_sampler_cfg
+        )
 
         # Wrap for DDP if needed (so each rank gets different batches).
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
+        if (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        ):
             if not isinstance(batch_sampler, DistributedSamplerWrapper):
-                batch_sampler = DistributedSamplerWrapper(batch_sampler, shuffle=False, drop_last=True)
+                batch_sampler = DistributedSamplerWrapper(
+                    batch_sampler, shuffle=False, drop_last=True
+                )
 
         # DataLoader cannot accept batch_size/shuffle/drop_last alongside batch_sampler.
-        kwargs = {k: v for k, v in loader_kwargs.items() if k not in ("batch_size", "shuffle", "drop_last")}
-        return DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=collate_fn, **kwargs)
+        kwargs = {
+            k: v
+            for k, v in loader_kwargs.items()
+            if k not in ("batch_size", "shuffle", "drop_last")
+        }
+        return DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            collate_fn=collate_fn,
+            **kwargs,
+        )
 
     return DataLoader(dataset, collate_fn=collate_fn, **loader_kwargs)
 
 
-######### Processing utils #########
+######### Processing utils #########  # noqa: E266
+
 
 def segment_utterance(
     speaker_id: str,
@@ -71,20 +92,21 @@ def segment_utterance(
     min_segment_duration: float,
     original_row: dict,
     base_start_time: float = 0.0,
-    vad_speech_timestamps: Optional[Union[str, List[Tuple[float, float]]]] = None,
+    vad_speech_timestamps: Optional[
+        Union[str, List[Tuple[float, float]]]
+    ] = None,
     segment_max_silence_ratio: Optional[float] = None,
 ) -> list:
-    """
-    Segment a single utterance into fixed-duration chunks.
-    
+    """Segment a single utterance into fixed-duration chunks.
+
     This is a shared utility function used across all dataset processors
     (CNCeleb, VoxCeleb, LibriSpeech) for consistent segmentation behavior.
-    
+
     Tail handling: If the remaining audio after the last full segment is shorter
     than segment_duration, it is merged into the previous segment rather than
     creating a tiny final segment. This means min_segment_duration only applies
     to recordings shorter than segment_duration (i.e., the first/only segment).
-    
+
     Args:
         speaker_id: Speaker identifier
         rel_filepath: Relative file path
@@ -97,45 +119,57 @@ def segment_utterance(
         base_start_time: Offset for absolute timestamps (e.g., from VAD)
         vad_speech_timestamps: Optional speech segments for silence filtering
         segment_max_silence_ratio: Optional max silence ratio to filter segments
-        
+
     Returns:
         List of dictionaries, each representing a segment
     """
     # Early exit: recording too short to be useful
     if recording_duration < min_segment_duration:
         return []
-    
+
     # Calculate step size (hop) between segments
     step_size = segment_duration - segment_overlap
     if step_size <= 0:
-        raise ValueError(f"segment_overlap ({segment_overlap}) must be less than segment_duration ({segment_duration})")
-    
+        raise ValueError(
+            f"segment_overlap ({segment_overlap}) must be less than segment_duration ({segment_duration})"
+        )
+
     # Build segment ID prefix from speaker_id and filepath components
-    path_no_ext = Path(rel_filepath).with_suffix('').as_posix()
-    path_tokens = path_no_ext.replace('/', '_').replace('\\', '_').split('_')
-    speaker_parts = {p.lower() for p in speaker_id.split('_')}
-    
+    path_no_ext = Path(rel_filepath).with_suffix("").as_posix()
+    path_tokens = path_no_ext.replace("/", "_").replace("\\", "_").split("_")
+    speaker_parts = {p.lower() for p in speaker_id.split("_")}
+
     unique_tokens = []
     seen_lower = set()
     for token in path_tokens:
         token_lower = token.lower()
-        if token and token_lower not in speaker_parts and token_lower not in seen_lower:
+        if (
+            token
+            and token_lower not in speaker_parts
+            and token_lower not in seen_lower
+        ):
             unique_tokens.append(token)
             seen_lower.add(token_lower)
-    
-    segment_prefix = f"{speaker_id}_{'_'.join(unique_tokens)}" if unique_tokens else speaker_id
-    
+
+    segment_prefix = (
+        f"{speaker_id}_{'_'.join(unique_tokens)}"
+        if unique_tokens
+        else speaker_id
+    )
+
     # Handle VAD chunk suffix if present - extract just the vad index (e.g., 'vad00')
-    if isinstance(original_row, dict) and original_row.get('vad_chunk_id'):
-        vad_chunk_id = str(original_row.get('vad_chunk_id'))
+    if isinstance(original_row, dict) and original_row.get("vad_chunk_id"):
+        vad_chunk_id = str(original_row.get("vad_chunk_id"))
         # Extract just the vad index after '::' (e.g., 'path/to/file.flac::vad00' -> 'vad00')
-        if '::' in vad_chunk_id:
-            vad_suffix = vad_chunk_id.split('::')[-1]
+        if "::" in vad_chunk_id:
+            vad_suffix = vad_chunk_id.split("::")[-1]
         else:
-            vad_suffix = vad_chunk_id.replace('/', '_').replace('\\', '_')
+            vad_suffix = vad_chunk_id.replace("/", "_").replace("\\", "_")
         segment_prefix = f"{segment_prefix}::{vad_suffix}"
 
-    def _parse_speech_segments(value: Optional[Union[str, List[Tuple[float, float]]]]) -> Optional[List[Tuple[float, float]]]:
+    def _parse_speech_segments(
+        value: Optional[Union[str, List[Tuple[float, float]]]]
+    ) -> Optional[List[Tuple[float, float]]]:
         if value is None:
             return None
         if isinstance(value, list):
@@ -152,7 +186,9 @@ def segment_utterance(
                 return None
         return None
 
-    def _speech_fraction(seg_start: float, seg_end: float, speech: List[Tuple[float, float]]) -> float:
+    def _speech_fraction(
+        seg_start: float, seg_end: float, speech: List[Tuple[float, float]]
+    ) -> float:
         if seg_end <= seg_start:
             return 0.0
         total = 0.0
@@ -175,18 +211,20 @@ def segment_utterance(
 
     while start_time < recording_duration:
         remaining = recording_duration - start_time
-        
+
         # Tail merging: if remaining < segment_duration and we have previous segments,
         # extend the last segment to cover the remainder instead of creating a short one.
         if segments and remaining < segment_duration:
             last_seg = segments[-1]
-            last_start_abs = float(last_seg['start_time'])
+            last_start_abs = float(last_seg["start_time"])
             merged_end_abs = base_start_time + recording_duration
-            
+
             # Only merge if it doesn't exceed silence threshold
             if not _exceeds_silence_threshold(last_start_abs, merged_end_abs):
-                last_seg['end_time'] = round(merged_end_abs, 3)
-                last_seg['segment_duration'] = round(merged_end_abs - last_start_abs, 3)
+                last_seg["end_time"] = round(merged_end_abs, 3)
+                last_seg["segment_duration"] = round(
+                    merged_end_abs - last_start_abs, 3
+                )
             break
 
         # Calculate segment boundaries
@@ -203,52 +241,61 @@ def segment_utterance(
         # since start_time and end_time are absolute file timestamps.
         # This ensures the dataloader can correctly validate segment boundaries.
         absolute_recording_duration = base_start_time + recording_duration
-        
+
         # Compute num_frames at sample rate for precise loading
-        sample_rate = original_row.get('sample_rate')
+        sample_rate = original_row.get("sample_rate")
         if isinstance(sample_rate, str):
             sample_rate = int(sample_rate)
-        
+
         # IMPORTANT: int ensures we never request frames beyond what's available -> (pfs.seek error)
         start_frame = int(start_time_abs * sample_rate)
         end_frame = int(end_time_abs * sample_rate)
         segment_num_frames = end_frame - start_frame
-        
+
         segment = {
-            'segment_id': f"{segment_prefix}_seg{segment_idx:04d}",
-            'speaker_id': speaker_id,
-            'rel_filepath': rel_filepath,
-            'start_time': start_time_abs,
-            'end_time': end_time_abs,
-            'num_frames': segment_num_frames,
-            'segment_duration': segment_num_frames / sample_rate,
-            'recording_duration': absolute_recording_duration,
+            "segment_id": f"{segment_prefix}_seg{segment_idx:04d}",
+            "speaker_id": speaker_id,
+            "rel_filepath": rel_filepath,
+            "start_time": start_time_abs,
+            "end_time": end_time_abs,
+            "num_frames": segment_num_frames,
+            "segment_duration": segment_num_frames / sample_rate,
+            "recording_duration": absolute_recording_duration,
             **{
-                k: v for k, v in original_row.items() if k not in [
-                    'speaker_id', 'rel_filepath', 'recording_duration',
-                    'vad_chunk_id', 'vad_speech_timestamps']  # Exclude redundant VAD fields
-                }
+                k: v
+                for k, v in original_row.items()
+                if k
+                not in [
+                    "speaker_id",
+                    "rel_filepath",
+                    "recording_duration",
+                    "vad_chunk_id",
+                    "vad_speech_timestamps",
+                ]  # Exclude redundant VAD fields
+            },
         }
         segments.append(segment)
         segment_idx += 1
         start_time += step_size
-    
+
     return segments
 
 
 class CsvProcessor:
-    """
-    Utility class for handling CSV files with metadata.
-    """
-        
-    def __init__(self, verbose: bool = False, fill_value: str = 'N/A'):
+    """Utility class for handling CSV files with metadata."""
+
+    def __init__(
+        self,
+        verbose: bool = False,
+        fill_value: str = "N/A",
+        max_speakers: int | None = None,
+    ):
         self.verbose = verbose
         self.fill_value = fill_value
+        self.max_speakers = max_speakers
 
-
-    def read_csv(self, csv_path: str, sep: str = '|') -> pd.DataFrame:
-        """
-        Read CSV file and return DataFrame
+    def read_csv(self, csv_path: str, sep: str = "|") -> pd.DataFrame:
+        """Read CSV file and return DataFrame.
 
         Args:
             csv_path: Path to CSV file
@@ -261,19 +308,19 @@ class CsvProcessor:
         df = pd.read_csv(csv_path, sep=sep)
         return df.fillna(self.fill_value)
 
+    def concatenate_metadata(
+        self, csv_paths, fill_value="N/A", speaker_id_col="speaker_id", sep="|"
+    ) -> pd.DataFrame:
+        """Concatenate multiple CSVs with handling for different columns and
+        unique IDs.
 
-    def concatenate_metadata(self, csv_paths, fill_value='N/A', speaker_id_col='speaker_id', sep='|'
-                             ) -> pd.DataFrame:
-        """
-        Concatenate multiple CSVs with handling for different columns and unique IDs.
-        
         Args:
             csv_paths (list): List of paths to CSV files
             fill_value: Value to fill missing columns with (default: None)
             speaker_id_col (str): Name of the speaker ID column (default: 'speaker_id')
             utterance_id_col (str): Name of the utterance ID column (default: 'utterance_id')
             rel_path_col (str): Name of the relative path column (default: 'rel_path')
-        
+
         Returns:
             pd.DataFrame: Concatenated DataFrame with unique IDs
         """
@@ -281,61 +328,63 @@ class CsvProcessor:
         dfs = []
         for path in csv_paths:
             dfs.append(self.read_csv(path, sep=sep))
-        
-        combined_df = pd.concat(dfs, ignore_index=True)        
+
+        combined_df = pd.concat(dfs, ignore_index=True)
         # Ensure speaker IDs are unique by adding prefix if needed
         if speaker_id_col in combined_df.columns:
             speaker_counts = combined_df[speaker_id_col].value_counts()
             duplicate_speakers = speaker_counts[speaker_counts > 1].index
-           
+
             for speaker in duplicate_speakers:
                 mask = combined_df[speaker_id_col] == speaker
                 indices = combined_df[mask].index
                 for i, idx in enumerate(indices):
                     if i > 0:  # Skip first occurrence
-                        combined_df.loc[idx, speaker_id_col] = f"{speaker}_v{i}"
-                    
+                        combined_df.loc[
+                            idx, speaker_id_col
+                        ] = f"{speaker}_v{i}"
 
         return combined_df.fillna(fill_value)
 
-
     @staticmethod
-    def concatenate_csvs(csv_paths: Union[str, List[str]],
-                         fill_value='N/A',
-                         rel_path_col=DATESET_CLS.REL_FILEPATH,
-                         sep='|') -> pd.DataFrame:
-        """
-        Concatenate multiple CSVs with handling for different columns and unique paths.
-        
+    def concatenate_csvs(
+        csv_paths: Union[str, List[str]],
+        fill_value="N/A",
+        rel_path_col=DATESET_CLS.REL_FILEPATH,
+        sep="|",
+    ) -> pd.DataFrame:
+        """Concatenate multiple CSVs with handling for different columns and
+        unique paths.
+
         Args:
             csv_paths (list): List of paths to CSV files
             fill_value: Value to fill missing columns with (default: None)
             rel_path_col (str): Name of the relative path column (default: 'rel_path')
-        
+
         Returns:
             pd.DataFrame: Concatenated DataFrame with unique IDs
         """
         # Read all CSVs and store their DataFrames
         if isinstance(csv_paths, str):
             csv_paths = [csv_paths]
-        
+
         dfs = []
         for path in csv_paths:
-            df = pd.read_csv(path, sep=sep)                
+            df = pd.read_csv(path, sep=sep)
             dfs.append(df)
-        
+
         # Concatenate all DataFrames
         combined_df = pd.concat(dfs, ignore_index=True)
-        
+
         # Check for duplicates based on data structure.
         # - Pre-segmented data: unique by 'segment_id'
         # - VAD-split file-level data: unique by 'vad_chunk_id'
         # - Otherwise: unique by relative path
         unique_key = None
-        if 'segment_id' in combined_df.columns:
-            unique_key = 'segment_id'
-        elif 'vad_chunk_id' in combined_df.columns:
-            unique_key = 'vad_chunk_id'
+        if "segment_id" in combined_df.columns:
+            unique_key = "segment_id"
+        elif "vad_chunk_id" in combined_df.columns:
+            unique_key = "vad_chunk_id"
 
         if unique_key is not None:
             duplicate_counts = combined_df[unique_key].value_counts()
@@ -353,194 +402,295 @@ class CsvProcessor:
                 for filepath, count in duplicates.items():
                     error_msg += f"- '{filepath}' appears {count} times\n"
                 raise ValueError(error_msg)
-            
+
         # Fill missing values
         combined_df = combined_df.fillna(fill_value)
-        
+
         return combined_df
 
-
     @staticmethod
-    def append_speaker_stats(df: pd.DataFrame, 
-                             speaker_stats: pd.DataFrame,
-                             col_id: str = DATESET_CLS.SPEAKER_ID) -> pd.DataFrame:
-        """Append speaker stats to metadata"""
-        df = df.merge(speaker_stats, on=col_id, how='left')
-        df = df.sort_values('total_dur/spk', ascending=False)
+    def append_speaker_stats(
+        df: pd.DataFrame,
+        speaker_stats: pd.DataFrame,
+        col_id: str = DATESET_CLS.SPEAKER_ID,
+    ) -> pd.DataFrame:
+        """Append speaker stats to metadata."""
+        df = df.merge(speaker_stats, on=col_id, how="left")
+        df = df.sort_values("total_dur/spk", ascending=False)
         df = df.reset_index(drop=True)
         return df
 
-
     @staticmethod
-    def get_speakers_stats(df: pd.DataFrame,
-                           col_id: str = DATESET_CLS.SPEAKER_ID,
-                           duration_col: str = DATESET_CLS.REC_DURATION,
-                           rounding: int = 4) -> pd.DataFrame:
-        speaker_stats = df.groupby(col_id).agg(
-            {duration_col: ['sum', 'mean', 'count']}).round(rounding)
+    def get_speakers_stats(
+        df: pd.DataFrame,
+        col_id: str = DATESET_CLS.SPEAKER_ID,
+        duration_col: str = DATESET_CLS.REC_DURATION,
+        rounding: int = 4,
+    ) -> pd.DataFrame:
+        speaker_stats = (
+            df.groupby(col_id)
+            .agg({duration_col: ["sum", "mean", "count"]})
+            .round(rounding)
+        )
 
-        speaker_stats.columns = pd.MultiIndex.from_tuples([
-            (duration_col, 'total_dur/spk'),
-            (duration_col, 'mean_dur/spk'),
-            (duration_col, 'utterances/spk')
-        ])
+        speaker_stats.columns = pd.MultiIndex.from_tuples(
+            [
+                (duration_col, "total_dur/spk"),
+                (duration_col, "mean_dur/spk"),
+                (duration_col, "utterances/spk"),
+            ]
+        )
         speaker_stats.columns = speaker_stats.columns.get_level_values(1)
         # Reset index to make speaker_id a column
         speaker_stats = speaker_stats.reset_index()
         return speaker_stats
 
-
     @staticmethod
-    def generate_training_ids(combined_df: pd.DataFrame,
-                              id_col: str = DATESET_CLS.SPEAKER_ID,
-                              verbose=True) -> pd.DataFrame:
-        """
-        Generate training IDs from combined VoxCeleb1 and VoxCeleb2 metadata
+    def generate_training_ids(
+        combined_df: pd.DataFrame,
+        id_col: str = DATESET_CLS.SPEAKER_ID,
+        verbose=True,
+    ) -> pd.DataFrame:
+        """Generate training IDs from combined VoxCeleb1 and VoxCeleb2
+        metadata.
 
         Args:
             metadata_files: List of paths to metadata CSV files
-            
+
         Returns:
             Dictionary mapping original speaker IDs to numerical training IDs
-            
+
         Example:
             {'id1': 0, 'id2': 1, ...}
-        """        
+        """
         # Sort speakers for consistent ordering
         sorted_speakers = sorted(combined_df[id_col].unique())
 
         # Create mapping dictionary
-        speaker_to_id = {speaker: idx for idx, speaker in enumerate(sorted_speakers)}
-        
+        speaker_to_id = {
+            speaker: idx for idx, speaker in enumerate(sorted_speakers)
+        }
+
         if verbose:
-            log.info(f"Generated training IDs for {len(speaker_to_id)} unique speakers")
+            log.info(
+                f"Generated training IDs for {len(speaker_to_id)} unique speakers"
+            )
 
         return speaker_to_id
 
-
     @staticmethod
-    def update_metadata_with_training_ids(df: pd.DataFrame,
-                                          speaker_to_id: Dict[str, int],
-                                          id_col: str = DATESET_CLS.SPEAKER_ID, 
-                                          verbose: bool = True,
-                                          class_id_col: str = DATESET_CLS.CLASS_ID) -> pd.DataFrame:
-        """
-        Update metadata CSV file with training_id column
-        
+    def update_metadata_with_training_ids(
+        df: pd.DataFrame,
+        speaker_to_id: Dict[str, int],
+        id_col: str = DATESET_CLS.SPEAKER_ID,
+        verbose: bool = True,
+        class_id_col: str = DATESET_CLS.CLASS_ID,
+    ) -> pd.DataFrame:
+        """Update metadata CSV file with training_id column.
+
         Args:
             df: metadata as da dataframe
             speaker_to_id: Dictionary mapping speaker IDs to training IDs
             backup: Whether to create backup of original file
-        """                        
+        """
         # Add class_id column
         df_copy = df.copy()
         df_copy[class_id_col] = df_copy[id_col].map(speaker_to_id).astype(int)
-        
+
         # Verify no missing mappings
         missing_ids = df_copy[df_copy[class_id_col].isna()][id_col].unique()
         if len(missing_ids) > 0:
-            raise RuntimeWarning(f"Warning: No training ID mapping for speakers: {missing_ids}")
-        
+            raise RuntimeWarning(
+                f"Warning: No training ID mapping for speakers: {missing_ids}"
+            )
+
         if verbose:
             log.info(f"Total speakers: {len(df_copy[id_col].unique())}")
-        
+
         return df_copy
 
+    @staticmethod
+    def filter_top_speakers(
+        df: pd.DataFrame,
+        max_speakers: int,
+        speaker_id_col: str = DATESET_CLS.SPEAKER_ID,
+        duration_col: str = DATESET_CLS.REC_DURATION,
+    ) -> pd.DataFrame:
+        """Keep top N speakers ranked by total recording duration."""
+        speaker_totals = (
+            df.groupby(speaker_id_col)[duration_col]
+            .sum()
+            .sort_values(ascending=False)
+        )
+        n_total = len(speaker_totals)
+        top_speakers = speaker_totals.head(max_speakers).index
+        kept = df[df[speaker_id_col].isin(top_speakers)].copy()
+        min_dur = speaker_totals.loc[top_speakers].min()
+        log.info(
+            f"Speaker cap: keeping top {max_speakers} of {n_total} speakers "
+            f"(min total duration of kept speakers: {min_dur:.1f}s)"
+        )
+        return kept
 
-    def process(self,
-                dataset_files: List[str],
-                spks_metadata_paths: List[str],
-                speaker_id_col: str = DATESET_CLS.SPEAKER_ID,
-                rel_path_col: str = DATESET_CLS.REL_FILEPATH,
-                duration_col: str = DATESET_CLS.REC_DURATION,
-                rounding: int = 4,
-                class_id: str = DATESET_CLS.CLASS_ID,
-                verbose: bool = True,
-                sep: str = '|') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        
+    def process(
+        self,
+        dataset_files: List[str],
+        spks_metadata_paths: List[str],
+        speaker_id_col: str = DATESET_CLS.SPEAKER_ID,
+        rel_path_col: str = DATESET_CLS.REL_FILEPATH,
+        duration_col: str = DATESET_CLS.REC_DURATION,
+        rounding: int = 4,
+        class_id: str = DATESET_CLS.CLASS_ID,
+        verbose: bool = True,
+        sep: str = "|",
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+
         # read and append metadata
-        dataset_df = self.concatenate_csvs(dataset_files, fill_value=self.fill_value, rel_path_col=rel_path_col, sep=sep)
+        dataset_df = self.concatenate_csvs(
+            dataset_files,
+            fill_value=self.fill_value,
+            rel_path_col=rel_path_col,
+            sep=sep,
+        )
+
+        # Apply speaker cap if configured
+        if self.max_speakers is not None:
+            dataset_df = self.filter_top_speakers(
+                dataset_df,
+                self.max_speakers,
+                speaker_id_col=speaker_id_col,
+                duration_col=duration_col,
+            )
 
         # generate training ids
-        speaker_to_id = self.generate_training_ids(dataset_df, id_col=speaker_id_col, verbose=verbose)
+        speaker_to_id = self.generate_training_ids(
+            dataset_df, id_col=speaker_id_col, verbose=verbose
+        )
 
-        # append training ids to metadata        
-        updated_dataset_df = self.update_metadata_with_training_ids(df=dataset_df,
-                                                                    speaker_to_id=speaker_to_id,
-                                                                    id_col=speaker_id_col,
-                                                                    verbose=verbose,
-                                                                    class_id_col=class_id)
+        # append training ids to metadata
+        updated_dataset_df = self.update_metadata_with_training_ids(
+            df=dataset_df,
+            speaker_to_id=speaker_to_id,
+            id_col=speaker_id_col,
+            verbose=verbose,
+            class_id_col=class_id,
+        )
 
         # get speaker stats
-        speaker_stats = self.get_speakers_stats(df=updated_dataset_df,
-                                                col_id=speaker_id_col,
-                                                duration_col=duration_col,
-                                                rounding=rounding)
+        speaker_stats = self.get_speakers_stats(
+            df=updated_dataset_df,
+            col_id=speaker_id_col,
+            duration_col=duration_col,
+            rounding=rounding,
+        )
 
         # append speaker stats to metadata
-        final_df = self.append_speaker_stats(df=updated_dataset_df, speaker_stats=speaker_stats, col_id=speaker_id_col)
+        final_df = self.append_speaker_stats(
+            df=updated_dataset_df,
+            speaker_stats=speaker_stats,
+            col_id=speaker_id_col,
+        )
 
         # get combined speakers' metadata
-        combined_metadatda = self.concatenate_metadata(spks_metadata_paths, 
-                                                       fill_value='N/A',
-                                                       speaker_id_col=speaker_id_col,
-                                                       sep=sep)
+        combined_metadatda = self.concatenate_metadata(
+            spks_metadata_paths,
+            fill_value="N/A",
+            speaker_id_col=speaker_id_col,
+            sep=sep,
+        )
 
-        speaker_to_id_df = self.lookup_with_metadata(speaker_to_id=speaker_to_id, 
-                                                     speaker_stats=speaker_stats,
-                                                     metadata=combined_metadatda,
-                                                     speaker_id_col=speaker_id_col,
-                                                     class_id=class_id)
+        speaker_to_id_df = self.lookup_with_metadata(
+            speaker_to_id=speaker_to_id,
+            speaker_stats=speaker_stats,
+            metadata=combined_metadatda,
+            speaker_id_col=speaker_id_col,
+            class_id=class_id,
+        )
 
         # Log final duration statistics (uses segment_duration if pre-segmented, else recording_duration)
         if self.verbose:
-            dur_col = 'segment_duration' if 'segment_duration' in final_df.columns else duration_col
+            dur_col = (
+                "segment_duration"
+                if "segment_duration" in final_df.columns
+                else duration_col
+            )
             if dur_col in final_df.columns:
-                total_hours = float(final_df[dur_col].sum()) / 3600.0 if len(final_df) else 0.0
+                total_hours = (
+                    float(final_df[dur_col].sum()) / 3600.0
+                    if len(final_df)
+                    else 0.0
+                )
                 # Log per dataset_name if available
-                if 'dataset_name' in final_df.columns:
-                    for ds_name, ds_group in final_df.groupby('dataset_name'):
+                if "dataset_name" in final_df.columns:
+                    for ds_name, ds_group in final_df.groupby("dataset_name"):
                         ds_hours = float(ds_group[dur_col].sum()) / 3600.0
-                        log.info(f"Final duration ({ds_name}): {ds_hours:.3f} hours")
+                        log.info(
+                            f"Final duration ({ds_name}): {ds_hours:.3f} hours"
+                        )
                         # Log per source within each dataset if available
-                        if 'source' in ds_group.columns:
-                            for src, src_hours in ds_group.groupby('source')[dur_col].sum().sort_index().items():
-                                log.info(f"  └─ {src}: {float(src_hours) / 3600.0:.3f} hours")
-                elif 'source' in final_df.columns:
+                        if "source" in ds_group.columns:
+                            for src, src_hours in (
+                                ds_group.groupby("source")[dur_col]
+                                .sum()
+                                .sort_index()
+                                .items()
+                            ):
+                                log.info(
+                                    f"  └─ {src}: {float(src_hours) / 3600.0:.3f} hours"
+                                )
+                elif "source" in final_df.columns:
                     # No dataset_name but source exists
-                    for src, src_hours in final_df.groupby('source')[dur_col].sum().sort_index().items():
-                        log.info(f"Final duration ({src}): {float(src_hours) / 3600.0:.3f} hours")
+                    for src, src_hours in (
+                        final_df.groupby("source")[dur_col]
+                        .sum()
+                        .sort_index()
+                        .items()
+                    ):
+                        log.info(
+                            f"Final duration ({src}): {float(src_hours) / 3600.0:.3f} hours"
+                        )
                 log.info(f"Final duration (total): {total_hours:.3f} hours")
 
         return final_df, speaker_to_id_df
-            
 
-    def lookup_with_metadata(self,
-                             speaker_to_id: Dict,
-                             speaker_stats: pd.DataFrame,
-                             metadata: pd.DataFrame,
-                             speaker_id_col: str = DATESET_CLS.SPEAKER_ID,
-                             class_id: str = DATESET_CLS.CLASS_ID) -> pd.DataFrame:
+    def lookup_with_metadata(
+        self,
+        speaker_to_id: Dict,
+        speaker_stats: pd.DataFrame,
+        metadata: pd.DataFrame,
+        speaker_id_col: str = DATESET_CLS.SPEAKER_ID,
+        class_id: str = DATESET_CLS.CLASS_ID,
+    ) -> pd.DataFrame:
         # Save speaker lookup table with class IDs
-        speaker_to_id_df = pd.DataFrame({speaker_id_col: speaker_to_id.keys(), class_id: speaker_to_id.values()})
-        speaker_to_id_df = self.append_speaker_stats(df=speaker_to_id_df, speaker_stats=speaker_stats, col_id=speaker_id_col)
-        speaker_to_id_df = speaker_to_id_df.merge(metadata, on=speaker_id_col, how='left')
+        speaker_to_id_df = pd.DataFrame(
+            {
+                speaker_id_col: speaker_to_id.keys(),
+                class_id: speaker_to_id.values(),
+            }
+        )
+        speaker_to_id_df = self.append_speaker_stats(
+            df=speaker_to_id_df,
+            speaker_stats=speaker_stats,
+            col_id=speaker_id_col,
+        )
+        speaker_to_id_df = speaker_to_id_df.merge(
+            metadata, on=speaker_id_col, how="left"
+        )
         return speaker_to_id_df
-
 
     @staticmethod
     def split_dataset(
-            df: pd.DataFrame,
-            train_ratio: float = 0.95,
-            speaker_overlap: bool = False,
-            save_csv: bool = True,
-            speaker_id_col: str = "speaker_id",
-            train_csv: str = "train.csv",
-            val_csv: str = "validation.csv",
-            sep: str = '|',
-            seed: int = 42,
-            fill_value: str = 'N/A'
-            ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
+        df: pd.DataFrame,
+        train_ratio: float = 0.95,
+        speaker_overlap: bool = False,
+        save_csv: bool = True,
+        speaker_id_col: str = "speaker_id",
+        train_csv: str = "train.csv",
+        val_csv: str = "validation.csv",
+        sep: str = "|",
+        seed: int = 42,
+        fill_value: str = "N/A",
+    ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame]]:
         """Splits a dataset into training and validation sets.
 
         Parameters:
@@ -570,7 +720,7 @@ class CsvProcessor:
             random.seed(seed)
             random.shuffle(speakers)
 
-            train_speakers = speakers[:int(len(speakers) * train_ratio)]
+            train_speakers = speakers[: int(len(speakers) * train_ratio)]
             train_df = df[df[speaker_id_col].isin(train_speakers)]
             val_df = df[~df[speaker_id_col].isin(train_speakers)]
 
@@ -583,12 +733,13 @@ class CsvProcessor:
 
 
 class AudioProcessor:
-    """Handles audio loading and preprocessing"""
+    """Handles audio loading and preprocessing."""
+
     def __init__(self, sample_rate: int = 16000):
         self.sample_rate = sample_rate
 
     def load_audio(self, audio_path: str) -> Tuple[torch.Tensor, int]:
-        """Load audio file and return waveform and sample rate"""
+        """Load audio file and return waveform and sample rate."""
         try:
             waveform, sr = torchaudio.load(audio_path)
             return waveform, sr
@@ -598,88 +749,93 @@ class AudioProcessor:
             raise RuntimeError(msg) from e
 
     def convert_to_mono(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Convert multi-channel audio to mono"""
+        """Convert multi-channel audio to mono."""
         if waveform.shape[0] > 1:
             return torch.mean(waveform, dim=0, keepdim=True)
         return waveform
 
     def resample(self, waveform: torch.Tensor, orig_sr: int) -> torch.Tensor:
-        """Resample audio to target sample rate"""
+        """Resample audio to target sample rate."""
         if orig_sr == self.sample_rate:
             return waveform
         return torchaudio.functional.resample(
-                waveform, 
-                orig_freq=orig_sr, 
-                new_freq=self.sample_rate
-            )
+            waveform, orig_freq=orig_sr, new_freq=self.sample_rate
+        )
 
-    def normalize_audio(self, waveform: torch.Tensor, method: str = "rms", target_level: float = -20.0, 
-                        clip_limit: float = 0.999, epsilon: float = 1e-8) -> torch.Tensor:
-        """
-        Normalize audio using various methods to handle different scenarios better than simple max normalization.
-        
+    def normalize_audio(
+        self,
+        waveform: torch.Tensor,
+        method: str = "rms",
+        target_level: float = -20.0,
+        clip_limit: float = 0.999,
+        epsilon: float = 1e-8,
+    ) -> torch.Tensor:
+        """Normalize audio using various methods to handle different scenarios
+        better than simple max normalization.
+
         Args:
             waveform: Input waveform tensor of shape (1, samples)
             method: Normalization method: 'peak', 'rms', 'percentile', or 'dynamic'
             target_level: Target level in dB for RMS normalization (typically -20 dB)
             clip_limit: Clipping limit for preventing excessive amplification (0-1)
             epsilon: Small value to prevent division by zero
-            
+
         Returns:
             Normalized waveform tensor of shape (1, samples)
         """
         waveform = waveform.squeeze(0)
         assert waveform.dim() == 1, "Expected single-channel audio"
-        
+
         # Center the waveform by removing DC offset
         waveform = waveform - waveform.mean()
-        
+
         if method == "peak":
             # Traditional peak normalization
             peak = waveform.abs().max() + epsilon
             waveform = waveform / peak
-            
+
         elif method == "rms":
             # RMS normalization (based on signal energy)
-            rms = torch.sqrt(torch.mean(waveform ** 2))
+            rms = torch.sqrt(torch.mean(waveform**2))
             target_rms = 10 ** (target_level / 20)  # Convert dB to linear
             gain = target_rms / (rms + epsilon)
             waveform = waveform * gain
-            
+
         elif method == "percentile":
             # Percentile-based normalization (robust to outliers)
             sorted_abs = torch.sort(waveform.abs())[0]
             idx = min(int(len(sorted_abs) * 0.995), len(sorted_abs) - 1)
             ref_level = sorted_abs[idx] + epsilon
             waveform = waveform / ref_level
-            
+
         elif method == "dynamic":
             # Dynamic range compression (logarithmic compression)
             sign = torch.sign(waveform)
             abs_wave = waveform.abs() + epsilon
-            compressed = sign * torch.log1p(abs_wave) / torch.log1p(torch.tensor(1.0))
+            compressed = (
+                sign * torch.log1p(abs_wave) / torch.log1p(torch.tensor(1.0))
+            )
             peak = compressed.abs().max() + epsilon
             waveform = compressed / peak
-        
+
         else:
             raise ValueError(f"Unsupported normalization method: {method}")
-        
+
         # Apply clipping to prevent excessive values
         if clip_limit < 1.0:
             waveform = torch.clamp(waveform, min=-clip_limit, max=clip_limit)
-        
+
         return waveform.unsqueeze(0)
 
     def resolve_path(self, audio_path: str) -> Path:
-        """
-        Safely resolve and validate audio file path
-        
+        """Safely resolve and validate audio file path.
+
         Args:
             audio_path: Path to audio file
-        
+
         Returns:
             Resolved absolute path
-            
+
         Raises:
             FileNotFoundError: If file doesn't exist
             ValueError: If path is invalid or file is empty
@@ -695,12 +851,11 @@ class AudioProcessor:
             raise ValueError(f"Invalid audio path {audio_path}: {str(e)}")
 
     def process_audio(self, audio_path: str) -> torch.Tensor:
-        """
-        Complete audio processing pipeline with robust path handling
-        
+        """Complete audio processing pipeline with robust path handling.
+
         Args:
             audio_path: Path to audio file
-            
+
         Returns:
             Processed audio tensor
         """
@@ -713,66 +868,65 @@ class AudioProcessor:
             waveform = self.resample(waveform, orig_sr=sr)
             waveform = self.normalize_audio(waveform)
             return waveform.squeeze(0), self.sample_rate
-            
+
         except FileNotFoundError as e:
-            raise FileNotFoundError(f"Audio file not found: {audio_path}") from e
-        
+            raise FileNotFoundError(
+                f"Audio file not found: {audio_path}"
+            ) from e
+
         except Exception as e:
-            raise RuntimeError(f"Error processing audio file {audio_path}: {str(e)}") from e
+            raise RuntimeError(
+                f"Error processing audio file {audio_path}: {str(e)}"
+            ) from e
 
     def apply_preemphasis(
-        self,
-        waveform: torch.Tensor,
-        coeff: float = 0.97
+        self, waveform: torch.Tensor, coeff: float = 0.97
     ) -> torch.Tensor:
-        """
-        Apply pre-emphasis using torchaudio's functional API
-        
+        """Apply pre-emphasis using torchaudio's functional API.
+
         Args:
             waveform: Input waveform tensor of shape (channels, samples) or (samples,)
             coeff: Pre-emphasis coefficient (default: 0.97)
-            
+
         Returns:
             Pre-emphasized waveform of same shape as input
         """
         # Ensure 2D input
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
-            
+
         return F.preemphasis(waveform, coeff)
-    
+
     def remove_preemphasis(
-        self,
-        waveform: torch.Tensor,
-        coeff: float = 0.97
+        self, waveform: torch.Tensor, coeff: float = 0.97
     ) -> torch.Tensor:
-        """
-        Apply de-emphasis using torchaudio's functional API
-        
+        """Apply de-emphasis using torchaudio's functional API.
+
         Args:
             waveform: Pre-emphasized waveform tensor of shape (channels, samples) or (samples,)
             coeff: Pre-emphasis coefficient (default: 0.97)
-            
+
         Returns:
             De-emphasized waveform of same shape as input
         """
         # Ensure 2D input
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
-            
+
         return F.deemphasis(waveform, coeff)
 
 
-######### Datasets #########
+######### Datasets #########  # noqa: E266
+
 
 class BaseCollate:
     """Static collate class for batching data items."""
+
     def __init__(self, pad_value: float = 0.0):
         self.pad_value = pad_value
-    
+
     def __call__(self, batch: list[DatasetItem]) -> DatasetItem:
-        """
-        Collate a batch of DatasetItems into a single batched DatasetItem.
+        """Collate a batch of DatasetItems into a single batched DatasetItem.
 
         Args:
             batch: List of DatasetItem instances to be collated
@@ -781,20 +935,44 @@ class BaseCollate:
             DatasetItem: Batched data with padded sequences and processed labels
         """
         # Unzip the batch into separate lists
-        waveforms, speaker_ids, class_id, audio_paths, nationalities, genders, \
-        sample_rates, recording_durations, texts = zip(
-            *[(item.audio, item.speaker_id, item.class_id, item.audio_path, item.country,
-               item.gender, item.sample_rate, item.recording_duration, item.text) 
-              for item in batch]
+        (
+            waveforms,
+            speaker_ids,
+            class_id,
+            audio_paths,
+            nationalities,
+            genders,
+            sample_rates,
+            recording_durations,
+            texts,
+        ) = zip(
+            *[
+                (
+                    item.audio,
+                    item.speaker_id,
+                    item.class_id,
+                    item.audio_path,
+                    item.country,
+                    item.gender,
+                    item.sample_rate,
+                    item.recording_duration,
+                    item.text,
+                )
+                for item in batch
+            ]
         )
-        
+
         # Process audio lengths and pad sequences
         lengths = torch.tensor([wav.shape[0] for wav in waveforms])
-        padded_waveforms = pad_sequence(waveforms, batch_first=True, padding_value=self.pad_value)
-        
+        padded_waveforms = pad_sequence(
+            waveforms, batch_first=True, padding_value=self.pad_value
+        )
+
         # Convert gender labels to numerical values
-        gender_labels = torch.tensor([0.0 if gender == 'male' else 1.0 for gender in genders])
-        
+        gender_labels = torch.tensor(
+            [0.0 if gender == "male" else 1.0 for gender in genders]
+        )
+
         return DatasetItem(
             audio=padded_waveforms,
             speaker_id=speaker_ids,
@@ -805,24 +983,30 @@ class BaseCollate:
             gender=gender_labels,
             sample_rate=sample_rates,
             recording_duration=recording_durations,
-            text=texts
+            text=texts,
         )
 
 
 class BaseDataset(Dataset):
-    """Static base dataset class for audio processing and feature extraction."""
-    
+    """Static base dataset class for audio processing and feature
+    extraction."""
+
     DATASET_CLS = BaseDatasetCols()
-    
+
     @staticmethod
-    def _calculate_max_samples(max_duration: Union[None, float, int], sample_rate: int) -> int:
-        """Calculate maximum number of samples based on duration and sample rate."""
+    def _calculate_max_samples(
+        max_duration: Union[None, float, int], sample_rate: int
+    ) -> int:
+        """Calculate maximum number of samples based on duration and sample
+        rate."""
         if max_duration is None or max_duration == -1:
             return -1
         if max_duration > 0:
             return int(max_duration * sample_rate)
-        raise ValueError(f"max_duration must be -1, None, or a positive number, got {max_duration}")
-    
+        raise ValueError(
+            f"max_duration must be -1, None, or a positive number, got {max_duration}"
+        )
+
     @staticmethod
     def _load_audio(
         audio_path: Union[str, Path],
@@ -832,9 +1016,8 @@ class BaseDataset(Dataset):
         num_frames: Optional[int] = None,
         max_samples: int = -1,
     ) -> torch.Tensor:
-        """
-        Load and process audio with flexible segmentation options.
-        
+        """Load and process audio with flexible segmentation options.
+
         Args:
             audio_path: Path to audio file
             audio_processor: AudioProcessor instance for processing
@@ -842,7 +1025,7 @@ class BaseDataset(Dataset):
             end_time: Optional end time in seconds (for pre-segmentation)
             num_frames: Optional exact number of frames to load (avoids float precision issues)
             max_samples: Maximum samples for random cropping (ignored if start_time/end_time provided)
-            
+
         Returns:
             Processed audio waveform tensor
         """
@@ -850,21 +1033,24 @@ class BaseDataset(Dataset):
         try:
             info = torchaudio.info(str(audio_path))
         except Exception as e:
-            msg = f"Failed to get audio info for file: {audio_path}. Error: {e}"
+            msg = (
+                f"Failed to get audio info for file: {audio_path}. Error: {e}"
+            )
             log.error(msg)
             raise RuntimeError(msg) from e
 
         sr = info.sample_rate
         total_frames = info.num_frames
 
-        assert (start_time is None and end_time is None) or (start_time is not None and end_time is not None), \
-            "Either both start_time and end_time must be provided, or neither." 
-        
+        assert (start_time is None and end_time is None) or (
+            start_time is not None and end_time is not None
+        ), "Either both start_time and end_time must be provided, or neither."
+
         # Case 1: Pre-segmentation - use provided start_time and num_frames
         if start_time is not None and end_time is not None:
             # Use floor for start_frame to ensure we don't overshoot
             frame_offset = int(start_time * sr)
-            
+
             # Use num_frames directly if provided (from CSV), otherwise compute from end_time
             if num_frames is not None:
                 frames_to_load = num_frames
@@ -872,17 +1058,17 @@ class BaseDataset(Dataset):
                 # Fallback: compute from times (may have precision issues)
                 end_frame = int(end_time * sr)
                 frames_to_load = max(0, end_frame - frame_offset)
-            
+
             # Clamp to valid range
             frame_offset = min(frame_offset, total_frames)
             frames_to_load = min(frames_to_load, total_frames - frame_offset)
-            
+
             if frames_to_load <= 0:
                 raise RuntimeError(
                     f"Segment {start_time}-{end_time}s is outside file boundaries "
                     f"(file duration: {total_frames/sr:.2f}s) for {audio_path}"
                 )
-        
+
         # Case 2: Random cropping - calculate start_time and end_time randomly
         else:
             if max_samples == -1 or total_frames <= max_samples:
@@ -894,13 +1080,13 @@ class BaseDataset(Dataset):
                 max_offset = total_frames - max_samples
                 frame_offset = torch.randint(0, max_offset, (1,)).item()
                 frames_to_load = max_samples
-        
+
         # Load audio
         try:
             waveform, sr = torchaudio.load(
                 str(audio_path),
                 frame_offset=frame_offset,
-                num_frames=frames_to_load
+                num_frames=frames_to_load,
             )
         except Exception as e:
             # Some FLAC files have incomplete seek tables, causing psf_fseek() failures
@@ -916,22 +1102,26 @@ class BaseDataset(Dataset):
                 msg = f"Failed to load audio file: {audio_path}. Error: {e}"
                 log.error(msg)
                 raise RuntimeError(msg) from e
-        
+
         waveform = waveform.squeeze(0)  # Remove channel dimension
-        
+
         # Resample if needed
         if sr != audio_processor.sample_rate:
             waveform = F.resample(waveform, sr, audio_processor.sample_rate)
-        
+
         # Normalize
         waveform = audio_processor.normalize_audio(waveform).squeeze(0)
-        
+
         return waveform
-    
+
     @staticmethod
-    def _load_dataset(data_filepath: Union[str, Path], sep: str = "|") -> pd.DataFrame:
+    def _load_dataset(
+        data_filepath: Union[str, Path], sep: str = "|"
+    ) -> pd.DataFrame:
         """Load and validate dataset from CSV file."""
-        assert isinstance(data_filepath, (str, Path)), "data_filepath must be a string or Path"
+        assert isinstance(
+            data_filepath, (str, Path)
+        ), "data_filepath must be a string or Path"
 
         try:
             df = pd.read_csv(data_filepath, sep=sep)
@@ -940,8 +1130,10 @@ class BaseDataset(Dataset):
                 df[BaseDataset.DATASET_CLS.CLASS_ID] = None
             return df
         except Exception as e:
-            raise RuntimeError(f"Failed to load dataset from {data_filepath}: {str(e)}")
-        
+            raise RuntimeError(
+                f"Failed to load dataset from {data_filepath}: {str(e)}"
+            )
+
     def __init__(
         self,
         data_dir: Union[str, Path],
@@ -950,9 +1142,8 @@ class BaseDataset(Dataset):
         max_duration: Union[None, float, int] = 12.0,
         sep: str = "|",
     ):
-        """
-        Initialize the BaseDataset.
-        
+        """Initialize the BaseDataset.
+
         Args:
             data_dir: Directory containing the audio files
             data_filepath: Path to the metadata CSV file
@@ -963,65 +1154,73 @@ class BaseDataset(Dataset):
         self.data_dir = Path(data_dir)
         self.dataset = self._load_dataset(data_filepath, sep)
         self.audio_processor = AudioProcessor(sample_rate)
-        self.max_samples = self._calculate_max_samples(max_duration, sample_rate)
+        self.max_samples = self._calculate_max_samples(
+            max_duration, sample_rate
+        )
 
     def __len__(self) -> int:
         """Return the number of items in the dataset."""
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> DatasetItem:
-        """
-        Get a single item from the dataset.
-        
+        """Get a single item from the dataset.
+
         Args:
             idx: Index of the item to retrieve
-            
+
         Returns:
             DatasetItem containing processed audio and metadata
         """
         row = self.dataset.iloc[idx]
         audio_path = self.data_dir / row[BaseDataset.DATASET_CLS.REL_FILEPATH]
-        
+
         # Check if CSV has pre-segmented data with time boundaries
-        has_segments = 'start_time' in self.dataset.columns and 'end_time' in self.dataset.columns
-        
+        has_segments = (
+            "start_time" in self.dataset.columns
+            and "end_time" in self.dataset.columns
+        )
+
         if has_segments:
             # Pre-segmented: use explicit time boundaries
             # Pass num_frames from CSV if available to avoid floating point precision issues
-            num_frames = row.get('num_frames', None)
+            num_frames = row.get("num_frames", None)
             if num_frames is not None:
                 num_frames = int(num_frames)
-            
-            waveform = self._load_audio(
-                audio_path, 
-                self.audio_processor,
-                start_time=row['start_time'],
-                end_time=row['end_time'],
-                num_frames=num_frames,
-            )
-            actual_duration = row['segment_duration'] if 'segment_duration' in row else (row['end_time'] - row['start_time'])
-        else:
-            # Random cropping: use max_samples
+
             waveform = self._load_audio(
                 audio_path,
                 self.audio_processor,
-                max_samples=self.max_samples
+                start_time=row["start_time"],
+                end_time=row["end_time"],
+                num_frames=num_frames,
+            )
+            actual_duration = (
+                row["segment_duration"]
+                if "segment_duration" in row
+                else (row["end_time"] - row["start_time"])
+            )
+        else:
+            # Random cropping: use max_samples
+            waveform = self._load_audio(
+                audio_path, self.audio_processor, max_samples=self.max_samples
             )
             actual_duration = row[BaseDataset.DATASET_CLS.REC_DURATION].item()
-        
+
         non_class_id = row[BaseDataset.DATASET_CLS.CLASS_ID] is None
 
         return DatasetItem(
             audio=waveform,
             speaker_id=row[BaseDataset.DATASET_CLS.SPEAKER_ID],
-            class_id=row[BaseDataset.DATASET_CLS.CLASS_ID] if non_class_id else row[BaseDataset.DATASET_CLS.CLASS_ID].item(),
+            class_id=row[BaseDataset.DATASET_CLS.CLASS_ID]
+            if non_class_id
+            else row[BaseDataset.DATASET_CLS.CLASS_ID].item(),
             audio_length=waveform.shape[0],
             audio_path=str(audio_path),
             country=row[BaseDataset.DATASET_CLS.NATIONALITY],
             gender=row[BaseDataset.DATASET_CLS.GENDER],
             sample_rate=self.audio_processor.sample_rate,
             recording_duration=actual_duration,
-            text=row.get(BaseDataset.DATASET_CLS.TEXT, '')
+            text=row.get(BaseDataset.DATASET_CLS.TEXT, ""),
         )
 
 
@@ -1029,7 +1228,7 @@ class SimpleAudioDataset(Dataset):
     def __init__(self, df, wav_dir, crop_len=None, sr=16000):
         self.df = df
         self.wav_dir = wav_dir
-        self.crop_len = crop_len # in seconds
+        self.crop_len = crop_len  # in seconds
 
     def __len__(self):
         return len(self.df)
@@ -1042,19 +1241,19 @@ class SimpleAudioDataset(Dataset):
             msg = f"Failed to load audio file: {wav_path}. Error: {e}"
             log.error(msg)
             raise RuntimeError(msg) from e
-            
+
         if self.crop_len:
             waveform = waveform[:, : int(sr * self.crop_len)]
         return waveform.squeeze(0), idx
 
     @staticmethod
     def collate_fn(batch):
-        """Collate function to ensure all audio data are of same length.
-        Pads shorter sequences and truncates longer ones.
+        """Collate function to ensure all audio data are of same length. Pads
+        shorter sequences and truncates longer ones.
 
         Args:
             batch: List of tuples (waveform, index)
-        
+
         Returns:
             Tuple of (padded_waveforms, indices)
         """
@@ -1082,7 +1281,8 @@ class SimpleAudioDataset(Dataset):
 
 
 class FullUtteranceCohortDataset(Dataset):
-    """Wrapper dataset that loads full utterances for cohort embedding computation.
+    """Wrapper dataset that loads full utterances for cohort embedding
+    computation.
 
     When training data uses pre-segmentation (multiple segments per file), this
     wrapper deduplicates by file path and loads full audio content, ignoring
@@ -1131,7 +1331,9 @@ class FullUtteranceCohortDataset(Dataset):
             info = torchaudio.info(str(audio_path))
             recording_duration = info.num_frames / info.sample_rate
         except Exception:
-            recording_duration = waveform.shape[0] / self.audio_processor.sample_rate
+            recording_duration = (
+                waveform.shape[0] / self.audio_processor.sample_rate
+            )
 
         # Handle class_id - may be None/NaN in pandas
         class_id_val = row.get(BaseDataset.DATASET_CLS.CLASS_ID, None)
@@ -1147,7 +1349,7 @@ class FullUtteranceCohortDataset(Dataset):
             gender=row.get(BaseDataset.DATASET_CLS.GENDER, None),
             sample_rate=self.audio_processor.sample_rate,
             recording_duration=recording_duration,
-            text=row.get(BaseDataset.DATASET_CLS.TEXT, ''),
+            text=row.get(BaseDataset.DATASET_CLS.TEXT, ""),
         )
 
 
@@ -1178,7 +1380,9 @@ class PKSpeakerBatchSampler(Sampler[List[int]]):
         if num_speakers <= 0:
             raise ValueError(f"num_speakers must be > 0, got {num_speakers}")
         if num_utterances <= 0:
-            raise ValueError(f"num_utterances must be > 0, got {num_utterances}")
+            raise ValueError(
+                f"num_utterances must be > 0, got {num_utterances}"
+            )
 
         self.dataset = dataset
         self.num_speakers = int(num_speakers)
@@ -1201,7 +1405,9 @@ class PKSpeakerBatchSampler(Sampler[List[int]]):
             if self.drop_last:
                 self.batches_per_epoch = len(self.dataset) // batch_size
             else:
-                self.batches_per_epoch = (len(self.dataset) + batch_size - 1) // batch_size
+                self.batches_per_epoch = (
+                    len(self.dataset) + batch_size - 1
+                ) // batch_size
         else:
             self.batches_per_epoch = int(batches_per_epoch)
 
@@ -1226,7 +1432,9 @@ class PKSpeakerBatchSampler(Sampler[List[int]]):
             )
 
         indices_by_speaker: Dict[str, List[int]] = {}
-        for idx, speaker in enumerate(df[self.speaker_id_col].astype(str).tolist()):
+        for idx, speaker in enumerate(
+            df[self.speaker_id_col].astype(str).tolist()
+        ):
             indices_by_speaker.setdefault(speaker, []).append(idx)
         return indices_by_speaker
 
@@ -1245,18 +1453,29 @@ class PKSpeakerBatchSampler(Sampler[List[int]]):
                 if len(speakers) >= self.num_speakers:
                     batch_speakers = rng.sample(speakers, self.num_speakers)
                 else:
-                    batch_speakers = [rng.choice(speakers) for _ in range(self.num_speakers)]
+                    batch_speakers = [
+                        rng.choice(speakers) for _ in range(self.num_speakers)
+                    ]
             else:
                 # Deterministic (but still cycles if not enough speakers)
-                batch_speakers = [speakers[i % len(speakers)] for i in range(self.num_speakers)]
+                batch_speakers = [
+                    speakers[i % len(speakers)]
+                    for i in range(self.num_speakers)
+                ]
 
             batch_indices: List[int] = []
             for spk in batch_speakers:
                 pool = self._indices_by_speaker[spk]
                 if len(pool) >= self.num_utterances:
-                    chosen = rng.sample(pool, self.num_utterances) if self.shuffle else pool[: self.num_utterances]
+                    chosen = (
+                        rng.sample(pool, self.num_utterances)
+                        if self.shuffle
+                        else pool[: self.num_utterances]
+                    )
                 else:
-                    chosen = [rng.choice(pool) for _ in range(self.num_utterances)]
+                    chosen = [
+                        rng.choice(pool) for _ in range(self.num_utterances)
+                    ]
                 batch_indices.extend(chosen)
 
             if self.shuffle:
@@ -1264,7 +1483,8 @@ class PKSpeakerBatchSampler(Sampler[List[int]]):
             yield batch_indices
 
 
-######### Datasets utils #########
+######### Datasets utils #########  # noqa: E266
+
 
 class DatasetFromSampler(Dataset):
     """Dataset to create indexes from `Sampler`.
@@ -1354,7 +1574,8 @@ class DistributedSamplerWrapper(DistributedSampler):
         return (self.dataset[i] for i in indexes_of_indexes)
 
     def set_epoch(self, epoch: int) -> None:
-        """Set epoch for deterministic shuffling and propagate to wrapped sampler.
+        """Set epoch for deterministic shuffling and propagate to wrapped
+        sampler.
 
         This is especially useful when wrapping custom samplers/batch samplers
         (e.g., PKSpeakerBatchSampler) that implement their own `set_epoch`.
@@ -1370,30 +1591,43 @@ class DistributedSamplerWrapper(DistributedSampler):
 
 if __name__ == "__main__":
     import argparse
-    from torch.utils.data import DataLoader
-    from matplotlib import pyplot as plt
 
-    parser = argparse.ArgumentParser(description="Generate train_list.txt for VoxCeleb")
-    parser.add_argument("--data_dir", 
-                        type=str,
-                        default="data/librispeech",)
-    parser.add_argument("--data_filepath", 
-                        type=str, 
-                        default="data/librispeech/metadata/dev-clean.csv")
-    args = parser.parse_args() 
+    from matplotlib import pyplot as plt
+    from torch.utils.data import DataLoader
+
+    parser = argparse.ArgumentParser(
+        description="Generate train_list.txt for VoxCeleb"
+    )
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default="data/librispeech",
+    )
+    parser.add_argument(
+        "--data_filepath",
+        type=str,
+        default="data/librispeech/metadata/dev-clean.csv",
+    )
+    args = parser.parse_args()
 
     print("Starting BASE Dataset test...")
-    dataset = BaseDataset(data_dir=args.data_dir, data_filepath=args.data_filepath, sample_rate=16000.0)
-    dataloader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=BaseCollate())
+    dataset = BaseDataset(
+        data_dir=args.data_dir,
+        data_filepath=args.data_filepath,
+        sample_rate=16000.0,
+    )
+    dataloader = DataLoader(
+        dataset, batch_size=2, shuffle=True, collate_fn=BaseCollate()
+    )
 
     for batch in dataloader:
         print(batch)
         break
-    
+
     ap = AudioProcessor(sample_rate=batch.sample_rate[0])
     emphasized = ap.apply_preemphasis(batch.audio[0], coeff=0.09)
     reconstructed = ap.remove_preemphasis(emphasized, coeff=0.09)
-    
+
     # Plot original and reconstructed waveforms
     plt.figure(figsize=(12, 6))
     plt.plot(batch.audio[0], label="Original waveform")
