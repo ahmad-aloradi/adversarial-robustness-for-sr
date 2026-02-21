@@ -82,7 +82,7 @@ datamodule:
     max_duration: 3.0
     use_pre_segmentation: true
 
-  num_classes: ${oc.eval:'(${module.data_augmentation.augmentations.wav_augmenter.speed_perturb.virtual_speakers}) and (${datamodule._base_num_classes} * len(${module.data_augmentation.augmentations.wav_augmenter.speed_perturb.speed_factors})) or ${datamodule._base_num_classes}'}
+  num_classes: ${oc.eval:'(${oc.select:module.data_augmentation.augmentations.wav_augmenter.speed_perturb.virtual_speakers,False}) and (${datamodule._base_num_classes} * len(${oc.select:module.data_augmentation.augmentations.wav_augmenter.speed_perturb.speed_factors,[]})) or ${datamodule._base_num_classes}'}
 
   loaders:
     train:

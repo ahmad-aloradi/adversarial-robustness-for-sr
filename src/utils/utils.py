@@ -1,6 +1,6 @@
 import argparse
-import shutil
 import pickle
+import shutil
 import warnings
 from functools import wraps
 from importlib.util import find_spec
@@ -372,6 +372,12 @@ def register_custom_resolvers(
     if not OmegaConf.has_resolver("oc.eval"):
         OmegaConf.register_new_resolver("oc.eval", eval)
 
+    # register bregman lambda interpolation resolver
+    if not OmegaConf.has_resolver("bregman_lambda"):
+        from src.utils.bregman_utils import get_bregman_lambda
+
+        OmegaConf.register_new_resolver("bregman_lambda", get_bregman_lambda)
+
     # register the replace resolver
     if not OmegaConf.has_resolver("replace"):
         with initialize_config_dir(
@@ -382,7 +388,7 @@ def register_custom_resolvers(
                 return_hydra_config=True,
                 overrides=overrides if overrides else [],
             )
-        
+
         if cfg.module.criterion.loss:
             cfg_tmp = cfg.copy()
             loss = load_loss(cfg_tmp.module.criterion.loss)
@@ -397,7 +403,9 @@ def register_custom_resolvers(
             )
         else:
             # cfg_tmp.module.criterion.loss is done for testing
-            log.warning(f'cfg_tmp.module.criterion.loss is set to {cfg_tmp.module.criterion.loss}')
+            log.warning(
+                f"cfg_tmp.module.criterion.loss is set to {cfg_tmp.module.criterion.loss}"
+            )
 
     def decorator(function: Callable) -> Callable:
         @wraps(function)

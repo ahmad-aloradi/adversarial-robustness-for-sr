@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.utilities.types import LRSchedulerConfig
 
 from src.utils import get_pylogger
 
@@ -71,8 +70,8 @@ def compute_sparsity(
 
 class ValidationSuppressor:
     """Suppresses validation, ModelCheckpoint, EarlyStopping, and
-    ReduceLROnPlateau during sparsity ramp-up. Restores and resets
-    trackers when target is reached.
+    ReduceLROnPlateau during sparsity ramp-up. Restores and resets trackers
+    when target is reached.
 
     Intended to be instantiated internally by each pruner (composition).
     """
@@ -101,7 +100,10 @@ class ValidationSuppressor:
             # Transition: unsuppressed -> suppressed
             self._suppress(trainer, current_sparsity, target_sparsity)
         elif not target_reached and self._suppressed:
-            # Still suppressed — reset EarlyStopping each epoch
+            # Still suppressed — re-apply settings (idempotent; also fixes
+            # resume-from-checkpoint where trainer state is not persisted)
+            # and reset EarlyStopping each epoch.
+            self._apply_suppression_to_trainer(trainer)
             self._reset_early_stoppings(trainer)
             logger.info(
                 f"Validation still suppressed (sparsity {current_sparsity:.2%}"
@@ -133,11 +135,26 @@ class ValidationSuppressor:
         self._original_es_check_on_train = dict(
             state.get("original_es_check_on_train", {})
         )
-        self._original_lr_strict = dict(
-            state.get("original_lr_strict", {})
-        )
+        self._original_lr_strict = dict(state.get("original_lr_strict", {}))
 
     # -- Internal helpers ----------------------------------------------------
+
+    def _apply_suppression_to_trainer(self, trainer: Trainer) -> None:
+        """Apply suppression settings to the trainer (idempotent).
+
+        Safe to call multiple times — does not touch saved originals. Called by
+        both _suppress() and the "still suppressed" branch of check() to handle
+        resume-from-checkpoint correctly.
+        """
+        trainer.limit_val_batches = 0
+        for cb in trainer.callbacks:
+            if isinstance(cb, ModelCheckpoint):
+                cb.save_top_k = 0
+            if isinstance(cb, EarlyStopping):
+                cb._check_on_train_epoch_end = False
+        for config in trainer.lr_scheduler_configs:
+            if config.reduce_on_plateau:
+                config.strict = False
 
     def _suppress(
         self,
@@ -145,34 +162,23 @@ class ValidationSuppressor:
         current_sparsity: float,
         target_sparsity: float,
     ) -> None:
-        # Save originals
+        # Save originals before applying suppression
         self._original_limit_val_batches = trainer.limit_val_batches
-        trainer.limit_val_batches = 0
-
         for cb in trainer.callbacks:
             if isinstance(cb, ModelCheckpoint):
                 key = cb.monitor or ""
                 self._original_save_top_k[key] = cb.save_top_k
-                cb.save_top_k = 0
             if isinstance(cb, EarlyStopping):
                 key = cb.monitor or ""
-                self._original_es_check_on_train[key] = (
-                    cb._check_on_train_epoch_end
-                )
-                # Disable: limit_val_batches=0 already prevents
-                # on_validation_end, so setting this to False prevents
-                # on_train_epoch_end check too — fully disabling ES.
-                cb._check_on_train_epoch_end = False
-
-        # Disable strict metric enforcement on ReduceLROnPlateau so
-        # Lightning skips the step (instead of crashing) when the
-        # monitored validation metric is absent.
+                self._original_es_check_on_train[
+                    key
+                ] = cb._check_on_train_epoch_end
         for config in trainer.lr_scheduler_configs:
             if config.reduce_on_plateau:
                 key = config.monitor or ""
                 self._original_lr_strict[key] = config.strict
-                config.strict = False
 
+        self._apply_suppression_to_trainer(trainer)
         self._suppressed = True
         logger.info(
             f"Validation suppressed (sparsity {current_sparsity:.2%}"

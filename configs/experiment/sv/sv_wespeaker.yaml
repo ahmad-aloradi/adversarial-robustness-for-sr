@@ -80,7 +80,7 @@ datamodule:
     #   num_speakers: 16
     #   num_utterances: 8
   # Auto-scale only when virtual speakers are enabled
-  num_classes: ${oc.eval:'(${module.data_augmentation.augmentations.wav_augmenter.speed_perturb.virtual_speakers}) and (${datamodule._base_num_classes} * len(${module.data_augmentation.augmentations.wav_augmenter.speed_perturb.speed_factors})) or ${datamodule._base_num_classes}'}
+  num_classes: ${oc.eval:'(${oc.select:module.data_augmentation.augmentations.wav_augmenter.speed_perturb.virtual_speakers,False}) and (${datamodule._base_num_classes} * len(${oc.select:module.data_augmentation.augmentations.wav_augmenter.speed_perturb.speed_factors,[]})) or ${datamodule._base_num_classes}'}
 
   loaders:
     train:
@@ -163,18 +163,18 @@ module:
         # Noise and reverb are mutually exclusive (WeSpeaker strategy)
         transforms:
           - _target_: src.modules.augmentation.MutuallyExclusive
-            p: 1.0  # Always apply one — concat_original provides the clean copy
+            p: 1.0 # Always apply one — concat_original provides the clean copy
             transforms:
               - _target_: src.modules.augmentation.NormalizedReverb
                 ir_csv: ${module.data_augmentation.rir_annotation}
                 sample_rate: ${datamodule.dataset.sample_rate}
-                p: 1.0  # Controlled by MutuallyExclusive wrapper
+                p: 1.0 # Controlled by MutuallyExclusive wrapper
                 normalize: true
               - _target_: src.modules.augmentation.NoiseFromCSV
                 noise_csv: ${module.data_augmentation.noise_annotation}
                 min_snr_db: 0
                 max_snr_db: 15
-                p: 1.0  # Controlled by MutuallyExclusive wrapper
+                p: 1.0 # Controlled by MutuallyExclusive wrapper
 
 logger:
   wandb:
