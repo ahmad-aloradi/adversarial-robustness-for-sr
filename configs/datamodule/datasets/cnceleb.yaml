@@ -103,9 +103,9 @@ dataset:
 transforms: null
 
 # Base speaker count before speed perturbation expansion
-_base_num_classes: 2793
-# Placeholder, will be determined automatically by the CsvProcessor during data preparation
-num_classes: 2793
+# When max_speakers is set, cap the class count accordingly
+_base_num_classes: ${oc.eval:'min(${.dataset.max_speakers}, 2793) if ${.dataset.max_speakers} != None else 2793'}
+num_classes: ${._base_num_classes}
 
 loaders:
   train:
@@ -127,14 +127,14 @@ loaders:
     prefetch_factor: 3
 
   test:
-    batch_size: 8
+    batch_size: 32
     shuffle: False
     num_workers: 4
     drop_last: False
     pin_memory: True
 
   enrollment:
-    batch_size: 8
+    batch_size: 2
     shuffle: False
     num_workers: 4
     drop_last: False

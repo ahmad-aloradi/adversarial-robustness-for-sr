@@ -15,7 +15,7 @@ datasets:
       test: true
     datamodule:
       dataset:
-        max_speakers: ${datamodule.dataset.max_speakers}
+        max_speakers: ${oc.eval:'${datamodule.dataset.max_speakers} if ${datamodule.datasets.voxceleb.stages.train} else None'}
 
   cnceleb:
     enabled: true
@@ -25,7 +25,7 @@ datasets:
       test: true
     datamodule:
       dataset:
-        max_speakers: ${datamodule.dataset.max_speakers}
+        max_speakers: ${oc.eval:'${datamodule.dataset.max_speakers} if ${datamodule.datasets.cnceleb.stages.train} else None'}
 
 # Top-level loader configs used by MultiSVDataModule for train/val
 # Test/enrollment loaders are dataset-specific (configured above in each dataset)
@@ -47,7 +47,6 @@ loaders:
     pin_memory: true
     persistent_workers: true
     prefetch_factor: 3
-
 
 _base_num_classes: ${oc.eval:"(${datamodule.datasets.voxceleb.datamodule._base_num_classes} if ${datamodule.datasets.voxceleb.stages.train} else 0) + (${datamodule.datasets.cnceleb.datamodule._base_num_classes} if ${datamodule.datasets.cnceleb.stages.train} else 0)"}
 num_classes: ${datamodule._base_num_classes}

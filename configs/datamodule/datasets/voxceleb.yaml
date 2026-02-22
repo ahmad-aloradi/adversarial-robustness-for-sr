@@ -10,15 +10,15 @@ dataset:
   voxceleb_metadata: ${.data_dir}/voxceleb_metadata
   base_search_dir: ${.voxceleb_metadata}/metadata
 
-  voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
+  artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
   veri_test_output_paths:
-    veri_test2: ${..voxceleb_artifacts_dir}/veri_test2.csv
-    veri_test_extended2: ${..voxceleb_artifacts_dir}/veri_test_extended2.csv
-    veri_test_hard2: ${..voxceleb_artifacts_dir}/veri_test_hard2.csv
-  metadata_csv_file: ${.voxceleb_artifacts_dir}/vox_meta.csv
-  train_csv_file: ${.voxceleb_artifacts_dir}/train.csv
-  val_csv_file: ${.voxceleb_artifacts_dir}/val.csv
-  speaker_lookup: ${.voxceleb_artifacts_dir}/speaker_lookup.csv
+    veri_test2: ${..artifacts_dir}/veri_test2.csv
+    veri_test_extended2: ${..artifacts_dir}/veri_test_extended2.csv
+    veri_test_hard2: ${..artifacts_dir}/veri_test_hard2.csv
+  metadata_csv_file: ${.artifacts_dir}/vox_meta.csv
+  train_csv_file: ${.artifacts_dir}/train.csv
+  val_csv_file: ${.artifacts_dir}/val.csv
+  speaker_lookup: ${.artifacts_dir}/speaker_lookup.csv
 
   seed: ${seed}
   sep: "|"
@@ -78,8 +78,9 @@ dataset:
 transforms: null
 
 # Base speaker count before speed perturbation expansion
-_base_num_classes: 7205
-num_classes: 7205
+# When max_speakers is set, cap the class count accordingly
+_base_num_classes: ${oc.eval:'min(${.dataset.max_speakers}, 7205) if ${.dataset.max_speakers} != None else 7205'}
+num_classes: ${._base_num_classes}
 
 loaders:
   train:
@@ -101,7 +102,7 @@ loaders:
     prefetch_factor: 3
 
   test:
-    batch_size: 8
+    batch_size: 32
     shuffle: False
     num_workers: 4
     drop_last: False
