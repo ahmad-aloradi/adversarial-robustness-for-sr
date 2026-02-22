@@ -1,4 +1,6 @@
 defaults:
+  - /datamodule/datasets/voxceleb@datasets.voxceleb.datamodule
+  - /datamodule/datasets/cnceleb@datasets.cnceleb.datamodule
   - _self_
 
 _target_: src.datamodules.multi_sv_datamodule.MultiSVDataModule
@@ -12,93 +14,8 @@ datasets:
       val: true
       test: true
     datamodule:
-      _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
       dataset:
-        data_dir: ${paths.data_dir}/voxceleb
-        wav_dir: ${datamodule.datasets.voxceleb.datamodule.dataset.data_dir}/voxceleb1_2
-        veri_test_filenames:
-          - veri_test2
-          - veri_test_extended2
-          - veri_test_hard2
-        voxceleb_metadata: ${datamodule.datasets.voxceleb.datamodule.dataset.data_dir}/voxceleb_metadata
-        base_search_dir: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_metadata}/metadata
-        voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
-        veri_test_output_paths:
-          veri_test2: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/veri_test2.csv
-          veri_test_extended2: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/veri_test_extended2.csv
-          veri_test_hard2: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/veri_test_hard2.csv
-        metadata_csv_file: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/vox_meta.csv
-        train_csv_file: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/train.csv
-        val_csv_file: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/val.csv
-        speaker_lookup: ${datamodule.datasets.voxceleb.datamodule.dataset.voxceleb_artifacts_dir}/speaker_lookup.csv
-        seed: ${seed}
-        sep: "|"
-        verbose: true
-        save_csv: true
-        sample_rate: 16000
-
-        vad:
-          _target_: src.datamodules.preparation.vad.SileroCsvVad
-          enabled: false  # Master switch; when true, VAD rewrites rows via vad_start/vad_end
-          apply_to_splits: [dev]  # VoxCeleb prep produces a dev metadata table (later split into train/val)
-
-          # Model input/sample rate (should match your audio + pipeline expectations)
-          sample_rate: ${datamodule.datasets.voxceleb.datamodule.dataset.sample_rate}
-
-          # Silero VAD detection knobs
-          min_speech_duration_ms: 100  # Drop detected speech bursts shorter than this (in ms)
-          min_silence_duration_ms: 300  # Silence shorter than this will not split speech segments (in ms)
-          speech_pad_ms: 60  # Expand speech segments a bit on both ends (in ms)
-
-          # Post-processing to reduce VAD glitches
-          merge_gap_s: 0.20  # Merge adjacent speech segments separated by <= this gap (seconds)
-          drop_short_speech_s: 0.10  # Drop post-merged speech segments shorter than this (seconds)
-
-          # Split a file into multiple rows if there is a long internal silence.
-          # Threshold is dynamic: clamp(duration * ratio, min_s, max_s)
-          long_silence_ratio: 0.20
-          long_silence_min_s: 0.60
-          long_silence_max_s: 2.00
-
-          # Segment-level skipping (only relevant when you also pre-segment):
-          # a segment is dropped if silence_ratio > segment_max_silence_ratio.
-          segment_max_silence_ratio: 0.90
-
-        min_duration: 0.5
-        speaker_overlap: true
-        train_ratio: 0.95
-        # --- Segmentation Strategy ---
-        use_pre_segmentation: true
-        # Segmentation parameters (only used if use_pre_segmentation=true)
-        segment_duration: 3.0  # Duration of each segment in seconds
-        segment_overlap: 0.0  # Overlap between segments in seconds (0.0 = non-overlapping)
-        min_segment_duration: 0.5  # Minimum segment duration to be included
-        # Random cropping parameter (only used if use_pre_segmentation=false)
-        max_duration: 3.0  # Maximum duration for random cropping during training
-
-      transforms: null
-
-      # Set to null for default DataLoader batching.
-      batch_sampler: null
-
-      # Base speaker count before speed perturbation expansion
-      _base_num_classes: 7205
-      num_classes: 7205
-      # Dataset-specific loader configs for test/enrollment
-      # Note: train/valid loaders are inherited from MultiSVDataModule's top-level loaders
-      loaders:
-        test:
-          batch_size: 8
-          shuffle: false
-          num_workers: 4
-          drop_last: false
-          pin_memory: true
-        enrollment:
-          batch_size: 8
-          shuffle: false
-          num_workers: 4
-          drop_last: false
-          pin_memory: true
+        max_speakers: ${datamodule.dataset.max_speakers}
 
   cnceleb:
     enabled: true
@@ -107,112 +24,8 @@ datasets:
       val: false
       test: true
     datamodule:
-      _target_: src.datamodules.cnceleb_datamodule.CNCelebDataModule
       dataset:
-        data_dir: ${paths.data_dir}/cnceleb
-        cnceleb1: "CN-Celeb_wav"
-        cnceleb2: "CN-Celeb2_wav"
-
-        # Base search directory where pre-generated metadata files can be found
-        # Automatically selects vad_metadata if vad.enabled=true, else metadata
-        # base_search_dir: ${datamodule.datasets.cnceleb.datamodule.dataset.data_dir}/${oc.eval:"'vad_metadata' if ${datamodule.datasets.cnceleb.datamodule.dataset.vad.enabled} else 'metadata'"}
-        base_search_dir: ${datamodule.datasets.cnceleb.datamodule.dataset.data_dir}/metadata
-
-        # Directory where artifacts like CSVs will be stored for this experiment
-        artifacts_dir: ${hydra:runtime.output_dir}/cnceleb_artifacts
-
-        # Specific artifact file paths
-        dev_metadata_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/cnceleb_dev.csv
-        enroll_csv_path: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/enroll.csv
-        test_unique_csv_path: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/test_unique.csv
-        train_csv_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/train.csv
-        val_csv_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/val.csv
-        speaker_lookup: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/speaker_lookup.csv
-        veri_test_output_path: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/verification_trials.csv
-        dev_spk_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/dev_speakers.txt
-        test_spk_file: ${datamodule.datasets.cnceleb.datamodule.dataset.artifacts_dir}/test_speakers.txt
-
-        # --- Data Preparation Settings ---
-        train_ratio: 0.9
-        speaker_overlap: true
-        seed: ${seed}
-        sep: "|"
-        verbose: true
-        sample_rate: 16000
-
-        vad:
-          _target_: src.datamodules.preparation.vad.SileroCsvVad
-          enabled: true   # Master switch; when true, VAD rewrites rows via vad_start/vad_end
-          apply_to_splits: [dev]  # CNCeleb prep produces a dev metadata table (later split into train/val)
-
-          # Model input/sample rate (should match your audio + pipeline expectations)
-          sample_rate: ${datamodule.datasets.cnceleb.datamodule.dataset.sample_rate}
-
-          # Silero VAD detection knobs
-          min_speech_duration_ms: 100  # Drop detected speech bursts shorter than this (in ms)
-          min_silence_duration_ms: 300  # Silence shorter than this will not split speech segments (in ms)
-          speech_pad_ms: 60  # Expand speech segments a bit on both ends (in ms)
-
-          # Post-processing to reduce VAD glitches
-          merge_gap_s: 0.20  # Merge adjacent speech segments separated by <= this gap (seconds)
-          drop_short_speech_s: 0.10  # Drop post-merged speech segments shorter than this (seconds)
-
-          # Split a file into multiple rows if there is a long internal silence.
-          # Threshold is dynamic: clamp(duration * ratio, min_s, max_s)
-          long_silence_ratio: 0.20
-          long_silence_min_s: 0.60
-          long_silence_max_s: 2.00
-
-          # Segment-level skipping (only relevant when you also pre-segment):
-          # a segment is dropped if silence_ratio > segment_max_silence_ratio.
-          segment_max_silence_ratio: 0.90
-
-        min_duration: 0.5
-
-        # Enrollment mode for evaluation:
-        # - "concatenated": Use pre-concatenated enrollment file (enroll_path) - single embedding
-        # - "multi": Use individual utterances (map_path), average embeddings - proper CNCeleb protocol
-        # - "both": Run both modes for comparison
-        enrollment_mode: concatenated
-
-        # --- Segmentation Strategy ---
-        use_pre_segmentation: true
-        # Segmentation parameters (only used if use_pre_segmentation=true)
-        segment_duration: 3.0  # Duration of each segment in seconds
-        segment_overlap: 0.0  # Overlap between segments in seconds (0.0 = non-overlapping)
-        min_segment_duration: 0.5  # Minimum segment duration to be included
-        # Random cropping parameter (only used if use_pre_segmentation=false)
-        max_duration: 3.0  # Maximum duration for random cropping during training
-
-        # --- Optional Concatenation of Short Utterances ---
-        # Path to mapping file from concat_short_utterances.py script
-        # When provided, merged source files will be skipped and concatenated files will be included
-        # Set to null to disable (default)
-        concat_mapping_file: ${datamodule.datasets.cnceleb.datamodule.dataset.base_search_dir}/concat_mapping.map
-
-      transforms: null
-
-      # Set to null for default DataLoader batching.
-      batch_sampler: null
-      # Base speaker count before speed perturbation expansion
-      _base_num_classes: 2793
-      # Placeholder, will be determined automatically by the CsvProcessor during data preparation
-      num_classes: 2793
-      # Dataset-specific loader configs for test/enrollment
-      # Note: train/valid loaders would be inherited from MultiSVDataModule if CNCeleb were used for training
-      loaders:
-        test:
-          batch_size: 8
-          shuffle: false
-          num_workers: 4
-          drop_last: false
-          pin_memory: true
-        enrollment:
-          batch_size: 8
-          shuffle: false
-          num_workers: 4
-          drop_last: false
-          pin_memory: true
+        max_speakers: ${datamodule.dataset.max_speakers}
 
 # Top-level loader configs used by MultiSVDataModule for train/val
 # Test/enrollment loaders are dataset-specific (configured above in each dataset)
@@ -243,3 +56,4 @@ dataset:
   sample_rate: ${datamodule.datasets.voxceleb.datamodule.dataset.sample_rate}
   min_duration: ${datamodule.datasets.voxceleb.datamodule.dataset.min_duration}
   max_duration: ${datamodule.datasets.voxceleb.datamodule.dataset.max_duration}
+  max_speakers: null

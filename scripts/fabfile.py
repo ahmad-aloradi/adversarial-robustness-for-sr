@@ -847,7 +847,7 @@ def _submit_sv_job(
     job_name = (
         f"{experiment}{ramp_str}-{sv_model}-{os.path.basename(dataset_name)}"
         f"-virtual_spks-{virtual_spks}-bs{batch_size}-vad{apply_vad}"
-        f"-ckpt_avg{num_ckpt_avg}-max_epochs{max_epochs}data_aug{apply_augmentation}"
+        f"-ckpt_avg{num_ckpt_avg}-max_epochs{max_epochs}-data_aug{apply_augmentation}"
         f"{sparsity_str}"
     )
 
@@ -884,6 +884,7 @@ def _submit_sv_job(
         )
 
     if not apply_augmentation:
+        # if experiment not in no_aug_exps:
         script_arguments["module.data_augmentation"] = "null"
     else:
         script_arguments[
@@ -926,7 +927,7 @@ def _submit_sv_job(
             lg in script_arguments["logger"]
             for lg in ["wandb", "many_loggers"]
         ):
-            script_arguments["loggers.wandb.id"] = name
+            script_arguments["logger.wandb.id"] = name
             print(f"Resuming run in wandb dashboard with id: {name}")
 
     bash_script = create_sv_bash_script(
@@ -1000,8 +1001,6 @@ def run_sv(transfer_data="false"):
                     base_max_epochs=base_max_epochs,
                     gpu_device=GPU,
                 )
-            break
-        break
 
 
 @task
@@ -1084,7 +1083,7 @@ def run_sv_sparsity(transfer_data="false"):
         transfer_data (str): 'true' to transfer data to local SSD,
             'false' to use the shared filesystem.
     """
-    assert CLUSTER_NAME == "tiny", (
+    assert CLUSTER_NAME == "tinygpu", (
         "Run exps on TinyGPU to avoid overloading the shared filesystem "
         "with multiple simultaneous transfers"
     )

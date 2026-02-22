@@ -2,23 +2,23 @@ _target_: src.datamodules.voxceleb_datamodule.VoxCelebDataModule
 
 dataset:
   data_dir: ${paths.data_dir}/voxceleb
-  wav_dir: ${datamodule.dataset.data_dir}/voxceleb1_2
+  wav_dir: ${.data_dir}/voxceleb1_2
   veri_test_filenames:
     - veri_test2
     - veri_test_extended2
     - veri_test_hard2
-  voxceleb_metadata: ${datamodule.dataset.data_dir}/voxceleb_metadata
-  base_search_dir: ${datamodule.dataset.voxceleb_metadata}/metadata
+  voxceleb_metadata: ${.data_dir}/voxceleb_metadata
+  base_search_dir: ${.voxceleb_metadata}/metadata
 
   voxceleb_artifacts_dir: ${hydra:runtime.output_dir}/voxceleb_artifacts
   veri_test_output_paths:
-    veri_test2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test2.csv
-    veri_test_extended2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test_extended2.csv
-    veri_test_hard2: ${datamodule.dataset.voxceleb_artifacts_dir}/veri_test_hard2.csv
-  metadata_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/vox_meta.csv
-  train_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/train.csv
-  val_csv_file: ${datamodule.dataset.voxceleb_artifacts_dir}/val.csv
-  speaker_lookup: ${datamodule.dataset.voxceleb_artifacts_dir}/speaker_lookup.csv
+    veri_test2: ${..voxceleb_artifacts_dir}/veri_test2.csv
+    veri_test_extended2: ${..voxceleb_artifacts_dir}/veri_test_extended2.csv
+    veri_test_hard2: ${..voxceleb_artifacts_dir}/veri_test_hard2.csv
+  metadata_csv_file: ${.voxceleb_artifacts_dir}/vox_meta.csv
+  train_csv_file: ${.voxceleb_artifacts_dir}/train.csv
+  val_csv_file: ${.voxceleb_artifacts_dir}/val.csv
+  speaker_lookup: ${.voxceleb_artifacts_dir}/speaker_lookup.csv
 
   seed: ${seed}
   sep: "|"
@@ -51,7 +51,7 @@ dataset:
     apply_to_splits: [dev] # VoxCeleb prep produces a dev metadata table (later split into train/val)
 
     # Model input/sample rate (should match your audio + pipeline expectations)
-    sample_rate: ${datamodule.dataset.sample_rate}
+    sample_rate: ${..sample_rate}
 
     # Silero VAD detection knobs
     min_speech_duration_ms: 100 # Drop detected speech bursts shorter than this (in ms)

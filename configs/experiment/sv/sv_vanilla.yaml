@@ -95,6 +95,8 @@ module:
     lr: 1.0e-4
     weight_decay: 1.0e-5
 
+  data_augmentation: null # No augmentation for vanilla baseline
+
 logger:
   wandb:
     tags: ${tags}

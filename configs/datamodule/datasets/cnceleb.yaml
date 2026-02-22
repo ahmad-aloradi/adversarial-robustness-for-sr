@@ -9,21 +9,21 @@ dataset:
 
   # Base search directory where pre-generated metadata files can be found
   # Automatically selects vad_metadata if vad.enabled=true, else metadata
-  base_search_dir: ${datamodule.dataset.data_dir}/${oc.eval:"'vad_metadata' if ${datamodule.dataset.vad.enabled} else 'metadata'"}
+  base_search_dir: ${.data_dir}/${oc.eval:"'vad_metadata' if ${.vad.enabled} else 'metadata'"}
 
   # Directory where artifacts like CSVs will be stored for this experiment
   artifacts_dir: ${hydra:runtime.output_dir}/cnceleb_artifacts
 
   # Specific artifact file paths
-  dev_metadata_file: ${datamodule.dataset.artifacts_dir}/cnceleb_dev.csv
-  enroll_csv_path: ${datamodule.dataset.artifacts_dir}/enroll.csv
-  test_unique_csv_path: ${datamodule.dataset.artifacts_dir}/test_unique.csv
-  train_csv_file: ${datamodule.dataset.artifacts_dir}/train.csv
-  val_csv_file: ${datamodule.dataset.artifacts_dir}/val.csv
-  speaker_lookup: ${datamodule.dataset.artifacts_dir}/speaker_lookup.csv
-  veri_test_output_path: ${datamodule.dataset.artifacts_dir}/verification_trials.csv
-  dev_spk_file: ${datamodule.dataset.artifacts_dir}/dev_speakers.txt
-  test_spk_file: ${datamodule.dataset.artifacts_dir}/test_speakers.txt
+  dev_metadata_file: ${.artifacts_dir}/cnceleb_dev.csv
+  enroll_csv_path: ${.artifacts_dir}/enroll.csv
+  test_unique_csv_path: ${.artifacts_dir}/test_unique.csv
+  train_csv_file: ${.artifacts_dir}/train.csv
+  val_csv_file: ${.artifacts_dir}/val.csv
+  speaker_lookup: ${.artifacts_dir}/speaker_lookup.csv
+  veri_test_output_path: ${.artifacts_dir}/verification_trials.csv
+  dev_spk_file: ${.artifacts_dir}/dev_speakers.txt
+  test_spk_file: ${.artifacts_dir}/test_speakers.txt
 
   # --- Data Preparation Settings ---
   train_ratio: 0.9
@@ -58,7 +58,7 @@ dataset:
   # Path to mapping file from concat_short_utterances.py script
   # When provided, merged source files will be skipped and concatenated files will be included
   # Set to null to disable (default)
-  concat_mapping_file: ${datamodule.dataset.base_search_dir}/concat_mapping.map
+  concat_mapping_file: ${.base_search_dir}/concat_mapping.map
 
   # --- Optional VAD (applied at CSV level, before segmentation) ---
   vad:
@@ -67,7 +67,7 @@ dataset:
     apply_to_splits: [dev] # CNCeleb prep produces a dev metadata table (later split into train/val)
 
     # Model input/sample rate (should match your audio + pipeline expectations)
-    sample_rate: ${datamodule.dataset.sample_rate}
+    sample_rate: ${..sample_rate}
 
     # Silero VAD detection knobs
     min_speech_duration_ms: 100 # Drop detected speech bursts shorter than this (in ms)
