@@ -550,8 +550,8 @@ class SpeakerVerification(pl.LightningModule):
     def _get_cohort_cache_path(self, base_dataset: str) -> Path:
         """Get the per-dataset cohort embeddings cache path.
 
-        Stored once per experiment to avoid mixing datasets.
-        Uses 'full_utt' suffix to distinguish from legacy segment-based caches.
+        Stored once per experiment to avoid mixing datasets. Uses 'full_utt'
+        suffix to distinguish from legacy segment-based caches.
         """
         cache_root = (
             Path(self.trainer.default_root_dir)
@@ -681,6 +681,7 @@ class SpeakerVerification(pl.LightningModule):
             return False
         return True
 
+    @torch.inference_mode()
     def _compute_embeddings(self, dataloader, mode: str) -> dict:
         """Compute embeddings for test or enrollment data.
 
@@ -718,11 +719,19 @@ class SpeakerVerification(pl.LightningModule):
                     # Aggregate embeddings per enroll_id using scoring pipeline
                     # This respects the enrollment_aggregation config (mean or length_weighted)
                     idx = 0
-                    for enroll_id, count in zip(batch.enroll_id, batch.utt_counts):
-                        utt_embeds = embed[idx : idx + count]  # [count, embed_dim]
-                        utt_lengths = batch.audio_length[idx : idx + count]  # [count]
-                        aggregated_embed = self.scoring_pipeline.aggregate_enrollment(
-                            utt_embeds, lengths=utt_lengths
+                    for enroll_id, count in zip(
+                        batch.enroll_id, batch.utt_counts
+                    ):
+                        utt_embeds = embed[
+                            idx : idx + count
+                        ]  # [count, embed_dim]
+                        utt_lengths = batch.audio_length[
+                            idx : idx + count
+                        ]  # [count]
+                        aggregated_embed = (
+                            self.scoring_pipeline.aggregate_enrollment(
+                                utt_embeds, lengths=utt_lengths
+                            )
                         )
                         embeddings_dict[enroll_id] = aggregated_embed
                         idx += count
@@ -746,6 +755,7 @@ class SpeakerVerification(pl.LightningModule):
 
         return embeddings_dict
 
+    @torch.inference_mode()
     def _compute_cohort_embeddings(
         self, dataloader
     ) -> Dict[str, torch.Tensor]:
