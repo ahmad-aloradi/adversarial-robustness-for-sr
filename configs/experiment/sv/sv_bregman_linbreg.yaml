@@ -25,6 +25,11 @@ tags:
   ]
 seed: 42
 
+# Single source of truth for Bregman lambda values
+_bregman_target_sparsity: 0.9
+_bregman_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},initial_lambda}
+_bregman_min_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},min_lambda}
+
 trainer:
   max_epochs: 50
   min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
@@ -64,11 +69,13 @@ callbacks:
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
-      target_sparsity: 0.9
-      initial_lambda: ${bregman_lambda:LinBreg,${callbacks.model_pruning.lambda_scheduler.target_sparsity},initial_lambda}
+      target_sparsity: ${_bregman_target_sparsity}
+      initial_lambda: ${_bregman_lambda}
       acceleration_factor: 0.25
-      min_lambda: ${bregman_lambda:LinBreg,${callbacks.model_pruning.lambda_scheduler.target_sparsity},min_lambda}
+      min_lambda: ${_bregman_min_lambda}
       max_lambda: 10
+      warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
+      update_frequency: 500
 
 datamodule:
   dataset:
@@ -178,7 +185,7 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1L2Conv
-            lamda: 1.0 # Overridden by lambda_scheduler; set to match initial_lambda
+            lamda: ${_bregman_lambda}
           lambda_scale: 1.0
 
         pruning_config:
@@ -193,7 +200,7 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1.0 # Overridden by lambda_scheduler; set to match initial_lambda
+            lamda: ${_bregman_lambda}
           lambda_scale: 1.0 # Scale factor for the global lambda
 
         pruning_config:
@@ -208,7 +215,7 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1e-2
+            lamda: ${_bregman_lambda}
           lambda_scale: 1.0
 
         pruning_config:
@@ -238,7 +245,7 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1.0 # Overridden by lambda_scheduler; set to match initial_lambda
+            lamda: ${_bregman_lambda}
           lambda_scale: 1.0 # Scale factor for the global lambda
 
       # Group 5: Fallback  (i.e., it catches what's left over) (MUST BE LAST)
@@ -249,7 +256,7 @@ module:
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1.0 # Overridden by lambda_scheduler; set to match initial_lambda
+            lamda: ${_bregman_lambda}
           lambda_scale: 1.0 # Scale factor for the global lambda
 
         pruning_config:

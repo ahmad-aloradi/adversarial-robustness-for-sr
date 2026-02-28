@@ -8,11 +8,12 @@ works correctly together in abbreviated training loops:
 - Lambda evolves correctly during training
 - Scheduled target mode works end-to-end
 """
+from unittest.mock import Mock
+
 import pytest
 import torch
 import torch.nn as nn
 from pytorch_lightning import LightningModule
-from unittest.mock import Mock
 
 from src.callbacks.pruning.bregman.bregman_optimizers import AdaBreg
 from src.callbacks.pruning.bregman.bregman_pruner import BregmanPruner
@@ -20,7 +21,6 @@ from src.callbacks.pruning.bregman.bregman_regularizers import RegL1
 from src.callbacks.pruning.bregman.lambda_scheduler import LambdaScheduler
 from src.callbacks.pruning.shared_prune_utils import compute_sparsity
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
-
 
 # =============================================================================
 # Mini-training framework
@@ -83,7 +83,9 @@ class MiniBregmanModule(LightningModule):
                     },
                     "pruning_config": {
                         "pruning_type": "unstructured",
-                        "sparsity_rate": self.optimizer_config.get("initial_sparsity", 0.0),
+                        "sparsity_rate": self.optimizer_config.get(
+                            "initial_sparsity", 0.0
+                        ),
                     },
                 },
                 {
@@ -99,7 +101,9 @@ class MiniBregmanModule(LightningModule):
         )
 
         # Get optimizer param groups from manager
-        optimizer_param_groups = self.pruning_manager.get_optimizer_param_groups()
+        optimizer_param_groups = (
+            self.pruning_manager.get_optimizer_param_groups()
+        )
 
         # Create optimizer
         optimizer = AdaBreg(
@@ -116,7 +120,6 @@ def _run_mini_bregman_training(
     initial_sparsity=0.99,
     num_epochs=10,
     num_batches_per_epoch=20,
-    use_ema=False,
     schedule_type=None,
     initial_target=None,
     final_target=None,
@@ -153,13 +156,11 @@ def _run_mini_bregman_training(
             final_target_sparsity=final_target,
             epochs_to_ramp=epochs_to_ramp,
             initial_lambda=0.1,
-            use_ema=use_ema,
         )
     else:
         scheduler = LambdaScheduler(
             target_sparsity=target_sparsity,
             initial_lambda=0.1,
-            use_ema=use_ema,
         )
 
     # Create pruner
@@ -177,7 +178,9 @@ def _run_mini_bregman_training(
     trainer.optimizers = [optimizer]
     trainer.ckpt_path = None
     trainer.callbacks = []
+    trainer.lr_scheduler_configs = []
     trainer.limit_val_batches = 1.0
+    trainer.num_training_batches = num_batches_per_epoch
 
     # Initialize pruner
     pruner.on_fit_start(trainer, pl_module)
@@ -207,7 +210,9 @@ def _run_mini_bregman_training(
 
             # on_train_batch_end
             trainer.global_step = epoch * num_batches_per_epoch + batch_idx
-            pruner.on_train_batch_end(trainer, pl_module, None, batch, batch_idx)
+            pruner.on_train_batch_end(
+                trainer, pl_module, None, batch, batch_idx
+            )
 
             # Record lambda
             lambda_per_step.append(scheduler.get_lambda())
@@ -235,15 +240,14 @@ def test_bregman_mini_training_produces_sparsity():
         initial_sparsity=0.99,  # Start very sparse (inverse-scale)
         num_epochs=10,
         num_batches_per_epoch=20,
-        use_ema=False,
     )
 
     # Final sparsity should be between target and initial
     # (model starts at 0.99, moves toward 0.7)
     final_sparsity = sparsity_per_epoch[-1]
-    assert 0.3 < final_sparsity < 0.99, (
-        f"Expected final sparsity in (0.3, 0.99), got {final_sparsity}"
-    )
+    assert (
+        0.3 < final_sparsity < 0.99
+    ), f"Expected final sparsity in (0.3, 0.99), got {final_sparsity}"
 
 
 @pytest.mark.slow
@@ -258,9 +262,9 @@ def test_bregman_mini_training_no_nan():
 
     # Check all parameters for NaN/Inf
     for param in final_params:
-        assert torch.all(torch.isfinite(param)), (
-            f"Parameter contains NaN or Inf values"
-        )
+        assert torch.all(
+            torch.isfinite(param)
+        ), "Parameter contains NaN or Inf values"
 
 
 @pytest.mark.slow
@@ -276,18 +280,20 @@ def test_bregman_per_layer_sparsity_not_degenerate():
     # Check per-layer sparsity for linear layers
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
-            weight_sparsity = compute_sparsity([module.weight], threshold=1e-12)
+            weight_sparsity = compute_sparsity(
+                [module.weight], threshold=1e-12
+            )
 
             # Layer should not be 100% sparse (fully collapsed)
-            assert weight_sparsity < 0.99, (
-                f"Layer {name} is nearly fully sparse (collapsed): {weight_sparsity}"
-            )
+            assert (
+                weight_sparsity < 0.99
+            ), f"Layer {name} is nearly fully sparse (collapsed): {weight_sparsity}"
 
             # Layer should not be 0% sparse (no regularization applied)
             # Starting from 0.85 initial sparsity, should retain some sparsity
-            assert weight_sparsity > 0.1, (
-                f"Layer {name} has too little sparsity: {weight_sparsity}"
-            )
+            assert (
+                weight_sparsity > 0.1
+            ), f"Layer {name} has too little sparsity: {weight_sparsity}"
 
 
 @pytest.mark.slow
@@ -298,7 +304,6 @@ def test_bregman_lambda_evolves_during_training():
         initial_sparsity=0.99,  # Start too sparse
         num_epochs=10,
         num_batches_per_epoch=20,
-        use_ema=False,
     )
 
     # Lambda should decrease over training
@@ -306,33 +311,22 @@ def test_bregman_lambda_evolves_during_training():
     initial_lambda = lambda_per_step[0]
     final_lambda = lambda_per_step[-1]
 
-    assert final_lambda < initial_lambda, (
-        f"Expected lambda to decrease, but {initial_lambda} -> {final_lambda}"
-    )
+    assert (
+        final_lambda < initial_lambda
+    ), f"Expected lambda to decrease, but {initial_lambda} -> {final_lambda}"
 
 
 @pytest.mark.slow
-def test_bregman_scheduled_mode_mini_training():
-    """Scheduled target mode ramps target sparsity correctly."""
-    sparsity_per_epoch, lambda_per_step, _, _ = _run_mini_bregman_training(
-        schedule_type="linear",
-        initial_target=0.5,
-        final_target=0.9,
-        epochs_to_ramp=5,
-        initial_sparsity=0.6,  # Start somewhat sparse
-        num_epochs=10,
-        num_batches_per_epoch=20,
-        use_ema=False,
-    )
-
-    # Verify final sparsity is significant
-    final_sparsity = sparsity_per_epoch[-1]
-    assert final_sparsity > 0.4, (
-        f"Expected final sparsity > 0.4, got {final_sparsity}"
-    )
-
-    # Sparsity should be in reasonable range after scheduled ramp
-    # Target goes from 0.5 to 0.9, so final should be closer to 0.9
-    assert 0.4 < final_sparsity < 0.95, (
-        f"Expected sparsity in (0.4, 0.95), got {final_sparsity}"
-    )
+def test_bregman_scheduled_mode_unsupported():
+    """Scheduled target mode is no longer supported for Bregman; constructing a
+    scheduler/requesting a scheduled run should raise a TypeError."""
+    with pytest.raises(TypeError):
+        _run_mini_bregman_training(
+            schedule_type="linear",
+            initial_target=0.5,
+            final_target=0.9,
+            epochs_to_ramp=5,
+            initial_sparsity=0.6,
+            num_epochs=2,
+            num_batches_per_epoch=2,
+        )

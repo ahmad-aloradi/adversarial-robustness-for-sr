@@ -56,6 +56,7 @@ class BregmanPruner(Callback):
 
         self.manager: Optional[PruningManager] = None
         self._initialized = False
+        self._warmup_resolved = False
         self._ckpt_scheduler_state: Optional[dict] = None
         self._ckpt_last_sparsity: Optional[float] = None
         self._suppressor = ValidationSuppressor(tolerance=tolerance)
@@ -88,10 +89,10 @@ class BregmanPruner(Callback):
             log.info("BregmanPruner: Applying initial sparsity...")
             self.manager.apply_initial_sparsity()
 
-        self._setup_lambda_scheduler(optimizer, is_resuming)
+        self._setup_lambda_scheduler(optimizer, trainer, is_resuming)
 
+        self._apply_lambda_to_groups(trainer)
         if is_resuming and self._ckpt_scheduler_state:
-            self._apply_lambda_to_groups(trainer)
             log.info("Restored lambda values to optimizer parameter groups.")
 
         self._initialized = True
@@ -103,6 +104,14 @@ class BregmanPruner(Callback):
         """Manage validation suppression at epoch start."""
         if not self._initialized or self.lambda_scheduler is None:
             return
+
+        # Resolve warmup on first epoch (num_training_batches is now available)
+        if not self._warmup_resolved:
+            if hasattr(self.lambda_scheduler, "resolve_warmup_steps"):
+                self.lambda_scheduler.resolve_warmup_steps(
+                    trainer.num_training_batches
+                )
+            self._warmup_resolved = True
 
         # Validation suppression: suppress while sparsity < target
         current_sparsity = self._overall_sparsity()
@@ -172,7 +181,9 @@ class BregmanPruner(Callback):
     # Scheduler management
     # -------------------------------------------------------------------------
 
-    def _setup_lambda_scheduler(self, optimizer, is_resuming: bool) -> None:
+    def _setup_lambda_scheduler(
+        self, optimizer, trainer: Trainer, is_resuming: bool
+    ) -> None:
         """Instantiate and configure the lambda scheduler."""
         if self.lambda_scheduler is None:
             return
@@ -197,7 +208,8 @@ class BregmanPruner(Callback):
 
     def _step_lambda_scheduler(self, trainer: Trainer) -> None:
         """Step the scheduler and update regularizer lambdas.
-            w_t+1 = max(w_t + δ(λ_old − λ_new) − δ·lr·grad_step, 0)
+
+        w_t+1 = max(w_t + δ(λ_old − λ_new) − δ·lr·grad_step, 0)
         """
         current_sparsity = self._overall_sparsity()
 
@@ -207,7 +219,7 @@ class BregmanPruner(Callback):
             self._ckpt_last_sparsity = None  # Use only once
 
         new_lambda = self.lambda_scheduler.step(
-            current_sparsity, last_sparsity
+            current_sparsity, last_sparsity, trainer.global_step
         )
 
         for group in trainer.optimizers[0].param_groups:
@@ -293,7 +305,8 @@ class BregmanPruner(Callback):
         if self.lambda_scheduler:
             sched_info = (
                 f"Lambda Scheduler: target_sparsity={self.lambda_scheduler.target_sparsity}, "
-                f"lambda={self.lambda_scheduler.get_lambda():.4f}"
+                f"lambda={self.lambda_scheduler.get_lambda():.4f}, "
+                f"update_frequency={self.lambda_scheduler.update_frequency}"
             )
             log.info(sched_info)
         else:
@@ -309,6 +322,11 @@ class BregmanPruner(Callback):
                 log.info(
                     f"  Group '{name}': {reg_type}, lambda={lamda:.4f}, scale={scale}"
                 )
+                if scale != 1.0:
+                    log.warning(
+                        f"Group '{name}' has lambda_scale={scale} != 1.0. "
+                        "Non-uniform regularization is generally not recommended."
+                    )
             else:
                 log.info(f"  Group '{name}': No regularizer")
 

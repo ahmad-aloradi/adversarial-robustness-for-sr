@@ -1,0 +1,12 @@
+# @package _global_
+
+# Fixed-lambda LinBreg: no lambda scheduler, static regularization.
+# Lambda is still set via _bregman_lambda from the base config.
+
+defaults:
+  - sv/sv_bregman_linbreg
+  - _self_
+
+callbacks:
+  model_pruning:
+    lambda_scheduler: null

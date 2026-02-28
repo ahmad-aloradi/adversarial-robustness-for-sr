@@ -10,9 +10,9 @@ BREGMAN_LAMBDA_CONFIGS = {
         0.99: {"initial_lambda": 1.0, "min_lambda": 1e-3},
     },
     "LinBreg": {
-        0.5: {"initial_lambda": 0.001, "min_lambda": 1e-10},
-        0.7: {"initial_lambda": 0.005, "min_lambda": 5e-9},
-        0.9: {"initial_lambda": 0.01, "min_lambda": 1e-8},
+        0.5: {"initial_lambda": 0.0001, "min_lambda": 1e-10},
+        0.7: {"initial_lambda": 0.0005, "min_lambda": 5e-9},
+        0.9: {"initial_lambda": 0.001, "min_lambda": 1e-8},
         0.95: {"initial_lambda": 0.05, "min_lambda": 5e-7},
         0.99: {"initial_lambda": 0.1, "min_lambda": 1e-6},
     },

@@ -11,7 +11,7 @@ class LambdaScheduler:
     """Lambda scheduler for Bregman target sparsity control.
 
     This scheduler updates lambda once per call to :meth:`step` (i.e., per-batch when
-    called from a batch-end hook). The scheduler maintains a fixed `target_sparsity` 
+    called from a batch-end hook). The scheduler maintains a fixed `target_sparsity`
     and updates lambda once per call to :meth:`step` (typically called at each batch end).
 
     Parameters
@@ -36,7 +36,9 @@ class LambdaScheduler:
         acceleration_factor: float = 0.25,
         min_lambda: float = 1e-6,
         max_lambda: float = 1e3,
-        ):
+        warmup_epochs: int = 0,
+        update_frequency: int = 1,
+    ):
         if not (0.0 < target_sparsity <= 1.0):
             raise ValueError(
                 f"target_sparsity must be in (0.0, 1.0], got {target_sparsity}"
@@ -62,11 +64,19 @@ class LambdaScheduler:
         self.max_lambda = max_lambda
         self._last_sparsity = None
         self.target_sparsity = target_sparsity
+        self.warmup_epochs = warmup_epochs
+        # Resolved to actual steps by BregmanPruner.resolve_warmup_steps()
+        self.warmup_steps = 0
+        assert (
+            update_frequency >= 1
+        ), f"update_frequency must be >= 1, got {update_frequency}"
+        self.update_frequency = update_frequency
 
     def step(
         self,
         current_sparsity: float,
         last_sparsity: Optional[float] = None,
+        current_step: Optional[int] = None,
     ) -> float:
         """Process a sparsity reading and update lambda.
 
@@ -82,6 +92,25 @@ class LambdaScheduler:
         float
             Current lambda value
         """
+        if self.warmup_steps > 0 and current_step <= self.warmup_steps:
+            if current_step == 0:
+                log.info(
+                    f"Warmup phase: Holding lambda at {self.lambda_value:.4f} "
+                    f"for {self.warmup_steps} steps ({self.warmup_epochs} epochs)."
+                )
+            # At this point, self.lambda_value = initial_lambda
+            return self.lambda_value
+
+        if self.warmup_steps > 0 and current_step == self.warmup_steps + 1:
+            log.info(
+                f"Warmup complete. Starting lambda updates with "
+                f"target sparsity {self.target_sparsity:.4f}."
+            )
+
+        # Only update lambda every update_frequency steps
+        if current_step % self.update_frequency != 0:
+            return self.lambda_value
+
         # If resuming from a checkpoint, use provided last_sparsity
         if last_sparsity is not None:
             self._validate_sparsity(last_sparsity)
@@ -95,10 +124,14 @@ class LambdaScheduler:
 
         if sparsity_signal < self.target_sparsity:
             # Increase lambda to encourage more sparsity
-            self.lambda_value *= 1 + self.acceleration_factor * abs(sparsity_difference)
+            self.lambda_value *= 1 + self.acceleration_factor * abs(
+                sparsity_difference
+            )
         elif sparsity_signal > self.target_sparsity:
             # Decrease lambda since we're above target
-            self.lambda_value /= 1 + self.acceleration_factor * abs(sparsity_difference)
+            self.lambda_value /= 1 + self.acceleration_factor * abs(
+                sparsity_difference
+            )
 
         # Clamp lambda to valid range
         self.lambda_value = max(
@@ -126,6 +159,17 @@ class LambdaScheduler:
                 f"current_sparsity must be in [0.0, 1.0], got {current_sparsity}."
             )
 
+    def resolve_warmup_steps(self, steps_per_epoch: int) -> None:
+        """Convert warmup_epochs to warmup_steps using the actual batch count.
+
+        Called by BregmanPruner once the trainer is available.
+        """
+        self.warmup_steps = self.warmup_epochs * steps_per_epoch
+        if self.warmup_steps > 0:
+            log.info(
+                f"Lambda warmup: {self.warmup_epochs} epochs "
+                f"× {steps_per_epoch} batches/epoch = {self.warmup_steps} steps"
+            )
 
     def get_lambda(self) -> float:
         """Get current lambda value."""
@@ -140,6 +184,7 @@ class LambdaScheduler:
             "acceleration_factor": self.acceleration_factor,
             "min_lambda": self.min_lambda,
             "max_lambda": self.max_lambda,
+            "warmup_steps": self.warmup_steps,
         }
 
     def load_state(self, state: dict) -> None:
@@ -153,5 +198,8 @@ class LambdaScheduler:
         self.acceleration_factor = state["acceleration_factor"]
         self.min_lambda = state["min_lambda"]
         self.max_lambda = state["max_lambda"]
+        self.warmup_steps = state.get("warmup_steps", self.warmup_steps)
 
-        log.info(f"LambdaScheduler state restored. lambda={self.lambda_value:.4f}")
+        log.info(
+            f"LambdaScheduler state restored. lambda={self.lambda_value:.4f}"
+        )
