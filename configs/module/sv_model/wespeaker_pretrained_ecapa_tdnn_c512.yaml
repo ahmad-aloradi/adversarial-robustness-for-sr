@@ -19,17 +19,16 @@ audio_encoder:
   _target_: torch.nn.Sequential
   _args_:
     - _target_: src.utils.hf_utils.load_wespeaker_model
-      model_name: resnet34
-      local_ckpt_path: "/home/ahmad/adversarial-robustness-for-sr/logs/train/runs/2026-02-06_00-04-45"
+      model_name: "ecapa_tdnn_glob_c512"
+      local_ckpt_path: "/home/ahmad/adversarial-robustness-for-sr/logs/train/runs/2026-02-06_00-01-22/checkpoints/averaged_top5.ckpt"
       model_args:
         feat_dim: 80
-        embed_dim: 256
-        pooling_func: TSTP
-        two_emb_layer: false
+        embed_dim: 192
+        pooling_func: ASTP
     - _target_: src.utils.torch_utils.SelectFromTuple
       _args_: [1]
 
 classifier:
   _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
-  input_size: 256
+  input_size: 192
   out_neurons: ${datamodule.num_classes}

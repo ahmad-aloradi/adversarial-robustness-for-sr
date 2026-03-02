@@ -39,7 +39,7 @@ dataset:
   # - "concatenated": Use pre-concatenated enrollment file (enroll_path) - single embedding
   # - "multi": Use individual utterances (map_path), average embeddings - proper CNCeleb protocol
   # - "both": Run both modes for comparison
-  enrollment_mode: concatenated
+  enrollment_mode: both
 
   # --- Segmentation Strategy ---
   # - true: Generate segments with fixed boundaries in CSV (deterministic, full coverage)

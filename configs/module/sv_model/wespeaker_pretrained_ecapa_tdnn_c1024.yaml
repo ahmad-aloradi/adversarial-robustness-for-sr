@@ -18,14 +18,17 @@ audio_processor_normalizer:
 audio_encoder:
   _target_: torch.nn.Sequential
   _args_:
-  - _target_: src.utils.hf_utils.load_wespeaker_model
-    model_name: "ecapa_tdnn_glob_c1024"
-    repo_id: "Wespeaker/wespeaker-voxceleb-ecapa-tdnn1024-LM"
-    checkpoint_filename: "avg_model.pt"
-  - _target_: src.utils.torch_utils.SelectFromTuple
-    _args_: [1]
+    - _target_: src.utils.hf_utils.load_wespeaker_model
+      model_name: "ecapa_tdnn_glob_c1024"
+      local_ckpt_path: "/dataHDD/ahmad/comfort26_sem/cnceleb/sv_wespeaker-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs40-data_augFalse"
+      model_args:
+        feat_dim: 80
+        embed_dim: 192
+        pooling_func: ASTP
+    - _target_: src.utils.torch_utils.SelectFromTuple
+      _args_: [1]
 
 classifier:
   _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
   input_size: 192
-  out_neurons:  ${datamodule.num_classes}
+  out_neurons: ${datamodule.num_classes}

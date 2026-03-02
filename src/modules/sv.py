@@ -877,7 +877,8 @@ class SpeakerVerification(pl.LightningModule):
         loader_cfg = train_dm.hparams.loaders.train
         cohort_loader = DataLoader(
             cohort_dataset,
-            batch_size=getattr(loader_cfg, "batch_size", 64),
+            # Hardcoded since full utterances may throw an OOM error
+            batch_size=2,
             num_workers=getattr(loader_cfg, "num_workers", 0),
             shuffle=False,
             pin_memory=getattr(loader_cfg, "pin_memory", False),
