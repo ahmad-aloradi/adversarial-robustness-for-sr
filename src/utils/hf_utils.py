@@ -1,6 +1,5 @@
 import importlib
 import os
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
@@ -48,22 +47,6 @@ def _instantiate_from_registry(
     )
 
 
-def _resolve_ckpt_path(path: str) -> str:
-    """Return a .ckpt file; accepts a direct file or a Lightning run
-    directory."""
-    p = Path(path)
-    if p.is_file():
-        return str(p)
-    ckpt_dir = p / "checkpoints"
-    assert ckpt_dir.is_dir(), f"No checkpoints/ directory in {p}"
-    averaged = list(ckpt_dir.glob("averaged_*.ckpt"))
-    if averaged:
-        return str(max(averaged, key=lambda f: f.stat().st_mtime))
-    last = ckpt_dir / "last.ckpt"
-    assert last.exists(), f"No averaged_*.ckpt or last.ckpt in {ckpt_dir}"
-    return str(last)
-
-
 def _load_lightning_encoder_weights(model: nn.Module, ckpt_path: str) -> None:
     """Extract audio_encoder.encoder.0.* from a Lightning checkpoint and load
     into model."""
@@ -76,6 +59,56 @@ def _load_lightning_encoder_weights(model: nn.Module, ckpt_path: str) -> None:
     }
     assert encoder_sd, f"No keys with prefix '{prefix}' in {ckpt_path}"
     model.load_state_dict(encoder_sd, strict=True)
+
+
+def _extract_classifier_state_dict(
+    ckpt_path: str, prefix: str = "classifier."
+) -> dict[str, torch.Tensor]:
+    """Extract classifier keys from a Lightning checkpoint."""
+    sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)[
+        "state_dict"
+    ]
+    return {k[len(prefix) :]: v for k, v in sd.items() if k.startswith(prefix)}
+
+
+def load_pretrained_classifier(
+    ckpt_path: str,
+    input_size: int,
+    out_neurons: int,
+) -> nn.Module:
+    """Load a classifier from a Lightning checkpoint if shapes match.
+
+    Instantiates a SpeechBrain Classifier, then attempts to load weights from
+    the checkpoint. If the checkpoint has no classifier keys or the shapes
+    don't match (e.g. different number of classes), returns the freshly-
+    initialised classifier instead.
+    """
+    from speechbrain.lobes.models.ECAPA_TDNN import Classifier
+
+    classifier = Classifier(input_size=input_size, out_neurons=out_neurons)
+
+    cls_sd = _extract_classifier_state_dict(ckpt_path)
+    if not cls_sd:
+        log.warning("No classifier keys in checkpoint, using random init")
+        return classifier
+
+    # Check shape compatibility before loading
+    model_sd = classifier.state_dict()
+    shapes_match = all(
+        k in model_sd and model_sd[k].shape == v.shape
+        for k, v in cls_sd.items()
+    )
+
+    if shapes_match:
+        classifier.load_state_dict(cls_sd, strict=True)
+        log.info(f"Loaded pretrained classifier from {ckpt_path}")
+    else:
+        log.critical(
+            f"Classifier shape mismatch (checkpoint vs config), "
+            f"using random init for {out_neurons} classes"
+        )
+
+    return classifier
 
 
 def _load_wespeaker_pretrained(
@@ -127,9 +160,10 @@ def load_wespeaker_model(
             model_args is not None
         ), "model_args required with local_ckpt_path"
         model = _instantiate_from_registry(model_name, model_args)
-        resolved = _resolve_ckpt_path(local_ckpt_path)
-        _load_lightning_encoder_weights(model, resolved)
-        log.info(f"Loaded '{model_name}' from local checkpoint: {resolved}")
+        _load_lightning_encoder_weights(model, local_ckpt_path)
+        log.info(
+            f"Loaded '{model_name}' from local checkpoint: {local_ckpt_path}"
+        )
 
     elif repo_id is not None:
         from huggingface_hub import snapshot_download

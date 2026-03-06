@@ -29,6 +29,7 @@ audio_encoder:
       _args_: [1]
 
 classifier:
-  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  _target_: src.utils.hf_utils.load_pretrained_classifier
+  ckpt_path: ${module.model.audio_encoder._args_[0].local_ckpt_path}
   input_size: 192
   out_neurons: ${datamodule.num_classes}

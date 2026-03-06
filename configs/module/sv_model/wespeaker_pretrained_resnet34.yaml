@@ -20,7 +20,7 @@ audio_encoder:
   _args_:
     - _target_: src.utils.hf_utils.load_wespeaker_model
       model_name: resnet34
-      local_ckpt_path: "/home/ahmad/adversarial-robustness-for-sr/logs/train/runs/2026-02-06_00-04-45"
+      local_ckpt_path: "/home/ahmad/adversarial-robustness-for-sr/logs/train/runs/2026-02-06_00-04-45/checkpoints/averaged_top5.ckpt"
       model_args:
         feat_dim: 80
         embed_dim: 256
@@ -30,6 +30,7 @@ audio_encoder:
       _args_: [1]
 
 classifier:
-  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  _target_: src.utils.hf_utils.load_pretrained_classifier
+  ckpt_path: ${module.model.audio_encoder._args_[0].local_ckpt_path}
   input_size: 256
   out_neurons: ${datamodule.num_classes}
