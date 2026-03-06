@@ -6,7 +6,7 @@
 # To avoiding copying of loss and metric names, during hydra initialization
 # there is custom resolver which replaces __loss__ to loss.__class__.__name__
 # and __metric__ to main_metric.__class__.__name__,
-# for example: ${replace:"__metric__/valid"}
+# for example: ${replace:"valid/__metric__"}
 # Use quotes for defining internal value in ${replace:"..."} to avoid
 # grammar problems with hydra config parser.
 

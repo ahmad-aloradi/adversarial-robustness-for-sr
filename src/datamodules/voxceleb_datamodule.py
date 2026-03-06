@@ -1,23 +1,29 @@
-from typing import Dict, List, Optional
 from pathlib import Path
+from typing import Dict, List, Optional
 
+import hydra
+import pandas as pd
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
-import pandas as pd
-import hydra
 
-from src.datamodules.components.voxceleb.voxceleb_dataset import (
-    VoxCelebDataset, 
-    VoxCelebVerificationDataset, 
-    TrainCollate, 
-    VerificationCollate,
-    VoxCelebEnroll,
-    EnrollCoallate)
 from src import utils
-from src.datamodules.components.utils import CsvProcessor
-from src.datamodules.components.common import VoxcelebDefaults, get_dataset_class
-from src.datamodules.preparation.voxceleb import VoxCelebMetadataPreparer, _extract_enroll_test
-
+from src.datamodules.components.common import (
+    VoxcelebDefaults,
+    get_dataset_class,
+)
+from src.datamodules.components.utils import CsvProcessor, make_dataloader
+from src.datamodules.components.voxceleb.voxceleb_dataset import (
+    EnrollCoallate,
+    TrainCollate,
+    VerificationCollate,
+    VoxCelebDataset,
+    VoxCelebEnroll,
+    VoxCelebVerificationDataset,
+)
+from src.datamodules.preparation.voxceleb import (
+    VoxCelebMetadataPreparer,
+    _extract_enroll_test,
+)
 
 log = utils.get_pylogger(__name__)
 DATASET_DEFAULTS = VoxcelebDefaults()
@@ -30,7 +36,11 @@ class VoxCelebDataModule(LightningDataModule):
         self.save_hyperparameters(logger=False)
         self.train_data = None
         self.val_data = None
-        self.csv_processor = CsvProcessor(verbose=self.hparams.dataset.verbose, fill_value='N/A')
+        self.csv_processor = CsvProcessor(
+            verbose=self.hparams.dataset.verbose,
+            fill_value="N/A",
+            max_speakers=self.hparams.dataset.get("max_speakers", None),
+        )
         self.enroll_data_dict: Dict[str, pd.DataFrame] = {}
         self.unique_trial_data_dict: Dict[str, pd.DataFrame] = {}
         self._prepared_test_artifacts = None
@@ -39,12 +49,16 @@ class VoxCelebDataModule(LightningDataModule):
         """Prepare all metadata artifacts."""
         if self._artifacts_ready():
             if self.hparams.dataset.verbose:
-                log.info("Skipping VoxCeleb data preparation because all artifacts are already present.")
+                log.info(
+                    "Skipping VoxCeleb data preparation because all artifacts are already present."
+                )
             return None
 
         # Output files don't exist - run preparation
         # (This will check base_search_dir internally for pre-generated files to copy)
-        preparer = VoxCelebMetadataPreparer(self.hparams.dataset, self.csv_processor)
+        preparer = VoxCelebMetadataPreparer(
+            self.hparams.dataset, self.csv_processor
+        )
         result = preparer.prepare()
         self._prepared_test_artifacts = result.test
         return result
@@ -58,110 +72,143 @@ class VoxCelebDataModule(LightningDataModule):
             enroll_frames = self._prepared_test_artifacts.enroll_frames
             unique_frames = self._prepared_test_artifacts.unique_trial_frames
             for test_filename in self.hparams.dataset.veri_test_filenames:
-                if test_filename in enroll_frames and test_filename in unique_frames:
-                    self.enroll_data_dict[test_filename] = enroll_frames[test_filename].copy()
-                    self.unique_trial_data_dict[test_filename] = unique_frames[test_filename].copy()
+                if (
+                    test_filename in enroll_frames
+                    and test_filename in unique_frames
+                ):
+                    self.enroll_data_dict[test_filename] = enroll_frames[
+                        test_filename
+                    ].copy()
+                    self.unique_trial_data_dict[test_filename] = unique_frames[
+                        test_filename
+                    ].copy()
                 else:
                     self._load_test_artifact_from_disk(test_filename)
             return
 
         for test_filename in self.hparams.dataset.veri_test_filenames:
-            output_path = Path(self.hparams.dataset.veri_test_output_paths[test_filename])
+            output_path = Path(
+                self.hparams.dataset.veri_test_output_paths[test_filename]
+            )
             test_df = pd.read_csv(output_path, sep=self.hparams.dataset.sep)
-            self.enroll_data_dict[test_filename] = _extract_enroll_test(test_df, mode="enroll")
-            self.unique_trial_data_dict[test_filename] = _extract_enroll_test(test_df, mode="test")
+            self.enroll_data_dict[test_filename] = _extract_enroll_test(
+                test_df, mode="enroll"
+            )
+            self.unique_trial_data_dict[test_filename] = _extract_enroll_test(
+                test_df, mode="test"
+            )
 
     def _load_test_artifact_from_disk(self, test_filename: str):
-        output_path = Path(self.hparams.dataset.veri_test_output_paths[test_filename])
+        output_path = Path(
+            self.hparams.dataset.veri_test_output_paths[test_filename]
+        )
         test_df = pd.read_csv(output_path, sep=self.hparams.dataset.sep)
-        self.enroll_data_dict[test_filename] = _extract_enroll_test(test_df, mode="enroll")
-        self.unique_trial_data_dict[test_filename] = _extract_enroll_test(test_df, mode="test")
+        self.enroll_data_dict[test_filename] = _extract_enroll_test(
+            test_df, mode="enroll"
+        )
+        self.unique_trial_data_dict[test_filename] = _extract_enroll_test(
+            test_df, mode="test"
+        )
 
     def setup(self, stage: Optional[str] = None):
         """Setup datasets for the given stage."""
-        
-        max_duration = -1 if self.hparams.dataset.use_pre_segmentation else self.hparams.dataset.max_duration
 
-        if stage in ('fit', None):
+        max_duration = (
+            -1
+            if self.hparams.dataset.use_pre_segmentation
+            else self.hparams.dataset.max_duration
+        )
+
+        if stage in ("fit", None):
             # Ensure metadata files exist (idempotent)
             if not self._artifacts_ready():
                 self.prepare_data()
-            
+
             # Create train/val datasets
             self.train_data = VoxCelebDataset(
                 self.hparams.dataset.wav_dir,
                 self.hparams.dataset.train_csv_file,
                 self.hparams.dataset.sample_rate,
-                max_duration
+                max_duration,
             )
             self.val_data = VoxCelebDataset(
                 self.hparams.dataset.wav_dir,
                 self.hparams.dataset.val_csv_file,
                 self.hparams.dataset.sample_rate,
-                max_duration
+                max_duration,
             )
-        
-        if stage in ('test', None):
+
+        if stage in ("test", None):
             # Load test artifacts from disk if not already loaded
             if not self.enroll_data_dict or not self.unique_trial_data_dict:
                 self._load_test_artifacts()
-            
+
             # Setup test datasets for all configured test sets
             self.test_data_dict = {}
             self.enrollment_data_dict = {}
             self.test_unique_data_dict = {}
-            
+
             for test_filename in self.hparams.dataset.veri_test_filenames:
                 # Create test verification dataset for each test set
-                self.test_data_dict[test_filename] = VoxCelebVerificationDataset(
+                self.test_data_dict[
+                    test_filename
+                ] = VoxCelebVerificationDataset(
                     self.hparams.dataset.wav_dir,
                     self.hparams.dataset.veri_test_output_paths[test_filename],
                     self.hparams.dataset.sample_rate,
                 )
-                
+
                 # Create enrollment dataset for each test set
                 self.enrollment_data_dict[test_filename] = VoxCelebEnroll(
                     data_dir=self.hparams.dataset.wav_dir,
-                    phase='enrollment',
+                    phase="enrollment",
                     sample_rate=self.hparams.dataset.sample_rate,
-                    dataset=self.enroll_data_dict[test_filename]
+                    dataset=self.enroll_data_dict[test_filename],
                 )
-                
-                # Create test unique dataset for each test set  
+
+                # Create test unique dataset for each test set
                 self.test_unique_data_dict[test_filename] = VoxCelebEnroll(
                     data_dir=self.hparams.dataset.wav_dir,
-                    phase='test',
+                    phase="test",
                     sample_rate=self.hparams.dataset.sample_rate,
-                    dataset=self.unique_trial_data_dict[test_filename]
+                    dataset=self.unique_trial_data_dict[test_filename],
                 )
-                log.info(f"Test set '{test_filename}' has {len(self.test_data_dict[test_filename])} trials, "
-                         f"enrollment set has {len(self.enrollment_data_dict[test_filename])} trials, "
-                         f"unique set has {len(self.test_unique_data_dict[test_filename])} trials.")
+                log.info(
+                    f"Test set '{test_filename}' has {len(self.test_data_dict[test_filename])} trials, "
+                    f"enrollment set has {len(self.enrollment_data_dict[test_filename])} trials, "
+                    f"unique set has {len(self.test_unique_data_dict[test_filename])} trials."
+                )
 
     def train_dataloader(self):
-        assert self.hparams.get('loaders') is not None, "VoxCelebDataModule requires 'loaders' config"
-        return DataLoader(
-            self.train_data,
-            **self.hparams.loaders.train,
-            collate_fn=TrainCollate()
+        assert (
+            self.hparams.get("loaders") is not None
+        ), "VoxCelebDataModule requires 'loaders' config"
+        return make_dataloader(
+            dataset=self.train_data,
+            loader_kwargs=dict(self.hparams.loaders.train),
+            collate_fn=TrainCollate(),
+            batch_sampler_cfg=self.hparams.dataset.get("batch_sampler", None),
         )
 
     def val_dataloader(self):
-        assert self.hparams.get('loaders') is not None, "VoxCelebDataModule requires 'loaders' config"
+        assert (
+            self.hparams.get("loaders") is not None
+        ), "VoxCelebDataModule requires 'loaders' config"
         return DataLoader(
             self.val_data,
             **self.hparams.loaders.valid,
-            collate_fn=TrainCollate()
+            collate_fn=TrainCollate(),
         )
 
     def test_dataloader(self):
-        """Return dictionary of test dataloaders for all configured test sets."""
+        """Return dictionary of test dataloaders for all configured test
+        sets."""
         test_dataloaders = {}
         for test_filename in self.hparams.dataset.veri_test_filenames:
             test_dataloaders[test_filename] = DataLoader(
                 self.test_data_dict[test_filename],
                 **self.hparams.loaders.test,
-                collate_fn=VerificationCollate()
+                collate_fn=VerificationCollate(),
             )
         return test_dataloaders
 
@@ -174,20 +221,22 @@ class VoxCelebDataModule(LightningDataModule):
             Tuple of (enroll_dataloader, trial_unique_dataloader)
         """
         if test_filename not in self.hparams.dataset.veri_test_filenames:
-            raise ValueError(f"Unknown test set: {test_filename}. Available test sets: {self.hparams.dataset.veri_test_filenames}")
+            raise ValueError(
+                f"Unknown test set: {test_filename}. Available test sets: {self.hparams.dataset.veri_test_filenames}"
+            )
 
         # Enrollment dataloader
         enroll_dataloader = DataLoader(
             self.enrollment_data_dict[test_filename],
             **self.hparams.loaders.enrollment,
-            collate_fn=EnrollCoallate()
+            collate_fn=EnrollCoallate(),
         )
 
         # Trial unique dataloader (to compute test embeddings per unique utterance, not per trial)
         trial_unique_dataloader = DataLoader(
             self.test_unique_data_dict[test_filename],
             **self.hparams.loaders.enrollment,
-            collate_fn=EnrollCoallate()
+            collate_fn=EnrollCoallate(),
         )
 
         return enroll_dataloader, trial_unique_dataloader
@@ -205,27 +254,44 @@ class VoxCelebDataModule(LightningDataModule):
 
 if __name__ == "__main__":
     import pyrootutils
-    root = pyrootutils.setup_root(search_from=__file__, indicator=[".env"], pythonpath=True, dotenv=True,)
-    _HYDRA_PARAMS = {"version_base": "1.3", "config_path": str(root / "configs"), "config_name": "train.yaml"}
+
+    root = pyrootutils.setup_root(
+        search_from=__file__,
+        indicator=[".env"],
+        pythonpath=True,
+        dotenv=True,
+    )
+    _HYDRA_PARAMS = {
+        "version_base": "1.3",
+        "config_path": str(root / "configs"),
+        "config_name": "train.yaml",
+    }
 
     @hydra.main(**_HYDRA_PARAMS)
     def test_datamodule(cfg):
 
         print("Starting VoxCeleb DataModule test...")
 
-        datamodule: VoxCelebDataModule = hydra.utils.instantiate(cfg.datamodule, _recursive_=False)
+        datamodule: VoxCelebDataModule = hydra.utils.instantiate(
+            cfg.datamodule, _recursive_=False
+        )
 
         datamodule.prepare_data()
 
         assert not datamodule.train_data
         assert not datamodule.val_data
-        assert not hasattr(datamodule, 'test_data') or datamodule.test_data is None
+        assert (
+            not hasattr(datamodule, "test_data")
+            or datamodule.test_data is None
+        )
         # assert not datamodule.predict_set
 
         datamodule.setup()
         assert datamodule.train_data
         assert datamodule.val_data
-        assert datamodule.test_data_dict  # Now we have test_data_dict instead of test_data
+        assert (
+            datamodule.test_data_dict
+        )  # Now we have test_data_dict instead of test_data
 
         assert datamodule.train_dataloader()
         assert datamodule.val_dataloader()
@@ -233,5 +299,5 @@ if __name__ == "__main__":
 
         batch = next(iter(datamodule.train_dataloader()))
         print(batch)
-    
+
     test_datamodule()

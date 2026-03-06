@@ -1,0 +1,18 @@
+# @package _global_
+# Simplified 100-speaker.
+# Run: python train.py experiment=sv/sv_pruning_mag_unstruct_onetime_100spk
+
+defaults:
+  - sv/sv_pruning_mag_unstruct_onetime # inherit parent
+  - _self_
+
+tags:
+  - "100spk"
+  - "ln_unstructured_pruning"
+  - "onetime_pruning"
+  - "sv"
+
+datamodule:
+  dataset:
+    max_speakers: 100
+  _base_num_classes: 100

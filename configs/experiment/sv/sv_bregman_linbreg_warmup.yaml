@@ -1,0 +1,24 @@
+# @package _global_
+# LinBreg with warmup LR scheduler and tuned lambda scheduler.
+# Run: python train.py experiment=sv/sv_bregman_linbreg_warmup
+
+defaults:
+  - sv/sv_bregman_linbreg # inherit parent
+  - _self_
+
+module:
+  lr_scheduler:
+    scheduler:
+      _target_: src.utils.schedulers.WarmupExponentialLR
+      warmup_epochs: ${oc.eval:'max(1, int(${trainer.max_epochs} * 0.04))'}
+      warmup_start_factor: 0.0
+      gamma: ${oc.eval:'pow(0.0005, 1.0 / (${trainer.max_epochs} - max(1, int(${trainer.max_epochs} * 0.04))))'}
+    extras:
+      interval: "epoch"
+      frequency: ${trainer.check_val_every_n_epoch}
+
+  optimizer:
+    _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
+    _partial_: True
+    momentum: 0.0
+    lr: 1e-1

@@ -30,9 +30,12 @@ class MultiSVDataModule(LightningDataModule):
         self._val_sets: List[Tuple[str, Dataset]] = []
         self._train_collate = None
         self._val_collate = None
+        self._train_collate_by_ds: Dict[str, Any] = {}
+        self._cohort_sets: Dict[str, Dataset] = {}
         self._test_loaders: "OrderedDict[str, DataLoader]" = OrderedDict()
         self.train_data: Optional[Dataset] = None
         self.val_data: Optional[Dataset] = None
+        self.score_normalization: bool = bool(kwargs.get("score_normalization", False))
 
     # ------------------------------------------------------------------
     # Helper utilities
@@ -100,6 +103,8 @@ class MultiSVDataModule(LightningDataModule):
         self._val_sets.clear()
         self._train_collate = None
         self._val_collate = None
+        self._train_collate_by_ds = {}
+        self._cohort_sets = {}
         self.train_data = None
         self.val_data = None
 
@@ -158,6 +163,10 @@ class MultiSVDataModule(LightningDataModule):
         if getattr(self, collate_attr) is None:
             setattr(self, collate_attr, loader.collate_fn)
 
+        # Track per-dataset train collate for cohort preparation and reuse
+        if stage == "train":
+            self._train_collate_by_ds[name] = loader.collate_fn
+
         collection.append((name, dataset))
         log.info(
             f"Added {name} {log_label} dataset with {len(dataset)} samples to MultiSV {collection_label}."
@@ -168,6 +177,17 @@ class MultiSVDataModule(LightningDataModule):
         if not datasets:
             return None
         return datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
+
+    def get_train_dataset(self, name: str) -> Optional[Dataset]:
+        """Return the training dataset for the given base name, if present."""
+        for ds_name, dataset in self._train_sets:
+            if ds_name == name:
+                return dataset
+        return self._cohort_sets.get(name)
+
+    def get_train_collate(self, name: str):
+        """Return a dataset-specific train collate function if known."""
+        return self._train_collate_by_ds.get(name) or self._train_collate
 
     def _setup_test_stage(self) -> None:
         self._test_loaders = OrderedDict()
@@ -185,6 +205,52 @@ class MultiSVDataModule(LightningDataModule):
                 self._test_loaders[alias] = loader
             registered = len(self._test_loaders) - size_before
             log.info(f"Registered {registered} test loader(s) for dataset '{name}' in MultiSV datamodule.")
+
+        # When score normalization is requested, prepare cohort datasets even if training is disabled
+        if self.score_normalization:
+            self._prepare_cohort_sets_for_normalization()
+
+    def _prepare_cohort_sets_for_normalization(self) -> None:
+        """Ensure cohort datasets/collate fns exist for every test dataset."""
+        # Seed with any already-registered train datasets
+        if not self._cohort_sets:
+            self._cohort_sets = {}
+
+        for name, dataset in self._train_sets:
+            self._cohort_sets[name] = dataset
+            if name not in self._train_collate_by_ds and self._train_collate is not None:
+                self._train_collate_by_ds[name] = self._train_collate
+
+        for name, cfg in self.datasets_cfg.items():
+            if not self._is_enabled(name, cfg) or not self._stage_enabled(name, cfg, "test"):
+                continue
+            if name in self._cohort_sets:
+                continue
+
+            dm = self._get_or_create_datamodule(name)
+            dm.setup(stage="fit")
+            loader = dm.train_dataloader()
+            dataset: Optional[Dataset] = getattr(dm, "train_data", None) or getattr(loader, "dataset", None)
+
+            if dataset is None:
+                log.warning(
+                    f"Score normalization requested but no train dataset available for '{name}'. "
+                    "Ensure training metadata exists or disable normalization for this dataset."
+                )
+                continue
+
+            self._cohort_sets[name] = dataset
+
+            collate_fn = getattr(loader, "collate_fn", None)
+            if collate_fn:
+                self._train_collate_by_ds[name] = collate_fn
+                if self._train_collate is None:
+                    self._train_collate = collate_fn
+
+    def ensure_cohort_datasets_for_normalization(self) -> None:
+        """Idempotently prepare cohort datasets when score normalization is used."""
+        if not self._cohort_sets:
+            self._prepare_cohort_sets_for_normalization()
 
     def _normalize_test_loaders(self, name: str, loaders: Any) -> List[Tuple[str, DataLoader]]:
         if isinstance(loaders, Mapping):

@@ -77,8 +77,8 @@ class LinBreg(torch.optim.Optimizer):
                 else:
                     sub_grad.add_(-step_size * grad)
                 
-                # Update parameters using proximal operator
-                p.data = reg.prox(delta * sub_grad, delta)
+                # Update parameters using proximal operator (safe in-place copy)
+                p.copy_(reg.prox(delta * sub_grad, delta))
         
         return loss
         
@@ -181,8 +181,8 @@ class AdaBreg(torch.optim.Optimizer):
                 # Update subgradient
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
                 
-                # Update parameters using proximal operator
-                p.data = reg.prox(delta * sub_grad, delta)
+                # Update parameters using proximal operator (safe in-place copy)
+                p.copy_(reg.prox(delta * sub_grad, delta))
         
         return loss
         
@@ -251,9 +251,9 @@ class ProxSGD(torch.optim.Optimizer):
                     state['step'] = 0
                     
                 # Gradient step
-                p.data.add_(-step_size * grad)
-                # Proximal step
-                p.data = reg.prox(p.data, step_size)
+                p.add_(-step_size * grad)
+                # Proximal step (safe in-place copy)
+                p.copy_(reg.prox(p.data, step_size))
         
         return loss
                 

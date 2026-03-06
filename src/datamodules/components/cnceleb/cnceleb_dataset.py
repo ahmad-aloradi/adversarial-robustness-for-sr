@@ -1,4 +1,4 @@
-from typing import Dict, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -341,6 +341,120 @@ class CNCelebEnroll(Dataset):
             audio_length=len(audio),
             enroll_id=enroll_id,
             enroll_path=enroll_path,
+            sample_rate=self.sample_rate,
+        )
+
+
+@dataclass
+class CNCelebEnrollSampleMulti:
+    """Single multi-utterance enrollment sample before collation."""
+    audios: List[torch.Tensor]
+    audio_lengths: List[int]
+    enroll_id: str
+    audio_paths: List[str]
+    sample_rate: int
+
+
+@dataclass
+class CNCelebEnrollBatchMulti:
+    """Batched multi-utterance enrollment data consumed by the model."""
+    audio: torch.Tensor
+    audio_length: torch.Tensor
+    audio_path: Tuple[str, ...]
+    enroll_id: Tuple[str, ...]
+    utt_counts: Tuple[int, ...]
+    sample_rate: int
+
+
+class EnrollCollateMulti(BaseCollate):
+    """Collate for multi-enrollment: flattens utterances and returns `utt_counts`."""
+
+    def __init__(self, pad_value=0):
+        super().__init__(pad_value)
+
+    def __call__(self, batch) -> CNCelebEnrollBatchMulti:
+        if not batch:
+            raise ValueError("CNCeleb enrollment batch is empty.")
+
+        all_audios: List[torch.Tensor] = []
+        all_lengths: List[int] = []
+        all_paths: List[str] = []
+        enroll_ids: List[str] = []
+        utt_counts: List[int] = []
+
+        for item in batch:
+            enroll_ids.append(item.enroll_id)
+            utt_counts.append(len(item.audios))
+            for audio, length, path in zip(item.audios, item.audio_lengths, item.audio_paths):
+                all_audios.append(audio)
+                all_lengths.append(length)
+                all_paths.append(path)
+
+        lengths = torch.tensor(all_lengths, dtype=torch.long)
+        padded_audios = pad_sequence(all_audios, batch_first=True, padding_value=self.pad_value)
+
+        return CNCelebEnrollBatchMulti(
+            audio=padded_audios,
+            audio_length=lengths,
+            audio_path=tuple(all_paths),
+            enroll_id=tuple(enroll_ids),
+            utt_counts=tuple(utt_counts),
+            sample_rate=batch[0].sample_rate,
+        )
+
+
+class CNCelebEnrollMulti(Dataset):
+    """Dataset for CNCeleb multi-utterance enrollment (from `map_path`)."""
+
+    def __init__(
+        self,
+        data_dir: str,
+        df: pd.DataFrame,
+        sample_rate: int = 16000,
+        max_duration: Union[None, float, int] = None,
+    ):
+        self.data_dir = Path(data_dir)
+        self.sample_rate = sample_rate
+        self.max_duration = max_duration
+        self.audio_processor = AudioProcessor(sample_rate)
+
+        self.enroll_df = df
+
+        total_utterances = sum(
+            len(paths) if isinstance(paths, list) else 1
+            for paths in self.enroll_df["map_path"]
+        )
+        log.info(
+            f"Loaded {len(self.enroll_df)} enrollment IDs with {total_utterances} total utterances"
+        )
+
+    def __len__(self):
+        return len(self.enroll_df)
+
+    def __getitem__(self, idx) -> CNCelebEnrollSampleMulti:
+        row = self.enroll_df.iloc[idx]
+        enroll_id = row["enroll_id"]
+
+        map_paths = row["map_path"]
+        if not isinstance(map_paths, list):
+            map_paths = [row["enroll_path"]]
+
+        audios: List[torch.Tensor] = []
+        audio_lengths: List[int] = []
+        audio_paths: List[str] = []
+
+        for utt_path in map_paths:
+            audio_path = self.data_dir / utt_path
+            audio, _ = self.audio_processor.process_audio(str(audio_path))
+            audios.append(audio)
+            audio_lengths.append(len(audio))
+            audio_paths.append(utt_path)
+
+        return CNCelebEnrollSampleMulti(
+            audios=audios,
+            audio_lengths=audio_lengths,
+            enroll_id=enroll_id,
+            audio_paths=audio_paths,
             sample_rate=self.sample_rate,
         )
 

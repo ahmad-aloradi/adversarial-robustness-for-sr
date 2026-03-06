@@ -19,13 +19,13 @@ audio_encoder:
   _target_: torch.nn.Sequential
   _args_:
   - _target_: src.utils.hf_utils.load_wespeaker_model
-    model_name: "ecapa_tdnn_glob_c1024"
-    repo_id: "Wespeaker/wespeaker-voxceleb-ecapa-tdnn1024-LM"
-    checkpoint_filename: "avg_model.pt"
+    model_name: resnet152
+    repo_id: "Wespeaker/wespeaker-voxceleb-resnet152-LM"
+    checkpoint_filename: "voxceleb_resnet152_LM.pt"
   - _target_: src.utils.torch_utils.SelectFromTuple
     _args_: [1]
 
 classifier:
   _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
-  input_size: 192
+  input_size: 256
   out_neurons:  ${datamodule.num_classes}

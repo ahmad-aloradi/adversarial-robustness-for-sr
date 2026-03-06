@@ -7,7 +7,7 @@ import hydra
 
 from src import utils
 from src.datamodules.components.librispeech.librispeech_dataset import LibrispeechDataset, Collate
-from src.datamodules.components.utils import CsvProcessor
+from src.datamodules.components.utils import CsvProcessor, make_dataloader
 from src.datamodules.preparation.librispeech import LibrispeechMetadataPreparer
 
 log = utils.get_pylogger(__name__)
@@ -64,10 +64,11 @@ class LibrispeechDataModule(LightningDataModule):
 
     def train_dataloader(self):
         assert self.hparams.get('loaders') is not None, "LibrispeechDataModule requires 'loaders' config"
-        return DataLoader(
-            self.train_data,
-            **self.hparams.loaders.train,
-            collate_fn=Collate(pad_value=0.0)
+        return make_dataloader(
+            dataset=self.train_data,
+            loader_kwargs=dict(self.hparams.loaders.train),
+            collate_fn=Collate(pad_value=0.0),
+            batch_sampler_cfg=self.hparams.dataset.get("batch_sampler", None),
         )
 
     def val_dataloader(self):

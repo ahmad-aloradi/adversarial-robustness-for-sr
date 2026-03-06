@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, Tuple
+from typing import Any, Dict, Optional, Union, Tuple, Set
 from multiprocessing import cpu_count
 import pandas as pd
 import soundfile as sf
@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from src import utils
+from hydra.utils import instantiate
 from src.datamodules.components.common import get_dataset_class, get_speaker_class, CNCelebDefaults
 from src.datamodules.components.utils import segment_utterance
 from src.datamodules.preparation.base import (
@@ -30,7 +31,8 @@ class CNCelebUtterance:
     speaker_id: str
     rel_filepath: str
     recording_duration: float
-    split: str
+    source: str  # Dataset origin: CN-Celeb_flac, CN-Celeb2_flac, etc.
+    split: str   # Actual split: data, dev, eval, etc.
     class_id: Union[int, float] = None
     dataset_name: str = DATASET_DEFAULTS.dataset_name
     sample_rate: int = DATASET_DEFAULTS.sample_rate
@@ -64,14 +66,16 @@ def process_audio_file(args_tuple):
     assert speaker_id.startswith('id'), f"Invalid speaker ID extracted: {speaker_id}"
     speaker_id = _format_global_speaker_id(speaker_id)
 
-    # Determine dataset version from root directory path
-    split_name = _determine_dataset_split(audio_path, cnceleb1_name, cnceleb2_name)
+    # Determine dataset source and actual split
+    source_name = _determine_source(audio_path, cnceleb1_name, cnceleb2_name)
+    split_name = _determine_split(rel_path)
     
     # Create utterance data
     return {
         'speaker_id': speaker_id,
         'rel_filepath': str(Path(root_dir.name) / rel_path),
         'recording_duration': info.duration,
+        'source': source_name,
         'split': split_name,
         'class_id': None,
         'dataset_name': DATASET_DEFAULTS.dataset_name,
@@ -80,12 +84,13 @@ def process_audio_file(args_tuple):
         'gender': None,
         'country': DATASET_DEFAULTS.country,
         'speaker_name': None,
-        'text': None
+        'text': None,
+        'is_concatenated': False
     }
 
 
-def _determine_dataset_split(audio_path: Path, cnceleb1_name: str, cnceleb2_name: Optional[str] = None) -> str:
-    """Determine the dataset split based on audio file path."""
+def _determine_source(audio_path: Path, cnceleb1_name: str, cnceleb2_name: Optional[str] = None) -> str:
+    """Determine the dataset source (CN-Celeb_flac, CN-Celeb2_flac) based on audio file path."""
     audio_path_str = str(audio_path)
     
     if cnceleb2_name and cnceleb2_name in audio_path_str:
@@ -93,7 +98,17 @@ def _determine_dataset_split(audio_path: Path, cnceleb1_name: str, cnceleb2_name
     elif cnceleb1_name in audio_path_str:
         return cnceleb1_name
     else:
-        raise ValueError(f"Could not determine dataset split from path: {audio_path}")
+        raise ValueError(f"Could not determine dataset source from path: {audio_path}")
+
+
+def _determine_split(rel_path: Path) -> str:
+    """Determine the actual split (data, dev, eval) from relative path."""
+    parts = rel_path.parts
+    if len(parts) >= 1:
+        first_part = parts[0]
+        if first_part in ['data', 'dev', 'eval']:
+            return first_part
+    return 'unknown'  # Default to 'data' if not determinable
 
 
 def _extract_speaker_id(rel_path: Path) -> Optional[str]:
@@ -160,16 +175,7 @@ def _ensure_prefixed_identifier(raw_id: str) -> str:
 
 
 class CNCelebProcessor:
-
-    DATASET_PATHS = {
-        'wav_dir': 'voxceleb1_2',
-        'downloaded_metadata_dir': 'voxceleb_metadata/downloaded',
-        'vox_metadata': 'vox_meta.csv',
-        'speaker_lookup': 'speaker_lookup.csv',
-        'preprocess_stats_file': 'preprocess_stats.csv'
-    }
-
-    """Simplified CNCeleb dataset processor."""
+    """CNCeleb dataset processor."""
 
     def __init__(self, root_dir: Union[str, Path], artifacts_dir: Union[str, Path], 
                  cnceleb1: str, 
@@ -185,7 +191,9 @@ class CNCelebProcessor:
                  use_pre_segmentation: bool = True,
                  segment_duration: float = 3.0,
                  segment_overlap: float = 0.0,
-                 min_segment_duration: float = 0.5):
+                 min_segment_duration: float = 0.5,
+                 vad: Any = None,
+                 concat_mapping_file: Optional[Union[str, Path]] = None):
         self.sep = sep
         self.verbose = verbose
         self.sample_rate = sample_rate
@@ -196,16 +204,21 @@ class CNCelebProcessor:
             raise ValueError("cnceleb1 is mandatory and cannot be None")
         
         # Build sub_datasets list from cnceleb1 and cnceleb2
-        self.sub_datasets = [cnceleb1]
-        if cnceleb2 is not None:
-            self.sub_datasets.append(cnceleb2)
+        self.sub_datasets = [cnceleb1, cnceleb2]
 
         # Store the sub-dataset roots for verification
         self.sub_dataset_roots = [self.root_dir / d for d in self.sub_datasets]
         self._verify_sub_datasets()
 
+        # Determine audio file extension from dataset name (expects 'flac' or 'wav' in name)
+        lower1 = cnceleb1.lower()
+        self.audio_ext = 'flac' if 'flac' in lower1 else 'wav' if 'wav' in lower1 else None
+        if self.audio_ext is None:
+            raise ValueError("Could not determine audio extension from cnceleb1 value (expected 'flac' or 'wav' in name)")
+        assert (self.audio_ext in cnceleb2.lower()), "cnceleb2 must use the same audio extension as cnceleb1"
+
         self.cnceleb1_dirpath = self.root_dir / cnceleb1
-        self.cnceleb2_dirpath = self.root_dir / cnceleb2 if cnceleb2 is not None else None
+        self.cnceleb2_dirpath = self.root_dir / cnceleb2
 
         self.artifacts_dir = Path(artifacts_dir)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -226,14 +239,13 @@ class CNCelebProcessor:
         self.trials_lst_file = self.cnceleb1_dirpath / 'eval' / 'lists' / 'trials.lst'
         self.test_lst_file = self.cnceleb1_dirpath / 'eval' / 'lists' / 'test.lst'
         self.cnceleb1_dev_lst_file = self.cnceleb1_dirpath / 'dev' / 'dev.lst'
-        self.cnceleb2_dev_lst_file = self.cnceleb2_dirpath / 'spk.lst' if self.cnceleb2_dirpath else None
+        self.cnceleb2_dev_lst_file = self.cnceleb2_dirpath / 'spk.lst'
 
         assert self.enroll_map_file.exists(), f"Enrollment map file not found: {self.enroll_map_file}"
         assert self.enroll_lst_file.exists(), f"Enrollment list file not found: {self.enroll_lst_file}"
         assert self.trials_lst_file.exists(), f"Trials list file not found: {self.trials_lst_file}"
         assert self.cnceleb1_dev_lst_file.exists(), f"dev.lst in CN-Celeb1 not found: {self.cnceleb1_dev_lst_file}"
-        if self.cnceleb2_dev_lst_file:
-            assert self.cnceleb2_dev_lst_file.exists(), f"spk.lst in CN-Celeb2 not found: {self.cnceleb2_dev_lst_file}"
+        assert self.cnceleb2_dev_lst_file.exists(), f"spk.lst in CN-Celeb2 not found: {self.cnceleb2_dev_lst_file}"
 
         log.info(f"Initialized CNCelebProcessor:")
         log.info(f"  Root: {self.root_dir}")
@@ -245,6 +257,27 @@ class CNCelebProcessor:
         self.segment_duration = segment_duration
         self.segment_overlap = segment_overlap
         self.min_segment_duration = min_segment_duration
+
+        # Optional VAD config (Hydra-instantiated when used)
+        self.vad_cfg = vad
+        
+        # Load concatenation mapping if provided (CSV format: output_path|source_paths|duration|speaker_id|genre|dataset_source)
+        self.concat_mapping_df: Optional[pd.DataFrame] = None
+        self.merged_source_files: Set[str] = set()
+        self.concat_mapping_file = Path(concat_mapping_file) if concat_mapping_file else None
+
+        if self.concat_mapping_file is not None:
+            if not self.concat_mapping_file.exists():
+                raise FileNotFoundError(f"Concatenation mapping file not found: {self.concat_mapping_file}")
+
+            log.info(f"Loading concatenation mapping from: {self.concat_mapping_file}")
+            self.concat_mapping_df = pd.read_csv(self.concat_mapping_file, sep='|')
+            # Build set of merged source files from semicolon-delimited source_paths column
+            for source_paths in self.concat_mapping_df['source_paths']:
+                for path in source_paths.split(';'):
+                    self.merged_source_files.add(path)
+            log.info(f"Loaded mapping with {len(self.concat_mapping_df)} concatenated files")
+            log.info(f"Will skip {len(self.merged_source_files)} merged source files")
     
     def _verify_sub_datasets(self):
         """Verify that the specified sub-datasets exist."""
@@ -252,10 +285,66 @@ class CNCelebProcessor:
             if not sub_root.exists() or not sub_root.is_dir():
                 raise FileNotFoundError(f"Sub-dataset directory does not exist: {sub_root}")
         log.info(f"All specified sub-datasets exist: {[str(p) for p in self.sub_dataset_roots]}")
+    
+    def _collect_concatenated_utterances(self) -> list:
+        """
+        Collect utterances from concatenated files based on the mapping CSV.
+        
+        Returns:
+            List of utterance dictionaries for concatenated files
+        """
+        concat_utterances = []
+        
+        if self.concat_mapping_df is None or len(self.concat_mapping_df) == 0:
+            return concat_utterances
+        
+        log.info(f"Adding {len(self.concat_mapping_df)} concatenated files from mapping...")
+        
+        for _, row in self.concat_mapping_df.iterrows():
+            concat_path = self.root_dir / row['output_path']
+            if not concat_path.exists():
+                log.warning(f"Concatenated file not found: {concat_path}")
+                continue
+            
+            # Use dataset_source to preserve CN-Celeb1/CN-Celeb2 origin as 'source'
+            # Fall back to first source file's path if dataset_source not in mapping
+            original_source = row.get('dataset_source')
+            if pd.isna(original_source) and row.get('source_paths'):
+                # Extract from first source path: "CN-Celeb_flac/data/..." -> "CN-Celeb_flac"
+                first_source = row['source_paths'].split(';')[0]
+                original_source = first_source.split('/')[0] if '/' in first_source else None
+            
+            concat_utt = {
+                'speaker_id': _format_global_speaker_id(row['speaker_id']),
+                'rel_filepath': row['output_path'],
+                'recording_duration': row['duration'],
+                'source': original_source,  # Dataset origin: CN-Celeb_flac or CN-Celeb2_flac
+                'split': 'data',  # Concatenated files are training data
+                'class_id': None,
+                'dataset_name': DATASET_DEFAULTS.dataset_name,
+                'sample_rate': self.sample_rate,
+                'language': DATASET_DEFAULTS.language,
+                'gender': None,
+                'country': DATASET_DEFAULTS.country,
+                'speaker_name': None,
+                'text': None,
+                'is_concatenated': True,
+            }
+            concat_utterances.append(concat_utt)
+        
+        log.info(f"Added {len(concat_utterances)} concatenated utterances")
+        return concat_utterances
 
     def generate_metadata(self) -> pd.DataFrame:
-        """Generate metadata by scanning dev and data directories."""
+        """Generate metadata by scanning dev and data directories.
+        
+        If a concatenation mapping is provided, this method will:
+        1. Skip original source files that have been merged into concatenated files
+        2. Include the concatenated files in processing
+        3. Apply VAD to concatenated files (as per requirement)
+        """
         all_audio_files = []
+        skipped_merged_count = 0
         
         # Scan all sub-datasets
         for sub_root in self.sub_dataset_roots:
@@ -267,12 +356,29 @@ class CNCelebProcessor:
             ]
             
             for scan_dir in scan_dirs:
-                audio_files = list(scan_dir.rglob('*.flac'))
-                assert audio_files, f"No audio files found in {scan_dir}"
+                audio_files = list(scan_dir.rglob(f'*.{self.audio_ext}'))
+                assert audio_files, f"No audio files found in {scan_dir} (looking for '*.{self.audio_ext}')"
                 log.info(f"Found {len(audio_files)} audio files in {scan_dir}")
-                all_audio_files.extend([(f, sub_root) for f in audio_files])
+                
+                for f in audio_files:
+                    # Build relative path as stored in the mapping (sub_dataset/rel_path)
+                    rel_to_root = f.relative_to(self.root_dir)
+                    rel_path_str = str(rel_to_root)
+                    
+                    # Skip files that have been merged into concatenated files
+                    if rel_path_str in self.merged_source_files:
+                        skipped_merged_count += 1
+                        continue
+                    
+                    all_audio_files.extend([(f, sub_root)])
+        
+        if self.merged_source_files:
+            log.info(f"Skipped {skipped_merged_count} files that have been merged into concatenated utterances")
+        
+        # Add concatenated files if mapping exists
+        concat_utterances = self._collect_concatenated_utterances()
 
-        log.info(f"Processing {len(all_audio_files)} audio files...")
+        log.info(f"Processing {len(all_audio_files)} original audio files...")
         
         # Prepare tasks for multiprocessing - include cnceleb1 and cnceleb2 names
         tasks = [(str(f), str(r), self.sample_rate, self.sub_datasets[0], 
@@ -287,12 +393,31 @@ class CNCelebProcessor:
                 result = future.result()
                 assert result, f"Processing failed for: {future_to_path[future]}"
                 utterances.append(result)
+        
+        # Merge original utterances with concatenated utterances
+        utterances.extend(concat_utterances)
+        log.info(f"Total utterances (original + concatenated): {len(utterances)}")
+
+        # Optional VAD (applied at file-level / before segmentation)
+        # VAD is applied to ALL utterances including concatenated ones
+        vad_cfg = self.vad_cfg
+        vad = instantiate(vad_cfg) if vad_cfg and getattr(vad_cfg, '_target_', None) else None
+        if vad is not None and vad.should_apply('dev'):
+            utterances = vad.apply(
+                utterances,
+                audio_root=self.root_dir,
+                split_name='dev',
+                rel_filepath_key='rel_filepath',
+                recording_duration_key='recording_duration',
+                skip_list_path=self.artifacts_dir / f"vad_skipped_dev.txt",
+            )
 
         # Apply segmentation only if enabled
         if self.use_pre_segmentation:
             log.info(f"Pre-segmentation enabled. Processing {len(utterances)} utterances...")
             
             all_segments = []
+            skipped_utterances = 0
             for utt in tqdm(utterances, desc="Segmenting utterances"):
                 segments = segment_utterance(
                     speaker_id=utt['speaker_id'],
@@ -301,16 +426,43 @@ class CNCelebProcessor:
                     segment_duration=self.segment_duration,
                     segment_overlap=self.segment_overlap,
                     min_segment_duration=self.min_segment_duration,
-                    original_row=utt
+                    original_row=utt,
+                    base_start_time=float(utt.get('vad_start', 0.0) or 0.0),
+                    vad_speech_timestamps=utt.get('vad_speech_timestamps', None),
+                    segment_max_silence_ratio=float(getattr(vad, 'segment_max_silence_ratio', 0.80)) if vad is not None and vad.enabled else None,
                 )
-                all_segments.extend(segments)
-            
-            log.info(f"Generated {len(all_segments)} segments from {len(utterances)} utterances")
-            log.info(f"Average segments per utterance: {len(all_segments)/len(utterances):.2f}")
+                if not segments:
+                    skipped_utterances += 1
+                else:
+                    all_segments.extend(segments)
+
+            # Compute skipped utts percentage and average segment length (seconds)
+            total_utterances = len(utterances)
+            skipped_pct = (skipped_utterances / total_utterances) * 100 if total_utterances > 0 else 0.0
+            avg_segment_length = sum(s.get('segment_duration', 0.0) for s in all_segments) / len(all_segments)
+
+            log.info(f"Generated {len(all_segments)} segments from {total_utterances} utterances")
+            log.info(f"Average segments per utterance: {len(all_segments)/total_utterances:.2f}")
+            log.info(f"Average segment duration: {avg_segment_length:.3f}s")
+            log.info(f"Skipped {skipped_utterances} utterances ({skipped_pct:.2f}%) due to duration < min_segment_duration={self.min_segment_duration}s or silence filtering")
             dev_df = pd.DataFrame(all_segments)
         else:
             log.info(f"Pre-segmentation disabled. Using full file metadata with random cropping during training.")
             dev_df = pd.DataFrame(utterances)
+
+        # Ensure split speaker lists exist (dev/test) and filter out any test speakers
+        try:
+            # This will populate self.test_spk_file (and dev_spk_file) based on dataset lists
+            self.save_split_speaker_lists()
+            if self.test_spk_file.exists():
+                with open(self.test_spk_file, 'r', encoding='utf-8') as f:
+                    test_speakers = {line.strip() for line in f if line.strip()}
+                if test_speakers:
+                    before = len(dev_df)
+                    dev_df = dev_df[~dev_df['speaker_id'].isin(test_speakers)]
+                    log.info(f"Filtered {before - len(dev_df)} rows from dev metadata belonging to test speakers")
+        except Exception as e:
+            log.warning(f"Could not filter test speakers from dev metadata: {e}")
 
         write_dataset_csv(dev_df, self.dev_metadata_file, sep=self.sep)
         log.info(f"Saved metadata for {len(dev_df)} {'segments' if self.use_pre_segmentation else 'files'} to {self.dev_metadata_file}")
@@ -322,26 +474,26 @@ class CNCelebProcessor:
         # CNCeleb1 trial paths are like "test/id00800-singing-01-001.wav"
         # But actual files are in "eval/test/id00800-singing-01-001.flac"
         
-        # Add .flac extension if not present
-        if not trial_path.endswith('.flac'):
-            trial_path_flac = Path(trial_path).with_suffix('.flac')
+        # Add the configured audio extension if not present
+        if not trial_path.endswith(f'.{self.audio_ext}'):
+            trial_path_with_ext = Path(trial_path).with_suffix(f'.{self.audio_ext}')
         else:
-            trial_path_flac = Path(trial_path)
+            trial_path_with_ext = Path(trial_path)
                     
-        path = self.cnceleb1_dirpath / 'eval' / trial_path_flac
+        path = self.cnceleb1_dirpath / 'eval' / trial_path_with_ext
         assert path.exists(), f"File not found: {path}"
         rel_path = self.cnceleb1_dirpath.name / path.relative_to(self.cnceleb1_dirpath)
         return str(rel_path)
 
     def _find_audio_map_files(self, trial_path: str) -> str:
         """Find the actual audio file path from trial path - CNCeleb specific logic."""        
-        # Add .flac extension if not present
-        if not trial_path.endswith('.flac'):
-            trial_path_flac = Path(trial_path).with_suffix('.flac')
+        # Add the configured audio extension if not present
+        if not trial_path.endswith(f'.{self.audio_ext}'):
+            trial_path_with_ext = Path(trial_path).with_suffix(f'.{self.audio_ext}')
         else:
-            trial_path_flac = Path(trial_path)
+            trial_path_with_ext = Path(trial_path)
 
-        path = self.cnceleb1_dirpath / 'data' / trial_path_flac
+        path = self.cnceleb1_dirpath / 'data' / trial_path_with_ext        
         assert path.exists(), f"File not found: {path}"
         rel_path = self.cnceleb1_dirpath.name / path.relative_to(self.cnceleb1_dirpath)
         return str(rel_path)
@@ -452,14 +604,11 @@ class CNCelebProcessor:
         with open(self.cnceleb1_dev_lst_file, 'r', encoding='utf-8') as f:
             cn1_dev_speakers = [_format_global_speaker_id(line.strip()) for line in f if line.strip()]
 
-        if self.cnceleb2_dev_lst_file and self.cnceleb2_dev_lst_file.exists():
-            log.info(f"Reading additional dev speakers from: {self.cnceleb2_dev_lst_file}")
-            with open(self.cnceleb2_dev_lst_file, 'r', encoding='utf-8') as f:
-                cn2_dev_speakers = [_format_global_speaker_id(line.strip()) for line in f if line.strip()]
-            dev_speakers = sorted(set(cn1_dev_speakers + cn2_dev_speakers))
-        else:
-            dev_speakers = sorted(set(cn1_dev_speakers))
-        
+        log.info(f"Reading additional dev speakers from: {self.cnceleb2_dev_lst_file}")
+        with open(self.cnceleb2_dev_lst_file, 'r', encoding='utf-8') as f:
+            cn2_dev_speakers = [_format_global_speaker_id(line.strip()) for line in f if line.strip()]
+
+        dev_speakers = sorted(set(cn1_dev_speakers + cn2_dev_speakers))        
         log.info(f"Total dev speakers found: {len(dev_speakers)}")
 
         # Test speakers from test list
@@ -602,23 +751,31 @@ class CNCelebProcessor:
 
 
 if __name__ == "__main__":
+    # Resolve data directory (check for HPC path first)
+    data_dir = f"{os.environ['HOME']}/adversarial-robustness-for-sr/data"
+    hpc_data_dir = Path(data_dir) / "datasets"
+    if hpc_data_dir.is_dir() and (hpc_data_dir / "cnceleb").is_dir():
+        data_dir = str(hpc_data_dir)
+
+    # Load Hydra config
     config = read_hydra_config(
         config_path='../../../configs',
         config_name='train.yaml',
         overrides=[
-            f"paths.data_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data",
-            'datamodule=datasets/cnceleb',
-            f"datamodule.dataset.artifacts_dir={os.environ['HOME']}/adversarial-robustness-for-sr/data/cnceleb/metadata"
+            f"paths.data_dir={data_dir}",
+            "datamodule=datasets/cnceleb",
         ]
     )
     config = config.datamodule.dataset
     
+    # Set artifacts directory based on VAD setting
+    vad_enabled = config.get("vad.enabled", False)
+    artifacts_subdir = "vad_metadata" if vad_enabled else "metadata"
+    config.artifacts_dir = f"{data_dir}/cnceleb/{artifacts_subdir}"
+    
     # Resolve paths
     resolved_root = Path(config.data_dir).expanduser().resolve()
     resolved_artifacts = Path(config.artifacts_dir).expanduser().resolve()
-    
-    # Handle optional cnceleb2 parameter
-    cnceleb2 = config.cnceleb2 if hasattr(config, 'cnceleb2') and config.cnceleb2 else None
 
     processor = CNCelebProcessor(
         root_dir=resolved_root,
@@ -629,7 +786,7 @@ if __name__ == "__main__":
         test_unique_csv_path=Path(config.test_unique_csv_path),
         dev_spk_file=Path(config.dev_spk_file),
         test_spk_file=Path(config.test_spk_file),
-        cnceleb2=cnceleb2,
+        cnceleb2=config.cnceleb2,
         verbose=config.verbose,
         sep=config.sep,
         sample_rate=config.sample_rate,
@@ -638,12 +795,14 @@ if __name__ == "__main__":
         segment_duration=config.segment_duration,
         segment_overlap=config.segment_overlap,
         min_segment_duration=config.min_segment_duration,
+        vad=getattr(config, 'vad', None),
+        concat_mapping_file=getattr(config, 'concat_mapping_file', None),
     )
     
     # Run the preprocessing pipeline
     dev_metadata = processor.generate_metadata()
     trials_df = processor.generate_trial_list()
-    processor.save_split_speaker_lists()
+    # Note: save_split_speaker_lists() is already called inside generate_metadata()
     processor.generate_enrollment_embeddings_list()
     processor.generate_unique_test_csv(trials_df)
     

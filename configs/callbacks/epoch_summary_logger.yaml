@@ -1,0 +1,5 @@
+epoch_summary_logger:
+  _target_: src.callbacks.epoch_summary_logger.EpochSummaryLogger
+  monitor: ${replace:"valid/__metric__"}
+  filename: train_log.txt
+  sparsity_threshold: 1e-12

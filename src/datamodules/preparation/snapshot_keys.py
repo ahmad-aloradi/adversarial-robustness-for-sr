@@ -19,6 +19,8 @@ CNCELEB_COMPARABLE_KEYS: Tuple[str, ...] = (
     "segment_duration",
     "segment_overlap",
     "min_segment_duration",
+    "vad",
+    "concat_mapping_file"
 )
 
 # VoxCeleb dataset snapshot keys
@@ -31,6 +33,7 @@ VOXCELEB_COMPARABLE_KEYS: Tuple[str, ...] = (
     "segment_overlap",
     "min_segment_duration",
     "min_duration",
+    "vad",
     # "veri_test_filenames",
 )
 
@@ -49,4 +52,5 @@ LIBRISPEECH_COMPARABLE_KEYS: Tuple[str, ...] = (
     "segment_overlap",
     "min_segment_duration",
     "max_duration",
+    "vad",
 )

@@ -162,3 +162,5 @@ notebooks/*.xlsx
 notebooks/*.csv
 notebooks/*.png
 .neptune
+.planning/
+.claude

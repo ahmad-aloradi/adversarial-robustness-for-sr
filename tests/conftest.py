@@ -78,7 +78,7 @@ def cfg_eval_global() -> DictConfig:
         cfg = compose(
             config_name="eval.yaml",
             return_hydra_config=True,
-            overrides=["ckpt_path=.", *_HYDRA_OVERRIDES],
+            overrides=[*_HYDRA_OVERRIDES],
         )
 
         # set defaults for all tests

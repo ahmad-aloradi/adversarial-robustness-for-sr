@@ -3,26 +3,26 @@ _target_: src.datamodules.librispeech_datamodule.LibrispeechDataModule
 dataset:
   dataset_dir: ${paths.data_dir}/librispeech # Replace data_dir with PROJECTROOT when testing
   artifacts_dir: ${hydra:runtime.output_dir}/librispeech_artifacts
-  metadata_path: ${datamodule.dataset.dataset_dir}/metadata
-  train_dir: ${datamodule.dataset.dataset_dir}/train-clean-360
-  test_dir: ${datamodule.dataset.dataset_dir}/test-clean
-  dev_dir: ${datamodule.dataset.dataset_dir}/dev-clean
+  metadata_path: ${.dataset_dir}/metadata
+  train_dir: ${.dataset_dir}/train-clean-360
+  test_dir: ${.dataset_dir}/test-clean
+  dev_dir: ${.dataset_dir}/dev-clean
   
-  train_csv: ${datamodule.dataset.metadata_path}/train-clean-360.csv
-  dev_csv: ${datamodule.dataset.metadata_path}/dev-clean.csv
-  test_csv: ${datamodule.dataset.metadata_path}/test-clean.csv
+  train_csv: ${.metadata_path}/train-clean-360.csv
+  dev_csv: ${.metadata_path}/dev-clean.csv
+  test_csv: ${.metadata_path}/test-clean.csv
 
-  speaker_csv_path: ${datamodule.dataset.metadata_path}/SPEAKERS.csv
+  speaker_csv_path: ${.metadata_path}/SPEAKERS.csv
 
-  train_csv_exp_filepath: ${datamodule.dataset.artifacts_dir}/train-clean-360.csv
-  dev_csv_exp_filepath: ${datamodule.dataset.artifacts_dir}/dev-clean.csv
-  test_csv_exp_filepath: ${datamodule.dataset.artifacts_dir}/test-clean.csv
-  speaker_csv_exp_filepath: ${datamodule.dataset.artifacts_dir}/SPEAKERS.csv
+  train_csv_exp_filepath: ${.artifacts_dir}/train-clean-360.csv
+  dev_csv_exp_filepath: ${.artifacts_dir}/dev-clean.csv
+  test_csv_exp_filepath: ${.artifacts_dir}/test-clean.csv
+  speaker_csv_exp_filepath: ${.artifacts_dir}/SPEAKERS.csv
 
   audio_file_type: flac
   annotation_format: .trans.txt
   sep: '|'
-  speaker_filepath: ${datamodule.dataset.dataset_dir}/SPEAKERS.TXT
+  speaker_filepath: ${.dataset_dir}/SPEAKERS.TXT
   save_csv: False
   verbose: True
   sample_rate: 16000
@@ -38,6 +38,37 @@ dataset:
   min_segment_duration: 0.5  # Minimum segment duration to be included
   # Random cropping parameter (only used if use_pre_segmentation=false)
   max_duration: 4.0  # Maximum duration for random cropping during training
+
+  # --- Optional VAD (applied at CSV level, before segmentation) ---
+  vad:
+    _target_: src.datamodules.preparation.vad.SileroCsvVad
+    enabled: false  # Master switch; when true, VAD rewrites rows via vad_start/vad_end
+    apply_to_splits: [train-clean-360, dev-clean]  # Which subsets get VAD (test is typically excluded)
+
+    # Model input/sample rate (should match your audio + pipeline expectations)
+    sample_rate: ${..sample_rate}
+
+    # Silero VAD detection knobs
+    min_speech_duration_ms: 100  # Drop detected speech bursts shorter than this (in ms)
+    min_silence_duration_ms: 300  # Silence shorter than this will not split speech segments (in ms)
+    speech_pad_ms: 60  # Expand speech segments a bit on both ends (in ms)
+
+    # Post-processing to reduce VAD glitches
+    merge_gap_s: 0.20  # Merge adjacent speech segments separated by <= this gap (seconds)
+    drop_short_speech_s: 0.10  # Drop post-merged speech segments shorter than this (seconds)
+
+    # Split a file into multiple rows if there is a long internal silence.
+    # Threshold is dynamic: clamp(duration * ratio, min_s, max_s)
+    long_silence_ratio: 0.20
+    long_silence_min_s: 0.60
+    long_silence_max_s: 2.00
+
+    # Segment-level skipping (only relevant when you also pre-segment):
+    # a segment is dropped if silence_ratio > segment_max_silence_ratio.
+    segment_max_silence_ratio: 0.90
+
+  # Set to null for default DataLoader batching.
+  batch_sampler: null
 
 
 transforms: null

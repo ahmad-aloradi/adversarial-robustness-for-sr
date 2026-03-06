@@ -1,5 +1,6 @@
 import argparse
 import pickle
+import shutil
 import warnings
 from functools import wraps
 from importlib.util import find_spec
@@ -10,7 +11,8 @@ import hydra
 from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import DictConfig, OmegaConf
-from pytorch_lightning import Callback
+from pytorch_lightning import Callback, Trainer
+from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers.logger import Logger as PLLogger
 from pytorch_lightning.utilities import rank_zero_only
 
@@ -370,6 +372,12 @@ def register_custom_resolvers(
     if not OmegaConf.has_resolver("oc.eval"):
         OmegaConf.register_new_resolver("oc.eval", eval)
 
+    # register bregman lambda interpolation resolver
+    if not OmegaConf.has_resolver("bregman_lambda"):
+        from src.utils.bregman_utils import get_bregman_lambda
+
+        OmegaConf.register_new_resolver("bregman_lambda", get_bregman_lambda)
+
     # register the replace resolver
     if not OmegaConf.has_resolver("replace"):
         with initialize_config_dir(
@@ -380,17 +388,24 @@ def register_custom_resolvers(
                 return_hydra_config=True,
                 overrides=overrides if overrides else [],
             )
-        cfg_tmp = cfg.copy()
-        loss = load_loss(cfg_tmp.module.criterion.loss)
-        metric, metric_best, _ = load_metrics(cfg_tmp.module.metrics)
-        GlobalHydra.instance().clear()
 
-        OmegaConf.register_new_resolver(
-            "replace",
-            lambda item: item.replace("__loss__", loss.__class__.__name__)
-            .replace("__metric__", metric.__class__.__name__)
-            .replace("__metric_best__", metric_best.__class__.__name__),
-        )
+        if cfg.module.criterion.loss:
+            cfg_tmp = cfg.copy()
+            loss = load_loss(cfg_tmp.module.criterion.loss)
+            metric, metric_best, _ = load_metrics(cfg_tmp.module.metrics)
+            GlobalHydra.instance().clear()
+
+            OmegaConf.register_new_resolver(
+                "replace",
+                lambda item: item.replace("__loss__", loss.__class__.__name__)
+                .replace("__metric__", metric.__class__.__name__)
+                .replace("__metric_best__", metric_best.__class__.__name__),
+            )
+        else:
+            # cfg_tmp.module.criterion.loss is done for testing
+            log.warning(
+                f"cfg_tmp.module.criterion.loss is set to {cfg_tmp.module.criterion.loss}"
+            )
 
     def decorator(function: Callable) -> Callable:
         @wraps(function)
@@ -435,3 +450,101 @@ def load_pickle(pickle_path: Union[str, Path]) -> dict:
         stats = pickle.load(f)
     print(f"Statistics loaded from {pickle_path}")
     return stats
+
+
+def rename_yaml(path, new_name):
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path.rename(path.with_name(new_name))
+
+
+def copy_yaml(src, dst):
+    src, dst = Path(src), Path(dst)
+    if not src.is_file():
+        raise FileNotFoundError(src)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return dst
+
+
+def _resolve_test_ckpt_path(trainer: Trainer) -> Optional[str]:
+    """Prefer an averaged checkpoint (if present) for testing.
+
+    Falls back to the best checkpoint if no averaged checkpoint is found.
+    """
+    from src.callbacks.checkpoint_averaging import CheckpointAveraging
+
+    ckpt_cb = getattr(trainer, "checkpoint_callback", None)
+    if ckpt_cb is None:
+        for cb in trainer.callbacks:
+            if isinstance(cb, ModelCheckpoint):
+                ckpt_cb = cb
+                break
+
+    avg_cb = None
+    for cb in trainer.callbacks:
+        if isinstance(cb, CheckpointAveraging):
+            avg_cb = cb
+            break
+
+    if avg_cb is not None and avg_cb.averaged_ckpt_path:
+        avg_path = Path(avg_cb.averaged_ckpt_path)
+        if avg_path.exists():
+            return str(avg_path)
+
+    if ckpt_cb is not None:
+        return ckpt_cb.best_model_path or None
+
+    return None
+
+
+def average_checkpoints(
+    checkpoint_paths: list[Path],
+    output_path: Path,
+) -> str:
+    """Average multiple checkpoint files into a single checkpoint.
+
+    Loads checkpoints, averages floating-point tensors, and saves the result.
+    Non-floating-point tensors are copied from the first checkpoint.
+
+    Args:
+        checkpoint_paths: List of checkpoint file paths to average
+        output_path: Path where averaged checkpoint will be saved
+
+    Returns:
+        str: Path to the saved averaged checkpoint
+    """
+    import torch
+
+    avg_state: dict[str, torch.Tensor] = {}
+    float_keys: list[str] = []
+    num = len(checkpoint_paths)
+
+    # Load first checkpoint to initialize
+    first_ckpt = torch.load(checkpoint_paths[0], map_location="cpu")
+    state_dict = first_ckpt.get("state_dict", {})
+    for k, v in state_dict.items():
+        if torch.is_tensor(v) and torch.is_floating_point(v):
+            avg_state[k] = v.clone().float()
+            float_keys.append(k)
+        else:
+            avg_state[k] = v.clone() if torch.is_tensor(v) else v
+
+    # Accumulate remaining checkpoints
+    for ckpt_path in checkpoint_paths[1:]:
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        state_dict = ckpt.get("state_dict", {})
+        for k in float_keys:
+            if k in state_dict and torch.is_tensor(state_dict[k]):
+                avg_state[k] += state_dict[k].float()
+
+    # Average
+    for k in float_keys:
+        avg_state[k] = avg_state[k] / float(num)
+
+    # Save averaged checkpoint
+    first_ckpt["state_dict"] = avg_state
+    torch.save(first_ckpt, output_path)
+
+    return str(output_path)

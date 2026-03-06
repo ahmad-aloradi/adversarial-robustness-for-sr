@@ -1,0 +1,17 @@
+# @package _global_
+# Simplified 100-speaker dataset.
+# Run: python train.py experiment=sv/sv_vanilla
+
+defaults:
+  - sv/sv_vanilla # inherit parent
+  - _self_
+
+tags:
+  - "100spk"
+  - "sv_vanilla"
+  - "sv"
+
+datamodule:
+  dataset:
+    max_speakers: 100
+  _base_num_classes: 100

@@ -4,6 +4,7 @@ defaults:
   - _self_
   - datamodule: datasets/vpc.yaml # choose datamodule with `test_dataloader()` for evaluation
   - module: vpc.yaml
+  - callbacks: none.yaml
   - logger: null
   - trainer: default.yaml
   - paths: default.yaml
@@ -13,7 +14,17 @@ defaults:
 task_name: "eval"
 predict: False
 
+exp_dir: null
+keep_logger: false
+use_training_configs: false  # Use training-time config snapshot from metadata/ if available
+use_avg_ckpt: false
+ckpt_dir: null
+ckpt_avg_num: null  # null = use all available candidates
+ckpt_avg_min: 2
+
 tags: ["dev"]
 
-# passing checkpoint path is necessary for evaluation
-ckpt_path: ???
+# Checkpoint resolution:
+#   - If ckpt_path is set: use it directly; exp_dir is derived automatically.
+#   - If only exp_dir is set: use averaged checkpoint (use_avg_ckpt forced True).
+ckpt_path: null
