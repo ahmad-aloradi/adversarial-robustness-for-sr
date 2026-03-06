@@ -12,7 +12,7 @@ import datetime
 import os
 import time
 
-from fabric.api import cd, env, run, task
+from fabric.api import cd, env, local, run, task
 from fabric.contrib.project import rsync_project
 
 # Cluster configuration
@@ -32,7 +32,7 @@ CONDA_ENV = "comfort"
 
 WOODY_DIR = f"/home/woody/{env.user[: 4]}/{env.user}"
 VAULT_DIR = f"/home/vault/{env.user[: 4]}/{env.user}"
-RESULTS_DIR = os.path.join(VAULT_DIR, "results")
+RESULTS_DIR = os.path.join(WOODY_DIR, "results")
 DATA_DIR = os.path.join(WOODY_DIR, "datasets")
 
 # Speaker-verification datasets packaged as fast-to-extract .tar.zst files.
@@ -45,10 +45,11 @@ SV_DATA_ARCHIVES = [
 ]
 
 # sync_results paths - Update these for your specific use case
-SYNC_DIR_REMOTE = os.path.join(
-    RESULTS_DIR, "train/runs/available_models/*available_models**"
-)
-SYNC_DIR_LOCAL = "/dataHDD/ahmad/hpc_results/libri_augmented3/"
+# SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, "train/runs/multi_sv/*")
+dataset = "cnceleb" # "cnceleb" or "multi_sv"
+SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, f"train/runs/{dataset}/*")
+# SYNC_DIR_LOCAL = f"/Users/ahmad_aloradi/Desktop/phd/comfort_project/adversarial-robustness-for-sr/results/exps/{dataset}"
+SYNC_DIR_LOCAL = f"/dataHDD/ahmad/comfort26_sem/{dataset}"
 
 
 def timestamp():
@@ -76,11 +77,41 @@ def sync_results():
             "*.ckpt",
             "*.pth",
             ".vscode",
+            "wandb",
         ],
         delete=False,
         upload=False,
     )
 
+@task
+def sync_tb():
+    """Rsync only TensorBoard data from the HPC cluster to the local machine."""
+    rsync_project(
+        remote_dir=SYNC_DIR_REMOTE,
+        local_dir=SYNC_DIR_LOCAL,
+        # We drop the 'exclude' parameter to ensure strict rule ordering via extra_opts
+        extra_opts='-m --include="*/" --include="events.out.tfevents.*" --exclude="*"',
+        delete=False,
+        upload=False,
+    )
+
+@task
+def sync_results_for_test():
+    """Recursively rsync specific artifacts, checkpoints, and logs from the HPC."""
+    rsync_project(
+        remote_dir=SYNC_DIR_REMOTE,
+        local_dir=SYNC_DIR_LOCAL,
+        extra_opts=(
+            "-m "                                     # prune empty directories
+            "--include='*/' "                         # allow traversing directories
+            "--include='**/*artifacts/**' "            # include any artifacts dir + contents
+            "--include='**/checkpoints/**' "          # include any checkpoints dir + contents
+            "--include='**/train_log.txt' "           # include train_log.txt anywhere
+            "--exclude='*'"                           # exclude everything else
+        ),
+        delete=False,
+        upload=False,
+    )
 
 def generate_vpc_data_transfer_section(settings):
     """Generate bash code for transferring VPC datasets to local SSD with
@@ -586,6 +617,17 @@ def check_running_pending(job_name):
     Returns:
         bool: True if the job is pending or running, False otherwise
     """
+    # hosts = ["tinyx.nhr.fau.de", "alex.nhr.fau.de"]
+    # sq = 'squeue -t PENDING,RUNNING --format "%.j" -h'
+    # ssh_opts = "-o ConnectTimeout=5 -o BatchMode=yes"
+    # # SSH from local machine to both clusters in parallel
+    # cmds = " & ".join(
+    #     f"ssh {ssh_opts} {env.user}@{h} '{sq}'"
+    #     for h in hosts
+    # )
+    # result = local(f"{{ {cmds}; wait; }}", capture=True)
+    # jobs = result.split() if result else []
+    # return job_name in jobs
     result = run('squeue -t PENDING,RUNNING --format "%.j" -h', quiet=True)
     files = result.split() if result else []
     return job_name in files
@@ -754,17 +796,20 @@ def run_vpc():
 
 
 def _submit_sv_job(
+    # hparams
     experiment,
     sv_model,
     dataset_name,
     transfer_data_bool,
-    base_max_epochs,
-    gpu_device=GPU,
+    max_epochs,
+    apply_augmentation=False,
+    batch_size_base = 128,
     target_sparsity=None,
+    # other options
+    gpu_device=GPU,
+    bypass_exps=None,
 ):
     """Helper function to configure and submit a single SV training job."""
-    apply_augmentation = False
-    batch_size_base = 128
     if not apply_augmentation:
         batch_size_base *= 2  # compensate for no augmentation (which effectively increases batch size by NUM_AUG)
     apply_vad = False
@@ -772,6 +817,7 @@ def _submit_sv_job(
     num_ckpt_avg = 3  # Number of checkpoints to average for final model (only applicable for certain experiments)
     ramp_up_epochs = 10
     virtual_spks = "False"
+    logger = 'many_loggers' # options tensorboard , many_loggers
 
     settings = {
         "script_name": "src/train.py",
@@ -796,8 +842,15 @@ def _submit_sv_job(
         "wespeaker_pretrained_resnet152",
     ]
 
+    bypass_exps = bypass_exps or []
     is_pretrained = "pretrained" in sv_model
     is_onetime = "onetime" in experiment
+
+    # Specify sparsity if not baseline
+    if "bregman" in experiment or "pruning" in experiment:
+        assert target_sparsity is not None, "target_sparsity should be set for pruning and bregman experiments"
+    else:
+        assert target_sparsity is None, "target_sparsity should be None for baseline experiments"
 
     # skip when model type and experiment type disagree
     if is_pretrained != is_onetime:
@@ -813,10 +866,6 @@ def _submit_sv_job(
 
     # Handling epochs
     epochs_to_ramp = None
-    if dataset_name not in base_max_epochs:
-        raise ValueError(f"Unexpected dataset name: {dataset_name}")
-    max_epochs = base_max_epochs[dataset_name]
-
     if experiment in ramp_up_experiments:
         epochs_to_ramp = ramp_up_epochs
         max_epochs += epochs_to_ramp
@@ -840,14 +889,14 @@ def _submit_sv_job(
         f"-ramp{epochs_to_ramp}_{schedule_type}" if epochs_to_ramp else ""
     )
     sparsity_str = (
-        f"-sparsity{int(target_sparsity * 100)}"
+        f"-sr{int(target_sparsity * 100)}"
         if target_sparsity is not None
         else ""
     )
     job_name = (
         f"{experiment}{ramp_str}-{sv_model}-{os.path.basename(dataset_name)}"
-        f"-virtual_spks-{virtual_spks}-bs{batch_size}-vad{apply_vad}"
-        f"-ckpt_avg{num_ckpt_avg}-max_epochs{max_epochs}-data_aug{apply_augmentation}"
+        f"-virt-{virtual_spks}-bs{batch_size}-vad{apply_vad}"
+        f"-avg{num_ckpt_avg}-ep{max_epochs}-aug{apply_augmentation}"
         f"{sparsity_str}"
     )
 
@@ -862,9 +911,11 @@ def _submit_sv_job(
         "trainer": "gpu",
         "name": name,
         "module/sv_model": sv_model,
-        "logger": "many_loggers.yaml",
+        "logger": logger,
         "datamodule.loaders.train.batch_size": batch_size,
         "datamodule.loaders.valid.batch_size": batch_size,
+        "datamodule.loaders.enrollment.batch_size": 4,
+        "datamodule.loaders.test.batch_size": 64,
         "trainer.max_epochs": max_epochs,
         "paths.log_dir": RESULTS_DIR,
         "hydra.run.dir": f"{RESULTS_DIR}/train/runs/{name}",
@@ -893,9 +944,7 @@ def _submit_sv_job(
 
     if target_sparsity is not None:
         if "bregman" in experiment:
-            script_arguments[
-                "callbacks.model_pruning.lambda_scheduler.target_sparsity"
-            ] = target_sparsity
+            script_arguments["_bregman_target_sparsity"] = target_sparsity
         elif "pruning" in experiment:
             script_arguments[
                 "callbacks.model_pruning.amount"
@@ -918,15 +967,16 @@ def _submit_sv_job(
         print(f"Skipping {job_name} - testing already complete")
         return
 
+    if run_dir in bypass_exps:
+        print(f"Skipping {job_name} - in bypass list for testing")
+        return
+
     # If a checkpoint exists, resume from it. This can happen when a job was previously running and got interrupted
     last_ckpt = os.path.join(run_dir, "checkpoints/last.ckpt")
     if check_file_exists(last_ckpt):
         script_arguments["ckpt_path"] = last_ckpt
         print(f"Resuming {job_name} from checkpoint")
-        if any(
-            lg in script_arguments["logger"]
-            for lg in ["wandb", "many_loggers"]
-        ):
+        if any(lg in logger for lg in ["wandb", "many_loggers"]):
             script_arguments["logger.wandb.id"] = name
             print(f"Resuming run in wandb dashboard with id: {name}")
 
@@ -940,7 +990,10 @@ def _submit_sv_job(
 
 @task
 def run_sv(transfer_data="false"):
-    """Generate and submit all SV training jobs.
+    """Generate and submit all SV training jobs for multi_sv dataset.
+
+    Bregman and iterative-pruning experiments sweep over all sparsity rates.
+    One-time pruning and baseline experiments run at the config default.
 
     Args:
         transfer_data (str): 'true' to transfer data to local SSD, 'false' to use shared filesystem
@@ -950,115 +1003,64 @@ def run_sv(transfer_data="false"):
     ), "Run exps on Alex to avoid overloading the shared filesystem with multiple simultaneous transfers"
     transfer_data_bool = transfer_data.lower() in ("true", "1", "yes")
 
-    experiments = [
-        # #Bregman experiments
+    # sparsity_experiments = [
+    #     # Pruning exps
+    #     "sv_pruning_mag_struct",
+    #     "sv_pruning_mag_unstruct",
+    #     "sv_pruning_mag_struct_onetime",
+    #     "sv_pruning_mag_unstruct_onetime",
+    #     # Bregman exps
+    #     "sv_bregman_adabreg",
+    #     "sv_bregman_linbreg",
+    #     "sv_bregman_adabreg_fixed",
+    #     "sv_bregman_linbreg_fixed",
+    # ]
+    # baselines_exps = [
+    #     # Baselines
+    #     "sv_wespeaker",
+    # ]
+    #
+    # sparsity_rates = [0.50, 0.75, 0.90, 0.95]
+
+
+    sparsity_experiments = [
+        # Bregman exps
         "sv_bregman_adabreg",
         "sv_bregman_linbreg",
-        "sv_bregman_adabreg_100spk",
-        "sv_bregman_linbreg_100spk",
-        # #Pruning experiments
-        "sv_pruning_mag_struct_onetime",
-        "sv_pruning_mag_unstruct_onetime",
-        "sv_pruning_mag_struct_onetime_100spk",
-        "sv_pruning_mag_unstruct_onetime_100spk",
-        "sv_pruning_mag_struct",
-        "sv_pruning_mag_unstruct",
-        # #Baselines
-        # 'sv_wespeaker',
-        "sv_vanilla",
-        "sv_vanilla_100spk",
+        "sv_bregman_adabreg_fixed",
+        "sv_bregman_linbreg_fixed",
     ]
+    baselines_exps = []
+
+
+    sparsity_rates = [0.95]
 
     # Get SV models from config directory
     config_dir = "../configs/module/sv_model"
-    assert os.path.exists(
-        config_dir
-    ), f"Config directory {config_dir} does not exist"
+    assert os.path.exists(config_dir), f"Config directory {config_dir} does not exist"
     sv_models = [
         "wespeaker_ecapa_tdnn",
-        "wespeaker_pretrained_ecapa_tdnn",
+        "wespeaker_pretrained_ecapa_tdnn_c512",
         # "wespeaker_resnet34",
         # "wespeaker_pretrained_resnet34",
         # "wespeaker_resnet152",
         # "wespeaker_pretrained_resnet152"
     ]
 
-    dataset_names = ["multi_sv"]
-    base_max_epochs = {
-        "datasets/cnceleb": 40,
-        "datasets/voxceleb": 20,
-        "multi_sv": 20,
-    }
-
-    for experiment in experiments:
-        for sv_model in sv_models:
-            for dataset_name in dataset_names:
-                _submit_sv_job(
-                    experiment=experiment,
-                    sv_model=sv_model,
-                    dataset_name=dataset_name,
-                    transfer_data_bool=transfer_data_bool,
-                    base_max_epochs=base_max_epochs,
-                    gpu_device=GPU,
-                )
-
-
-@task
-def run_baselines(transfer_data="false"):
-    """Generate and submit all SV training jobs.
-
-    Args:
-        transfer_data (str): 'true' to transfer data to local SSD, 'false' to use shared filesystem
-    """
-
-    assert (
-        CLUSTER_NAME == "alex"
-    ), "Run exps on Alex to avoid overloading the shared filesystem with multiple simultaneous transfers"
-    GPU = (
-        "a40" if CLUSTER_NAME == "alex" else "a100"
-    )  # use A100 on TinyGPU and A40 on Alex
-
-    transfer_data_bool = transfer_data.lower() in ("true", "1", "yes")
-
-    experiments = [
-        # #Bregman experiments
-        "sv_bregman_adabreg",
-        "sv_bregman_linbreg",
-        "sv_bregman_adabreg_100spk",
-        "sv_bregman_linbreg_100spk",
-        # #Pruning experiments
-        "sv_pruning_mag_struct_onetime",
-        "sv_pruning_mag_unstruct_onetime",
-        "sv_pruning_mag_struct_onetime_100spk",
-        "sv_pruning_mag_unstruct_onetime_100spk",
-        "sv_pruning_mag_struct",
-        "sv_pruning_mag_unstruct",
-        # #Baselines
-        # 'sv_wespeaker',
-        "sv_vanilla",
-        "sv_vanilla_100spk",
-    ]
-
-    # Get SV models from config directory
-    config_dir = "../configs/module/sv_model"
-    assert os.path.exists(
-        config_dir
-    ), f"Config directory {config_dir} does not exist"
-    sv_models = [
-        "wespeaker_ecapa_tdnn",
-        # "wespeaker_resnet34"
-    ]
-
-    dataset_names = [
-        "datasets/cnceleb"
-    ]  # voxceleb is redundant with multi_sv --> so we skip it here for the baselines
+    # dataset_names = ["datasets/cnceleb", "multi_sv"]
+    dataset_names = ["datasets/cnceleb"]
     base_max_epochs = {
         "datasets/cnceleb": 40,
         "datasets/voxceleb": 10,
         "multi_sv": 10,
     }
+    gpus = {
+        "datasets/cnceleb": "a40",
+        "datasets/voxceleb": "a100",
+        "multi_sv": "a100",
+    }
 
-    for experiment in experiments:
+    for experiment in baselines_exps:
         for sv_model in sv_models:
             for dataset_name in dataset_names:
                 _submit_sv_job(
@@ -1066,55 +1068,11 @@ def run_baselines(transfer_data="false"):
                     sv_model=sv_model,
                     dataset_name=dataset_name,
                     transfer_data_bool=transfer_data_bool,
-                    base_max_epochs=base_max_epochs,
-                    gpu_device=GPU,
+                    max_epochs=base_max_epochs[dataset_name],
+                    gpu_device=gpus[dataset_name],
                 )
 
-
-@task
-def run_sv_sparsity(transfer_data="false"):
-    """Submit SV jobs sweeping over target sparsity rates.
-
-    Covers sv_bregman_adabreg and sv_pruning_mag_unstruct at sparsity
-    rates 50%, 75%, and 95%.  90% is commented out because it is already
-    covered by run_sv / run_baselines.
-
-    Args:
-        transfer_data (str): 'true' to transfer data to local SSD,
-            'false' to use the shared filesystem.
-    """
-    assert CLUSTER_NAME == "tinygpu", (
-        "Run exps on TinyGPU to avoid overloading the shared filesystem "
-        "with multiple simultaneous transfers"
-    )
-    GPU = "a100"
-    transfer_data_bool = transfer_data.lower() in ("true", "1", "yes")
-
-    experiments = [
-        "sv_bregman_adabreg",
-        "sv_pruning_mag_unstruct",
-    ]
-
-    sparsity_rates = [
-        0.50,
-        0.75,
-        # 0.90,  # Already covered by run_sv / run_baselines
-        0.95,
-    ]
-
-    sv_models = [
-        "wespeaker_ecapa_tdnn",
-        # "wespeaker_resnet34"
-    ]
-
-    dataset_names = ["multi_sv", "datasets/cnceleb"]
-    base_max_epochs = {
-        "datasets/cnceleb": 40,
-        "datasets/voxceleb": 20,
-        "multi_sv": 20,
-    }
-
-    for experiment in experiments:
+    for experiment in sparsity_experiments:
         for sv_model in sv_models:
             for dataset_name in dataset_names:
                 for sparsity in sparsity_rates:
@@ -1123,7 +1081,7 @@ def run_sv_sparsity(transfer_data="false"):
                         sv_model=sv_model,
                         dataset_name=dataset_name,
                         transfer_data_bool=transfer_data_bool,
-                        base_max_epochs=base_max_epochs,
-                        gpu_device=GPU,
+                        max_epochs=base_max_epochs[dataset_name],
                         target_sparsity=sparsity,
+                        gpu_device=gpus[dataset_name],
                     )
