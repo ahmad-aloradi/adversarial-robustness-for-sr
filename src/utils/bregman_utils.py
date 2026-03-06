@@ -3,18 +3,34 @@ import math
 # Base values at 90% sparsity (0.9) and other anchor points
 BREGMAN_LAMBDA_CONFIGS = {
     "AdaBreg": {
-        0.5: {"initial_lambda": 0.2, "min_lambda": 1e-5},
-        0.7: {"initial_lambda": 0.4, "min_lambda": 5e-5},
-        0.9: {"initial_lambda": 0.5, "min_lambda": 1e-4},
-        0.95: {"initial_lambda": 2.0, "min_lambda": 5e-4},
-        0.99: {"initial_lambda": 4.0, "min_lambda": 1e-3},
+        0.5: {"initial_lambda": 0.2, "min_lambda": 1e-5, "fixed_lambda": 1.0},
+        0.7: {"initial_lambda": 0.4, "min_lambda": 5e-5, "fixed_lambda": 1.5},
+        0.9: {"initial_lambda": 0.5, "min_lambda": 1e-4, "fixed_lambda": 2.0},
+        0.95: {"initial_lambda": 2.0, "min_lambda": 5e-4, "fixed_lambda": 4.0},
+        0.99: {"initial_lambda": 4.0, "min_lambda": 1e-3, "fixed_lambda": 8.0},
     },
     "LinBreg": {
-        0.5: {"initial_lambda": 0.0001, "min_lambda": 1e-10},
-        0.7: {"initial_lambda": 0.0005, "min_lambda": 5e-9},
-        0.9: {"initial_lambda": 0.01, "min_lambda": 1e-8},
-        0.95: {"initial_lambda": 0.01, "min_lambda": 5e-7},
-        0.99: {"initial_lambda": 0.05, "min_lambda": 1e-6},
+        0.5: {
+            "initial_lambda": 0.0001,
+            "min_lambda": 1e-10,
+            "fixed_lambda": 0.001,
+        },
+        0.7: {
+            "initial_lambda": 0.0005,
+            "min_lambda": 5e-9,
+            "fixed_lambda": 0.005,
+        },
+        0.9: {"initial_lambda": 0.01, "min_lambda": 1e-8, "fixed_lambda": 0.1},
+        0.95: {
+            "initial_lambda": 0.01,
+            "min_lambda": 5e-7,
+            "fixed_lambda": 0.1,
+        },
+        0.99: {
+            "initial_lambda": 0.05,
+            "min_lambda": 1e-6,
+            "fixed_lambda": 0.5,
+        },
     },
 }
 
@@ -29,7 +45,7 @@ def get_bregman_lambda(
     if optimizer_type not in BREGMAN_LAMBDA_CONFIGS:
         raise ValueError(f"Unknown optimizer {optimizer_type}")
 
-    if param_type not in ["initial_lambda", "min_lambda"]:
+    if param_type not in ["initial_lambda", "min_lambda", "fixed_lambda"]:
         raise ValueError(f"Unknown param_type {param_type}")
 
     configs = BREGMAN_LAMBDA_CONFIGS[optimizer_type]

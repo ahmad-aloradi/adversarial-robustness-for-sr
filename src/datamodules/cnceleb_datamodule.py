@@ -128,6 +128,9 @@ class CNCelebDataModule(LightningDataModule):
                 sep=self.hparams.dataset.get("sep", "|"),
             )
 
+            # self.train_data.dataset = self.train_data.dataset.sample(6000)
+            # self.val_data.dataset = self.val_data.dataset.sample(6000)
+
         if stage == "test" or stage is None:
             enroll_df = pd.read_csv(
                 self.enroll_csv_path, sep=self.hparams.dataset.get("sep", "|")

@@ -7,6 +7,9 @@ defaults:
   - sv/sv_bregman_linbreg
   - _self_
 
+_bregman_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},fixed_lambda}
+_bregman_min_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},fixed_lambda}
+
 callbacks:
   model_pruning:
     lambda_scheduler: null
