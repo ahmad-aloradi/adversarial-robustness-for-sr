@@ -38,7 +38,7 @@ class BregmanPruner(Callback):
         sparsity_threshold: float = 1e-12,
         verbose: int = 1,
         lambda_scheduler: Optional[LambdaScheduler] = None,
-        console_log_frequency: int = 100,
+        target_sparsity: Optional[float] = None,
         tolerance: float = 0.01,
     ):
         """
@@ -46,13 +46,13 @@ class BregmanPruner(Callback):
             sparsity_threshold: Threshold below which a weight is considered zero.
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
             lambda_scheduler: Optional scheduler for dynamic lambda updates.
-            console_log_frequency: How often (in steps) to print to console (verbose >= 2).
+            target_sparsity: Target sparsity for validation suppression.
         """
         super().__init__()
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
-        self.console_log_frequency = console_log_frequency
+        self.target_sparsity = target_sparsity
 
         self.manager: Optional[PruningManager] = None
         self._initialized = False
@@ -97,16 +97,17 @@ class BregmanPruner(Callback):
 
         self._initialized = True
         self._log_configuration(optimizer)
+        self._log_group_assignments(pl_module)
 
     def on_train_epoch_start(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         """Manage validation suppression at epoch start."""
-        if not self._initialized or self.lambda_scheduler is None:
+        if not self._initialized:
             return
 
         # Resolve warmup on first epoch (num_training_batches is now available)
-        if not self._warmup_resolved:
+        if self.lambda_scheduler is not None and not self._warmup_resolved:
             if hasattr(self.lambda_scheduler, "resolve_warmup_steps"):
                 self.lambda_scheduler.resolve_warmup_steps(
                     trainer.num_training_batches
@@ -114,9 +115,11 @@ class BregmanPruner(Callback):
             self._warmup_resolved = True
 
         # Validation suppression: suppress while sparsity < target
-        current_sparsity = self._overall_sparsity()
-        target = self.lambda_scheduler.target_sparsity
-        self._suppressor.check(trainer, current_sparsity, target)
+        if self.target_sparsity is not None:
+            current_sparsity = self._overall_sparsity()
+            self._suppressor.check(
+                trainer, current_sparsity, self.target_sparsity
+            )
 
     def on_train_batch_end(
         self,
@@ -135,13 +138,6 @@ class BregmanPruner(Callback):
 
         # Log metrics via Lightning's logging system (respects logging_params)
         self._log_metrics(pl_module, trainer)
-
-        # Console logging at higher verbosity with separate frequency
-        if (
-            self.verbose >= 2
-            and trainer.global_step % self.console_log_frequency == 0
-        ):
-            self._log_to_console(trainer)
 
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule
@@ -285,22 +281,14 @@ class BregmanPruner(Callback):
             )
 
     @rank_zero_only
-    def _log_to_console(self, trainer: Trainer) -> None:
-        """Log sparsity info to console (controlled by
-        console_log_frequency)."""
-        sparsity = self._overall_sparsity()
-        msg = f"Step {trainer.global_step}: sparsity={sparsity:.3%}"
-        if self.lambda_scheduler:
-            msg += f", lambda={self.lambda_scheduler.get_lambda():.4f}"
-        log.info(msg)
-
-    @rank_zero_only
     def _log_configuration(self, optimizer) -> None:
         """Log the configuration of all parameter groups."""
         if self.verbose == 0:
             return
 
         log.info("=== Bregman Configuration ===")
+
+        log.info(f"Optimizer: {type(optimizer).__name__}")
 
         if self.lambda_scheduler:
             sched_info = (
@@ -315,20 +303,18 @@ class BregmanPruner(Callback):
         for group in optimizer.param_groups:
             name = group.get("name", "unnamed")
             scale = group.get("lambda_scale", 1.0)
+            lamda = group["reg"].lamda
+            reg_type = type(group["reg"]).__name__
+            log.info(
+                f"  Group '{name}': {reg_type}, lambda={lamda:.4f}, scale={scale}"
+            )
 
-            if self._group_has_regularizer(group):
-                lamda = group["reg"].lamda
-                reg_type = type(group["reg"]).__name__
-                log.info(
-                    f"  Group '{name}': {reg_type}, lambda={lamda:.4f}, scale={scale}"
+            # Safety check for non-uniform scaling
+            if self._group_has_regularizer(group) and scale != 1.0:
+                log.warning(
+                    f"Group '{name}' has lambda_scale={scale} != 1.0. "
+                    "Non-uniform regularization is generally not recommended."
                 )
-                if scale != 1.0:
-                    log.warning(
-                        f"Group '{name}' has lambda_scale={scale} != 1.0. "
-                        "Non-uniform regularization is generally not recommended."
-                    )
-            else:
-                log.info(f"  Group '{name}': No regularizer")
 
         log.info("Current sparsity by group:")
         for group in self.manager.processed_groups:
@@ -336,7 +322,10 @@ class BregmanPruner(Callback):
             sparsity = compute_sparsity(
                 group["params"], threshold=self.sparsity_threshold
             )
-            log.info(f"  {name}: {sparsity:.3%}")
+            str_extras = (
+                "(not pruned)" if group["applier"].sparsity_rate == 0.0 else ""
+            )
+            log.info(f"  {name}: {sparsity:.3%} {str_extras}")
 
         log.info(f"Overall sparsity: {self._overall_sparsity():.3%}")
         log.info("=== End Configuration ===")
@@ -352,15 +341,29 @@ class BregmanPruner(Callback):
             for name, p in pl_module.named_parameters()
         }
 
+        total_params = sum(
+            p.numel()
+            for group in self.manager.processed_groups
+            for p in group["params"]
+        )
+
         log.info("--- Parameter Group Assignments ---")
         for group in self.manager.processed_groups:
             name = group["config"].get("name", "unnamed")
+            # is_fallback = group["config"].get("is_fallback", False)
             modules = {param_to_module.get(id(p)) for p in group["params"]}
             modules.discard(None)
+            group_params = sum(p.numel() for p in group["params"])
+            pct = group_params / total_params * 100 if total_params else 0
+            log.info(40 * "-")
             log.info(
-                f"  {name}: {len(modules)} modules, {len(group['params'])} params"
+                f"  {name}: {len(modules)} modules, "
+                f"{group_params:,} params ({pct:.1f}%)"
             )
-        log.info("-----------------------------------")
+            if modules:
+                for m in sorted(modules):
+                    log.info(f"    {m}")
+        log.info(40 * "-")
 
     # -------------------------------------------------------------------------
     # Helpers

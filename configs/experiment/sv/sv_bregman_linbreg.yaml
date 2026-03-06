@@ -63,7 +63,7 @@ callbacks:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-12
     verbose: 2
-    console_log_frequency: 1e10 # Frequency for console output (verbose >= 2)
+    target_sparsity: ${_bregman_target_sparsity}
     tolerance: 0.01 # Tolerance of 1% means accept 89% if target is 90%
     # Global lambda scheduler configuration.
     lambda_scheduler:
@@ -71,11 +71,11 @@ callbacks:
       _partial_: true
       target_sparsity: ${_bregman_target_sparsity}
       initial_lambda: ${_bregman_lambda}
-      acceleration_factor: 0.25
+      acceleration_factor: 1.0
       min_lambda: ${_bregman_min_lambda}
       max_lambda: 10
-      warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
-      update_frequency: 500
+      warmup_epochs: 0 #${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
+      update_frequency: 200
 
 datamodule:
   dataset:
@@ -122,7 +122,7 @@ module:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
     _partial_: True
     momentum: 0.0
-    lr: 1e-3
+    lr: 1e-1
 
   data_augmentation:
     noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
@@ -177,11 +177,7 @@ module:
       # Group 1: Prunable Convolutional Layers
       - name: conv_layers
         layer_types: ["torch.nn.Conv1d", "torch.nn.Conv2d"]
-        # Typically, only prune weight parameters, not biases.
         param_names: ["weight"]
-        # Match any module name containing 'conv'
-        module_name_patterns:
-          - ".*conv.*"
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1L2Conv
@@ -192,11 +188,10 @@ module:
           pruning_type: "unstructured"
           sparsity_rate: 0.99 # Initial sparsity
 
-      # Group 2a: Prunable Linear Layers (catch all torch.nn.Linear regardless of name)
+      # Group 2a: Prunable Linear Layers
       - name: linear_layers
         layer_types: ["torch.nn.Linear"]
         param_names: ["weight"]
-        # No module_name_patterns - this will match ALL torch.nn.Linear modules
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
@@ -207,11 +202,9 @@ module:
           pruning_type: "unstructured"
           sparsity_rate: 0.99 # Initial sparsity
 
-      # Group 2b: Catch classifier by exact module name match
+      # Group 2b: Classifier
       - name: classifier
         layer_types: ["speechbrain.lobes.models.ECAPA_TDNN.Classifier"]
-        module_name_patterns:
-          - "^classifier$" # Exact match for module named "classifier"
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
@@ -231,28 +224,28 @@ module:
             "torch.nn.layernorm.LayerNorm",
             "torch.nn.GroupNorm",
           ]
-        module_name_patterns: [".*norm.*", ".*pos_enc.*", .*head.*]
+        # layer_types is sufficient — isinstance() catches all norm layers
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
+            lamda: ${_bregman_lambda}
           lambda_scale: 0.0 # Scale factor for the global lambda
 
-      # Group 4: Biases
+      # Group 4: Biases (from any layer type)
       - name: bias_params
-        layer_types: ["torch.nn.Linear", "torch.nn.Conv1d", "torch.nn.Conv2d"]
-        module_name_patterns: [".*"]
         param_names: ["bias"]
         optimizer_settings:
           reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
             lamda: ${_bregman_lambda}
-          lambda_scale: 1.0 # Scale factor for the global lambda
+          lambda_scale: 0.0
 
       # Group 5: Fallback  (i.e., it catches what's left over) (MUST BE LAST)
       - name: fallback
         # Mark this as the fallback "other" layers types.
         is_fallback: True
         module_name_patterns: [".*"] # Regex for "match anything"
+        param_names: ["weight"]
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
