@@ -73,7 +73,7 @@ callbacks:
       initial_lambda: ${_bregman_lambda}
       acceleration_factor: 1.0
       min_lambda: ${_bregman_min_lambda}
-      max_lambda: 10
+      max_lambda: 1000
       warmup_epochs: 0 #${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
       update_frequency: 200
 
