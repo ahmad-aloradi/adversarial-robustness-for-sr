@@ -27,8 +27,8 @@ seed: 42
 
 # Single source of truth for Bregman lambda values
 _bregman_target_sparsity: 0.9
-_bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
-_bregman_min_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},min_lambda}
+_bregman_lambda: ${bregman_lambda:AdaBregW,${_bregman_target_sparsity},initial_lambda}
+_bregman_min_lambda: ${bregman_lambda:AdaBregW,${_bregman_target_sparsity},min_lambda}
 
 trainer:
   max_epochs: 50

@@ -4,7 +4,7 @@ These implement linearized Bregman iterations for sparse neural network training
 """
 import torch
 import math
-from typing import Optional, Union
+from typing import Optional
 from .bregman_regularizers import BregmanRegularizer, RegNone
 
 

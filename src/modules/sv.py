@@ -496,7 +496,7 @@ class SpeakerVerification(pl.LightningModule):
         2.  For any standard optimizer (e.g., Adam, SGD), it applies the
             optimizer to all model parameters uniformly.
         """
-        BREGMAN_OPTIMIZERS = {"AdaBreg", "LinBreg", "ProxSGD"}
+        BREGMAN_OPTIMIZERS = {"AdaBreg", "AdaBregW", "LinBreg", "ProxSGD"}
         optimizer_class_name = self.hparams.optimizer._target_.split(".")[-1]
 
         # Use the two-step partial instantiation pattern for the optimizer
