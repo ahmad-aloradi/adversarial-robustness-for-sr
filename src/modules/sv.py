@@ -300,7 +300,13 @@ class SpeakerVerification(pl.LightningModule):
                 continue
 
             log.info(f"Processing '{test_filename}'...")
+            # Extract base dataset name, stripping enrollment mode suffixes
+            # so that e.g. cnceleb_concatenated and cnceleb_multi share one cohort
             base_dataset = test_filename.split("/")[0]
+            for suffix in ("_concatenated", "_multi"):
+                if base_dataset.endswith(suffix):
+                    base_dataset = base_dataset[: -len(suffix)]
+                    break
 
             # Get cohort data if needed for scoring
             cohort_data = None

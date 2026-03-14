@@ -1,7 +1,5 @@
 #!/bin/bash
 # CNCeleb dataset preparation script
-# Converts FLAC to WAV using sox (more robust than ffmpeg for malformed FLAC files)
-# then runs the metadata preparation
 
 set -euo pipefail
 

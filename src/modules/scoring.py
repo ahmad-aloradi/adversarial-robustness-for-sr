@@ -143,6 +143,12 @@ class ScoringPipeline:
             speaker_ids: Speaker ID for each embedding [N]. Required if
                         config.cohort.speaker_level is True.
         """
+        # L2-normalize cohort embeddings for scale-invariant centering.
+        # Without this, the mean vector inherits the raw encoder output scale
+        # (e.g. norm ~400-600), which catastrophically dominates any
+        # pre-normalized embeddings (norm=1) during centering.
+        embeddings = self.l2_normalize(embeddings)
+
         self.cohort_embeddings = embeddings
         self._cohort_speaker_ids = speaker_ids
 
@@ -370,11 +376,18 @@ class ScoringPipeline:
         Returns:
             Normalized score, or (normalized_score, raw_score) if return_raw=True
         """
+        # L2-normalize to unit scale before centering so that the mean
+        # vector (computed from L2-normalized cohort) operates on the same
+        # scale — prevents raw encoder norms from dwarfing or being
+        # dwarfed by the centering offset.
+        enroll_embedding = self.l2_normalize(enroll_embedding)
+        test_embedding = self.l2_normalize(test_embedding)
+
         # Apply centering
         centered_enroll = self.center(enroll_embedding)
         centered_test = self.center(test_embedding)
 
-        # L2-normalize embeddings
+        # L2-normalize after centering
         centered_enroll = self.l2_normalize(centered_enroll)
         centered_test = self.l2_normalize(centered_test)
 

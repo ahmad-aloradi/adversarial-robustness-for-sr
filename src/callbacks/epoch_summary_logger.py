@@ -33,6 +33,8 @@ class EpochSummaryLogger(Callback):
         self.val_loss_sum = 0.0
         self.val_samples = 0
 
+        self.sparsity_threshold = sparsity_threshold
+
     # --- helpers ---
     def _get_batch_size(self, batch) -> int:
         # Try common container shapes used in modules
@@ -121,7 +123,7 @@ class EpochSummaryLogger(Callback):
         self.val_samples += batch_size
 
     @rank_zero_only
-    def on_validation_epoch_end(
+    def on_validation_end(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         # Compute averages
@@ -139,7 +141,7 @@ class EpochSummaryLogger(Callback):
 
         # Compute sparsity using shared utility
         sparsity = compute_sparsity(
-            list(pl_module.parameters()), threshold=1e-12
+            list(pl_module.parameters()), threshold=self.sparsity_threshold
         )
 
         cb_metrics = dict(trainer.callback_metrics)

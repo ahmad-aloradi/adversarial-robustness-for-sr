@@ -21,14 +21,14 @@ tags:
     '${oc.eval:''"${datamodule.dataset.data_dir}".split("/")[-1]''}',
     "Bregman_learning",
     "sv",
-    "Linbreg",
+    "AdabregW",
   ]
 seed: 42
 
 # Single source of truth for Bregman lambda values
 _bregman_target_sparsity: 0.9
-_bregman_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},initial_lambda}
-_bregman_min_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},min_lambda}
+_bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
+_bregman_min_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},min_lambda}
 
 trainer:
   max_epochs: 50
@@ -119,10 +119,10 @@ module:
       frequency: ${trainer.check_val_every_n_epoch}
 
   optimizer:
-    _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
-    _partial_: True
-    momentum: 0.0
-    lr: 1e-1
+    _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBregW
+    _partial_: true
+    lr: 1e-2
+    weight_decay: 1e-3
 
   data_augmentation:
     noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
@@ -177,7 +177,11 @@ module:
       # Group 1: Prunable Convolutional Layers
       - name: conv_layers
         layer_types: ["torch.nn.Conv1d", "torch.nn.Conv2d"]
+        # Typically, only prune weight parameters, not biases.
         param_names: ["weight"]
+        # Match any module name containing 'conv'
+        module_name_patterns:
+          - ".*conv.*"
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1L2Conv
@@ -188,10 +192,12 @@ module:
           pruning_type: "unstructured"
           sparsity_rate: 0.99 # Initial sparsity
 
-      # Group 2a: Prunable Linear Layers
+      # Group 2a: Prunable Linear Layers (catch all torch.nn.Linear regardless of name)
       - name: linear_layers
         layer_types: ["torch.nn.Linear"]
         param_names: ["weight"]
+        # module_name_patterns:
+        #   - ".*linear.*"
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
@@ -202,9 +208,11 @@ module:
           pruning_type: "unstructured"
           sparsity_rate: 0.99 # Initial sparsity
 
-      # Group 2b: Classifier
+      # Group 2b: Catch classifier by exact module name match
       - name: classifier
         layer_types: ["speechbrain.lobes.models.ECAPA_TDNN.Classifier"]
+        module_name_patterns:
+          - ".*classifier.*" # Exact match for module named "classifier"
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
@@ -224,11 +232,11 @@ module:
             "torch.nn.layernorm.LayerNorm",
             "torch.nn.GroupNorm",
           ]
-        # layer_types is sufficient — isinstance() catches all norm layers
+        module_name_patterns:
+          [".*gn.*", ".*ln.*", ".*bn.*", ".*norm.*", ".*pos_enc.*", ".*head.*"]
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
-            lamda: ${_bregman_lambda}
           lambda_scale: 0.0 # Scale factor for the global lambda
 
       # Group 4: Biases (from any layer type)

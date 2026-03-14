@@ -207,6 +207,97 @@ class AdaBreg(torch.optim.Optimizer):
         return reg_vals
 
 
+class AdaBregW(AdaBreg):
+    """Adaptive Bregman optimizer with decoupled weight decay.
+
+    Extends AdaBreg with AdamW-style decoupled weight decay to control the
+    magnitude of surviving weights, while L1 proximal controls sparsity.
+    Weight decay is applied directly to weights before the proximal step,
+    keeping it independent from the subgradient accumulation.
+    """
+
+    def __init__(
+        self,
+        params,
+        lr: float = 1e-3,
+        reg: Optional[BregmanRegularizer] = None,
+        delta: float = 1.0,
+        betas: tuple = (0.9, 0.999),
+        eps: float = 1e-8,
+        weight_decay: float = 1e-3
+    ):
+        self.weight_decay = weight_decay
+        if weight_decay <= 0.0:
+            if weight_decay == 0:
+                msg = f'{weight_decay} is set to zero. If you wish to use no weigth decay, use AdaBreg instead of AdabregW'
+            else:
+                msg = f"Invalid weight decay value: {weight_decay}"
+            raise ValueError(f"{msg}")
+        super().__init__(params, lr=lr, reg=reg, delta=delta, betas=betas, eps=eps)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        """Performs a single optimization step with decoupled weight decay."""
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            delta = group['delta']
+            reg = group['reg']
+            lr = group['lr']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            wd = group.get('weight_decay', self.weight_decay)
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad.data
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['sub_grad'] = self.initialize_sub_grad(p, reg, delta)
+                    state['exp_avg'] = torch.zeros_like(state['sub_grad'])
+                    state['exp_avg_sq'] = torch.zeros_like(state['sub_grad'])
+
+                state['step'] += 1
+                step = state['step']
+
+                sub_grad = state['sub_grad']
+                exp_avg = state['exp_avg']
+                exp_avg_sq = state['exp_avg_sq']
+
+                # Bias correction
+                bias_correction1 = 1 - beta1 ** step
+                bias_correction2 = 1 - beta2 ** step
+
+                # Update biased first and second moment estimates
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # Compute denominator
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+
+                # Compute step size
+                step_size = lr / bias_correction1
+
+                # Update subgradient (same as AdaBreg)
+                sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
+
+                # Proximal step to get candidate weights
+                p.copy_(reg.prox(delta * sub_grad, delta))
+
+                # Decoupled weight decay: shrink surviving weights
+                assert wd > 0, "Weight decay must be positive for AdaBregW"
+                p.mul_(1 - lr * wd)
+
+        return loss
+
+
 class ProxSGD(torch.optim.Optimizer):
     """Proximal SGD optimizer.
     
@@ -277,6 +368,7 @@ class ProxSGD(torch.optim.Optimizer):
 OPTIMIZER_REGISTRY = {
     "linbreg": LinBreg,
     "adabreg": AdaBreg,
+    "adabregw": AdaBregW,
     "proxsgd": ProxSGD,
 }
 

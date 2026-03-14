@@ -1,0 +1,15 @@
+# @package _global_
+
+# Fixed-lambda AdaBreg: no lambda scheduler, static regularization.
+# Lambda is still set via _bregman_lambda from the base config.
+
+defaults:
+  - sv/sv_bregman_adabregw
+  - _self_
+
+_bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},fixed_lambda}
+_bregman_min_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},fixed_lambda}
+
+callbacks:
+  model_pruning:
+    lambda_scheduler: null
