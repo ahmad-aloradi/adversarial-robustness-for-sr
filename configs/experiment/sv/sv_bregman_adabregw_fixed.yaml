@@ -1,11 +1,19 @@
 # @package _global_
 
-# Fixed-lambda AdaBreg: no lambda scheduler, static regularization.
-# Lambda is still set via _bregman_lambda from the base config.
+# Fixed-lambda AdaBregW: no lambda scheduler, static regularization,
+# with decoupled weight decay.
 
 defaults:
-  - sv/sv_bregman_adabregw
+  - sv/sv_bregman_adabreg
   - _self_
+
+tags:
+  [
+    '${oc.eval:''"${datamodule.dataset.data_dir}".split("/")[-1]''}',
+    "Bregman_learning",
+    "sv",
+    "AdabregW",
+  ]
 
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},fixed_lambda}
 _bregman_min_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},fixed_lambda}
@@ -13,3 +21,10 @@ _bregman_min_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},fixed_
 callbacks:
   model_pruning:
     lambda_scheduler: null
+
+module:
+  optimizer:
+    _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBregW
+    _partial_: true
+    lr: 1e-2
+    weight_decay: 1e-3

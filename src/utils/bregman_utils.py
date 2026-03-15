@@ -35,8 +35,9 @@ BREGMAN_LAMBDA_CONFIGS = {
     # AdaBregW shares AdaBreg's lambda dynamics (weight decay only affects magnitude, not sparsity)
     "AdaBregW": None,  # resolved to AdaBreg below
 }
-# Alias: AdaBregW uses same lambda config as AdaBreg
+# Aliases: AdaBregW and AdaBregL2 use same lambda config as AdaBreg
 BREGMAN_LAMBDA_CONFIGS["AdaBregW"] = BREGMAN_LAMBDA_CONFIGS["AdaBreg"]
+BREGMAN_LAMBDA_CONFIGS["AdaBregL2"] = BREGMAN_LAMBDA_CONFIGS["AdaBreg"]
 
 
 def get_bregman_lambda(
