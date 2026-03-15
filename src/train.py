@@ -1,9 +1,11 @@
 import os
 import sys
+from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 import hydra
 import pyrootutils
+import yaml
 from omegaconf import DictConfig
 from pytorch_lightning import (
     Callback,
@@ -61,6 +63,71 @@ from src.utils.utils import _resolve_test_ckpt_path  # noqa: E501
 log = utils.get_pylogger(__name__)
 
 from src.utils.augmentation_utils import prepare_speechbrain_augmentation
+
+
+def inject_expdir_overrides() -> None:
+    """Pre-Hydra hook: if expdir= is provided, resume training from that run.
+
+    Loads .hydra/overrides.yaml from the given experiment directory, injects
+    them into sys.argv (user CLI args take precedence), and appends
+    ckpt_path pointing to the last checkpoint.  The expdir= arg is removed
+    before Hydra sees it.
+    """
+    exp_dir: Path | None = None
+    for arg in sys.argv[1:]:
+        if arg.startswith("expdir="):
+            exp_dir = Path(arg.split("=", 1)[1]).expanduser().resolve()
+            break
+
+    if exp_dir is None:
+        return
+
+    if not exp_dir.exists():
+        raise FileNotFoundError(f"expdir does not exist: {exp_dir}")
+
+    # Remove expdir= so Hydra doesn't see it as a config key.
+    sys.argv = [a for a in sys.argv if not a.startswith("expdir=")]
+
+    # Load saved training overrides.
+    overrides_path = exp_dir / ".hydra" / "overrides.yaml"
+    if overrides_path.exists():
+        with overrides_path.open() as f:
+            data = yaml.safe_load(f) or []
+        overrides = (
+            [str(item) for item in data] if isinstance(data, list) else []
+        )
+    else:
+        log.warning(
+            f"No overrides.yaml found at {overrides_path}; continuing without saved overrides."
+        )
+        overrides = []
+
+    # Inject overrides; explicit CLI args take precedence.
+    user_keys = {
+        arg.lstrip("+~").split("=")[0] for arg in sys.argv[1:] if "=" in arg
+    }
+    for ov in overrides:
+        key = ov.lstrip("+~").split("=")[0]
+        if key not in user_keys:
+            sys.argv.append(ov)
+
+    # Append ckpt_path unless the user already specified one.
+    if not any(a.startswith("ckpt_path=") for a in sys.argv[1:]):
+        last_ckpt = exp_dir / "checkpoints" / "last.ckpt"
+        if not last_ckpt.exists():
+            raise FileNotFoundError(
+                f"Last checkpoint not found: {last_ckpt}\n"
+                "Pass ckpt_path= explicitly to use a different checkpoint."
+            )
+        sys.argv.append(f"ckpt_path={last_ckpt.as_posix()}")
+        log.info(f"Resuming from checkpoint: {last_ckpt}")
+
+    # Reuse the existing run directory so Hydra doesn't create a new one.
+    if not any(a.startswith("hydra.run.dir=") for a in sys.argv[1:]):
+        sys.argv.append(f"hydra.run.dir={exp_dir.as_posix()}")
+
+
+inject_expdir_overrides()
 
 
 @utils.task_wrapper

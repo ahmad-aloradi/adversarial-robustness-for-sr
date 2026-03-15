@@ -496,7 +496,13 @@ class SpeakerVerification(pl.LightningModule):
         2.  For any standard optimizer (e.g., Adam, SGD), it applies the
             optimizer to all model parameters uniformly.
         """
-        BREGMAN_OPTIMIZERS = {"AdaBreg", "AdaBregW", "LinBreg", "ProxSGD"}
+        BREGMAN_OPTIMIZERS = {
+            "AdaBreg",
+            "AdaBregW",
+            "AdaBregL2",
+            "LinBreg",
+            "ProxSGD",
+        }
         optimizer_class_name = self.hparams.optimizer._target_.split(".")[-1]
 
         # Use the two-step partial instantiation pattern for the optimizer
@@ -1009,37 +1015,53 @@ class SpeakerVerification(pl.LightningModule):
             f"Finalizing '{test_filename}': built scores DataFrame in {time.perf_counter() - t_build0:.1f}s (rows={len(scores)})"
         )
 
-        # Create a temporary metric instance for this specific test set
-        temp_metric = instantiate(self.hparams.metrics.test)
+        # Create temporary metric instances for this specific test set
+        norm_metric = instantiate(self.hparams.metrics.test)
+        raw_metric = instantiate(self.hparams.metrics.test)
 
-        # Update the temporary metric with this test set's data
+        # Collect scores and labels
         all_norm_scores = []
+        all_raw_scores = []
         all_labels = []
         for batch in trial_results:
             all_norm_scores.extend(batch["norm_score"])
+            all_raw_scores.extend(batch["score"])
             all_labels.extend(batch["trial_label"])
+
+        labels_tensor = torch.tensor(all_labels, dtype=torch.long)
+
         t_metric0 = time.perf_counter()
-        temp_metric.update(
+        norm_metric.update(
             scores=torch.tensor(all_norm_scores, dtype=torch.float32),
-            labels=torch.tensor(all_labels, dtype=torch.long),
+            labels=labels_tensor,
+        )
+        raw_metric.update(
+            scores=torch.tensor(all_raw_scores, dtype=torch.float32),
+            labels=labels_tensor,
         )
         log.info(
             f"Finalizing '{test_filename}': metric.update in {time.perf_counter() - t_metric0:.1f}s"
         )
 
-        # Compute metrics for this specific test set
+        # Compute metrics for both norm and raw scores
         t_compute0 = time.perf_counter()
-        metrics = temp_metric.compute()
+        norm_metrics = norm_metric.compute()
+        raw_metrics = raw_metric.compute()
         log.info(
             f"Finalizing '{test_filename}': metric.compute in {time.perf_counter() - t_compute0:.1f}s"
         )
 
-        # Log metrics with a clear prefix for each test set
-        temp_metric_class_name = temp_metric.__class__.__name__
-        prefixed_metrics = {
-            f"test/{test_filename}/{temp_metric_class_name}/{key}": value
-            for key, value in metrics.items()
-        }
+        # Log metrics with norm/ and raw/ prefixes
+        metric_class_name = norm_metric.__class__.__name__
+        prefixed_metrics = {}
+        for key, value in norm_metrics.items():
+            prefixed_metrics[
+                f"test/{test_filename}/{metric_class_name}/norm/{key}"
+            ] = value
+        for key, value in raw_metrics.items():
+            prefixed_metrics[
+                f"test/{test_filename}/{metric_class_name}/raw/{key}"
+            ] = value
         # Add batch_size to avoid PyTorch Lightning warning about ambiguous batch size inference
         batch_size = (
             len(trial_results[0]["trial_label"]) if trial_results else 1
@@ -1048,9 +1070,10 @@ class SpeakerVerification(pl.LightningModule):
             prefixed_metrics, batch_size=batch_size, **self.logging_params
         )
 
-        # Update scores DataFrame with computed metrics (optional; metrics are always saved in JSON)
-        scores.loc[:, metrics.keys()] = [
-            v.item() if torch.is_tensor(v) else v for v in metrics.values()
+        # Update scores DataFrame with norm metrics (primary)
+        scores.loc[:, norm_metrics.keys()] = [
+            v.item() if torch.is_tensor(v) else v
+            for v in norm_metrics.values()
         ]
 
         # Set up directory for saving test artifacts
@@ -1084,10 +1107,16 @@ class SpeakerVerification(pl.LightningModule):
 
         # Save test metrics as a JSON file
         metrics_for_save = {
-            k: v.item() if torch.is_tensor(v) else v
-            for k, v in metrics.items()
+            "test_set": test_filename,
+            "norm": {
+                k: v.item() if torch.is_tensor(v) else v
+                for k, v in norm_metrics.items()
+            },
+            "raw": {
+                k: v.item() if torch.is_tensor(v) else v
+                for k, v in raw_metrics.items()
+            },
         }
-        metrics_for_save["test_set"] = test_filename  # Add test set identifier
         with open(
             artifacts_dir / f"{safe_test_filename}_metrics.json", "w"
         ) as f:

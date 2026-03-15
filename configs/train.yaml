@@ -48,6 +48,10 @@ save_state_dict: True
 # simply provide checkpoint path to resume training
 ckpt_path: null
 
+# path to a previous training run directory; if set, overrides are loaded from
+# {expdir}/.hydra/overrides.yaml and ckpt_path is set to last.ckpt automatically
+expdir: null
+
 # seed for random number generators in pytorch, numpy and python.random
 seed: 42
 

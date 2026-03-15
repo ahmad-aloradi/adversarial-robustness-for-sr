@@ -158,7 +158,7 @@ class CNCelebDataModule(LightningDataModule):
             )
 
             modes_to_setup = (
-                ["concatenated", "multi"]
+                ["multi", "concatenated"]
                 if self._enrollment_mode == "both"
                 else [self._enrollment_mode]
             )
