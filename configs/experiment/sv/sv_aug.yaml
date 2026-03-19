@@ -5,7 +5,7 @@
 
 defaults:
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
-  - /module/scoring: default
+  - /module/scoring: as_norm
   - override /callbacks: default.yaml
   - override /datamodule: datasets/voxceleb.yaml
   - override /module: sv.yaml

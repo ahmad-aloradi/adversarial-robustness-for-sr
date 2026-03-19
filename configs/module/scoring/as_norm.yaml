@@ -18,5 +18,3 @@ norm_method: as_norm
 cohort:
   speaker_level: true
   topk_speakers: 600
-  min_size: 100
-  max_size: null

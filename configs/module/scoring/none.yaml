@@ -1,22 +1,13 @@
-# AS-Norm scoring configuration (WeSpeaker-style)
+# No-normalization scoring configuration
 #
-# Adaptive Symmetric Normalization with mean centering.
-# This is the recommended configuration for speaker verification
-# when you have a cohort dataset available.
+# Plain cosine similarity without mean centering or score normalization.
+# No cohort computation is needed, making this the fastest option.
 #
-# How it works:
-# 1. Cohort embeddings are averaged per speaker
-# 2. Mean vector computed from speaker-averaged cohort
-# 3. All embeddings (enroll, test, cohort) are centered
-# 4. Raw cosine similarity computed
-# 5. AS-Norm applied using top-K most similar cohort speakers
+# Use this when:
+# - You don't have cohort data available
+# - You want raw cosine similarity scores
+# - You're debugging or doing quick experiments
 
 enrollment_aggregation: mean
-mean_source: null
-norm_method: null
-
-cohort:
-  speaker_level: true
-  topk_speakers: 300
-  min_size: 100
-  max_size: null
+mean_source: none
+norm_method: none

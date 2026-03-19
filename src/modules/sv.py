@@ -25,7 +25,11 @@ from src.datamodules.components.voxceleb.voxceleb_dataset import (
     VoxCelebVerificationItem,
 )
 from src.modules.encoder_wrappers import EncoderWrapper
-from src.modules.scoring import ScoringPipeline, build_scoring_pipeline
+from src.modules.scoring import (
+    ScoringPipeline,
+    aggregate_embeddings,
+    build_scoring_pipeline,
+)
 
 log = utils.get_pylogger(__name__)
 
@@ -71,9 +75,10 @@ class SpeakerVerification(pl.LightningModule):
             "bypass_warmup", False
         )
 
-        # Scoring pipeline (handles centering, normalization, enrollment aggregation)
-        scoring_config = kwargs.get("scoring", {})
-        self.scoring_pipeline = build_scoring_pipeline(config=scoring_config)
+        # Scoring config (pipeline instances are created per test set in on_test_start)
+        self.scoring_config = build_scoring_pipeline(
+            config=kwargs.get("scoring", {})
+        ).config
 
     # Setup init
     def _setup_metrics(self, metrics: DictConfig) -> None:
@@ -288,8 +293,8 @@ class SpeakerVerification(pl.LightningModule):
 
         # Check if scoring pipeline needs cohort data
         needs_cohort = (
-            self.scoring_pipeline.config.norm_method != "none"
-            or self.scoring_pipeline.config.mean_source == "cohort"
+            self.scoring_config.norm_method != "none"
+            or self.scoring_config.mean_source == "cohort"
         )
 
         for test_filename, dataloader in test_dataloaders.items():
@@ -740,10 +745,10 @@ class SpeakerVerification(pl.LightningModule):
                         utt_lengths = batch.audio_length[
                             idx : idx + count
                         ]  # [count]
-                        aggregated_embed = (
-                            self.scoring_pipeline.aggregate_enrollment(
-                                utt_embeds, lengths=utt_lengths
-                            )
+                        aggregated_embed = aggregate_embeddings(
+                            utt_embeds,
+                            method=self.scoring_config.enrollment_aggregation,
+                            lengths=utt_lengths,
                         )
                         embeddings_dict[enroll_id] = aggregated_embed
                         idx += count
@@ -956,7 +961,7 @@ class SpeakerVerification(pl.LightningModule):
             )
 
         # Use scoring pipeline for complete scoring (centering + raw score + normalization)
-        normalized_scores, raw_scores = scoring_pipeline.score_batch(
+        normalized_scores, raw_scores = scoring_pipeline.score(
             enroll_embeddings, trial_embeddings
         )
 

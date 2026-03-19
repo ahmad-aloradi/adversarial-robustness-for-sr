@@ -51,10 +51,8 @@ logging_params:
 ### scoring pipeline ###
 scoring:
   enrollment_aggregation: mean # "mean" or "length_weighted"
-  mean_source: none # "cohort" or "none"
+  mean_source: cohort # "cohort" or "none"
   norm_method: as_norm # "as_norm" or "none"
   cohort:
     speaker_level: true
     topk_speakers: 300
-    min_size: 100
-    max_size: null

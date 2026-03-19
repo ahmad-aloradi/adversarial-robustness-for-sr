@@ -7,7 +7,7 @@
 #
 # Usage in experiment config:
 #   defaults:
-#     - /module/scoring: default
+#     - /module/scoring: as_norm
 #
 #   module:
 #     scoring:
@@ -34,10 +34,3 @@ cohort:
   # Number of top speakers (or utterances if speaker_level=false) for AS-Norm
   # WeSpeaker default: 300, Kaldi: 200-400
   topk_speakers: 300
-
-  # Minimum cohort size (speakers if speaker_level=true)
-  # Raises error if cohort is smaller than this
-  min_size: 100
-
-  # Maximum cohort size (for memory efficiency, null = unlimited)
-  max_size: null
