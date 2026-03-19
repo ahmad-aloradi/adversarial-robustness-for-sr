@@ -103,28 +103,47 @@ class EncoderWrapper(nn.Module):
         with torch.jit.optimized_execution(False):
             return self.encoder(wavs)
 
+    @staticmethod
+    def _make_feature_mask(relative_lens: torch.Tensor, num_frames: int) -> torch.Tensor:
+        """Build [B, T, 1] boolean mask from relative lengths and frame count."""
+        # Use ceil so the boundary STFT frame (straddling real audio and
+        # padding) is kept rather than dropped — it still carries signal.
+        valid = (relative_lens * num_frames).ceil().long().clamp(min=1, max=num_frames)
+        idx = torch.arange(num_frames, device=relative_lens.device)
+        return (idx.unsqueeze(0) < valid.unsqueeze(1)).unsqueeze(-1)  # [B, T, 1]
+
     def _forward_generic(self, wavs: torch.Tensor, wav_lens: torch.Tensor) -> torch.Tensor:
         """A generic forward pass for standard nn.Module encoders."""
+        # Relative lengths (0-1) for normalization and padding mask.
+        relative_lens = wav_lens / wavs.shape[1] if wavs.shape[1] > 0 else wav_lens
+
         # 1. Feature Extraction
         features = self.audio_processor(wavs)
-        
-        # 2. Feature Normalization
+
+        # 2. Mask padded feature frames BEFORE normalization so that
+        #    per-utterance statistics are not contaminated by padding.
+        #    Features are [B, T, F] (SpeechBrain Fbank convention).
+        T = features.shape[1]
+        mask = self._make_feature_mask(relative_lens, T)
+        features = features * mask
+
+        # 3. Feature Normalization
         if not isinstance(self.audio_processor_normalizer, nn.Identity):
             norm_sig = inspect.signature(self.audio_processor_normalizer.forward)
             if 'lengths' in norm_sig.parameters:
-                # SpeechBrain normalizers expect relative lengths.
-                wav_lens = wav_lens / wavs.shape[1] if wavs.shape[1] > 0 else wav_lens
-                features = self.audio_processor_normalizer(features, lengths=wav_lens)
+                features = self.audio_processor_normalizer(features, lengths=relative_lens)
             else:
                 features = self.audio_processor_normalizer(features)
+            # Re-mask after normalization: the normalizer may have written
+            # non-zero values back into padded positions.
+            features = features * mask
 
-        # 3. Encoding
+        # 4. Encoding
         sig = inspect.signature(self.encoder.forward)
         possible_len_args = ('length', 'lengths', 'wav_lens', 'input_signal_length', 'length', 'x_len', 'lens')
         len_arg_name = next((arg for arg in possible_len_args if arg in sig.parameters), None)
-        # Pass lengths-like if the model supports it.
         if len_arg_name:
-            return self.encoder(features, **{len_arg_name: wav_lens})
+            return self.encoder(features, **{len_arg_name: relative_lens})
         return self.encoder(features)
 
 
