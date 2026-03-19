@@ -1,0 +1,86 @@
+
+_target_: src.modules.cm.CountermeasureModule
+
+defaults:
+  - _self_
+
+model:
+  audio_processor: ???
+  audio_processor_normalizer: ???
+  audio_encoder: ???
+  classifier: ???
+
+### criteria and metrics ###
+criterion:
+  # Weighted CrossEntropyLoss for binary CM classification.
+  # ASVSpoof5 training data has ~6.5:1 spoof:bonafide imbalance.
+  # class_weights[0]=spoof (majority), class_weights[1]=bonafide (minority)
+  train_criterion:
+    _target_: torch.nn.CrossEntropyLoss
+    _partial_: true
+  class_weights: [1.0, 6.5]
+
+  # For callbacks / replace resolver
+  loss: ${module.criterion.train_criterion}
+
+metrics:
+  train:
+    _target_: "torchmetrics.Accuracy"
+    task: "multiclass"
+    num_classes: 2
+  valid:
+    _target_: src.modules.metrics.asvspoof5_metrics.ASVSpoof5Metrics
+  valid_best:
+    _target_: src.modules.metrics.metrics.AutoSyncDictMinMetric
+    target_key: "minDCF"
+  test:
+    _target_: src.modules.metrics.asvspoof5_metrics.ASVSpoof5Metrics
+
+### optimizer and lr_scheduler ###
+optimizer:
+  _target_: torch.optim.SGD
+  _partial_: True
+  lr: 0.1
+  momentum: 0.9
+  nesterov: True
+  weight_decay: 1.0e-4
+
+lr_scheduler:
+  scheduler:
+    _target_: src.utils.schedulers.WarmupExponentialLR
+    warmup_epochs: ${oc.eval:'max(1, int(${trainer.max_epochs} * 0.04))'} # 4% warmup (WeSpeaker: 6/150)
+    warmup_start_factor: 0.0 # WeSpeaker: warm_from_zero=True
+    gamma: ${oc.eval:'pow(0.0005, 1.0 / (${trainer.max_epochs} - max(1, int(${trainer.max_epochs} * 0.04))))'} # decay to 0.00005
+  extras:
+    interval: "epoch"
+    frequency: ${trainer.check_val_every_n_epoch}
+
+### extras and callbacks ###
+logging_params:
+  on_step: False
+  on_epoch: True
+  sync_dist: True
+  prog_bar: True
+
+### scoring pipeline ###
+# CM Track 1 does not use a scoring pipeline — scores come from the
+# classifier logits directly (bonafide log-softmax probability).
+scoring: null
+
+### Adapt callbacks for Error metrics ###
+callbacks:
+  model_checkpoint:
+    mode: min
+    monitor: valid/minDCF
+    save_top_k: 5
+    every_n_epochs: 1
+  checkpoint_averaging:
+    _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
+    num_checkpoints: ${callbacks.model_checkpoint.save_top_k}
+    output_filename: averaged_top{num}.ckpt
+  early_stopping:
+    mode: min
+    monitor: valid/minDCF
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'}
+  epoch_summary_logger:
+    monitor: valid/minDCF

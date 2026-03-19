@@ -1,0 +1,119 @@
+# @package _global_
+
+defaults:
+  - /module/cm: rawnet2.yaml
+  - override /callbacks: default.yaml
+  - override /datamodule: datasets/asvspoof5.yaml
+  - override /module: cm.yaml
+  - override /trainer: gpu.yaml
+  - override /logger: tensorboard.yaml
+
+tags:
+  [
+    '${oc.eval:''"${datamodule.dataset.data_dir}".split("/")[-1]''}',
+    "Countermeasures",
+  ]
+seed: 42
+
+trainer:
+  max_epochs: 20 # Change this to adjust training length (all schedules auto-scale)
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% minimum
+  gradient_clip_val: 1.0
+  num_sanity_val_steps: 0
+
+callbacks:
+  model_checkpoint:
+    mode: min
+    monitor: valid/minDCF
+    save_top_k: 3 # Save top-k checkpoints for averaging
+    every_n_epochs: 1
+  checkpoint_averaging:
+    _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
+    num_checkpoints: ${callbacks.model_checkpoint.save_top_k} # Average the top K checkpoints
+    output_filename: averaged_top{num}.ckpt
+  early_stopping:
+    mode: min
+    monitor: valid/minDCF
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'} # ~30% of epochs
+  epoch_summary_logger:
+    monitor: valid/minDCF
+
+datamodule:
+  dataset:
+    segment_duration: 3.0
+    max_duration: 3.0
+    use_pre_segmentation: True
+    cm_mode: True          # Map 'key' column to binary class_id (bonafide=1, spoof=0)
+    eval_tracks: "1"       # Track 1 only (CM detection)
+
+  # Binary classification: bonafide (1) vs spoof (0)
+  _base_num_classes: 2
+  num_classes: 2
+
+  loaders:
+    train:
+      batch_size: 128
+    valid:
+      batch_size: 128
+    test:
+      batch_size: 8
+    enrollment:
+      batch_size: 8
+
+  ### Data for augmentation ###
+  # Augmentation disabled for baseline. See cm_sota.yaml for full augmentation pipeline.
+
+  # noise_dataset_url: https://www.dropbox.com/scl/fi/a09pj97s5ifan81dqhi4n/noises.zip?rlkey=j8b0n9kdjdr32o1f06t0cw5b7&dl=1
+    # rir_dataset_url: https://www.dropbox.com/scl/fi/linhy77c36mu10965a836/RIRs.zip?rlkey=pg9cu8vrpn2u173vhiqyu743u&dl=1
+    # data_folder_rir_noises: ${paths.data_dir}/RIRS_NOISES
+    # noise_annotation: ${hydra:runtime.output_dir}/noise.csv
+    # rir_annotation: ${hydra:runtime.output_dir}/reverb.csv
+
+    # prepare_noise_data:
+    #   _target_: speechbrain.augment.preparation.prepare_dataset_from_URL
+    #   URL: ${module.data_augmentation.noise_dataset_url}
+    #   dest_folder: ${module.data_augmentation.data_folder_rir_noises}/noise
+    #   ext: wav
+    #   csv_file: ${module.data_augmentation.noise_annotation}
+
+    # prepare_rir_data:
+    #   _target_: speechbrain.augment.preparation.prepare_dataset_from_URL
+    #   URL: ${module.data_augmentation.rir_dataset_url}
+    #   dest_folder: ${module.data_augmentation.data_folder_rir_noises}/rir
+    #   ext: wav
+    #   csv_file: ${module.data_augmentation.rir_annotation}
+
+    # augmentations:
+    #   wav_augmenter:
+    #     _target_: src.modules.augmentation.GPUAugmenter
+    #     sample_rate: ${datamodule.dataset.sample_rate}
+    #     concat_original: true
+    #     # Speed perturbation WITHOUT virtual speakers for CM (binary labels,
+    #     # not speaker IDs — virtual speaker remapping is meaningless here)
+    #     speed_perturb:
+    #       _target_: src.modules.augmentation.SpeedPerturb
+    #       sample_rate: ${datamodule.dataset.sample_rate}
+    #       speed_factors: [0.9, 1.0, 1.1]
+    #       virtual_speakers: false
+    #       num_base_classes: ${datamodule._base_num_classes}
+    #       p: 1.0
+    #     # Noise and reverb are mutually exclusive (WeSpeaker strategy)
+    #     transforms:
+    #       - _target_: src.modules.augmentation.MutuallyExclusive
+    #         p: 1.0 # Always apply one — concat_original provides the clean copy
+    #         transforms:
+    #           - _target_: src.modules.augmentation.NormalizedReverb
+    #             ir_csv: ${module.data_augmentation.rir_annotation}
+    #             sample_rate: ${datamodule.dataset.sample_rate}
+    #             p: 1.0 # Controlled by MutuallyExclusive wrapper
+    #             normalize: true
+    #           - _target_: src.modules.augmentation.NoiseFromCSV
+    #             noise_csv: ${module.data_augmentation.noise_annotation}
+    #             min_snr_db: 0
+    #             max_snr_db: 15
+    #             p: 1.0 # Controlled by MutuallyExclusive wrapper
+
+logger:
+  wandb:
+    tags: ${tags}
+    group: ${oc.eval:"'${datamodule.dataset.data_dir}'.split('/')[-1]"}

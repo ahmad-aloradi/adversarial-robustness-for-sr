@@ -735,8 +735,9 @@ class CsvProcessor:
 class AudioProcessor:
     """Handles audio loading and preprocessing."""
 
-    def __init__(self, sample_rate: int = 16000):
+    def __init__(self, sample_rate: int = 16000, apply_preemphasis: bool = False):
         self.sample_rate = sample_rate
+        self.apply_preemphasis = apply_preemphasis
 
     def load_audio(self, audio_path: str) -> Tuple[torch.Tensor, int]:
         """Load audio file and return waveform and sample rate."""
@@ -867,6 +868,10 @@ class AudioProcessor:
             waveform = self.convert_to_mono(waveform)
             waveform = self.resample(waveform, orig_sr=sr)
             waveform = self.normalize_audio(waveform)
+            # optionally apply pre-emphasis here if desired (in CMs)
+            if self.apply_preemphasis:
+                waveform = self.preemphasis(waveform, coeff=0.97)
+
             return waveform.squeeze(0), self.sample_rate
 
         except FileNotFoundError as e:
@@ -879,7 +884,7 @@ class AudioProcessor:
                 f"Error processing audio file {audio_path}: {str(e)}"
             ) from e
 
-    def apply_preemphasis(
+    def preemphasis(
         self, waveform: torch.Tensor, coeff: float = 0.97
     ) -> torch.Tensor:
         """Apply pre-emphasis using torchaudio's functional API.
@@ -1141,6 +1146,7 @@ class BaseDataset(Dataset):
         sample_rate: Union[int, float],
         max_duration: Union[None, float, int] = 12.0,
         sep: str = "|",
+        apply_preemphasis: bool = False,
     ):
         """Initialize the BaseDataset.
 
@@ -1150,10 +1156,11 @@ class BaseDataset(Dataset):
             sample_rate: Target sample rate for audio processing
             max_duration: Maximum duration of audio samples in seconds (-1 for full length)
             sep: Separator used in the metadata CSV file
+            apply_preemphasis: Whether to apply pre-emphasis filtering to the audio (default: False)
         """
         self.data_dir = Path(data_dir)
         self.dataset = self._load_dataset(data_filepath, sep)
-        self.audio_processor = AudioProcessor(sample_rate)
+        self.audio_processor = AudioProcessor(sample_rate, apply_preemphasis=apply_preemphasis)
         self.max_samples = self._calculate_max_samples(
             max_duration, sample_rate
         )

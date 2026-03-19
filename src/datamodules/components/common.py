@@ -98,6 +98,24 @@ class CNCelebDefaults(NamedTuple):
   country: str = 'cn'
   sample_rate: float = 16000
 
+#########   ASVSPoof5 dataclasses   #########
+
+@dataclass(frozen=True)
+class ASVSpoof(BaseDatasetCols):
+    ATTACK_TAG: Literal['attack_tag'] = 'attack_tag'
+    ATTACK_LABEL: Literal['attack_label'] = 'attack_label'
+    CM_LABEL: Literal['key'] = 'key'
+
+@dataclass(frozen=True)
+class ASVSpoofSpeaker:
+    speaker_id: Literal['speaker_id'] = 'speaker_id'
+    gender: Literal['gender'] = 'gender'
+
+class ASVSpoofDefaults(NamedTuple):
+  dataset_name: str = 'asvspoof5'
+  sample_rate: float = 16000
+  language: str = 'en'
+
 #########   Common functions   #########
 
 def get_dataset_class(dataset: str):
@@ -115,6 +133,8 @@ def get_dataset_class(dataset: str):
         dataclass_instance = Librispeech()
     elif dataset == 'cnceleb':
         dataclass_instance = CNCeleb()
+    elif dataset == 'asvspoof5':
+        dataclass_instance = ASVSpoof()
     else:
         dataclass_instance =  BaseDatasetCols()    
     return dataclass_instance, list(astuple(dataclass_instance))
@@ -134,6 +154,8 @@ def get_speaker_class(dataset: str):
         dataclass_instance = VoxcelebSpeaker()
     elif dataset == 'cnceleb':
         dataclass_instance = CNCelebSpeaker()
+    elif dataset == 'asvspoof5':
+        dataclass_instance = ASVSpoofSpeaker()
     else:
         raise NotImplementedError(f"Speaker dataclass not implemented for {dataset}")
     return dataclass_instance, list(astuple(dataclass_instance))

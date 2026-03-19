@@ -1,0 +1,24 @@
+# @package module.model
+audio_processor:
+  # The audio_processor processor seems to implemented in the encoder itself
+  _target_: torch.nn.Identity
+
+audio_processor_normalizer:
+  _target_: torch.nn.Identity
+
+audio_encoder:
+  _target_: torch.nn.Sequential
+  _args_:
+    - _target_: src.modules.models.rawnet.RawNet2Spoof
+      first_conv: 1024
+      in_channels: 1
+      filts: [20, [20, 20], [20, 128], [128, 128]]
+      nb_fc_node: 1024
+      gru_node: 1024
+      nb_gru_layer: 3
+      nb_classes: 2
+    - _target_: src.utils.torch_utils.SelectFromTuple
+      _args_: [1]
+
+classifier:
+  _target_: torch.nn.Identity

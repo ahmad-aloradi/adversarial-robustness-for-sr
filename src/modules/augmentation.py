@@ -354,6 +354,166 @@ class MutuallyExclusive(nn.Module):
         return output
 
 
+class CodecAugmentation(nn.Module):
+    """Random codec augmentation to simulate transmission channel effects.
+
+    Wraps SpeechBrain's CodecAugment which applies random audio codecs
+    (mp3, ogg/vorbis, etc.) via torchaudio+ffmpeg.
+
+    Args:
+        sample_rate: Audio sample rate
+        p: Probability of applying codec augmentation per sample
+    """
+
+    def __init__(self, sample_rate: int = 16000, p: float = 0.3):
+        super().__init__()
+        self.p = p
+        self.sample_rate = sample_rate
+
+        from speechbrain.augment.codec import CodecAugment
+
+        self._codec = CodecAugment(sample_rate=sample_rate)
+
+    def forward(
+        self, waveforms: torch.Tensor, sample_rate: int | None = None
+    ) -> torch.Tensor:
+        """Apply random codec to a subset of samples.
+
+        Args:
+            waveforms: (batch, 1, time) mono audio tensor
+            sample_rate: Unused, uses self.sample_rate
+
+        Returns:
+            Codec-augmented waveforms (same shape)
+        """
+        batch_size = waveforms.shape[0]
+        device = waveforms.device
+        apply_mask = torch.rand(batch_size) <= self.p
+
+        if not apply_mask.any():
+            return waveforms
+
+        output = waveforms.clone()
+        indices = apply_mask.nonzero(as_tuple=True)[0]
+
+        for idx in indices:
+            # CodecAugment expects (batch, time) on CPU
+            sample = waveforms[idx].squeeze(0).unsqueeze(0).cpu()
+            coded = self._codec(sample)
+            # Handle length changes from codec round-trip
+            orig_len = waveforms.shape[-1]
+            if coded.shape[-1] < orig_len:
+                coded = F.pad(coded, (0, orig_len - coded.shape[-1]))
+            elif coded.shape[-1] > orig_len:
+                coded = coded[..., :orig_len]
+            output[idx] = coded.unsqueeze(1).to(device) if waveforms.ndim == 3 else coded.to(device)
+
+        return output
+
+
+class FreqMask(nn.Module):
+    """Frequency masking augmentation for codec robustness.
+
+    Applies STFT, zeros out frequency bins above a randomly selected cutoff,
+    and converts back via ISTFT. Simulates bandwidth-limited channels and
+    helps models generalize to codec-processed audio.
+
+    Reference: "Temporal Variability and Multi-Viewed Self-Supervised
+    Representations to Tackle the ASVspoof5 Deepfake Challenge" (2024).
+
+    Args:
+        sample_rate: Audio sample rate
+        cutoff_freqs: List of possible cutoff frequencies in Hz
+        p: Probability of applying the mask per sample
+        n_fft: FFT size for STFT
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        cutoff_freqs: list[int] | None = None,
+        p: float = 0.3,
+        n_fft: int = 512,
+    ):
+        super().__init__()
+        self.sample_rate = sample_rate
+        self.cutoff_freqs = cutoff_freqs or [4000, 5000, 6000, 7000]
+        self.p = p
+        self.n_fft = n_fft
+        self.hop_length = n_fft // 4
+
+        # Pre-compute the bin index for each cutoff frequency
+        freq_resolution = sample_rate / n_fft
+        self._cutoff_bins = [
+            int(f / freq_resolution) for f in self.cutoff_freqs
+        ]
+
+    def forward(
+        self, waveforms: torch.Tensor, sample_rate: int | None = None
+    ) -> torch.Tensor:
+        """Apply frequency masking to a subset of samples.
+
+        Args:
+            waveforms: (batch, 1, time) mono audio tensor
+            sample_rate: Unused, uses self.sample_rate
+
+        Returns:
+            Frequency-masked waveforms (same shape)
+        """
+        batch_size = waveforms.shape[0]
+        device = waveforms.device
+        apply_mask = torch.rand(batch_size, device=device) <= self.p
+
+        if not apply_mask.any():
+            return waveforms
+
+        output = waveforms.clone()
+        indices = apply_mask.nonzero(as_tuple=True)[0]
+        subset = waveforms[indices]
+
+        # Handle (batch, 1, time) -> (batch, time) for STFT
+        was_3d = subset.ndim == 3
+        if was_3d:
+            subset = subset.squeeze(1)
+
+        orig_len = subset.shape[-1]
+
+        # STFT
+        window = torch.hann_window(self.n_fft, device=device)
+        spec = torch.stft(
+            subset,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            window=window,
+            return_complex=True,
+        )
+
+        # Randomly select cutoff bin for each sample
+        cutoff_indices = torch.randint(
+            len(self._cutoff_bins), (len(indices),), device=device
+        )
+
+        for i, ci in enumerate(cutoff_indices):
+            bin_idx = self._cutoff_bins[ci.item()]
+            spec[i, bin_idx:, :] = 0
+
+        # ISTFT
+        reconstructed = torch.istft(
+            spec,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            window=window,
+            length=orig_len,
+        )
+
+        if was_3d:
+            reconstructed = reconstructed.unsqueeze(1)
+
+        output[indices] = reconstructed
+
+        return output
+
+
 class GPUAugmenter(nn.Module):
     """GPU-native audio augmentation pipeline for speaker verification.
 

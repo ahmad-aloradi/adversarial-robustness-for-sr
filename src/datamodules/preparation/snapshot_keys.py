@@ -54,3 +54,14 @@ LIBRISPEECH_COMPARABLE_KEYS: Tuple[str, ...] = (
     "max_duration",
     "vad",
 )
+
+# ASVSpoof dataset snapshot keys
+ASVSPOOF_COMPARABLE_KEYS: Tuple[str, ...] = (
+    "sep",
+    "sample_rate",
+    "use_pre_segmentation",
+    "segment_duration",
+    "segment_overlap",
+    "min_segment_duration",
+    "vad",
+)

@@ -1,0 +1,22 @@
+# @package module.model
+audio_processor:
+  # The audio_processor processor seems to implemented in the encoder itself
+  _target_: torch.nn.Identity
+
+audio_processor_normalizer:
+  _target_: torch.nn.Identity
+
+audio_encoder:
+  _target_: torch.nn.Sequential
+  _args_:
+    - _target_: src.modules.models.aasist.AASIST
+      first_conv: 128
+      filts: [70, [1, 32], [32, 32], [32, 24], [24, 24]]
+      gat_dims: [24, 32]
+      pool_ratios: [0.4, 0.5, 0.7, 0.5]
+      temperatures: [2.0, 2.0, 100.0, 100.0]
+    - _target_: src.utils.torch_utils.SelectFromTuple
+      _args_: [1]
+
+classifier:
+  _target_: torch.nn.Identity
