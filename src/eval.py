@@ -1,5 +1,5 @@
-import sys
 import re
+import sys
 from pathlib import Path
 from typing import List, Tuple
 
@@ -35,9 +35,7 @@ log = utils.get_pylogger(__name__)
 # Cluster path utilities
 # ---------------------------------------------------------------------------
 
-_CLUSTER_PATH_RE = re.compile(
-    r".*/dsnf101h/.*?/(train|eval)/runs/[^/]+"
-)
+_CLUSTER_PATH_RE = re.compile(r".*/dsnf101h/.*?/(train|eval)/runs/[^/]+/[^/]+")
 
 
 def _fix_cluster_paths_in_config(
@@ -77,18 +75,69 @@ def _fix_cluster_paths_in_config(
                 if isinstance(value, str):
                     fixed = _fix(value)
                     if fixed != value:
-                        log.info(
-                            f"Fixed path: {value} -> {fixed}"
-                        )
+                        log.info(f"Fixed path: {value} -> {fixed}")
                         node[key] = fixed
-                elif isinstance(
-                    value, (DictConfig, ListConfig)
-                ):
+                elif isinstance(value, (DictConfig, ListConfig)):
                     _recurse(value)
             except Exception:
                 pass  # read-only / interpolated nodes
 
     _recurse(cfg)
+
+
+def _infer_prefix_remap(
+    broken_path: str,
+    reference_path: Path,
+) -> tuple[str, str] | None:
+    """Infer a path remap from a broken path and a known-good reference.
+
+    Tries two strategies:
+
+    1. **Prefix swap** — find >=2 consecutive common path components
+       (e.g. ``dsnf/dsnf101h``) and swap the divergent prefix
+       (e.g. ``/home/hpc`` → ``/home/woody``).
+
+    2. **Ancestor search** — look for the dataset directory name
+       (last component of *broken_path*, e.g. ``cnceleb``) under
+       ``datasets/`` or ``data/`` beneath ancestors of *reference_path*.
+       Handles the case where the directory layout differs across
+       filesystems (e.g. ``repo/data/cnceleb`` on compute node vs
+       ``/home/woody/.../datasets/cnceleb`` on shared storage).
+
+    Returns ``(old_parent, new_parent)`` or ``None``.
+    """
+    b_parts = Path(broken_path).parts
+    r_parts = reference_path.parts
+
+    # Strategy 1: filesystem prefix swap.
+    for bi in range(1, len(b_parts) - 1):
+        for ri in range(1, len(r_parts) - 1):
+            if (
+                b_parts[bi] == r_parts[ri]
+                and b_parts[bi + 1] == r_parts[ri + 1]
+            ):
+                old_pre = str(Path(*b_parts[:bi]))
+                new_pre = str(Path(*r_parts[:ri]))
+                if old_pre == new_pre:
+                    continue
+                candidate = broken_path.replace(old_pre, new_pre, 1)
+                if Path(candidate).is_dir():
+                    return (old_pre, new_pre)
+
+    # Strategy 2: search for the dataset dir under reference ancestors.
+    dataset_name = Path(broken_path).name
+    broken_parent = str(Path(broken_path).parent)
+    # Don't search above /home/<fs>/<group> (depth 4).
+    min_depth = min(4, len(r_parts) - 1)
+    for depth in range(len(r_parts) - 1, min_depth, -1):
+        ancestor = Path(*r_parts[:depth])
+        for sub in ("datasets", "data"):
+            candidate = ancestor / sub / dataset_name
+            if candidate.is_dir():
+                new_parent = str(ancestor / sub)
+                if new_parent != broken_parent:
+                    return (broken_parent, new_parent)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -100,9 +149,7 @@ def _resolve_exp_dir_from_argv() -> Path | None:
     """Extract exp_dir from CLI, or derive from ckpt_path."""
     for arg in sys.argv[1:]:
         if arg.startswith("exp_dir="):
-            return (
-                Path(arg.split("=", 1)[1]).expanduser().resolve()
-            )
+            return Path(arg.split("=", 1)[1]).expanduser().resolve()
         if arg.startswith("ckpt_path="):
             return Path(arg.split("=", 1)[1]).resolve().parents[1]
     return None
@@ -184,15 +231,13 @@ def _sanitize_overrides_for_eval(
     artifacts_dirs = [
         p
         for p in exp_dir.glob("*_artifacts")
-        if not p.name.startswith("_")
-        and not p.name.startswith("test")
+        if not p.name.startswith("_") and not p.name.startswith("test")
     ]
-    assert len(artifacts_dirs) == 1, (
-        f"Expected 1 artifacts dir, found {len(artifacts_dirs)}"
-    )
+    assert (
+        len(artifacts_dirs) == 1
+    ), f"Expected 1 artifacts dir, found {len(artifacts_dirs)}"
     sanitized.append(
-        "datamodule.dataset.artifacts_dir="
-        f"{artifacts_dirs[0].as_posix()}"
+        "datamodule.dataset.artifacts_dir=" f"{artifacts_dirs[0].as_posix()}"
     )
     return sanitized
 
@@ -209,13 +254,9 @@ def inject_exp_dir_overrides() -> None:
     if exp_dir is None:
         return
     if not exp_dir.exists():
-        raise FileNotFoundError(
-            f"exp_dir does not exist: {exp_dir}"
-        )
+        raise FileNotFoundError(f"exp_dir does not exist: {exp_dir}")
 
-    if not any(
-        arg.startswith("exp_dir=") for arg in sys.argv[1:]
-    ):
+    if not any(arg.startswith("exp_dir=") for arg in sys.argv[1:]):
         sys.argv.append(f"exp_dir={exp_dir.as_posix()}")
 
     # Optionally use training-time configs from metadata/.
@@ -232,13 +273,10 @@ def inject_exp_dir_overrides() -> None:
                 f"use_training_configs=True but "
                 f"{metadata_configs} not found"
             )
-        log.info(
-            f"Using training-time configs from {metadata_configs}"
-        )
+        log.info(f"Using training-time configs from {metadata_configs}")
         # Copy repo eval.yaml so Hydra can find it in metadata dir.
         repo_eval = (
-            Path(_HYDRA_PARAMS["config_path"])
-            / _HYDRA_PARAMS["config_name"]
+            Path(_HYDRA_PARAMS["config_path"]) / _HYDRA_PARAMS["config_name"]
         )
         utils.utils.copy_yaml(
             repo_eval,
@@ -298,9 +336,7 @@ def _apply_exp_dir_config(cfg: DictConfig) -> DictConfig:
     exp_dir = Path(str(exp_dir_value)).expanduser().resolve()
     exp_cfg_path = exp_dir / ".hydra" / "config.yaml"
     if not exp_cfg_path.exists():
-        raise FileNotFoundError(
-            f"Missing experiment config: {exp_cfg_path}"
-        )
+        raise FileNotFoundError(f"Missing experiment config: {exp_cfg_path}")
 
     exp_cfg = OmegaConf.load(exp_cfg_path)
 
@@ -329,19 +365,51 @@ def _apply_exp_dir_config(cfg: DictConfig) -> DictConfig:
     if preserved:
         log.info(f"Preserved eval-specific keys: {preserved}")
 
+    # Clear ckpt_path if not explicitly provided — prevents stale
+    # training-time values (e.g. from resumed training) from leaking
+    # through and overriding use_avg_ckpt.
+    if "ckpt_path" not in preserved:
+        with open_dict(exp_cfg):
+            exp_cfg.ckpt_path = None
+
     # 2. Fix stale paths (prefix remaps + cluster run-dir regex).
+    # Skip remaps where the old path still exists — the training paths are
+    # already valid on the current machine (e.g. running eval on the cluster
+    # where /home/woody/... is mounted).
     prefix_remaps = [
         (
             str(old_val),
             str(OmegaConf.select(exp_cfg, f"paths.{k}")),
         )
         for k, old_val in old_paths.items()
-        if str(old_val)
-        != str(OmegaConf.select(exp_cfg, f"paths.{k}") or "")
+        if str(old_val) != str(OmegaConf.select(exp_cfg, f"paths.{k}") or "")
+        and not Path(str(old_val)).exists()
     ]
     if prefix_remaps:
         log.info(f"Path prefix remaps: {prefix_remaps}")
     _fix_cluster_paths_in_config(exp_cfg, exp_dir, prefix_remaps)
+
+    # 2b. Auto-fix HPC filesystem mismatches.
+    # After standard remaps, check whether data_dir actually exists.
+    # If not, infer the correct filesystem prefix by comparing the
+    # broken data_dir against exp_dir (which is known to be valid).
+    data_dir_str = str(
+        OmegaConf.select(exp_cfg, "datamodule.dataset.data_dir") or ""
+    )
+    if data_dir_str and not Path(data_dir_str).is_dir():
+        remap = _infer_prefix_remap(data_dir_str, exp_dir)
+        if remap:
+            old_pre, new_pre = remap
+            log.info(
+                f"HPC auto-remap: {old_pre} -> {new_pre} "
+                f"(data_dir {data_dir_str!r} did not exist)"
+            )
+            _fix_cluster_paths_in_config(exp_cfg, exp_dir, [remap])
+        else:
+            log.warning(
+                f"data_dir does not exist and no HPC prefix "
+                f"remap could be inferred: {data_dir_str}"
+            )
 
     # 3. Eval-specific adjustments.
     exp_cfg.task_name = "eval"
@@ -374,10 +442,7 @@ def _apply_exp_dir_config(cfg: DictConfig) -> DictConfig:
 
     # Strip data_augmentation (training-only). Resolve num_classes
     # first since it may reference data_augmentation via interpolation.
-    if (
-        OmegaConf.select(exp_cfg, "module.data_augmentation")
-        is not None
-    ):
+    if OmegaConf.select(exp_cfg, "module.data_augmentation") is not None:
         try:
             num_classes = OmegaConf.select(
                 exp_cfg,
@@ -485,9 +550,7 @@ def _extract_metric_from_checkpoint(
     ckpt_path: Path,
 ) -> float | None:
     """Extract metric_valid value from checkpoint filename."""
-    match = re.search(
-        r"metric_valid([0-9]+(?:\.[0-9]+)?)", ckpt_path.name
-    )
+    match = re.search(r"metric_valid([0-9]+(?:\.[0-9]+)?)", ckpt_path.name)
     return float(match.group(1)) if match else None
 
 
@@ -496,22 +559,24 @@ def _resolve_checkpoint(cfg: DictConfig) -> str:
     ckpt_path = cfg.get("ckpt_path")
     if ckpt_path:
         ckpt_path = Path(str(ckpt_path)).expanduser()
-        if not ckpt_path.exists():
+        if ckpt_path.exists():
+            if cfg.get("use_avg_ckpt"):
+                log.warning(
+                    "Both ckpt_path and use_avg_ckpt=True; " "using ckpt_path"
+                )
+            log.info(f"Using checkpoint: {ckpt_path}")
+            return str(ckpt_path)
+        if not cfg.get("use_avg_ckpt"):
             raise ValueError(f"Checkpoint not found: {ckpt_path}")
-        if cfg.get("use_avg_ckpt"):
-            log.warning(
-                "Both ckpt_path and use_avg_ckpt=True; "
-                "using ckpt_path"
-            )
-        log.info(f"Using checkpoint: {ckpt_path}")
-        return str(ckpt_path)
+        log.warning(
+            f"ckpt_path not found ({ckpt_path}); "
+            "falling back to use_avg_ckpt"
+        )
 
     if cfg.get("use_avg_ckpt"):
         return _resolve_averaged_checkpoint(cfg)
 
-    raise ValueError(
-        "ckpt_path is required when use_avg_ckpt is False"
-    )
+    raise ValueError("ckpt_path is required when use_avg_ckpt is False")
 
 
 def _resolve_averaged_checkpoint(cfg: DictConfig) -> str:
@@ -522,9 +587,7 @@ def _resolve_averaged_checkpoint(cfg: DictConfig) -> str:
 
     ckpt_dir = Path(str(ckpt_dir)).expanduser()
     if not ckpt_dir.exists():
-        raise ValueError(
-            f"Checkpoint directory not found: {ckpt_dir}"
-        )
+        raise ValueError(f"Checkpoint directory not found: {ckpt_dir}")
 
     avg_num = cfg.get("ckpt_avg_num")  # None = all available
     avg_min = cfg.get("ckpt_avg_min", 2)
@@ -540,14 +603,11 @@ def _resolve_averaged_checkpoint(cfg: DictConfig) -> str:
         return str(existing[0])
 
     # Find candidates (exclude averaged and last.ckpt).
-    log.warning(
-        f"No averaged checkpoint in {ckpt_dir}; creating one."
-    )
+    log.warning(f"No averaged checkpoint in {ckpt_dir}; creating one.")
     candidates = [
         p
         for p in ckpt_dir.glob("*.ckpt")
-        if not p.name.startswith("averaged_")
-        and p.name != "last.ckpt"
+        if not p.name.startswith("averaged_") and p.name != "last.ckpt"
     ]
 
     # Sort by metric from filename, fall back to mtime.
@@ -561,9 +621,7 @@ def _resolve_averaged_checkpoint(cfg: DictConfig) -> str:
         if (m := _extract_metric_from_checkpoint(p)) is not None
     ]
     if with_metric:
-        with_metric.sort(
-            key=lambda x: x[1], reverse=(ckpt_mode == "max")
-        )
+        with_metric.sort(key=lambda x: x[1], reverse=(ckpt_mode == "max"))
         candidates = [p for p, _ in with_metric]
         log.info(
             f"Sorted by metric (mode={ckpt_mode}), "
@@ -574,14 +632,11 @@ def _resolve_averaged_checkpoint(cfg: DictConfig) -> str:
             "Cannot extract metrics from filenames; "
             "falling back to modification time"
         )
-        candidates.sort(
-            key=lambda p: p.stat().st_mtime, reverse=True
-        )
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
     if len(candidates) < avg_min:
         raise ValueError(
-            f"Not enough checkpoints: "
-            f"{len(candidates)} < {avg_min}"
+            f"Not enough checkpoints: " f"{len(candidates)} < {avg_min}"
         )
 
     if avg_num is not None:
@@ -621,14 +676,10 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
     if ckpt_path_val and not exp_dir_val:
         ckpt = Path(str(ckpt_path_val)).expanduser().resolve()
         if not ckpt.exists():
-            raise FileNotFoundError(
-                f"Checkpoint not found: {ckpt}"
-            )
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
         derived = ckpt.parents[1]
         if not (derived / ".hydra" / "config.yaml").exists():
-            raise ValueError(
-                f"No training config at {derived / '.hydra'}"
-            )
+            raise ValueError(f"No training config at {derived / '.hydra'}")
         cfg.exp_dir = str(derived)
         log.info(f"Derived exp_dir from ckpt_path: {cfg.exp_dir}")
 
@@ -636,9 +687,7 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
     if exp_dir_val and not ckpt_path_val:
         if not cfg.get("use_avg_ckpt"):
             cfg.use_avg_ckpt = True
-            log.warning(
-                "No ckpt_path; defaulting to use_avg_ckpt=True"
-            )
+            log.warning("No ckpt_path; defaulting to use_avg_ckpt=True")
 
     cfg = _apply_exp_dir_config(cfg)
     _strip_stale_concat_rows(cfg)  # TEMPORARY — see docstring
@@ -648,9 +697,7 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
         log.info(f"Seed: {cfg.seed}")
         seed_everything(cfg.seed, workers=True)
 
-    log.info(
-        f"Instantiating datamodule <{cfg.datamodule._target_}>"
-    )
+    log.info(f"Instantiating datamodule <{cfg.datamodule._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(
         cfg.datamodule, _recursive_=False
     )
@@ -661,14 +708,10 @@ def evaluate(cfg: DictConfig) -> Tuple[dict, dict]:
     )
 
     log.info("Instantiating loggers...")
-    logger: List[PLLogger] = utils.instantiate_loggers(
-        cfg.get("logger")
-    )
+    logger: List[PLLogger] = utils.instantiate_loggers(cfg.get("logger"))
 
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")
-    trainer: Trainer = hydra.utils.instantiate(
-        cfg.trainer, logger=logger
-    )
+    trainer: Trainer = hydra.utils.instantiate(cfg.trainer, logger=logger)
 
     object_dict = {
         "cfg": cfg,

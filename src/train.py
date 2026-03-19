@@ -114,13 +114,17 @@ def inject_expdir_overrides() -> None:
     # Append ckpt_path unless the user already specified one.
     if not any(a.startswith("ckpt_path=") for a in sys.argv[1:]):
         last_ckpt = exp_dir / "checkpoints" / "last.ckpt"
-        if not last_ckpt.exists():
-            raise FileNotFoundError(
-                f"Last checkpoint not found: {last_ckpt}\n"
-                "Pass ckpt_path= explicitly to use a different checkpoint."
+        if (exp_dir / "checkpoints").exists():
+            if not last_ckpt.exists():
+                raise FileNotFoundError(
+                    f"Last checkpoint not found: {last_ckpt}"
+                )
+            sys.argv.append(f"ckpt_path={last_ckpt.as_posix()}")
+            log.info(f"Resuming from checkpoint: {last_ckpt}")
+        else:
+            log.warning(
+                f"No checkpoints directory found in {exp_dir} -> resuming without checkpoint."
             )
-        sys.argv.append(f"ckpt_path={last_ckpt.as_posix()}")
-        log.info(f"Resuming from checkpoint: {last_ckpt}")
 
     # Reuse the existing run directory so Hydra doesn't create a new one.
     if not any(a.startswith("hydra.run.dir=") for a in sys.argv[1:]):
