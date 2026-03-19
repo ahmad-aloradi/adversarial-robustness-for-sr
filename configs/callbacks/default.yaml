@@ -5,6 +5,7 @@ defaults:
   - rich_progress_bar.yaml
   - learning_rate_monitor.yaml
   - epoch_summary_logger.yaml
+  - weight_norm_tracker.yaml
   # - wandb.yaml
   # - gradient_monitor.yaml
   - _self_

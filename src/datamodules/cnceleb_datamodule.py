@@ -128,8 +128,9 @@ class CNCelebDataModule(LightningDataModule):
                 sep=self.hparams.dataset.get("sep", "|"),
             )
 
-            # self.train_data.dataset = self.train_data.dataset.sample(6000)
-            # self.val_data.dataset = self.val_data.dataset.sample(6000)
+            # --- Uncomment to subsample for quick pipeline testing ---
+            # self.train_data.dataset = self.train_data.dataset.sample(n=200, random_state=42).reset_index(drop=True)
+            # self.val_data.dataset = self.val_data.dataset.sample(n=400, random_state=42).reset_index(drop=True)
 
         if stage == "test" or stage is None:
             enroll_df = pd.read_csv(
@@ -201,6 +202,15 @@ class CNCelebDataModule(LightningDataModule):
                 sample_rate=self.hparams.dataset.sample_rate,
                 df=test_unique_df,
             )
+
+            # --- Uncomment to subsample test for quick pipeline testing ---
+            # _n_trials = 500
+            # self.test_data.trials_df = self.test_data.trials_df.sample(n=_n_trials, random_state=42).reset_index(drop=True)
+            # _kept_test_paths = set(self.test_data.trials_df["test_path"].unique())
+            # _kept_enroll_ids = set(self.test_data.trials_df["enroll_id"].unique())
+            # self.test_unique_data.test_df = self.test_unique_data.test_df[self.test_unique_data.test_df["test_path"].isin(_kept_test_paths)].reset_index(drop=True)
+            # for _k, _ds in self.enrollment_data_dict.items():
+            #     _ds.enroll_df = _ds.enroll_df[_ds.enroll_df["enroll_id"].isin(_kept_enroll_ids)].reset_index(drop=True)
 
     def train_dataloader(self):
         assert (

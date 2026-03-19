@@ -1,0 +1,5 @@
+weight_norm_tracker:
+  _target_: src.callbacks.weight_norm_tracker.WeightNormTracker
+  filename: weight_norms.csv
+  sparsity_threshold: 1e-12
+  embedding_sample_batches: 3
