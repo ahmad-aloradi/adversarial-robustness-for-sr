@@ -21,4 +21,4 @@ module:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBregW
     _partial_: true
     lr: 1e-2
-    weight_decay: 1e-3
+    weight_decay: 1e-2

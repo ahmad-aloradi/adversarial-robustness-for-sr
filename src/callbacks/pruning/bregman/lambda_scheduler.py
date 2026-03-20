@@ -14,6 +14,10 @@ class LambdaScheduler:
     called from a batch-end hook). The scheduler maintains a fixed `target_sparsity`
     and updates lambda once per call to :meth:`step` (typically called at each batch end).
 
+    When sparsity enters within ``damping_zone`` of the target, the scheduler reduces
+    oscillation by increasing the effective update frequency (fewer updates) and
+    reducing the effective acceleration factor (gentler corrections).
+
     Parameters
     ----------
     initial_lambda : float
@@ -27,6 +31,16 @@ class LambdaScheduler:
         Minimum lambda value
     max_lambda : float, default=1e3
         Maximum lambda value
+    warmup_epochs : int, default=0
+        Number of epochs to hold lambda at initial value before scheduling begins.
+    update_frequency : int, default=1
+        Only update lambda every this many steps.
+    damping_zone : float, default=0.0
+        Sparsity distance from target to activate damping. 0.0 disables damping.
+    damping_frequency_multiplier : int, default=10
+        Multiply ``update_frequency`` by this when inside the damping zone.
+    damping_acceleration_divisor : float, default=5.0
+        Divide ``acceleration_factor`` by this when inside the damping zone.
     """
 
     def __init__(
@@ -38,6 +52,9 @@ class LambdaScheduler:
         max_lambda: float = 1e3,
         warmup_epochs: int = 0,
         update_frequency: int = 1,
+        damping_zone: float = 0.0,
+        damping_frequency_multiplier: int = 10,
+        damping_acceleration_divisor: float = 5.0,
     ):
         if not (0.0 < target_sparsity <= 1.0):
             raise ValueError(
@@ -71,6 +88,9 @@ class LambdaScheduler:
             update_frequency >= 1
         ), f"update_frequency must be >= 1, got {update_frequency}"
         self.update_frequency = update_frequency
+        self.damping_zone = damping_zone
+        self.damping_frequency_multiplier = damping_frequency_multiplier
+        self.damping_acceleration_divisor = damping_acceleration_divisor
 
     def step(
         self,
@@ -107,8 +127,28 @@ class LambdaScheduler:
                 f"target sparsity {self.target_sparsity:.4f}."
             )
 
-        # Only update lambda every update_frequency steps
-        if current_step % self.update_frequency != 0:
+        # Determine effective parameters based on proximity to target
+        in_damping_zone = (
+            self.damping_zone > 0.0
+            and abs(current_sparsity - self.target_sparsity)
+            < self.damping_zone
+        )
+        effective_frequency = (
+            self.update_frequency * self.damping_frequency_multiplier
+            if in_damping_zone
+            else self.update_frequency
+        )
+        effective_acceleration = (
+            self.acceleration_factor / self.damping_acceleration_divisor
+            if in_damping_zone
+            else self.acceleration_factor
+        )
+
+        # Only update lambda every effective_frequency steps
+        if (
+            current_step is not None
+            and current_step % effective_frequency != 0
+        ):
             return self.lambda_value
 
         # If resuming from a checkpoint, use provided last_sparsity
@@ -124,12 +164,12 @@ class LambdaScheduler:
 
         if sparsity_signal < self.target_sparsity:
             # Increase lambda to encourage more sparsity
-            self.lambda_value *= 1 + self.acceleration_factor * abs(
+            self.lambda_value *= 1 + effective_acceleration * abs(
                 sparsity_difference
             )
         elif sparsity_signal > self.target_sparsity:
             # Decrease lambda since we're above target
-            self.lambda_value /= 1 + self.acceleration_factor * abs(
+            self.lambda_value /= 1 + effective_acceleration * abs(
                 sparsity_difference
             )
 
@@ -185,6 +225,7 @@ class LambdaScheduler:
             "min_lambda": self.min_lambda,
             "max_lambda": self.max_lambda,
             "warmup_steps": self.warmup_steps,
+            "damping_zone": self.damping_zone,
         }
 
     def load_state(self, state: dict) -> None:
@@ -199,6 +240,7 @@ class LambdaScheduler:
         self.min_lambda = state["min_lambda"]
         self.max_lambda = state["max_lambda"]
         self.warmup_steps = state.get("warmup_steps", self.warmup_steps)
+        self.damping_zone = state.get("damping_zone", self.damping_zone)
 
         log.info(
             f"LambdaScheduler state restored. lambda={self.lambda_value:.4f}"

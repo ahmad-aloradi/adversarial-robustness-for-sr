@@ -218,7 +218,14 @@ def test_bregman_pruner_updates_lambda_per_batch():
     mock_param = torch.nn.Parameter(torch.randn(10, 10))
     reg = RegL1(lamda=0.01)
     mock_optimizer = _make_mock_optimizer(
-        [{"params": [mock_param], "reg": reg, "lambda_scale": 1.0, "delta": 1.0}]
+        [
+            {
+                "params": [mock_param],
+                "reg": reg,
+                "lambda_scale": 1.0,
+                "delta": 1.0,
+            }
+        ]
     )
 
     mock_trainer = Mock()
@@ -271,7 +278,14 @@ def test_bregman_pruner_propagates_lambda_to_optimizer():
     # Create mock optimizer with param group
     mock_param = torch.nn.Parameter(torch.randn(10, 10))
     mock_optimizer = _make_mock_optimizer(
-        [{"params": [mock_param], "reg": reg, "lambda_scale": 1.0, "delta": 1.0}]
+        [
+            {
+                "params": [mock_param],
+                "reg": reg,
+                "lambda_scale": 1.0,
+                "delta": 1.0,
+            }
+        ]
     )
 
     mock_trainer = Mock()
@@ -314,7 +328,14 @@ def test_bregman_pruner_respects_lambda_scale():
     # Create mock optimizer with lambda_scale
     mock_param = torch.nn.Parameter(torch.randn(10, 10))
     mock_optimizer = _make_mock_optimizer(
-        [{"params": [mock_param], "reg": reg, "lambda_scale": lambda_scale, "delta": 1.0}]
+        [
+            {
+                "params": [mock_param],
+                "reg": reg,
+                "lambda_scale": lambda_scale,
+                "delta": 1.0,
+            }
+        ]
     )
 
     mock_trainer = Mock()
@@ -334,3 +355,143 @@ def test_bregman_pruner_respects_lambda_scale():
     # Assert: reg.lamda == scheduler.get_lambda() * lambda_scale
     expected_lambda = scheduler.get_lambda() * lambda_scale
     assert abs(reg.lamda - expected_lambda) < 1e-9
+
+
+# =============================================================================
+# Near-target damping tests
+# =============================================================================
+
+
+def test_damping_zone_reduces_update_frequency():
+    """Inside damping zone, updates happen at damping_frequency_multiplier x
+    lower frequency."""
+    scheduler = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+        update_frequency=10,
+        damping_zone=0.02,
+        damping_frequency_multiplier=10,
+        damping_acceleration_divisor=5.0,
+    )
+
+    initial_lambda = scheduler.get_lambda()
+
+    # Sparsity 0.89 is within 0.02 of target 0.9 -> damping active
+    # Effective frequency = 10 * 10 = 100
+    # Steps 1-99 should NOT update
+    for step in range(1, 100):
+        scheduler.step(0.89, current_step=step)
+    assert (
+        scheduler.get_lambda() == initial_lambda
+    ), "Should not update inside damping zone before effective_frequency"
+
+    # Step 100 should update
+    scheduler.step(0.89, current_step=100)
+    assert (
+        scheduler.get_lambda() != initial_lambda
+    ), "Should update at effective_frequency step"
+
+
+def test_damping_zone_reduces_acceleration():
+    """Inside damping zone, lambda changes are smaller per update."""
+    # Scheduler WITH damping
+    damped = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+        update_frequency=100,
+        damping_zone=0.02,
+        damping_frequency_multiplier=1,  # keep frequency same to isolate acceleration effect
+        damping_acceleration_divisor=5.0,
+    )
+
+    # Scheduler WITHOUT damping (same params but damping_zone=0)
+    undamped = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+        update_frequency=100,
+        damping_zone=0.0,
+    )
+
+    # Sparsity 0.89 is within damping zone for damped scheduler
+    damped.step(0.89, current_step=100)
+    undamped.step(0.89, current_step=100)
+
+    damped_change = abs(damped.get_lambda() - 1.0)
+    undamped_change = abs(undamped.get_lambda() - 1.0)
+
+    # Damped change should be ~5x smaller
+    ratio = undamped_change / damped_change
+    assert 4.9 < ratio < 5.1, f"Expected ~5x ratio, got {ratio}"
+
+
+def test_damping_zone_inactive_outside():
+    """Outside damping zone, behavior is unchanged."""
+    damped = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+        update_frequency=10,
+        damping_zone=0.02,
+        damping_frequency_multiplier=10,
+        damping_acceleration_divisor=5.0,
+    )
+
+    undamped = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+        update_frequency=10,
+        damping_zone=0.0,
+    )
+
+    # Sparsity 0.5 is far from target -> outside damping zone
+    damped.step(0.5, current_step=10)
+    undamped.step(0.5, current_step=10)
+
+    assert (
+        damped.get_lambda() == undamped.get_lambda()
+    ), "Outside damping zone, behavior should be identical"
+
+
+def test_damping_zone_zero_preserves_behavior():
+    """Default damping_zone=0.0 preserves existing behavior exactly."""
+    scheduler = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+        update_frequency=10,
+        damping_zone=0.0,
+    )
+
+    values = []
+    for step in range(0, 100):
+        scheduler.step(0.85, current_step=step)
+        values.append(scheduler.get_lambda())
+
+    # Should update at steps 0, 10, 20, ... (every 10 steps)
+    # Count distinct values
+    distinct = len(set(values))
+    assert distinct == 10, f"Expected 10 distinct values, got {distinct}"
+
+
+def test_damping_zone_checkpointing():
+    """damping_zone is preserved through checkpoint save/restore."""
+    scheduler = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        damping_zone=0.02,
+    )
+
+    state = scheduler.get_state()
+    assert state["damping_zone"] == 0.02
+
+    new_scheduler = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=0.5,
+        damping_zone=0.0,
+    )
+    new_scheduler.load_state(state)
+    assert new_scheduler.damping_zone == 0.02
