@@ -1,22 +1,24 @@
 import inspect
+
 import torch
 from torch import nn
 
 
 class EncoderWrapper(nn.Module):
-    """
-    A comprehensive wrapper for audio encoder models to provide a unified interface.
+    """A comprehensive wrapper for audio encoder models to provide a unified
+    interface.
 
     This wrapper abstracts away the differences between various encoder
     architectures by first identifying the model type (e.g., SpeechBrain, NeMo)
-    and then handling the specific forward pass logic for "pretrained"
-    (high-level) versus "from-scratch" (standard) versions.
+    and then handling the specific forward pass logic for "pretrained" (high-
+    level) versus "from-scratch" (standard) versions.
     """
+
     def __init__(
         self,
         encoder: nn.Module,
         audio_processor: nn.Module,
-        audio_processor_normalizer: nn.Module
+        audio_processor_normalizer: nn.Module,
     ):
         super().__init__()
         self.encoder = encoder
@@ -25,34 +27,39 @@ class EncoderWrapper(nn.Module):
 
         # A high-level pretrained model is one that does its own feature extraction.
         # We infer this if the audio_processor is just an identity function.
-        self._is_high_level_pretrained = isinstance(self.audio_processor, nn.Identity)
+        self._is_high_level_pretrained = isinstance(
+            self.audio_processor, nn.Identity
+        )
         if self._is_high_level_pretrained:
-            assert isinstance(self.audio_processor_normalizer, nn.Identity), 'Pretrained models expect identity normalizer.'
+            assert isinstance(
+                self.audio_processor_normalizer, nn.Identity
+            ), "Pretrained models expect identity normalizer."
         self._model_type = self._get_model_type()
 
     def _get_model_type(self) -> str:
-        """Determines the model's library/type based on its module path or attributes."""
+        """Determines the model's library/type based on its module path or
+        attributes."""
         # handle the case where self.encoder is a torch.Sequential wrapper
         if isinstance(self.encoder, nn.Sequential) and len(self.encoder) > 0:
             module_name = self.encoder[0].__class__.__module__
         else:
             module_name = self.encoder.__class__.__module__
-        
+
         if "speechbrain" in module_name:
             return "speechbrain"
         if "wespeaker" in module_name:
             return "wespeaker"
         if "nemo" in module_name:
             return "nemo"
-        if hasattr(self.encoder, 'code'):
+        if hasattr(self.encoder, "code"):
             return "torchscript"
         return "generic"
 
-    def forward(self, wavs: torch.Tensor, wav_lens: torch.Tensor) -> torch.Tensor:
-        """
-        Processes raw audio waveforms and returns speaker embeddings by dispatching
-        to the correct forward method based on the model type.
-        """
+    def forward(
+        self, wavs: torch.Tensor, wav_lens: torch.Tensor
+    ) -> torch.Tensor:
+        """Processes raw audio waveforms and returns speaker embeddings by
+        dispatching to the correct forward method based on the model type."""
         # Dispatch to the appropriate forward method based on model type
         if self._model_type == "speechbrain":
             embeddings = self._forward_speechbrain(wavs, wav_lens)
@@ -66,99 +73,153 @@ class EncoderWrapper(nn.Module):
             embeddings = self._forward_generic(wavs, wav_lens)
 
         # Ensure the final output is a 2D tensor [batch, embedding_dim]
-        assert embeddings.ndim == 2, f"Expected 2D embeddings, got {embeddings.shape}"
+        assert (
+            embeddings.ndim == 2
+        ), f"Expected 2D embeddings, got {embeddings.shape}"
         return embeddings
 
-    def _forward_speechbrain(self, wavs: torch.Tensor, wav_lens: torch.Tensor) -> torch.Tensor:
+    def _forward_speechbrain(
+        self, wavs: torch.Tensor, wav_lens: torch.Tensor
+    ) -> torch.Tensor:
         """Handles both high-level and standard SpeechBrain models."""
         if self._is_high_level_pretrained:
             # Pretrained models (e.g., EncoderClassifier) handle their own processing
-            normalized_lens = wav_lens / max(wav_lens) if max(wav_lens) > 1 else wav_lens
-            return self.encoder.encode_batch(wavs=wavs, wav_lens=normalized_lens).squeeze(1)
+            normalized_lens = (
+                wav_lens / max(wav_lens) if max(wav_lens) > 1 else wav_lens
+            )
+            return self.encoder.encode_batch(
+                wavs=wavs, wav_lens=normalized_lens
+            ).squeeze(1)
         else:
             # Standard models require external feature processing
             return self._forward_generic(wavs, wav_lens).squeeze(1)
 
-    def _forward_wespeaker(self, wavs: torch.Tensor, wav_lens: torch.Tensor) -> torch.Tensor:
+    def _forward_wespeaker(
+        self, wavs: torch.Tensor, wav_lens: torch.Tensor
+    ) -> torch.Tensor:
         """Handles both high-level and standard Wespeaker models."""
         if self._is_high_level_pretrained:
-            raise NotImplementedError("High-level Wespeaker models are not supported.")
+            raise NotImplementedError(
+                "High-level Wespeaker models are not supported."
+            )
         else:
             return self._forward_generic(wavs, wav_lens)
 
-    def _forward_nemo(self, wavs: torch.Tensor, wav_lens: torch.Tensor) -> torch.Tensor:
+    def _forward_nemo(
+        self, wavs: torch.Tensor, wav_lens: torch.Tensor
+    ) -> torch.Tensor:
         """Handles both high-level and standard NeMo models."""
         # Standard models require external feature processing
         features = self.audio_processor(wavs)
         if not isinstance(self.audio_processor_normalizer, nn.Identity):
-            features = self.audio_processor_normalizer(features, lengths=wav_lens)
-        
+            features = self.audio_processor_normalizer(
+                features, lengths=wav_lens
+            )
+
         # NeMo's standard forward returns a tuple (logits, embeddings)
-        _, embeddings = self.encoder(input_signal=features, input_signal_length=wav_lens)
+        _, embeddings = self.encoder(
+            input_signal=features, input_signal_length=wav_lens
+        )
         return embeddings
 
-    def _forward_torchscript(self, wavs: torch.Tensor, wav_lens: torch.Tensor) -> torch.Tensor:
+    def _forward_torchscript(
+        self, wavs: torch.Tensor, wav_lens: torch.Tensor
+    ) -> torch.Tensor:
         """Handles TorchScript models, assumed to be pretrained."""
-        # Per user assumption, TorchScript models are treated as high-level.        
+        # Per user assumption, TorchScript models are treated as high-level.
         with torch.jit.optimized_execution(False):
             return self.encoder(wavs)
 
-    @staticmethod
-    def _make_feature_mask(relative_lens: torch.Tensor, num_frames: int) -> torch.Tensor:
-        """Build [B, T, 1] boolean mask from relative lengths and frame count."""
-        # Use ceil so the boundary STFT frame (straddling real audio and
-        # padding) is kept rather than dropped — it still carries signal.
-        valid = (relative_lens * num_frames).ceil().long().clamp(min=1, max=num_frames)
-        idx = torch.arange(num_frames, device=relative_lens.device)
-        return (idx.unsqueeze(0) < valid.unsqueeze(1)).unsqueeze(-1)  # [B, T, 1]
-
-    def _forward_generic(self, wavs: torch.Tensor, wav_lens: torch.Tensor) -> torch.Tensor:
+    def _forward_generic(
+        self, wavs: torch.Tensor, wav_lens: torch.Tensor
+    ) -> torch.Tensor:
         """A generic forward pass for standard nn.Module encoders."""
         # Relative lengths (0-1) for normalization and padding mask.
-        relative_lens = wav_lens / wavs.shape[1] if wavs.shape[1] > 0 else wav_lens
+        relative_lens = (
+            wav_lens / wavs.shape[1] if wavs.shape[1] > 0 else wav_lens
+        )
 
-        # 1. Feature Extraction
-        features = self.audio_processor(wavs)
+        # Fast path: no padding (training with fixed-length segments, or all
+        # utterances happen to be the same length).  Process the whole batch.
+        if relative_lens.min() >= 1.0:
+            return self._encode_features(
+                self.audio_processor(wavs), relative_lens=None
+            )
 
-        # 2. Mask padded feature frames BEFORE normalization so that
-        #    per-utterance statistics are not contaminated by padding.
-        #    Features are [B, T, F] (SpeechBrain Fbank convention).
-        T = features.shape[1]
-        mask = self._make_feature_mask(relative_lens, T)
-        features = features * mask
+        # Padding present — process each utterance individually through the
+        # full pipeline (feature extraction → normalization → encoding) so
+        # that no stage ever sees zero-padded frames.  This avoids STFT
+        # boundary artifacts, normalizer contamination, and pooling distortion
+        # regardless of encoder architecture.
+        embeddings = []
+        for i in range(wavs.shape[0]):
+            n = wav_lens[i].long().item()
+            wav_i = wavs[i : i + 1, :n]
+            emb = self._encode_features(
+                self.audio_processor(wav_i), relative_lens=None
+            )
+            embeddings.append(emb)
+        return torch.cat(embeddings, dim=0)
 
-        # 3. Feature Normalization
+    def _encode_features(
+        self, features: torch.Tensor, relative_lens: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Normalize and encode features.
+
+        relative_lens=None means no padding.
+        """
         if not isinstance(self.audio_processor_normalizer, nn.Identity):
-            norm_sig = inspect.signature(self.audio_processor_normalizer.forward)
-            if 'lengths' in norm_sig.parameters:
-                features = self.audio_processor_normalizer(features, lengths=relative_lens)
+            norm_sig = inspect.signature(
+                self.audio_processor_normalizer.forward
+            )
+            if "lengths" in norm_sig.parameters:
+                lens = (
+                    relative_lens
+                    if relative_lens is not None
+                    else torch.ones(features.shape[0], device=features.device)
+                )
+                features = self.audio_processor_normalizer(
+                    features, lengths=lens
+                )
             else:
                 features = self.audio_processor_normalizer(features)
-            # Re-mask after normalization: the normalizer may have written
-            # non-zero values back into padded positions.
-            features = features * mask
 
-        # 4. Encoding
         sig = inspect.signature(self.encoder.forward)
-        possible_len_args = ('length', 'lengths', 'wav_lens', 'input_signal_length', 'length', 'x_len', 'lens')
-        len_arg_name = next((arg for arg in possible_len_args if arg in sig.parameters), None)
+        possible_len_args = (
+            "length",
+            "lengths",
+            "wav_lens",
+            "input_signal_length",
+            "length",
+            "x_len",
+            "lens",
+        )
+        len_arg_name = next(
+            (arg for arg in possible_len_args if arg in sig.parameters), None
+        )
         if len_arg_name:
-            return self.encoder(features, **{len_arg_name: relative_lens})
+            lens = (
+                relative_lens
+                if relative_lens is not None
+                else torch.ones(features.shape[0], device=features.device)
+            )
+            return self.encoder(features, **{len_arg_name: lens})
         return self.encoder(features)
 
 
 class SequentialEncoder(nn.Module):
-    """
-    A wrapper to chain a feature extractor (like WavLM) and a downstream
+    """A wrapper to chain a feature extractor (like WavLM) and a downstream
     speaker encoder (like ECAPA-TDNN).
 
     The feature extractor is frozen by default.
     """
 
-    def __init__(self, 
-                 feature_extractor: nn.Module,
-                 speaker_encoder: nn.Module,
-                 freeze_feature_extractor: bool = True):
+    def __init__(
+        self,
+        feature_extractor: nn.Module,
+        speaker_encoder: nn.Module,
+        freeze_feature_extractor: bool = True,
+    ):
         super().__init__()
         self.feature_extractor = feature_extractor
         self.speaker_encoder = speaker_encoder
@@ -168,9 +229,10 @@ class SequentialEncoder(nn.Module):
             for param in self.feature_extractor.parameters():
                 param.requires_grad = False
 
-    def forward(self, wavs: torch.Tensor, wav_lens: torch.Tensor = None) -> torch.Tensor:
-        """
-        Extract features and then encode them to get speaker embeddings.
+    def forward(
+        self, wavs: torch.Tensor, wav_lens: torch.Tensor = None
+    ) -> torch.Tensor:
+        """Extract features and then encode them to get speaker embeddings.
 
         Args:
             wavs: Raw audio waveforms.
@@ -188,7 +250,7 @@ class SequentialEncoder(nn.Module):
             # The features are in the 'last_hidden_state' attribute.
             output = self.feature_extractor(wavs)
 
-            if hasattr(output, 'last_hidden_state'):
+            if hasattr(output, "last_hidden_state"):
                 feats = output.last_hidden_state
             elif isinstance(output, tuple):
                 # Fallback for speechbrain-style tuple outputs
@@ -203,7 +265,9 @@ class SequentialEncoder(nn.Module):
         # or the speaker encoder can handle variable length sequences.
         embeddings = self.speaker_encoder(feats)
         if embeddings.ndim == 3:
-            assert embeddings.size(1) == 1, "Expected single embedding per utterance"
+            assert (
+                embeddings.size(1) == 1
+            ), "Expected single embedding per utterance"
             embeddings = embeddings.squeeze(1)
 
         return embeddings

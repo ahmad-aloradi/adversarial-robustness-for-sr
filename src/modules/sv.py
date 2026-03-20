@@ -365,13 +365,15 @@ class SpeakerVerification(pl.LightningModule):
 
             # Configure scoring pipeline with cohort data for this dataset
             scoring_pipeline = build_scoring_pipeline(
-                config=self.hparams.get("scoring", {})
+                config=self.hparams.get("scoring", {}),
+                cohort_embeddings=cohort_data["embeddings"]
+                if cohort_data
+                else None,
+                cohort_speaker_ids=cohort_data.get("speaker_ids")
+                if cohort_data
+                else None,
             )
             if cohort_data is not None:
-                scoring_pipeline.set_cohort(
-                    embeddings=cohort_data["embeddings"],
-                    speaker_ids=cohort_data.get("speaker_ids"),
-                )
                 log.info(
                     f"Configured scoring pipeline for '{test_filename}': "
                     f"enrollment_aggregation={scoring_pipeline.config.enrollment_aggregation}, "

@@ -1,4 +1,18 @@
-"""Scoring pipeline: enrollment aggregation, cosine scoring, AS-Norm."""
+"""Scoring pipeline: enrollment aggregation, cosine scoring, AS-Norm.
+
+Pipeline:
+    raw embs → L2 → aggregate → center (L2 → subtract mean) → cosine → AS-Norm
+
+L2-normalization is applied explicitly where needed: before aggregation
+(equal utterance contribution), before centering (unit-sphere alignment),
+and at cohort construction output.
+
+Diverges from WeSpeaker, which centers raw embeddings before any L2-norm:
+    raw embs → subtract mean(raw) → cosine (L2-norms internally)
+
+Our approach is robust to variable embedding scales (e.g. AdaBreg 469×
+vs LinBreg 1×) at the cost of not exactly reproducing WeSpeaker numbers.
+"""
 
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
@@ -24,6 +38,9 @@ def l2_normalize(x: torch.Tensor) -> torch.Tensor:
 class CohortConfig:
     speaker_level: bool = True
     topk_speakers: int = 300
+    # These are only placeholders for backward compatiblity
+    min_size: int = None
+    max_size: int = None
 
 
 @dataclass
@@ -42,15 +59,20 @@ def aggregate_embeddings(
     method: str = "mean",
     lengths: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Aggregate multi-utterance embeddings into one. [N, D] → [D]."""
+    """Aggregate multi-utterance embeddings into one.
+
+    [N, D] → [D].
+    """
     embeddings = l2_normalize(embeddings)
     if method == "mean":
-        return l2_normalize(embeddings.mean(dim=0))
+        return embeddings.mean(dim=0)
     if method == "length_weighted":
         if lengths is None:
-            raise ValueError("lengths required for length_weighted aggregation")
+            raise ValueError(
+                "lengths required for length_weighted aggregation"
+            )
         weights = (lengths.float() / lengths.sum()).to(embeddings.device)
-        return l2_normalize((embeddings * weights.unsqueeze(-1)).sum(dim=0))
+        return (embeddings * weights.unsqueeze(-1)).sum(dim=0)
     raise ValueError(f"Unknown aggregation method: {method}")
 
 
@@ -58,23 +80,35 @@ def aggregate_embeddings(
 
 
 class CosineScorer:
-    """L2-norm → center → L2-norm → cosine similarity."""
+    """L2-norm → mean-center → cosine similarity.
+
+    We L2-normalize before centering so that all operations happen in unit-
+    sphere space regardless of raw embedding scale.
+
+    F.cosine_similarity L2-normalizes internally, so no explicit norm is needed
+    after centering.
+    """
 
     def __init__(self, mean_vector: Optional[torch.Tensor] = None):
         self.mean_vector = mean_vector
 
-    def prepare(self, embedding: torch.Tensor) -> torch.Tensor:
-        """L2-norm → center → L2-norm."""
+    def center(self, embedding: torch.Tensor) -> torch.Tensor:
+        """L2-norm → subtract mean vector.
+
+        The L2-norm ensures centering happens in the same unit-sphere space
+        where the mean vector was computed (from L2-normalized cohort
+        embeddings).
+        """
         embedding = l2_normalize(embedding)
         if self.mean_vector is not None:
             embedding = embedding - self.mean_vector.to(embedding.device)
-        return l2_normalize(embedding)
+        return embedding
 
     def score(
         self, enroll: torch.Tensor, test: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns (raw_score, prepared_enroll, prepared_test)."""
-        enroll, test = self.prepare(enroll), self.prepare(test)
+        """Returns (raw_score, centered_enroll, centered_test)."""
+        enroll, test = self.center(enroll), self.center(test)
         return F.cosine_similarity(enroll, test, dim=-1), enroll, test
 
     def score_multi_enroll(
@@ -84,9 +118,13 @@ class CosineScorer:
         method: str = "mean",
         lengths: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Center each utterance before aggregation. Returns (raw_score, agg_enroll, prepared_test)."""
-        enroll = aggregate_embeddings(self.prepare(enroll_utts), method=method, lengths=lengths)
-        test = self.prepare(test)
+        """Aggregate (L2-norm → avg), then center (L2-norm → subtract mean),
+        then cosine."""
+        enroll = aggregate_embeddings(
+            enroll_utts, method=method, lengths=lengths
+        )
+        enroll = self.center(enroll)
+        test = self.center(test)
         return F.cosine_similarity(enroll, test, dim=-1), enroll, test
 
 
@@ -98,7 +136,10 @@ def build_speaker_cohort(
     speaker_ids: Optional[torch.Tensor],
     speaker_level: bool,
 ) -> torch.Tensor:
-    """Build (optionally speaker-averaged) cohort from raw embeddings. [N, D] → [S, D]."""
+    """Build (optionally speaker-averaged) cohort.
+
+    [N, D] → [S, D], all unit-norm.
+    """
     embeddings = l2_normalize(embeddings)
     if speaker_level:
         if speaker_ids is None:
@@ -111,11 +152,18 @@ def build_speaker_cohort(
 
 
 class ScoreNormalizer:
-    """Batched AS-Norm. Expects [N, D] enroll/test from score."""
+    """Batched AS-Norm using F.cosine_similarity (normalization-agnostic)."""
 
-    def __init__(self, speaker_cohort: torch.Tensor, topk_speakers: int):
+    def __init__(
+        self,
+        speaker_cohort: torch.Tensor,
+        topk_speakers: int,
+        mean_vector: Optional[torch.Tensor] = None,
+    ):
+        if mean_vector is not None:
+            speaker_cohort = speaker_cohort - mean_vector
         self._speaker_cohort = speaker_cohort
-        self._topk = min(topk_speakers, speaker_cohort.shape[0])
+        self.k = min(topk_speakers, speaker_cohort.shape[0])
 
     def __call__(
         self,
@@ -123,30 +171,59 @@ class ScoreNormalizer:
         enroll: torch.Tensor,
         test: torch.Tensor,
     ) -> torch.Tensor:
-        """AS-Norm for a batch of trials. enroll/test: [N, D], raw_score: [N]."""
+        """AS-Norm for a batch of trials.
+
+        enroll/test: [N, D], raw_score: [N].
+        """
         cohort = self._speaker_cohort.to(enroll.device)
+        if enroll.dim() == 1:
+            enroll = enroll.unsqueeze(0)
+        if test.dim() == 1:
+            test = test.unsqueeze(0)
 
-        # [N, D] @ [D, S] → [N, S]
-        e_scores = enroll @ cohort.T
-        t_scores = test @ cohort.T
+        # Compute cohort scores
+        e_scores = F.cosine_similarity(
+            enroll.unsqueeze(1), cohort.unsqueeze(0), dim=-1
+        )  # [N, S]
+        t_scores = F.cosine_similarity(
+            test.unsqueeze(1), cohort.unsqueeze(0), dim=-1
+        )  # [N, S]
 
-        # Top-K per trial: [N, K]
-        e_topk, _ = torch.topk(e_scores, self._topk, dim=-1)
-        t_topk, _ = torch.topk(t_scores, self._topk, dim=-1)
+        # Top-K scores
+        e_topk, _ = torch.topk(e_scores, self.k, dim=-1)
+        t_topk, _ = torch.topk(t_scores, self.k, dim=-1)
 
-        e_mean, e_std = e_topk.mean(dim=-1), e_topk.std(dim=-1, unbiased=True) + EPS
-        t_mean, t_std = t_topk.mean(dim=-1), t_topk.std(dim=-1, unbiased=True) + EPS
+        # compute cohorts stats: (mean_{enroll}, std_{enroll}) and (mean_{test}, std_{test})
+        e_mean, e_std = (
+            e_topk.mean(dim=-1),
+            e_topk.std(dim=-1, unbiased=True) + EPS,
+        )
+        t_mean, t_std = (
+            t_topk.mean(dim=-1),
+            t_topk.std(dim=-1, unbiased=True) + EPS,
+        )
 
-        return 0.5 * ((raw_score - e_mean) / e_std + (raw_score - t_mean) / t_std)
+        # AS-norm (variant 1)
+        return 0.5 * (
+            (raw_score - e_mean) / e_std + (raw_score - t_mean) / t_std
+        )
 
 
 # ── API for sv.py ──────────────────────────────────────────────
 
 
 class ScoringPipeline:
-    """Thin API composing aggregation, scoring, and normalization."""
+    """Thin API composing aggregation, scoring, and normalization.
 
-    def __init__(self, config: ScoringConfig):
+    Fully configured at construction — no mutable state after __init__.
+    """
+
+    def __init__(
+        self,
+        config: ScoringConfig,
+        cohort_embeddings: Optional[torch.Tensor] = None,
+        cohort_speaker_ids: Optional[torch.Tensor] = None,
+    ):
         if config.enrollment_aggregation is None:
             log.warning("enrollment_aggregation not set; defaulting to 'mean'")
             config.enrollment_aggregation = "mean"
@@ -158,18 +235,22 @@ class ScoringPipeline:
         self.scorer = CosineScorer()
         self.normalizer: Optional[ScoreNormalizer] = None
 
-    def set_cohort(
-        self,
-        embeddings: torch.Tensor,
-        speaker_ids: Optional[torch.Tensor] = None,
-    ) -> None:
-        speaker_cohort = build_speaker_cohort(
-            embeddings, speaker_ids, self.config.cohort.speaker_level
-        )
-        if self.config.mean_source == "cohort":
-            self.scorer.mean_vector = speaker_cohort.mean(dim=0)
-        if self.config.norm_method != "none":
-            self.normalizer = ScoreNormalizer(speaker_cohort, self.config.cohort.topk_speakers)
+        if cohort_embeddings is not None:
+            speaker_cohort = build_speaker_cohort(
+                cohort_embeddings,
+                cohort_speaker_ids,
+                config.cohort.speaker_level,
+            )
+            mean_vector = None
+            if config.mean_source == "cohort":
+                mean_vector = speaker_cohort.mean(dim=0)
+                self.scorer.mean_vector = mean_vector
+            if config.norm_method != "none":
+                self.normalizer = ScoreNormalizer(
+                    speaker_cohort,
+                    config.cohort.topk_speakers,
+                    mean_vector=mean_vector,
+                )
 
     def score(
         self,
@@ -180,7 +261,8 @@ class ScoringPipeline:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if enroll_multi is not None:
             raw, enroll, test = self.scorer.score_multi_enroll(
-                enroll_multi, test,
+                enroll_multi,
+                test,
                 method=self.config.enrollment_aggregation,
                 lengths=enroll_lengths,
             )
@@ -191,7 +273,11 @@ class ScoringPipeline:
         return norm, raw
 
 
-def build_scoring_pipeline(config: Optional[Dict] = None) -> ScoringPipeline:
+def build_scoring_pipeline(
+    config: Optional[Dict] = None,
+    cohort_embeddings: Optional[torch.Tensor] = None,
+    cohort_speaker_ids: Optional[torch.Tensor] = None,
+) -> ScoringPipeline:
     config = config or {}
     cohort_cfg = CohortConfig(**(config.get("cohort") or {}))
     scoring_cfg = ScoringConfig(
@@ -200,4 +286,4 @@ def build_scoring_pipeline(config: Optional[Dict] = None) -> ScoringPipeline:
         norm_method=config.get("norm_method"),
         cohort=cohort_cfg,
     )
-    return ScoringPipeline(scoring_cfg)
+    return ScoringPipeline(scoring_cfg, cohort_embeddings, cohort_speaker_ids)
