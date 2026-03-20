@@ -146,11 +146,17 @@ class EncoderWrapper(nn.Module):
                 self.audio_processor(wavs), relative_lens=None
             )
 
-        # Padding present — process each utterance individually through the
-        # full pipeline (feature extraction → normalization → encoding) so
-        # that no stage ever sees zero-padded frames.  This avoids STFT
-        # boundary artifacts, normalizer contamination, and pooling distortion
-        # regardless of encoder architecture.
+        # Padding present.  During training we must keep the full batch
+        # together so that BatchNorm (and similar layers that need batch
+        # statistics) can operate correctly.  The padding-aware per-utterance
+        # path is used only at eval time where accuracy matters most.
+        if self.training:
+            features = self.audio_processor(wavs)
+            return self._encode_features(features, relative_lens=relative_lens)
+
+        # Eval: process each utterance individually so no stage ever sees
+        # zero-padded frames (avoids STFT boundary artifacts, normalizer
+        # contamination, and pooling distortion).
         embeddings = []
         for i in range(wavs.shape[0]):
             n = wav_lens[i].long().item()
