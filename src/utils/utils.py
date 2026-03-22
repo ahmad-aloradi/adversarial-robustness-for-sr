@@ -399,7 +399,8 @@ def register_custom_resolvers(
                 "replace",
                 lambda item: item.replace("__loss__", loss.__class__.__name__)
                 .replace("__metric__", metric.__class__.__name__)
-                .replace("__metric_best__", metric_best.__class__.__name__),
+                .replace("__metric_best__", metric_best.__class__.__name__)
+                .replace("__sr__", "sparsity"),
             )
         else:
             # cfg_tmp.module.criterion.loss is done for testing

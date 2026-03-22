@@ -11,6 +11,7 @@ The tasks in this file perform two high-level chores:
 import datetime
 import os
 import time
+from pathlib import Path
 
 from fabric.api import cd, env, local, run, task
 from fabric.contrib.project import rsync_project
@@ -698,6 +699,22 @@ echo 1
     return result.strip() == "1"
 
 
+def _remove_completion_markers(test_root):
+    """Remove COMPLETE and LAST_RUN markers from all test set subdirectories.
+
+    This allows a previously completed experiment to be re-evaluated.
+    Existing results directories are preserved (new runs get a fresh timestamp).
+    """
+    cmd = f"""
+test_root="{test_root}"
+if [[ -d "$test_root" ]]; then
+    find "$test_root" -mindepth 2 -maxdepth 2 -name COMPLETE -delete 2>/dev/null
+    find "$test_root" -mindepth 2 -maxdepth 2 -name LAST_RUN -delete 2>/dev/null
+fi
+"""
+    run(cmd, quiet=True)
+
+
 @task
 def run_vpc():
     """Generate and submit all VPC training jobs."""
@@ -808,13 +825,14 @@ def _submit_sv_job(
     # other options
     gpu_device=GPU,
     bypass_exps=None,
+    force_retest=False,
 ):
     """Helper function to configure and submit a single SV training job."""
     if not apply_augmentation:
         batch_size_base *= 2  # compensate for no augmentation (which effectively increases batch size by NUM_AUG)
     apply_vad = False
     schedule_type = "constant"  # Options: 'constant', 'linear'
-    num_ckpt_avg = 3  # Number of checkpoints to average for final model (only applicable for certain experiments)
+    num_ckpt_avg = 0  # Number of checkpoints to average for final model (only applicable for certain experiments)
     ramp_up_epochs = 10
     virtual_spks = "False"
     logger = 'many_loggers' # options tensorboard , many_loggers
@@ -893,10 +911,13 @@ def _submit_sv_job(
         if target_sparsity is not None
         else ""
     )
+    num_ckpt_avg_str = f"-avg{num_ckpt_avg}" if num_ckpt_avg > 1 else ""
+
+
     job_name = (
         f"{experiment}{ramp_str}-{sv_model}-{os.path.basename(dataset_name)}"
         f"-virt-{virtual_spks}-bs{batch_size}-vad{apply_vad}"
-        f"-avg{num_ckpt_avg}-ep{max_epochs}-aug{apply_augmentation}"
+        f"{num_ckpt_avg_str}-ep{max_epochs}-aug{apply_augmentation}"
         f"{sparsity_str}"
     )
 
@@ -914,14 +935,19 @@ def _submit_sv_job(
         "logger": logger,
         "datamodule.loaders.train.batch_size": batch_size,
         "datamodule.loaders.valid.batch_size": batch_size,
-        "datamodule.loaders.enrollment.batch_size": 4,
-        "datamodule.loaders.test.batch_size": 64,
+        "datamodule.loaders.enrollment.batch_size": 8,
+        "datamodule.loaders.test.batch_size": 256,
         "trainer.max_epochs": max_epochs,
         "paths.log_dir": RESULTS_DIR,
         "hydra.run.dir": f"{RESULTS_DIR}/train/runs/{name}",
         "trainer.num_sanity_val_steps": 0,
-        "callbacks.checkpoint_averaging.num_checkpoints": num_ckpt_avg,
     }
+
+    # Disable checkpoint averaging if num_ckpt_avg is 1 or less
+    if num_ckpt_avg > 1:
+        script_arguments["callbacks.checkpoint_averaging.num_checkpoints"] = num_ckpt_avg
+    else:
+        script_arguments["callbacks.checkpoint_averaging"] = "null"
 
     if dataset_name != "multi_sv":
         script_arguments["datamodule.dataset.vad.enabled"] = str(apply_vad)
@@ -963,7 +989,7 @@ def _submit_sv_job(
 
     run_dir = script_arguments["hydra.run.dir"]
     # Check if test artifacts already exist to avoid re-running testing
-    if check_test_artifacts_complete(run_dir):
+    if not force_retest and check_test_artifacts_complete(run_dir):
         print(f"Skipping {job_name} - testing already complete")
         return
 
@@ -976,9 +1002,16 @@ def _submit_sv_job(
     if check_file_exists(last_ckpt):
         script_arguments["ckpt_path"] = last_ckpt
         print(f"Resuming {job_name} from checkpoint")
-        if any(lg in logger for lg in ["wandb", "many_loggers"]):
+        if any(lg in logger for lg in ["wandb"]):
             script_arguments["logger.wandb.id"] = name
             print(f"Resuming run in wandb dashboard with id: {name}")
+
+    if force_retest:
+        script_arguments["+module.force_retest"] = True
+        # Remove completion markers so the job starts fresh
+        test_root = os.path.join(run_dir, "test_artifacts")
+        _remove_completion_markers(test_root)
+        print(f"Force retest: cleared completion markers for {job_name}")
 
     bash_script = create_sv_bash_script(
         settings, script_arguments, transfer_data=transfer_data_bool
@@ -989,7 +1022,7 @@ def _submit_sv_job(
 
 
 @task
-def run_sv(transfer_data="false"):
+def run_sv(transfer_data="false", force="false"):
     """Generate and submit all SV training jobs for multi_sv dataset.
 
     Bregman and iterative-pruning experiments sweep over all sparsity rates.
@@ -997,65 +1030,55 @@ def run_sv(transfer_data="false"):
 
     Args:
         transfer_data (str): 'true' to transfer data to local SSD, 'false' to use shared filesystem
+        force (str): 'true' to force re-evaluation of already-completed experiments
     """
-    assert (
-        CLUSTER_NAME == "alex"
-    ), "Run exps on Alex to avoid overloading the shared filesystem with multiple simultaneous transfers"
     transfer_data_bool = transfer_data.lower() in ("true", "1", "yes")
+    force_retest = force.lower() in ("true", "1", "yes")
 
-    # sparsity_experiments = [
-    #     # Pruning exps
-    #     "sv_pruning_mag_struct",
-    #     "sv_pruning_mag_unstruct",
-    #     "sv_pruning_mag_struct_onetime",
-    #     "sv_pruning_mag_unstruct_onetime",
-    #     # Bregman exps
-    #     "sv_bregman_adabreg",
-    #     "sv_bregman_linbreg",
-    #     "sv_bregman_adabreg_fixed",
-    #     "sv_bregman_linbreg_fixed",
-    # ]
-    # baselines_exps = [
-    #     # Baselines
-    #     "sv_wespeaker",
-    # ]
-    #
-    # sparsity_rates = [0.50, 0.75, 0.90, 0.95]
-
+    batch_size_base = 128
 
     sparsity_experiments = [
+        # Pruning exps
+        "sv_pruning_mag_struct",
+        "sv_pruning_mag_unstruct",
+        "sv_pruning_mag_struct_onetime",
+        "sv_pruning_mag_unstruct_onetime",
         # Bregman exps
-        "sv_bregman_adabreg",
         "sv_bregman_linbreg",
+        "sv_bregman_adabreg",
+        "sv_bregman_adabregw",
+        "sv_bregman_adabregl2",
         "sv_bregman_adabreg_fixed",
         "sv_bregman_linbreg_fixed",
     ]
-    baselines_exps = []
-
-
-    sparsity_rates = [0.95]
+    baselines_exps = [
+        # Baselines
+        # "sv_wespeaker",
+        # "sv_vanilla",
+    ]    
+    sparsity_rates = [0.90, 0.95, 0.99]
 
     # Get SV models from config directory
     config_dir = "../configs/module/sv_model"
     assert os.path.exists(config_dir), f"Config directory {config_dir} does not exist"
     sv_models = [
         "wespeaker_ecapa_tdnn",
-        "wespeaker_pretrained_ecapa_tdnn_c512",
         # "wespeaker_resnet34",
+        # "wespeaker_pretrained_ecapa_tdnn_c512",
         # "wespeaker_pretrained_resnet34",
         # "wespeaker_resnet152",
         # "wespeaker_pretrained_resnet152"
     ]
 
-    # dataset_names = ["datasets/cnceleb", "multi_sv"]
-    dataset_names = ["datasets/cnceleb"]
+    dataset_names = ["datasets/cnceleb", "multi_sv"]
+
     base_max_epochs = {
         "datasets/cnceleb": 40,
-        "datasets/voxceleb": 10,
-        "multi_sv": 10,
+        "datasets/voxceleb": 20,
+        "multi_sv": 20,
     }
     gpus = {
-        "datasets/cnceleb": "a40",
+        "datasets/cnceleb": "a40" if CLUSTER_NAME == "alex" else "a100",
         "datasets/voxceleb": "a100",
         "multi_sv": "a100",
     }
@@ -1067,21 +1090,167 @@ def run_sv(transfer_data="false"):
                     experiment=experiment,
                     sv_model=sv_model,
                     dataset_name=dataset_name,
+                    batch_size_base=batch_size_base,
                     transfer_data_bool=transfer_data_bool,
                     max_epochs=base_max_epochs[dataset_name],
                     gpu_device=gpus[dataset_name],
+                    force_retest=force_retest,
                 )
 
     for experiment in sparsity_experiments:
         for sv_model in sv_models:
             for dataset_name in dataset_names:
                 for sparsity in sparsity_rates:
+                    
+                    # Cluster management: use multiple clusters
+                    # TODO: use a more general if statements --> e.g., if sparsity > 0.95 use alex, else use tinyx
+                    if sparsity == 0.99:
+                        assert CLUSTER_NAME == "tinygpu", \
+                            "Running 99% sparsity experiments is only feasible on TinyGPU"
+                    
                     _submit_sv_job(
                         experiment=experiment,
                         sv_model=sv_model,
                         dataset_name=dataset_name,
+                        batch_size_base=batch_size_base,
                         transfer_data_bool=transfer_data_bool,
                         max_epochs=base_max_epochs[dataset_name],
                         target_sparsity=sparsity,
                         gpu_device=gpus[dataset_name],
+                        force_retest=force_retest,
                     )
+
+
+def create_eval_bash_script(settings, script_arguments):
+    """Creates a SLURM bash script for SV evaluation jobs.
+
+    Unlike training scripts, no data transfer is performed — evaluation reads
+    directly from the shared filesystem via the pre-built exp_dir.
+
+    Args:
+        settings (dict): Dictionary containing job configuration settings.
+        script_arguments (dict): Dictionary of arguments to pass to eval.py.
+
+    Returns:
+        str: A bash script as a string, ready to be submitted to SLURM.
+    """
+    script_arguments_str = " ".join(
+        [f"{k}={v}" for k, v in script_arguments.items()]
+    )
+    return f"""#!/bin/bash -l
+#SBATCH --job-name={settings['job_name']}
+#SBATCH --clusters={settings['cluster']}
+#SBATCH --partition={settings['gpu']}
+#SBATCH --nodes={settings['num_nodes']}
+#SBATCH --gres=gpu:{settings['gpu']}:{settings['num_gpus']}
+#SBATCH --time={settings['walltime']}
+#SBATCH --export=NONE
+
+module load cuda/{settings['cuda']}
+source ~/miniconda3/bin/activate {settings['env_name']}
+cd {settings['path_project']}
+
+export http_proxy=http://proxy.nhr.fau.de:80
+export https_proxy=http://proxy.nhr.fau.de:80
+export HTTP_PROXY=http://proxy.nhr.fau.de:80
+export HTTPS_PROXY=http://proxy.nhr.fau.de:80
+
+echo 'Starting evaluation'
+python {settings['script_name']} {script_arguments_str}
+"""
+
+
+@task
+def eval_sv(force="true"):
+    """Submit evaluation jobs for trained SV models.
+
+    Args:
+        force (str): 'true' to force re-evaluation of already-completed experiments
+    """
+    force_retest = force.lower() in ("true", "1", "yes")
+    
+    EVAL_OUTPUT_DIR = '/home/hpc/dsnf/dsnf101h/adversarial-robustness-for-sr/logs/eval/runs'
+    TRAINED_MODELS_DIR = '/home/vault/dsnf/dsnf101h/results/train/runs'
+
+    exp_paths = [
+        "sv_vanilla-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs40-data_augFalse",
+        "sv_wespeaker-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs40-data_augFalse",
+    ]
+
+    base_settings = {
+        "script_name": "src/eval.py",
+        "cluster": CLUSTER_NAME,
+        "path_project": PATH_PROJECT,
+        "env_name": CONDA_ENV,
+        "gpu": 'v100' if CLUSTER_NAME == "tinyx" else 'a40',
+        "num_nodes": 1,
+        "walltime": "24:00:00",
+        "num_gpus": 1,
+        "cuda": "12.9.0",
+    }
+
+    for path in exp_paths:
+
+        job_name = f"eval-{path}"
+
+        # Extract dataset from exp name (assuming it contains either "cnceleb", "voxceleb", or neither for multi_sv)
+        dataset = "cnceleb" if "cnceleb" in path else ("voxceleb" if "voxceleb" in path else "multi_sv")
+        exp_dir = os.path.join(TRAINED_MODELS_DIR, dataset, path)
+        print(f"Preparing evaluation for {exp_dir}")
+
+        # Extract valid metric from filename and sort by best metric, then epoch as tiebreaker.
+        # Supports both old and new naming schemes:
+        #   old: epoch{epoch}-loss_valid{loss}-metric_valid{metric}.ckpt
+        #   new: epoch{epoch}-loss_valid{loss}-metric_valid{metric}-sr{sr}.ckpt
+        ckpt_dir = os.path.join(exp_dir, "checkpoints")
+        result = run(f"ls -1 {ckpt_dir}/epoch*.ckpt 2>/dev/null || true", quiet=True)
+        ckpt_names = [line.strip() for line in result.splitlines() if line.strip()]
+        if not ckpt_names:
+            raise ValueError(f"No checkpoints found for {path}")
+
+        def _ckpt_sort_key(p):
+            name = os.path.basename(p).removesuffix(".ckpt")
+            parts = name.split("-")
+            epoch = int(parts[0].removeprefix("epoch"))
+            metric = float(parts[2].removeprefix("metric_valid"))
+            return (metric, epoch)
+
+        ckpt_names.sort(key=_ckpt_sort_key, reverse=True)
+        best_ckpt = ckpt_names[0]
+
+        if check_running_pending(job_name):
+            print(f"Skipping {job_name} - already running or pending")
+            continue
+
+        if not force_retest and check_test_artifacts_complete(exp_dir):
+            print(f"Skipping {path} - testing already complete")
+            continue
+
+        if force_retest:
+            test_root = os.path.join(exp_dir, "test_artifacts")
+            _remove_completion_markers(test_root)
+            print(f"Force retest: cleared completion markers for {job_name}")
+
+        settings = base_settings.copy()
+        settings["job_name"] = job_name
+
+        script_arguments = {
+            "exp_dir": exp_dir,
+            "datamodule.loaders.train.batch_size": 8,
+            "datamodule.loaders.enrollment.batch_size": 8,
+            "datamodule.loaders.test.batch_size": 128,
+            "datamodule.dataset.enrollment_mode": "both",
+            "ckpt_path": best_ckpt,
+            "paths.data_dir": f'"{DATA_DIR}"',
+            # This will automatically resume the test if it was previously interrupted
+            "paths.log_dir": os.path.join(EVAL_OUTPUT_DIR, dataset),
+            "hydra.run.dir": os.path.join(EVAL_OUTPUT_DIR, dataset, path),
+        }
+
+        if force_retest:
+            script_arguments["+module.force_retest"] = True
+
+        bash_script = create_eval_bash_script(settings, script_arguments)
+        run_bash_script(bash_script)
+        print(f"Submitted eval job: {job_name}")
+        time.sleep(0.1)

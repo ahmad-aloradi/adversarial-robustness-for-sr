@@ -80,6 +80,9 @@ class SpeakerVerification(pl.LightningModule):
             config=kwargs.get("scoring", {})
         ).config
 
+        # Force re-evaluation even if test artifacts are already complete
+        self._force_retest = kwargs.get("force_retest", False)
+
     # Setup init
     def _setup_metrics(self, metrics: DictConfig) -> None:
         """Initialize all metrics for training, validation and testing."""
@@ -298,8 +301,8 @@ class SpeakerVerification(pl.LightningModule):
         )
 
         for test_filename, dataloader in test_dataloaders.items():
-            # Skip already completed test sets
-            if self._is_test_set_complete(test_filename):
+            # Skip already completed test sets (unless force_retest is set)
+            if not self._force_retest and self._is_test_set_complete(test_filename):
                 log.info(f"Skipping '{test_filename}' - already complete")
                 self.last_batch_indices[test_filename] = -2  # Mark as skip
                 continue

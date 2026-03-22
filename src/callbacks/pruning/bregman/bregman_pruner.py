@@ -266,6 +266,7 @@ class BregmanPruner(Callback):
 
         sparsity = self._overall_sparsity()
         pl_module.log("bregman/sparsity", sparsity, **logging_params)
+        pl_module.log("sparsity", sparsity, **logging_params)
 
         if self.lambda_scheduler:
             # Lambda changes per step, so always log on_step; override on_epoch to avoid noise

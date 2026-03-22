@@ -247,6 +247,12 @@ class MagnitudePruner(Callback):
                 prog_bar=False,
                 on_epoch=True,
             )
+            pl_module.log(
+                "sparsity",
+                current_sparsity,
+                prog_bar=False,
+                on_epoch=True,
+            )
 
         # 2. Console Monitor
         if self.verbose:
