@@ -7,7 +7,7 @@ Separate from visualize_training.py because data sources are fundamentally diffe
 
 Usage:
     python scripts/visualize_test_artifacts.py \\
-        --base_dir /dataHDD/ahmad/comfort26_sem/cnceleb \\
+        --base_dirs /dataHDD/ahmad/comfort26_sem/cnceleb /dataHDD/ahmad/21_03_2026/cnceleb \\
         --experiments "sv_vanilla_*" "sv_bregman_*-sr90" \\
         --test_sets cnceleb_concatenated \\
         --plots all \\
@@ -149,32 +149,20 @@ def extract_speaker_id(key):
 # ---------------------------------------------------------------------------
 
 
-def _compute_projection(embeddings, method, cache_path=None):
+def _compute_projection(embeddings, method, cache_path=None, force=False):
     """Run dimensionality reduction, with optional caching."""
-    if cache_path and os.path.isfile(cache_path):
+    if cache_path and os.path.isfile(cache_path) and not force:
         data = np.load(cache_path)
         return data["coords"]
 
     if method == "umap":
-        try:
-            import umap
-        except ImportError:
-            print(
-                "Error: umap-learn not installed. Install with: pip install umap-learn"
-            )
-            return None
+        import umap
         reducer = umap.UMAP(
             n_neighbors=15, min_dist=0.1, metric="cosine", random_state=42
         )
         coords = reducer.fit_transform(embeddings)
     elif method == "tsne":
-        try:
-            from sklearn.manifold import TSNE
-        except ImportError:
-            print(
-                "Error: scikit-learn not installed. Install with: pip install scikit-learn"
-            )
-            return None
+        from sklearn.manifold import TSNE
         reducer = TSNE(
             n_components=2,
             perplexity=30,
@@ -201,6 +189,7 @@ def plot_embedding_projection(
     max_utt_per_speaker=50,
     title=None,
     no_cache=False,
+    force_recompute=False,
 ):
     """Plot 2D embedding projection with highlighted speaker clusters."""
     if test_embeds is None:
@@ -261,9 +250,8 @@ def plot_embedding_projection(
     print(
         f"  Computing {method.upper()} projection for {len(all_embeds)} points..."
     )
-    coords = _compute_projection(all_embeds, method, cache_path)
-    if coords is None:
-        return
+    coords = _compute_projection(all_embeds, method, cache_path, force=force_recompute)
+    assert coords.any(), "Projection failed to produce coordinates"
 
     test_coords = coords[:n_test]
     enrol_coords = coords[n_test:]
@@ -692,9 +680,10 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--base_dir",
+        "--base_dirs",
+        nargs="+",
         required=True,
-        help="Root dir containing experiment folders.",
+        help="Root dir(s) containing experiment folders.",
     )
     parser.add_argument(
         "--experiments",
@@ -742,6 +731,10 @@ def main():
     parser.add_argument(
         "--no_cache", action="store_true", help="Disable projection caching."
     )
+    parser.add_argument(
+        "--force_recompute", action="store_true",
+        help="Force recomputation of projections (ignores cache but writes new cache).",
+    )
     args = parser.parse_args()
 
     plots = set(args.plots)
@@ -750,7 +743,7 @@ def main():
 
     setup_matplotlib(args.font_size)
 
-    experiments = discover_experiments(args.base_dir, args.experiments)
+    experiments = discover_experiments(args.base_dirs, args.experiments)
     if not experiments:
         print("No experiments matched the given patterns.")
         return
@@ -789,6 +782,7 @@ def main():
                     n_highlight=args.n_highlight,
                     title=title_prefix,
                     no_cache=args.no_cache,
+                    force_recompute=args.force_recompute,
                 )
 
             # Score distributions

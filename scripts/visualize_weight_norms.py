@@ -10,7 +10,7 @@ Output structure:
 
 Usage:
     python scripts/visualize_weight_norms.py \\
-        --base_dir /dataHDD/ahmad/comfort26_sem/cnceleb \\
+        --base_dirs /dataHDD/ahmad/comfort26_sem/cnceleb /dataHDD/ahmad/21_03_2026/cnceleb \\
         --experiments "sv_bregman_*-sr90" "sv_bregman_*-sr95" \\
         --output results/weight_norms_vis/
 """
@@ -210,9 +210,10 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--base_dir",
+        "--base_dirs",
+        nargs="+",
         required=True,
-        help="Root dir containing experiment folders.",
+        help="Root dir(s) containing experiment folders.",
     )
     parser.add_argument(
         "--experiments",
@@ -230,7 +231,7 @@ def main():
 
     setup_matplotlib(args.font_size)
 
-    experiments = discover_experiments(args.base_dir, args.experiments)
+    experiments = discover_experiments(args.base_dirs, args.experiments)
     if not experiments:
         print("No experiments matched the given patterns.")
         return

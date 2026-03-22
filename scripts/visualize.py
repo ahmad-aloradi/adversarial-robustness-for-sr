@@ -6,7 +6,7 @@ but train_loss cannot).
 Usage examples:
     # Plot training curves for specific experiments
     python scripts/visualize.py \\
-        --base_dir /dataHDD/ahmad/comfort26_sem/cnceleb \\
+        --base_dirs /dataHDD/ahmad/comfort26_sem/cnceleb /dataHDD/ahmad/21_03_2026/cnceleb \\
         --experiments "sv_bregman_adabreg-*-sr90" "sv_bregman_linbreg-*-sr95" "sv_vanilla-*" \\
         --metrics train_loss valid_loss sparsity \\
         --output figures/training_curves.pdf
@@ -104,8 +104,9 @@ def setup_matplotlib(font_size=10):
 # Method class → color.  Bregman = cool tones, Pruning = warm tones, Baselines = neutral.
 METHOD_CLASS_COLORS = {
     "linbreg": "#1f77b4",       # blue
-    "adabreg": "#2ca02c",       # green
-    "adabregw": "#006d5b",      # dark teal (distinct from blue)
+    "adabreg": "#34be34",       # green
+    "adabregw": "#023703",      # dark red (distinct from blue)
+    "adabregl2": "#8c564b",     # brown
     "pruning_struct": "#d62728",    # red
     "pruning_unstruct": "#ff7f0e",  # orange
     "vanilla": "#7f7f7f",       # gray
@@ -116,6 +117,7 @@ METHOD_DISPLAY_NAMES = {
     "linbreg": "LinBreg",
     "adabreg": "AdaBreg",
     "adabregw": "AdaBregW",
+    "adabregl2": "AdaBregL2",
     "pruning_struct": "Struct. Pruning",
     "pruning_unstruct": "Unstruct. Pruning",
     "vanilla": "Baseline Adam",
@@ -233,6 +235,7 @@ def parse_experiment_name(dirname):
     prefix = dirname.split("-wespeaker")[0] if "-wespeaker" in dirname else dirname
     METHOD_PATTERNS = [
         ("adabregw",        "adabregw"),
+        ("adabregl2",       "adabregl2"),
         ("adabreg",         "adabreg"),
         ("linbreg",         "linbreg"),
         ("pruning_mag_struct",   "pruning_struct"),
@@ -295,6 +298,12 @@ def load_train_log(exp_dir):
     return pd.DataFrame(rows) if rows else None
 
 
+CSV_COLUMN_ALIASES = {
+    "train/LogSoftmaxWrapper": "train_loss",
+    "valid/LogSoftmaxWrapper": "valid_loss",
+}
+
+
 def load_csv_metrics(exp_dir):
     """Load step-level metrics from csv/version_0/metrics.csv → DataFrame."""
     path = os.path.join(exp_dir, "csv", "version_0", "metrics.csv")
@@ -304,25 +313,38 @@ def load_csv_metrics(exp_dir):
     df = pd.read_csv(path)
     if "step" in df.columns:
         df = df.groupby("step").last().reset_index()
+    df.rename(columns=CSV_COLUMN_ALIASES, inplace=True)
     return df
 
 
-def discover_experiments(base_dir, patterns):
-    """Find experiment directories matching glob patterns. Returns sorted list."""
-    all_dirs = sorted(os.listdir(base_dir))
+def discover_experiments(base_dirs, patterns):
+    """Find experiment directories matching glob patterns. Returns sorted list.
+
+    Args:
+        base_dirs: A single directory path (str) or a list of directory paths.
+        patterns: Glob patterns for experiment directory names.
+    """
+    if isinstance(base_dirs, str):
+        base_dirs = [base_dirs]
+
     seen = set()
     matched = []
 
-    for pattern in patterns:
-        for d in all_dirs:
-            full = os.path.join(base_dir, d)
-            if os.path.isdir(full) and d not in seen and glob.fnmatch.fnmatch(d, pattern):
-                seen.add(d)
-                matched.append((full, parse_experiment_name(d)))
+    for base_dir in base_dirs:
+        if not os.path.isdir(base_dir):
+            raise ValueError(f"Warning: base dir does not exist: {base_dir}")
+
+        all_dirs = sorted(os.listdir(base_dir))
+        for pattern in patterns:
+            for d in all_dirs:
+                full = os.path.join(base_dir, d)
+                if os.path.isdir(full) and d not in seen and glob.fnmatch.fnmatch(d, pattern):
+                    seen.add(d)
+                    matched.append((full, parse_experiment_name(d)))
 
     # Stable sort: method class order, then sparsity
     ORDER = ["vanilla", "wespeaker", "linbreg", "adabreg", "adabregw",
-             "pruning_struct", "pruning_unstruct"]
+             "adabregl2", "pruning_struct", "pruning_unstruct"]
 
     def key(item):
         mc = item[1]["method_class"]
@@ -443,18 +465,14 @@ def plot_training_curves(experiments, metrics, output_path, font_size=10,
             labels.append(l)
 
     if handles:
-        # Choose ncol so rows are balanced (prefer 3 cols for 6 items, etc.)
-        # ncol = min(3, len(labels))
-        ncol = 1
-        # if len(labels) <= 4:
-        #     ncol = len(labels)
-        fig.legend(handles, labels, loc="lower left",
+        ncol = min(4, len(labels))
+        fig.legend(handles, labels, loc="lower center",
                    ncol=ncol,
-                   bbox_to_anchor=(0.65, 0.11), frameon=True,
-                   columnspacing=0.8, handletextpad=0.1)
+                   bbox_to_anchor=(0.5, 0.9), frameon=True,
+                   columnspacing=0.8, handletextpad=0.3)
 
     fig.align_ylabels(axes)
-    fig.subplots_adjust(hspace=0.08, top=0.93)
+    fig.subplots_adjust(hspace=0.08)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, format="pdf")
@@ -569,8 +587,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--base_dir", required=True,
-                        help="Root dir containing experiment folders.")
+    parser.add_argument("--base_dirs", nargs="+", required=True,
+                        help="Root dir(s) containing experiment folders.")
     parser.add_argument("--experiments", nargs="+", required=True,
                         help="Glob patterns for experiment directory names.")
     parser.add_argument("--metrics", nargs="+",
@@ -594,7 +612,7 @@ def main():
         out_dir = os.path.dirname(out_dir) or "figures"
     os.makedirs(out_dir, exist_ok=True)
 
-    experiments = discover_experiments(args.base_dir, args.experiments)
+    experiments = discover_experiments(args.base_dirs, args.experiments)
     if not experiments:
         print("No experiments matched the given patterns.")
         return
