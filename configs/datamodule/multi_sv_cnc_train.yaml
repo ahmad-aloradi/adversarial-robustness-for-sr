@@ -1,0 +1,58 @@
+defaults:
+  - /datamodule/datasets/voxceleb@datasets.voxceleb.datamodule
+  - /datamodule/datasets/cnceleb@datasets.cnceleb.datamodule
+  - _self_
+
+_target_: src.datamodules.multi_sv_datamodule.MultiSVDataModule
+
+# Stage participation and dataset-specific configuration blocks.
+datasets:
+  voxceleb:
+    enabled: true
+    stages:
+      train: true
+      val: true
+      test: true
+    datamodule:
+      dataset:
+        max_speakers: ${oc.eval:'${datamodule.dataset.max_speakers} if ${datamodule.datasets.voxceleb.stages.train} else None'}
+
+  cnceleb:
+    enabled: true
+    stages:
+      train: true
+      val: true
+      test: true
+    datamodule:
+      dataset:
+        max_speakers: ${oc.eval:'${datamodule.dataset.max_speakers} if ${datamodule.datasets.cnceleb.stages.train} else None'}
+
+# Top-level loader configs used by MultiSVDataModule for train/val
+# Test/enrollment loaders are dataset-specific (configured above in each dataset)
+loaders:
+  train:
+    batch_size: 32
+    shuffle: true
+    num_workers: 8
+    drop_last: true
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 3
+
+  valid:
+    batch_size: 32
+    shuffle: false
+    num_workers: 8
+    drop_last: false
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 3
+
+_base_num_classes: ${oc.eval:"(${datamodule.datasets.voxceleb.datamodule._base_num_classes} if ${datamodule.datasets.voxceleb.stages.train} else 0) + (${datamodule.datasets.cnceleb.datamodule._base_num_classes} if ${datamodule.datasets.cnceleb.stages.train} else 0)"}
+num_classes: ${datamodule._base_num_classes}
+dataset:
+  data_dir: TMPDIR/multi_sv # for parsing purposes only in experiment configs
+  sample_rate: ${datamodule.datasets.voxceleb.datamodule.dataset.sample_rate}
+  min_duration: ${datamodule.datasets.voxceleb.datamodule.dataset.min_duration}
+  max_duration: ${datamodule.datasets.voxceleb.datamodule.dataset.max_duration}
+  max_speakers: null

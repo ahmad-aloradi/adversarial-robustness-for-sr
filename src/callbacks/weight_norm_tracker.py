@@ -124,9 +124,23 @@ class WeightNormTracker(Callback):
         manager = getattr(pl_module, "pruning_manager", None)
         if manager is not None and hasattr(manager, "processed_groups"):
             groups: Dict[str, List[nn.Parameter]] = {}
+            seen_param_ids: set = set()
             for group in manager.processed_groups:
                 name = group["config"].get("name", "unnamed")
+                for p in group["params"]:
+                    seen_param_ids.add(id(p))
                 groups.setdefault(name, []).extend(group["params"])
+            # Classify remaining parameters not covered by pruning groups
+            for mod_name, module in pl_module.named_modules():
+                group_name = _classify_module(module)
+                for pname, param in module.named_parameters(recurse=False):
+                    if id(param) in seen_param_ids:
+                        continue
+                    seen_param_ids.add(id(param))
+                    if pname == "bias":
+                        groups.setdefault("bias_params", []).append(param)
+                    else:
+                        groups.setdefault(group_name, []).append(param)
             return groups
 
         # Auto-classify by walking named_modules
