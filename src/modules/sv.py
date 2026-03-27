@@ -302,7 +302,9 @@ class SpeakerVerification(pl.LightningModule):
 
         for test_filename, dataloader in test_dataloaders.items():
             # Skip already completed test sets (unless force_retest is set)
-            if not self._force_retest and self._is_test_set_complete(test_filename):
+            if not self._force_retest and self._is_test_set_complete(
+                test_filename
+            ):
                 log.info(f"Skipping '{test_filename}' - already complete")
                 self.last_batch_indices[test_filename] = -2  # Mark as skip
                 continue
@@ -875,7 +877,17 @@ class SpeakerVerification(pl.LightningModule):
         if getattr(train_dm, "train_data", None) is None:
             train_dm.setup(stage="fit")
 
-        train_dataset = train_dm.train_data
+        # For MultiSVDataModule, use the per-dataset train split rather than
+        # train_data (the merged total).  train_data is wrong in two ways:
+        #   - multi_sv (cnceleb test-only): train_data is the voxceleb set,
+        #     which would silently be used as the cnceleb cohort.
+        #   - multi_sv_cnc_train (both training): train_data is a ConcatDataset
+        #     that is not a BaseDataset, so FullUtteranceCohortDataset cannot
+        #     wrap it and the cohort contains segments instead of full utterances.
+        if hasattr(train_dm, "get_train_dataset"):
+            train_dataset = train_dm.get_train_dataset(base_dataset)
+        else:
+            train_dataset = train_dm.train_data
         if train_dataset is None:
             raise ValueError(
                 f"Score normalization requires training data for '{base_dataset}', "

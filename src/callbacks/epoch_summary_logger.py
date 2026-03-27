@@ -139,12 +139,23 @@ class EpochSummaryLogger(Callback):
             else float("nan")
         )
 
-        # Compute sparsity using shared utility
-        sparsity = compute_sparsity(
-            list(pl_module.parameters()), threshold=self.sparsity_threshold
-        )
-
+        # 1. Read sparsity from callback_metrics (logged by BregmanPruner over
+        # pruned params only).
+        # 2. Fall back to all-params computation if no pruner is active.
         cb_metrics = dict(trainer.callback_metrics)
+        if "sparsity" in cb_metrics:
+            sparsity_val = cb_metrics["sparsity"]
+            sparsity = float(
+                sparsity_val.item()
+                if hasattr(sparsity_val, "item")
+                else sparsity_val
+            )
+        else:
+            sparsity = compute_sparsity(
+                list(pl_module.parameters()),
+                threshold=self.sparsity_threshold,
+            )
+
         if self.monitor not in cb_metrics:
             raise KeyError(
                 f"EpochSummaryLogger: monitored metric '{self.monitor}' not found in trainer.callback_metrics. Available: {list(cb_metrics.keys())}"

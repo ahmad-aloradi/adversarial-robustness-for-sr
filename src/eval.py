@@ -227,18 +227,26 @@ def _sanitize_overrides_for_eval(
             f"(pass keep_logger=true to retain): {skipped_logger}"
         )
 
-    # Point to the local artifacts directory.
+    # Point to the local artifacts directory/directories.
     artifacts_dirs = [
         p
         for p in exp_dir.glob("*_artifacts")
         if not p.name.startswith("_") and not p.name.startswith("test")
     ]
-    assert (
-        len(artifacts_dirs) == 1
-    ), f"Expected 1 artifacts dir, found {len(artifacts_dirs)}"
-    sanitized.append(
-        "datamodule.dataset.artifacts_dir=" f"{artifacts_dirs[0].as_posix()}"
-    )
+    assert artifacts_dirs, f"No artifacts dirs found in {exp_dir}"
+    if len(artifacts_dirs) == 1:
+        sanitized.append(
+            "datamodule.dataset.artifacts_dir="
+            f"{artifacts_dirs[0].as_posix()}"
+        )
+    else:
+        # Multi-dataset (e.g. multi_sv_cnc): set per-dataset artifacts dirs.
+        # Convention: {dataset_name}_artifacts -> dataset name by stripping suffix.
+        for d in artifacts_dirs:
+            ds_name = d.name[: -len("_artifacts")]
+            sanitized.append(
+                f"datamodule.datasets.{ds_name}.datamodule.dataset.artifacts_dir={d.as_posix()}"
+            )
     return sanitized
 
 
@@ -426,19 +434,24 @@ def _apply_exp_dir_config(cfg: DictConfig) -> DictConfig:
         for p in sorted(exp_dir.glob("*_artifacts"))
         if not p.name.startswith("test")
     ]
-    if len(artifacts_dirs) > 1:
-        raise NotImplementedError(
-            f"Multiple artifacts dirs in {exp_dir}: "
-            f"{[p.name for p in artifacts_dirs]}. "
-            f"multi_sv evaluation is not supported yet."
-        )
     assert artifacts_dirs, f"No artifacts dir found in {exp_dir}"
-    OmegaConf.update(
-        exp_cfg,
-        "datamodule.dataset.artifacts_dir",
-        artifacts_dirs[0].as_posix(),
-        merge=True,
-    )
+    if len(artifacts_dirs) == 1:
+        OmegaConf.update(
+            exp_cfg,
+            "datamodule.dataset.artifacts_dir",
+            artifacts_dirs[0].as_posix(),
+            merge=True,
+        )
+    else:
+        # Multi-dataset (e.g. multi_sv_cnc): set per-dataset artifacts dirs.
+        for d in artifacts_dirs:
+            ds_name = d.name[: -len("_artifacts")]
+            OmegaConf.update(
+                exp_cfg,
+                f"datamodule.datasets.{ds_name}.datamodule.dataset.artifacts_dir",
+                d.as_posix(),
+                merge=True,
+            )
 
     # Strip data_augmentation (training-only). Resolve num_classes
     # first since it may reference data_augmentation via interpolation.
@@ -503,16 +516,28 @@ def _strip_stale_concat_rows(cfg: DictConfig) -> None:
     """
     import pandas as pd
 
-    artifacts_dir_str = OmegaConf.select(
-        cfg, "datamodule.dataset.artifacts_dir"
+    # Collect all candidate artifacts dirs (single-dataset and multi-dataset).
+    _candidate_strs = []
+    _single = OmegaConf.select(cfg, "datamodule.dataset.artifacts_dir")
+    if _single:
+        _candidate_strs.append(str(_single))
+    _datasets = OmegaConf.select(cfg, "datamodule.datasets")
+    if _datasets:
+        for _ds in _datasets:
+            _path = OmegaConf.select(
+                cfg,
+                f"datamodule.datasets.{_ds}.datamodule.dataset.artifacts_dir",
+            )
+            if _path:
+                _candidate_strs.append(str(_path))
+
+    artifacts_dir_str = next(
+        (s for s in _candidate_strs if "cnceleb" in Path(s).name.lower()), None
     )
     if not artifacts_dir_str:
         return
 
-    artifacts_dir = Path(str(artifacts_dir_str))
-    if "cnceleb" not in artifacts_dir.name.lower():
-        return
-
+    artifacts_dir = Path(artifacts_dir_str)
     train_csv = artifacts_dir / "train.csv"
     if not train_csv.exists():
         return

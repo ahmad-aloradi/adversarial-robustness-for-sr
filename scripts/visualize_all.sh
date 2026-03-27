@@ -13,18 +13,23 @@ force_recompute=true
 
 base_dirs=(
     '/dataHDD/ahmad/21_03_2026'
-    '/dataHDD/ahmad/comfort26_sem'
+    # '/dataHDD/ahmad/comfort26_sem'
 )
 experiments=(
-    "sv_bregman_*${eva_model}*"
-    "sv_vanilla_*${eva_model}*"
-    "sv_wespeaker*${eva_model}*"
+    "sv_bregman_adabreg*${eva_model}*"
+    "sv_bregman_linbreg*${eva_model}sr99*"
+    # "sv_vanilla_*${eva_model}*"
+    # "sv_wespeaker*${eva_model}*augFalse"
     )
 
 # Build list of dataset subdirs across all base_dirs
 exp_dirs=()
 for bd in "${base_dirs[@]}"; do
-    exp_dirs+=("$bd/cnceleb" "$bd/multi_sv")
+    exp_dirs+=(
+        "$bd/cnceleb"
+        "$bd/multi_sv"
+        # "$bd/multi_sv_cnc_train"
+        )
 done
 
 ############################
@@ -37,9 +42,10 @@ if [ "$stage_visualize" = true ]; then
         "bregman/global_lambda" "bregman/sparsity" #"sparsity"
         )
 
+    # shellcheck disable=SC2068
     python scripts/visualize.py \
         --base_dirs "${exp_dirs[@]}" \
-        --experiments "sv_bregman_*" \
+        --experiments ${experiments[@]} \
         --source "csv" \
         --output results/cross_exp_comparison/convergence_curves \
         --metrics "${metrics[@]}"
@@ -55,6 +61,9 @@ if [ "$stage_aggregate_and_vis" = true ]; then
 
     python scripts/visualize_test_metrics.py \
         --input_dir results/cross_exp_comparison/test_metrics
+
+    python scripts/visualize_sparsity_trend.py \
+        --input_dir results/cross_exp_comparison/test_metrics
 fi
 
 ############################
@@ -66,9 +75,10 @@ if [ "$stage_test_viz" = true ]; then
         force_flag="--force_recompute"
     fi
 
+    # shellcheck disable=SC2068
     python scripts/visualize_test_artifacts.py \
         --base_dirs "${exp_dirs[@]}" \
-        --experiments "sv_bregman_*" \
+        --experiments ${experiments[@]} \
         --plots all \
         --embed_method tsne \
         --score_col both \
@@ -80,8 +90,9 @@ fi
 # Weight Norms Visualization
 ############################
 if [ "$stage_weight_norms" = true ]; then
+    # shellcheck disable=SC2068
     python scripts/visualize_weight_norms.py \
         --base_dirs "${exp_dirs[@]}" \
-        --experiments "sv_bregman_*" \
+        --experiments ${experiments[@]} \
         --output results/weight_norms_visualizations/
 fi

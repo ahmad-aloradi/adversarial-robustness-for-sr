@@ -265,8 +265,11 @@ class BregmanPruner(Callback):
         )
 
         sparsity = self._overall_sparsity()
-        pl_module.log("bregman/sparsity", sparsity, **logging_params)
-        pl_module.log("sparsity", sparsity, **logging_params)
+        # reduce_fx="last" so callback_metrics gets end-of-epoch sparsity
+        # (not the batch-mean) while still tracking per-step values.
+        sparsity_params = {**logging_params, "reduce_fx": "last"}
+        pl_module.log("bregman/sparsity", sparsity, **sparsity_params)
+        pl_module.log("sparsity", sparsity, **sparsity_params)
 
         if self.lambda_scheduler:
             # Lambda changes per step, so always log on_step; override on_epoch to avoid noise
