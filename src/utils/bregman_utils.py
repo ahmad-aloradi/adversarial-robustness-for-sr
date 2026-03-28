@@ -1,6 +1,6 @@
 import math
 
-# Base values at 90% sparsity (0.9) and other anchor points
+
 BREGMAN_LAMBDA_CONFIGS = {
     "AdaBreg": {
         0.5: {"initial_lambda": 0.2, "min_lambda": 1e-5, "fixed_lambda": 1.0},
@@ -10,36 +10,18 @@ BREGMAN_LAMBDA_CONFIGS = {
         0.99: {"initial_lambda": 4.0, "min_lambda": 1e-3, "fixed_lambda": 8.0},
     },
     "LinBreg": {
-        0.5: {
-            "initial_lambda": 0.0001,
-            "min_lambda": 1e-10,
-            "fixed_lambda": 0.001,
-        },
-        0.7: {
-            "initial_lambda": 0.0005,
-            "min_lambda": 5e-9,
-            "fixed_lambda": 0.005,
-        },
+        0.5: {"initial_lambda": 0.0001, "min_lambda": 1e-10, "fixed_lambda": 0.001},
+        0.7: {"initial_lambda": 0.0005, "min_lambda": 5e-9, "fixed_lambda": 0.005},
         0.9: {"initial_lambda": 0.01, "min_lambda": 1e-8, "fixed_lambda": 0.1},
-        0.95: {
-            "initial_lambda": 0.01,
-            "min_lambda": 5e-7,
-            "fixed_lambda": 0.1,
-        },
-        0.99: {
-            "initial_lambda": 0.05,
-            "min_lambda": 1e-6,
-            "fixed_lambda": 0.5,
-        },
+        0.95: {"initial_lambda": 0.01, "min_lambda": 5e-7, "fixed_lambda": 0.1},
+        0.99: {"initial_lambda": 0.05, "min_lambda": 1e-6, "fixed_lambda": 0.5},
     },
-    # AdaBregW shares AdaBreg's lambda dynamics (weight decay only affects magnitude, not sparsity)
-    "AdaBregW": None,  # resolved to AdaBreg below
     "ProxSGD": {
-        0.5: {"initial_lambda": 0.05, "min_lambda": 1e-6, "fixed_lambda": 0.5},
-        0.7: {"initial_lambda": 0.1, "min_lambda": 5e-6, "fixed_lambda": 1.0},
+        0.5: {"initial_lambda": 0.2, "min_lambda": 1e-6, "fixed_lambda": 1.0},
+        0.7: {"initial_lambda": 0.4, "min_lambda": 5e-6, "fixed_lambda": 1.5},
         0.9: {"initial_lambda": 0.5, "min_lambda": 1e-4, "fixed_lambda": 2.0},
-        0.95: {"initial_lambda": 1.0, "min_lambda": 5e-4, "fixed_lambda": 4.0},
-        0.99: {"initial_lambda": 2.0, "min_lambda": 1e-3, "fixed_lambda": 8.0},
+        0.95: {"initial_lambda": 2.0, "min_lambda": 5e-4, "fixed_lambda": 4.0},
+        0.99: {"initial_lambda": 4.0, "min_lambda": 1e-3, "fixed_lambda": 8.0},
     },
 }
 # Aliases: AdaBregW and AdaBregL2 use same lambda config as AdaBreg
