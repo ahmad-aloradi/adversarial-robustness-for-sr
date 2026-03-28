@@ -34,6 +34,13 @@ BREGMAN_LAMBDA_CONFIGS = {
     },
     # AdaBregW shares AdaBreg's lambda dynamics (weight decay only affects magnitude, not sparsity)
     "AdaBregW": None,  # resolved to AdaBreg below
+    "ProxSGD": {
+        0.5: {"initial_lambda": 0.05, "min_lambda": 1e-6, "fixed_lambda": 0.5},
+        0.7: {"initial_lambda": 0.1, "min_lambda": 5e-6, "fixed_lambda": 1.0},
+        0.9: {"initial_lambda": 0.5, "min_lambda": 1e-4, "fixed_lambda": 2.0},
+        0.95: {"initial_lambda": 1.0, "min_lambda": 5e-4, "fixed_lambda": 4.0},
+        0.99: {"initial_lambda": 2.0, "min_lambda": 1e-3, "fixed_lambda": 8.0},
+    },
 }
 # Aliases: AdaBregW and AdaBregL2 use same lambda config as AdaBreg
 BREGMAN_LAMBDA_CONFIGS["AdaBregW"] = BREGMAN_LAMBDA_CONFIGS["AdaBreg"]
