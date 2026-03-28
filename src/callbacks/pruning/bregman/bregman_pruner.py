@@ -8,6 +8,7 @@ regularization strength to drive sparsity toward a target level.
 
 from typing import Any, Optional
 
+import torch
 from pytorch_lightning import Callback, LightningModule, Trainer
 from pytorch_lightning.utilities import rank_zero_only
 
@@ -142,12 +143,23 @@ class BregmanPruner(Callback):
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
-        """Log epoch-level sparsity."""
-        if not self._initialized or self.verbose == 0:
+        """Log epoch-level sparsity and inject into callback_metrics."""
+        if not self._initialized:
             return
-        log.info(
-            f"Epoch {trainer.current_epoch}: Sparsity = {self._overall_sparsity():.3%}"
-        )
+
+        sparsity = self._overall_sparsity()
+
+        # Inject end-of-epoch sparsity directly into callback_metrics so that
+        # ModelCheckpoint filenames and train_log.txt get the true final value
+        # (not a mean over all steps).
+        sparsity_tensor = torch.tensor(sparsity)
+        trainer.callback_metrics["sparsity"] = sparsity_tensor
+        trainer.callback_metrics["bregman/sparsity"] = sparsity_tensor
+
+        if self.verbose > 0:
+            log.info(
+                f"Epoch {trainer.current_epoch}: Sparsity = {sparsity:.3%}"
+            )
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
@@ -265,11 +277,10 @@ class BregmanPruner(Callback):
         )
 
         sparsity = self._overall_sparsity()
-        # reduce_fx="last" so callback_metrics gets end-of-epoch sparsity
-        # (not the batch-mean) while still tracking per-step values.
-        sparsity_params = {**logging_params, "reduce_fx": "last"}
-        pl_module.log("bregman/sparsity", sparsity, **sparsity_params)
-        pl_module.log("sparsity", sparsity, **sparsity_params)
+        # Log per-step only for TensorBoard/WandB tracking;
+        # epoch-level "sparsity" is injected in on_train_epoch_end.
+        step_params = {**logging_params, "on_step": True, "on_epoch": False}
+        pl_module.log("bregman/sparsity", sparsity, **step_params)
 
         if self.lambda_scheduler:
             # Lambda changes per step, so always log on_step; override on_epoch to avoid noise
