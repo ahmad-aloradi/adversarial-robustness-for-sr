@@ -889,9 +889,18 @@ class SpeakerVerification(pl.LightningModule):
         else:
             train_dataset = train_dm.train_data
         if train_dataset is None:
+            # No training data — fall back to voxceleb cohort only
+            if "voxceleb" in cache:
+                log.warning(
+                    f"No training data for '{base_dataset}'. "
+                    f"Using 'voxceleb' cohort for score normalization."
+                )
+                cache[base_dataset] = cache["voxceleb"]
+                return cache[base_dataset]
             raise ValueError(
                 f"Score normalization requires training data for '{base_dataset}', "
-                "but none was found. Set scoring.norm_method='none' or enable training for this dataset."
+                "but none was found and no voxceleb cohort is available as fallback. "
+                "Set scoring.norm_method='none' or enable training for this dataset."
             )
 
         log.info(f"Computing cohort embeddings for '{base_dataset}'...")
