@@ -1163,19 +1163,19 @@ def run_sv(transfer_data="false", force="false"):
         },
     }
 
-    # Merge all experiments
+    ########################
+    # Merge all sparsity experiments
+    ########################
     bregman_experiments = {**main_bregman_experiments, **aux_bregman_experiments}
     sparsity_experiments = {**bregman_experiments, **pruning_experiments}
 
     ########################
     # Poor-init experiments: swapped initial_lambda + fast update frequency
-    # AdaBreg gets LinBreg's lambda (too weak, won't prune enough)
-    # LinBreg gets AdaBreg's lambda (too strong for subgradient dynamics)
     ########################
     poor_init_configs = {
         "sv_bregman_adabreg": {
             "sv_models": ["wespeaker_ecapa_tdnn"],
-            "sparsity_rates": [0.75, 0.9, 0.99],
+            "sparsity_rates": [0.75, 0.9],
             "dataset_names": ['multi_sv'],
             "extra_overrides": {
                 "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.1,
@@ -1185,7 +1185,7 @@ def run_sv(transfer_data="false", force="false"):
         },
         "sv_bregman_linbreg": {
             "sv_models": ["wespeaker_ecapa_tdnn"],
-            "sparsity_rates": [0.75, 0.9, 0.99],
+            "sparsity_rates": [0.75, 0.9],
             "dataset_names": ['multi_sv'],
             "extra_overrides": {
                 "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.5,
@@ -1217,15 +1217,15 @@ def run_sv(transfer_data="false", force="false"):
             },
             "suffix": "-rescale_prox",
         },
-        "sv_bregman_proxsgd": {
-            "sv_models": ["wespeaker_ecapa_tdnn"],
-            "sparsity_rates": [0.9],
-            "dataset_names": ['multi_sv'],
-            "extra_overrides": {
-                "callbacks.model_pruning.rescale_prox": True,
-            },
-            "suffix": "-rescale_prox",
-        },
+        # "sv_bregman_proxsgd": {
+        #     "sv_models": ["wespeaker_ecapa_tdnn"],
+        #     "sparsity_rates": [0.9],
+        #     "dataset_names": ['multi_sv'],
+        #     "extra_overrides": {
+        #         "callbacks.model_pruning.rescale_prox": True,
+        #     },
+        #     "suffix": "-rescale_prox",
+        # },
     }
 
     # --- Volume estimation across clusters ---

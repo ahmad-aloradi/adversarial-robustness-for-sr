@@ -5,18 +5,18 @@ MIN_LAMBDA = 1e-10
 
 BREGMAN_LAMBDA_CONFIGS = {
     "AdaBreg": {
-        0.5: {"initial_lambda": 0.2, "min_lambda": MIN_LAMBDA, "fixed_lambda": 1.0},
-        0.7: {"initial_lambda": 0.4, "min_lambda": MIN_LAMBDA, "fixed_lambda": 1.5},
-        0.9: {"initial_lambda": 0.5, "min_lambda": MIN_LAMBDA, "fixed_lambda": 2.0},
-        0.95: {"initial_lambda": 2.0, "min_lambda": MIN_LAMBDA, "fixed_lambda": 4.0},
-        0.99: {"initial_lambda": 4.0, "min_lambda": MIN_LAMBDA, "fixed_lambda": 8.0},
+        0.5: {"initial_lambda": 0.2, "min_lambda": MIN_LAMBDA, "fixed_lambda": 2.0},
+        0.7: {"initial_lambda": 0.4, "min_lambda": MIN_LAMBDA, "fixed_lambda": 4.0},
+        0.9: {"initial_lambda": 0.5, "min_lambda": MIN_LAMBDA, "fixed_lambda": 8.0},
+        0.95: {"initial_lambda": 2.0, "min_lambda": MIN_LAMBDA, "fixed_lambda": 14.0},
+        0.99: {"initial_lambda": 4.0, "min_lambda": MIN_LAMBDA, "fixed_lambda": 18.0},
     },
     "LinBreg": {
         0.5: {"initial_lambda": 0.0001, "min_lambda": MIN_LAMBDA, "fixed_lambda": 0.001},
         0.7: {"initial_lambda": 0.0005, "min_lambda": MIN_LAMBDA, "fixed_lambda": 0.005},
-        0.9: {"initial_lambda": 0.01,   "min_lambda": MIN_LAMBDA, "fixed_lambda": 0.1},
+        0.9: {"initial_lambda": 0.01,   "min_lambda": MIN_LAMBDA, "fixed_lambda": 0.05},
         0.95: {"initial_lambda": 0.01,  "min_lambda": MIN_LAMBDA, "fixed_lambda": 0.1},
-        0.99: {"initial_lambda": 0.05,  "min_lambda": MIN_LAMBDA, "fixed_lambda": 0.5},
+        0.99: {"initial_lambda": 0.05,  "min_lambda": MIN_LAMBDA, "fixed_lambda": 0.3},
     },
     "ProxSGD": {
         0.5: {"initial_lambda": 0.0001, "min_lambda": MIN_LAMBDA, "fixed_lambda": 0.001},
