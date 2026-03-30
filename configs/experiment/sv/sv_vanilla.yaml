@@ -76,24 +76,34 @@ module:
         margin: 0.0
         scale: 32.0
 
+  # lr_scheduler:
+  #   scheduler:
+  #     _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+  #     mode: "max"
+  #     factor: 0.25
+  #     min_lr: 1.0e-6
+  #     patience: 2
+  #     verbose: True
+  #   extras:
+  #     monitor: ${replace:"valid/__metric__"}
+  #     interval: "epoch"
+  #     frequency: ${trainer.check_val_every_n_epoch}
+
   lr_scheduler:
     scheduler:
-      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-      mode: "max"
-      factor: 0.25
-      min_lr: 1.0e-6
-      patience: 2
-      verbose: True
+      _target_: src.utils.schedulers.WarmupExponentialLR
+      warmup_epochs: ${oc.eval:'max(1, int(${trainer.max_epochs} * 0.04))'} 
+      warmup_start_factor: 0.0
+      gamma: ${oc.eval:'pow(0.0005, 1.0 / (${trainer.max_epochs} - max(1, int(${trainer.max_epochs} * 0.04))))'} # decay to 0.00005
     extras:
-      monitor: ${replace:"valid/__metric__"}
       interval: "epoch"
       frequency: ${trainer.check_val_every_n_epoch}
 
   optimizer:
     _target_: torch.optim.AdamW
     _partial_: True
-    lr: 1.0e-4
-    weight_decay: 1.0e-5
+    lr: 0.1
+    weight_decay: 1.0e-4
 
   data_augmentation: null # No augmentation for vanilla baseline
 

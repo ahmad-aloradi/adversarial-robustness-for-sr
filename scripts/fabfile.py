@@ -19,7 +19,7 @@ from fabric.contrib.project import rsync_project
 # Cluster configuration
 env.user = "dsnf101h"  # 'iwal021h'
 
-CLUSTER_NAME = "alex"  # Options: 'tinygpu', 'alex'
+CLUSTER_NAME = "tinygpu"  # Options: 'tinygpu', 'alex'
 env.hosts = (
     ["alex.nhr.fau.de"] if CLUSTER_NAME == "alex" else ["tinyx.nhr.fau.de"]
 )
@@ -610,7 +610,11 @@ def lsa():
 
 
 def check_running_pending(job_name):
-    """Check if a job is pending or running.
+    """Check if a job is pending or running on any cluster.
+
+    Runs from the local machine, which has SSH access to both
+    cluster login nodes.  Each cluster is queried separately to test if the job is running.
+    on either cluster.
 
     Args:
         job_name (str): Name of the job to check
@@ -618,20 +622,21 @@ def check_running_pending(job_name):
     Returns:
         bool: True if the job is pending or running, False otherwise
     """
-    # hosts = ["tinyx.nhr.fau.de", "alex.nhr.fau.de"]
-    # sq = 'squeue -t PENDING,RUNNING --format "%.j" -h'
-    # ssh_opts = "-o ConnectTimeout=5 -o BatchMode=yes"
-    # # SSH from local machine to both clusters in parallel
-    # cmds = " & ".join(
-    #     f"ssh {ssh_opts} {env.user}@{h} '{sq}'"
-    #     for h in hosts
-    # )
-    # result = local(f"{{ {cmds}; wait; }}", capture=True)
-    # jobs = result.split() if result else []
-    # return job_name in jobs
-    result = run('squeue -t PENDING,RUNNING --format "%.j" -h', quiet=True)
-    files = result.split() if result else []
-    return job_name in files
+    hosts = ["alex.nhr.fau.de", "tinyx.nhr.fau.de"]
+    sq = 'squeue -t PENDING,RUNNING --format "%200j" -h'
+    ssh_opts = "-o ConnectTimeout=5 -o BatchMode=yes"
+
+    for host in hosts:
+        result = local(
+            f'ssh {ssh_opts} {env.user}@{host} \'{sq}\' 2>/dev/null',
+            capture=True,
+        )
+        if not result:
+            continue
+        jobs = [line.strip() for line in result.splitlines() if line.strip()]
+        if job_name in jobs:
+            return True
+    return False
 
 
 def check_file_exists(file_path):
@@ -812,6 +817,34 @@ def run_vpc():
             time.sleep(1.0)
 
 
+# Per-cluster GPU assignment: dataset -> {cluster -> gpu_partition}
+_GPU_MAP = {
+    "datasets/cnceleb":   {"alex": "a40",  "tinygpu": "v100"},
+    "datasets/voxceleb":  {"alex": "a100", "tinygpu": "a100"},
+    "multi_sv":           {"alex": "a100", "tinygpu": "a100"},
+    "multi_sv_cnc_train": {"alex": "a100", "tinygpu": "a100"},
+}
+
+
+def _get_job_routing(experiment, dataset_name, sparsity=None):
+    """Return (cluster_name, gpu_type) for a job.
+
+    Targeting ~80% alex / ~20% tinygpu when all experiment types are active:
+    - ProxSGD -> tinygpu (baseline comparison, ~1/5 of experiment types)
+    - All other Bregman/pruning -> alex
+    - Baselines (sparsity=None) -> current cluster (run on whichever is active)
+    """
+    if sparsity is None:
+        cluster = CLUSTER_NAME
+    elif "proxsgd" in experiment:
+        cluster = "tinygpu"
+    else:
+        cluster = "alex"
+
+    gpu = _GPU_MAP[dataset_name][cluster]
+    return cluster, gpu
+
+
 def _submit_sv_job(
     # hparams
     experiment,
@@ -826,6 +859,8 @@ def _submit_sv_job(
     gpu_device=GPU,
     bypass_exps=None,
     force_retest=False,
+    extra_overrides=None,
+    job_name_suffix="",
 ):
     """Helper function to configure and submit a single SV training job."""
     if not apply_augmentation:
@@ -918,7 +953,7 @@ def _submit_sv_job(
         f"{experiment}{ramp_str}-{sv_model}-{os.path.basename(dataset_name)}"
         f"-virt-{virtual_spks}-bs{batch_size}-vad{apply_vad}"
         f"{num_ckpt_avg_str}-ep{max_epochs}-aug{apply_augmentation}"
-        f"{sparsity_str}"
+        f"{sparsity_str}{job_name_suffix}"
     )
 
     settings = settings.copy()
@@ -936,7 +971,7 @@ def _submit_sv_job(
         "datamodule.loaders.train.batch_size": batch_size,
         "datamodule.loaders.valid.batch_size": batch_size,
         "datamodule.loaders.enrollment.batch_size": 8,
-        "datamodule.loaders.test.batch_size": 256,
+        "datamodule.loaders.test.batch_size": 128,
         "trainer.max_epochs": max_epochs,
         "paths.log_dir": RESULTS_DIR,
         "hydra.run.dir": f"{RESULTS_DIR}/train/runs/{name}",
@@ -949,8 +984,8 @@ def _submit_sv_job(
     else:
         script_arguments["callbacks.checkpoint_averaging"] = "null"
 
-    if dataset_name != "multi_sv":
-        script_arguments["datamodule.dataset.vad.enabled"] = str(apply_vad)
+    # if dataset_name != "multi_sv" or dataset_name != "multi_sv_cnc_train":
+    #     script_arguments["datamodule.dataset.vad.enabled"] = str(apply_vad)
 
     if epochs_to_ramp:
         script_arguments.update(
@@ -981,6 +1016,9 @@ def _submit_sv_job(
             script_arguments[
                 "callbacks.model_pruning.save_when_sparser_than"
             ] = target_sparsity
+
+    if extra_overrides:
+        script_arguments.update(extra_overrides)
 
     # Jobs submission logic
     if check_running_pending(job_name):
@@ -1035,89 +1073,222 @@ def run_sv(transfer_data="false", force="false"):
     transfer_data_bool = transfer_data.lower() in ("true", "1", "yes")
     force_retest = force.lower() in ("true", "1", "yes")
 
-    batch_size_base = 128
+    batch_sizes = {
+        "wespeaker_ecapa_tdnn": 128,
+        "wespeaker_resnet34": 64,
+    }
 
-    sparsity_experiments = [
-        # Pruning exps
-        "sv_pruning_mag_struct",
-        "sv_pruning_mag_unstruct",
-        "sv_pruning_mag_struct_onetime",
-        "sv_pruning_mag_unstruct_onetime",
-        # Bregman exps
-        "sv_bregman_linbreg",
-        "sv_bregman_adabreg",
-        "sv_bregman_adabregw",
-        "sv_bregman_adabregl2",
-        "sv_bregman_adabreg_fixed",
-        "sv_bregman_linbreg_fixed",
-    ]
-    baselines_exps = [
-        # Baselines
-        # "sv_wespeaker",
-        # "sv_vanilla",
-    ]    
-    sparsity_rates = [0.90, 0.95, 0.99]
-
-    # Get SV models from config directory
-    config_dir = "../configs/module/sv_model"
-    assert os.path.exists(config_dir), f"Config directory {config_dir} does not exist"
-    sv_models = [
+    # Default hparams shared across experiments
+    default_sv_models = [
         "wespeaker_ecapa_tdnn",
-        # "wespeaker_resnet34",
-        # "wespeaker_pretrained_ecapa_tdnn_c512",
-        # "wespeaker_pretrained_resnet34",
-        # "wespeaker_resnet152",
-        # "wespeaker_pretrained_resnet152"
+        "wespeaker_resnet34",
     ]
-
+    default_sparsity_rates = [0.90, 0.95, 0.99]
     dataset_names = ["datasets/cnceleb", "multi_sv"]
 
     base_max_epochs = {
         "datasets/cnceleb": 40,
         "datasets/voxceleb": 20,
         "multi_sv": 20,
-    }
-    gpus = {
-        "datasets/cnceleb": "a40" if CLUSTER_NAME == "alex" else "a100",
-        "datasets/voxceleb": "a100",
-        "multi_sv": "a100",
+        "multi_sv_cnc_train": 20,
     }
 
+    # Per-experiment hparams: models, sparsity_rates, extra_overrides
+    # Omitted keys fall back to defaults above
+    baselines_exps = [
+        "sv_wespeaker",
+        "sv_vanilla",
+    ]
+
+    ########################
+    # Pruning experiments
+    ########################
+    pruning_experiments = {
+        # "sv_pruning_mag_struct": {
+        #     "sv_models": default_sv_models,
+        #     "sparsity_rates": default_sparsity_rates,
+        #     "dataset_names": dataset_names,        
+        # },
+        "sv_pruning_mag_unstruct": {
+            "sv_models": default_sv_models,
+            "sparsity_rates": default_sparsity_rates,
+            "dataset_names": dataset_names,
+        },
+        # "sv_pruning_mag_struct_onetime": {
+        #     "sv_models": default_sv_models,
+        #     "sparsity_rates": [0.9], 
+        #     "dataset_names": dataset_names,           
+        # },
+        # "sv_pruning_mag_unstruct_onetime": {
+        #     "sv_models": default_sv_models,
+        #     "sparsity_rates": [0.9],  
+        #     "dataset_names": dataset_names,          
+        # },
+    }
+
+    ########################
+    # Bregman experiments
+    ########################
+    main_bregman_experiments = {
+        "sv_bregman_linbreg": {
+            "sv_models": default_sv_models,
+            "sparsity_rates": default_sparsity_rates,
+            "dataset_names": dataset_names,
+        },
+        "sv_bregman_adabreg": {
+            "sv_models": default_sv_models,
+            "sparsity_rates": default_sparsity_rates,
+            "dataset_names": dataset_names, 
+        },
+    }
+
+    # use a smaller sweep for auxiliary experiments to keep the total number of jobs manageable
+    mini_exps_sparsity_rates = [0.90]
+    mini_default_sv_models = ["wespeaker_ecapa_tdnn"]
+    aux_bregman_experiments = {
+        "sv_bregman_proxsgd": {
+            "sv_models": mini_default_sv_models,
+            "sparsity_rates": mini_exps_sparsity_rates,
+            "dataset_names": dataset_names,
+        },
+        "sv_bregman_adabreg_fixed": {
+            "sv_models": mini_default_sv_models,
+            "sparsity_rates": mini_exps_sparsity_rates,
+            "dataset_names": ['multi_sv'], 
+        },
+        "sv_bregman_linbreg_fixed": {
+            "sv_models": mini_default_sv_models,
+            "sparsity_rates": mini_exps_sparsity_rates,
+            "dataset_names": ['multi_sv'],
+        },
+    }
+
+    # Merge all experiments
+    bregman_experiments = {**main_bregman_experiments, **aux_bregman_experiments}
+    sparsity_experiments = {**bregman_experiments, **pruning_experiments}
+
+    ########################
+    # Poor-init experiments: swapped initial_lambda + fast update frequency
+    # AdaBreg gets LinBreg's lambda (too weak, won't prune enough)
+    # LinBreg gets AdaBreg's lambda (too strong for subgradient dynamics)
+    ########################
+    poor_init_configs = {
+        "sv_bregman_adabreg": {
+            "sv_models": ["wespeaker_ecapa_tdnn"],
+            "sparsity_rates": [0.9],
+            "dataset_names": ['multi_sv'],
+            "extra_overrides": {
+                "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.1,
+                "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
+            },
+            "suffix": "-poor_init",
+        },
+        "sv_bregman_linbreg": {
+            "sv_models": ["wespeaker_ecapa_tdnn"],
+            "sparsity_rates": [0.9],
+            "dataset_names": ['multi_sv'],
+            "extra_overrides": {
+                "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.5,
+                "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
+            },
+            "suffix": "-poor_init",
+        },
+    }
+
+    # --- Volume estimation across clusters ---
+    job_counts = {"alex": {"a40": 0, "a100": 0}, "tinygpu": {"v100": 0, "a100": 0}}
+
+    for experiment, exp_cfg in sparsity_experiments.items():
+        for dataset_name in exp_cfg["dataset_names"]:
+            for sparsity in exp_cfg["sparsity_rates"]:
+                cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                job_counts[cluster][gpu] += len(exp_cfg["sv_models"])
+
+    for experiment, cfg in poor_init_configs.items():
+        for dataset_name in cfg["dataset_names"]:
+            for sparsity in cfg["sparsity_rates"]:
+                cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                job_counts[cluster][gpu] += len(cfg["sv_models"])
+
+    total_jobs = sum(sum(gpus.values()) for gpus in job_counts.values())
+    print(f"\n{'='*50}")
+    print(f"Job distribution ({total_jobs} total):")
+    for cname, gpus in job_counts.items():
+        total = sum(gpus.values())
+        if total == 0:
+            continue
+        gpu_breakdown = ", ".join(f"{g}: {n}" for g, n in gpus.items() if n > 0)
+        pct = 100 * total / total_jobs if total_jobs else 0
+        marker = " <-- current" if cname == CLUSTER_NAME else ""
+        print(f"  {cname}: {total} jobs ({pct:.0f}%) [{gpu_breakdown}]{marker}")
+    print(f"{'='*50}\n")
+
+    # --- Submit baseline experiments (only for current cluster) ---
     for experiment in baselines_exps:
-        for sv_model in sv_models:
+        for sv_model in default_sv_models:
             for dataset_name in dataset_names:
+                cluster, gpu = _get_job_routing(experiment, dataset_name)
+                if cluster != CLUSTER_NAME:
+                    print(f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster")
+                    continue
                 _submit_sv_job(
                     experiment=experiment,
                     sv_model=sv_model,
                     dataset_name=dataset_name,
-                    batch_size_base=batch_size_base,
+                    batch_size_base=batch_sizes[sv_model],
                     transfer_data_bool=transfer_data_bool,
                     max_epochs=base_max_epochs[dataset_name],
-                    gpu_device=gpus[dataset_name],
+                    gpu_device=gpu,
                     force_retest=force_retest,
                 )
 
-    for experiment in sparsity_experiments:
-        for sv_model in sv_models:
-            for dataset_name in dataset_names:
-                for sparsity in sparsity_rates:
-                    
-                    # Cluster management: use multiple clusters
-                    # TODO: use a more general if statements --> e.g., if sparsity > 0.95 use alex, else use tinyx
-                    if sparsity == 0.99:
-                        assert CLUSTER_NAME == "tinygpu", \
-                            "Running 99% sparsity experiments is only feasible on TinyGPU"
-                    
+    # --- Submit poor-init experiments (only for current cluster) ---
+    for experiment, cfg in poor_init_configs.items():
+        for sv_model in cfg["sv_models"]:
+            for dataset_name in cfg["dataset_names"]:
+                for sparsity in cfg["sparsity_rates"]:
+                    cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                    if cluster != CLUSTER_NAME:
+                        print(f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster")
+                        continue
                     _submit_sv_job(
                         experiment=experiment,
                         sv_model=sv_model,
                         dataset_name=dataset_name,
-                        batch_size_base=batch_size_base,
+                        batch_size_base=batch_sizes[sv_model],
                         transfer_data_bool=transfer_data_bool,
                         max_epochs=base_max_epochs[dataset_name],
                         target_sparsity=sparsity,
-                        gpu_device=gpus[dataset_name],
+                        gpu_device=gpu,
                         force_retest=force_retest,
+                        extra_overrides=cfg["extra_overrides"],
+                        job_name_suffix=cfg["suffix"],
+                    )
+
+    # --- Submit sparsity experiments (only for current cluster) ---
+    for experiment, exp_cfg in sparsity_experiments.items():
+        extra_overrides = exp_cfg.get("extra_overrides")
+        suffix = exp_cfg.get("suffix", "")
+
+        for sv_model in exp_cfg["sv_models"]:
+            for dataset_name in exp_cfg["dataset_names"]:
+                for sparsity in exp_cfg["sparsity_rates"]:
+                    cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                    if cluster != CLUSTER_NAME:
+                        print(f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster")
+                        continue
+                    _submit_sv_job(
+                        experiment=experiment,
+                        sv_model=sv_model,
+                        dataset_name=dataset_name,
+                        batch_size_base=batch_sizes[sv_model],
+                        transfer_data_bool=transfer_data_bool,
+                        max_epochs=base_max_epochs[dataset_name],
+                        target_sparsity=sparsity,
+                        gpu_device=gpu,
+                        force_retest=force_retest,
+                        extra_overrides=extra_overrides,
+                        job_name_suffix=suffix,
                     )
 
 
@@ -1173,8 +1344,30 @@ def eval_sv(force="true"):
     TRAINED_MODELS_DIR = '/home/vault/dsnf/dsnf101h/results/train/runs'
 
     exp_paths = [
-        "sv_vanilla-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs40-data_augFalse",
-        "sv_wespeaker-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs40-data_augFalse",
+        ############
+        # CNCELEB
+        ############
+        # baselines
+        # "sv_vanilla-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs40-data_augFalse",
+        # "sv_wespeaker-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs40-data_augFalse",
+        # Pruning at 90% sparsity
+        "sv_pruning_mag_unstruct-ramp10_constant-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs50-data_augFalse",
+        "sv_pruning_mag_struct-ramp10_constant-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs50-data_augFalse",
+        # Pruning at 95% sparsity
+        "sv_pruning_mag_unstruct-ramp10_constant-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs50-data_augFalse-sparsity95",
+        "sv_pruning_mag_struct-ramp10_constant-wespeaker_ecapa_tdnn-cnceleb-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs50-data_augFalse-sparsity95",
+        ###############
+        # VOXCELEB
+        ###############
+        # baselines
+        "sv_wespeaker-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs10-data_augFalse",
+        "sv_vanilla-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs20-data_augFalse",
+        # Pruning at 90% sparsity
+        "sv_pruning_mag_unstruct-ramp10_constant-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs30-data_augFalse",
+        "sv_pruning_mag_struct-ramp10_constant-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs30-data_augFalse",
+         # Pruning at 95% sparsity
+        "sv_pruning_mag_unstruct-ramp10_constant-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs30-data_augFalse-sparsity95",
+        "sv_pruning_mag_struct-ramp10_constant-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs30-data_augFalse-sparsity95"
     ]
 
     base_settings = {
