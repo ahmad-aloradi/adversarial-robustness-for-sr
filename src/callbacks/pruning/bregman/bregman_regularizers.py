@@ -16,6 +16,7 @@ class BregmanRegularizer:
     """Base class for Bregman regularizers."""
     def __init__(self, lamda: float = 1.0, delta: float = 1.0):
         self.lamda = lamda
+        self.rescale_prox = False
         # Note: delta parameter is kept for compatibility but not stored
         # It's passed directly to prox() method during optimization
 

@@ -59,6 +59,7 @@ callbacks:
     verbose: 2
     target_sparsity: ${_bregman_target_sparsity}
     tolerance: 0.01
+    rescale_prox: false
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
@@ -118,6 +119,8 @@ module:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.ProxSGD
     _partial_: True
     lr: 1e-2
+
+  data_augmentation: null
 
   model:
     pruning_groups:
@@ -192,7 +195,7 @@ module:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
             lamda: ${_bregman_lambda}
-          lambda_scale: 1.0      
+          lambda_scale: 1.0
         pruning_config:
           pruning_type: "unstructured"
           sparsity_rate: 0.0

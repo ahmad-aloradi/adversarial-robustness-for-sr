@@ -76,12 +76,16 @@ class LinBreg(torch.optim.Optimizer):
                     sub_grad.add_(-mom_buff)
                 else:
                     sub_grad.add_(-step_size * grad)
-                
+
                 # Update parameters using proximal operator (safe in-place copy)
-                p.copy_(reg.prox(delta * sub_grad, delta))
-        
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if reg.rescale_prox:
+                    assert reg.lamda > 0
+                    prox_result = prox_result / reg.lamda
+                p.copy_(prox_result)
+
         return loss
-        
+
     def initialize_sub_grad(self, p: torch.Tensor, reg: BregmanRegularizer, delta: float):
         """Initialize subgradient for Bregman iterations."""
         p_init = p.data.clone()
@@ -180,12 +184,16 @@ class AdaBreg(torch.optim.Optimizer):
                 
                 # Update subgradient
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
-                
+
                 # Update parameters using proximal operator (safe in-place copy)
-                p.copy_(reg.prox(delta * sub_grad, delta))
-        
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if reg.rescale_prox:
+                    assert reg.lamda > 0
+                    prox_result = prox_result / reg.lamda
+                p.copy_(prox_result)
+
         return loss
-        
+
     def initialize_sub_grad(self, p: torch.Tensor, reg: BregmanRegularizer, delta: float):
         """Initialize subgradient for Bregman iterations."""
         p_init = p.data.clone()
@@ -289,7 +297,11 @@ class AdaBregW(AdaBreg):
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
                 # Proximal step to get candidate weights
-                p.copy_(reg.prox(delta * sub_grad, delta))
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if reg.rescale_prox:
+                    assert reg.lamda > 0
+                    prox_result = prox_result / reg.lamda
+                p.copy_(prox_result)
 
                 # Decoupled weight decay: shrink surviving weights
                 assert wd > 0, "Weight decay must be positive for AdaBregW"
@@ -389,7 +401,11 @@ class AdaBregL2(AdaBreg):
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
                 # Proximal step
-                p.copy_(reg.prox(delta * sub_grad, delta))
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if reg.rescale_prox:
+                    assert reg.lamda > 0
+                    prox_result = prox_result / reg.lamda
+                p.copy_(prox_result)
 
         return loss
 
@@ -440,7 +456,11 @@ class ProxSGD(torch.optim.Optimizer):
                 # Gradient step
                 p.add_(-step_size * grad)
                 # Proximal step (safe in-place copy)
-                p.copy_(reg.prox(p.data, step_size))
+                prox_result = reg.prox(p.data, step_size)
+                if reg.rescale_prox:
+                    assert reg.lamda > 0
+                    prox_result = prox_result / reg.lamda
+                p.copy_(prox_result)
         
         return loss
                 

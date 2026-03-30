@@ -19,7 +19,7 @@ from fabric.contrib.project import rsync_project
 # Cluster configuration
 env.user = "dsnf101h"  # 'iwal021h'
 
-CLUSTER_NAME = "tinygpu"  # Options: 'tinygpu', 'alex'
+CLUSTER_NAME = "alex"  # Options: 'tinygpu', 'alex'
 env.hosts = (
     ["alex.nhr.fau.de"] if CLUSTER_NAME == "alex" else ["tinyx.nhr.fau.de"]
 )
@@ -1107,7 +1107,7 @@ def run_sv(transfer_data="false", force="false"):
         # "sv_pruning_mag_struct": {
         #     "sv_models": default_sv_models,
         #     "sparsity_rates": default_sparsity_rates,
-        #     "dataset_names": dataset_names,        
+        #     "dataset_names": dataset_names,
         # },
         "sv_pruning_mag_unstruct": {
             "sv_models": default_sv_models,
@@ -1116,13 +1116,13 @@ def run_sv(transfer_data="false", force="false"):
         },
         # "sv_pruning_mag_struct_onetime": {
         #     "sv_models": default_sv_models,
-        #     "sparsity_rates": [0.9], 
-        #     "dataset_names": dataset_names,           
+        #     "sparsity_rates": [0.9],
+        #     "dataset_names": dataset_names,
         # },
         # "sv_pruning_mag_unstruct_onetime": {
         #     "sv_models": default_sv_models,
-        #     "sparsity_rates": [0.9],  
-        #     "dataset_names": dataset_names,          
+        #     "sparsity_rates": [0.9],
+        #     "dataset_names": dataset_names,
         # },
     }
 
@@ -1138,7 +1138,7 @@ def run_sv(transfer_data="false", force="false"):
         "sv_bregman_adabreg": {
             "sv_models": default_sv_models,
             "sparsity_rates": default_sparsity_rates,
-            "dataset_names": dataset_names, 
+            "dataset_names": dataset_names,
         },
     }
 
@@ -1154,7 +1154,7 @@ def run_sv(transfer_data="false", force="false"):
         "sv_bregman_adabreg_fixed": {
             "sv_models": mini_default_sv_models,
             "sparsity_rates": mini_exps_sparsity_rates,
-            "dataset_names": ['multi_sv'], 
+            "dataset_names": ['multi_sv'],
         },
         "sv_bregman_linbreg_fixed": {
             "sv_models": mini_default_sv_models,
@@ -1175,7 +1175,7 @@ def run_sv(transfer_data="false", force="false"):
     poor_init_configs = {
         "sv_bregman_adabreg": {
             "sv_models": ["wespeaker_ecapa_tdnn"],
-            "sparsity_rates": [0.9],
+            "sparsity_rates": [0.75, 0.9, 0.99],
             "dataset_names": ['multi_sv'],
             "extra_overrides": {
                 "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.1,
@@ -1185,13 +1185,46 @@ def run_sv(transfer_data="false", force="false"):
         },
         "sv_bregman_linbreg": {
             "sv_models": ["wespeaker_ecapa_tdnn"],
-            "sparsity_rates": [0.9],
+            "sparsity_rates": [0.75, 0.9, 0.99],
             "dataset_names": ['multi_sv'],
             "extra_overrides": {
                 "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.5,
                 "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
             },
             "suffix": "-poor_init",
+        },
+    }
+
+    ########################
+    # Rescale-prox experiments: divide prox output by lambda (dual averaging)
+    ########################
+    rescale_prox_configs = {
+        "sv_bregman_adabreg": {
+            "sv_models": ["wespeaker_ecapa_tdnn"],
+            "sparsity_rates": [0.9],
+            "dataset_names": ['multi_sv'],
+            "extra_overrides": {
+                "callbacks.model_pruning.rescale_prox": True,
+            },
+            "suffix": "-rescale_prox",
+        },
+        "sv_bregman_linbreg": {
+            "sv_models": ["wespeaker_ecapa_tdnn"],
+            "sparsity_rates": [0.9],
+            "dataset_names": ['multi_sv'],
+            "extra_overrides": {
+                "callbacks.model_pruning.rescale_prox": True,
+            },
+            "suffix": "-rescale_prox",
+        },
+        "sv_bregman_proxsgd": {
+            "sv_models": ["wespeaker_ecapa_tdnn"],
+            "sparsity_rates": [0.9],
+            "dataset_names": ['multi_sv'],
+            "extra_overrides": {
+                "callbacks.model_pruning.rescale_prox": True,
+            },
+            "suffix": "-rescale_prox",
         },
     }
 
@@ -1205,6 +1238,12 @@ def run_sv(transfer_data="false", force="false"):
                 job_counts[cluster][gpu] += len(exp_cfg["sv_models"])
 
     for experiment, cfg in poor_init_configs.items():
+        for dataset_name in cfg["dataset_names"]:
+            for sparsity in cfg["sparsity_rates"]:
+                cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                job_counts[cluster][gpu] += len(cfg["sv_models"])
+
+    for experiment, cfg in rescale_prox_configs.items():
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
                 cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
@@ -1244,6 +1283,29 @@ def run_sv(transfer_data="false", force="false"):
 
     # --- Submit poor-init experiments (only for current cluster) ---
     for experiment, cfg in poor_init_configs.items():
+        for sv_model in cfg["sv_models"]:
+            for dataset_name in cfg["dataset_names"]:
+                for sparsity in cfg["sparsity_rates"]:
+                    cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                    if cluster != CLUSTER_NAME:
+                        print(f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster")
+                        continue
+                    _submit_sv_job(
+                        experiment=experiment,
+                        sv_model=sv_model,
+                        dataset_name=dataset_name,
+                        batch_size_base=batch_sizes[sv_model],
+                        transfer_data_bool=transfer_data_bool,
+                        max_epochs=base_max_epochs[dataset_name],
+                        target_sparsity=sparsity,
+                        gpu_device=gpu,
+                        force_retest=force_retest,
+                        extra_overrides=cfg["extra_overrides"],
+                        job_name_suffix=cfg["suffix"],
+                    )
+
+    # --- Submit rescale-prox experiments (only for current cluster) ---
+    for experiment, cfg in rescale_prox_configs.items():
         for sv_model in cfg["sv_models"]:
             for dataset_name in cfg["dataset_names"]:
                 for sparsity in cfg["sparsity_rates"]:
@@ -1339,7 +1401,7 @@ def eval_sv(force="true"):
         force (str): 'true' to force re-evaluation of already-completed experiments
     """
     force_retest = force.lower() in ("true", "1", "yes")
-    
+
     EVAL_OUTPUT_DIR = '/home/hpc/dsnf/dsnf101h/adversarial-robustness-for-sr/logs/eval/runs'
     TRAINED_MODELS_DIR = '/home/vault/dsnf/dsnf101h/results/train/runs'
 

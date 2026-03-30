@@ -41,6 +41,7 @@ class BregmanPruner(Callback):
         lambda_scheduler: Optional[LambdaScheduler] = None,
         target_sparsity: Optional[float] = None,
         tolerance: float = 0.01,
+        rescale_prox: bool = False,
     ):
         """
         Args:
@@ -48,12 +49,15 @@ class BregmanPruner(Callback):
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
             lambda_scheduler: Optional scheduler for dynamic lambda updates.
             target_sparsity: Target sparsity for validation suppression.
+            rescale_prox: If True and lambda_scheduler is active, divide prox
+                output by lambda (dual averaging rescaling).
         """
         super().__init__()
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
         self.target_sparsity = target_sparsity
+        self.rescale_prox = rescale_prox
 
         self.manager: Optional[PruningManager] = None
         self._initialized = False
@@ -95,6 +99,12 @@ class BregmanPruner(Callback):
         self._apply_lambda_to_groups(trainer)
         if is_resuming and self._ckpt_scheduler_state:
             log.info("Restored lambda values to optimizer parameter groups.")
+
+        if self.lambda_scheduler is not None and self.rescale_prox:
+            for group in optimizer.param_groups:
+                if "reg" in group:
+                    group["reg"].rescale_prox = True
+            log.info("BregmanPruner: rescale_prox enabled (dividing prox by lambda).")
 
         self._initialized = True
         self._log_configuration(optimizer)
