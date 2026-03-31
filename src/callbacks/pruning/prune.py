@@ -236,20 +236,25 @@ class MagnitudePruner(Callback):
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         """Logs metrics and manages trackers AFTER training step."""
-        current_sparsity = compute_sparsity(self._target_params)
+        pruned_sparsity = compute_sparsity(self._target_params)
+        overall_sparsity = compute_sparsity(
+            list(pl_module.parameters()), threshold=1e-12
+        )
 
         # 1. Log Metrics (Recorder)
         if hasattr(pl_module, "log"):
             # prog_bar=False avoids stale display at start of next epoch
+            # "sparsity" = true whole-model sparsity (consistent with Bregman)
             pl_module.log(
-                "pruning/sparsity",
-                current_sparsity,
+                "sparsity",
+                overall_sparsity,
                 prog_bar=False,
                 on_epoch=True,
             )
+            # "pruning/sparsity" = pruned params only
             pl_module.log(
-                "sparsity",
-                current_sparsity,
+                "pruning/sparsity",
+                pruned_sparsity,
                 prog_bar=False,
                 on_epoch=True,
             )
@@ -259,7 +264,8 @@ class MagnitudePruner(Callback):
             logger.info(
                 f"[Pruning Monitor] Epoch {trainer.current_epoch}: "
                 f"Target={self._current_epoch_target:.2%} | "
-                f"Result={current_sparsity:.2%} | Status: {self._last_status}"
+                f"Result={pruned_sparsity:.2%} | "
+                f"Overall={overall_sparsity:.2%} | Status: {self._last_status}"
             )
 
     def on_train_end(

@@ -104,7 +104,9 @@ class BregmanPruner(Callback):
             for group in optimizer.param_groups:
                 if "reg" in group:
                     group["reg"].rescale_prox = True
-            log.info("BregmanPruner: rescale_prox enabled (dividing prox by lambda).")
+            log.info(
+                "BregmanPruner: rescale_prox enabled (dividing prox by lambda)."
+            )
 
         self._initialized = True
         self._log_configuration(optimizer)
@@ -158,18 +160,35 @@ class BregmanPruner(Callback):
             return
 
         sparsity = self._overall_sparsity()
+        pruned_sparsity = self._pruned_sparsity()
 
         # Inject end-of-epoch sparsity directly into callback_metrics so that
         # ModelCheckpoint filenames and train_log.txt get the true final value
         # (not a mean over all steps).
-        sparsity_tensor = torch.tensor(sparsity)
-        trainer.callback_metrics["sparsity"] = sparsity_tensor
-        trainer.callback_metrics["bregman/sparsity"] = sparsity_tensor
+        trainer.callback_metrics["sparsity"] = torch.tensor(sparsity)
+        trainer.callback_metrics["bregman/sparsity"] = torch.tensor(sparsity)
+        trainer.callback_metrics["bregman/pruned_sparsity"] = torch.tensor(
+            pruned_sparsity
+        )
 
         if self.verbose > 0:
             log.info(
-                f"Epoch {trainer.current_epoch}: Sparsity = {sparsity:.3%}"
+                f"Epoch {trainer.current_epoch}: "
+                f"Sparsity = {sparsity:.3%} (pruned = {pruned_sparsity:.3%})"
             )
+
+    def on_validation_start(
+        self, trainer: Trainer, pl_module: LightningModule
+    ) -> None:
+        """Re-check sparsity before validation.
+
+        If it drifted outside tolerance during the training epoch, suppress
+        this validation.
+        """
+        if not self._initialized or self.target_sparsity is None:
+            return
+        current_sparsity = self._overall_sparsity()
+        self._suppressor.check(trainer, current_sparsity, self.target_sparsity)
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
@@ -260,6 +279,12 @@ class BregmanPruner(Callback):
     # -------------------------------------------------------------------------
 
     def _overall_sparsity(self) -> float:
+        """Sparsity over all model parameters (true whole-model sparsity)."""
+        params = list(self.manager.pl_module.parameters())
+        return compute_sparsity(params, threshold=self.sparsity_threshold)
+
+    def _pruned_sparsity(self) -> float:
+        """Sparsity over pruned parameter groups only."""
         params = self.manager.get_pruned_parameters()
         return compute_sparsity(params, threshold=self.sparsity_threshold)
 
@@ -287,10 +312,14 @@ class BregmanPruner(Callback):
         )
 
         sparsity = self._overall_sparsity()
+        pruned_sparsity = self._pruned_sparsity()
         # Log per-step only for TensorBoard/WandB tracking;
         # epoch-level "sparsity" is injected in on_train_epoch_end.
         step_params = {**logging_params, "on_step": True, "on_epoch": False}
         pl_module.log("bregman/sparsity", sparsity, **step_params)
+        pl_module.log(
+            "bregman/pruned_sparsity", pruned_sparsity, **step_params
+        )
 
         if self.lambda_scheduler:
             # Lambda changes per step, so always log on_step; override on_epoch to avoid noise
@@ -352,7 +381,10 @@ class BregmanPruner(Callback):
             )
             log.info(f"  {name}: {sparsity:.3%} {str_extras}")
 
-        log.info(f"Overall sparsity: {self._overall_sparsity():.3%}")
+        log.info(
+            f"Overall sparsity: {self._overall_sparsity():.3%} "
+            f"(pruned only: {self._pruned_sparsity():.3%})"
+        )
         log.info("=== End Configuration ===")
 
     @rank_zero_only

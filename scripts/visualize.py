@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Visualization for experiment results. The type of plots currently supported are only training curves and bar charts 
-for final metrics. The script automatically determines which plot types are valid for each metric (e.g. EER can be bar, 
-but train_loss cannot).
+"""Visualization for experiment results. The type of plots currently supported
+are only training curves and bar charts for final metrics. The script
+automatically determines which plot types are valid for each metric (e.g. EER
+can be bar, but train_loss cannot).
 
 Usage examples:
     # Plot training curves for specific experiments
@@ -32,7 +33,7 @@ matplotlib.use("pdf")
 def _latex_available():
     """Check if a usable LaTeX installation exists (with required packages)."""
     import shutil
-    import subprocess
+    import subprocess  # nosec B404
     import tempfile
 
     if not shutil.which("pdflatex"):
@@ -43,12 +44,16 @@ def _latex_available():
             r"\usepackage{type1cm}\usepackage{type1ec}"
             r"\begin{document}x\end{document}"
         )
-        with tempfile.NamedTemporaryFile(suffix=".tex", mode="w", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            suffix=".tex", mode="w", delete=False
+        ) as f:
             f.write(test_tex)
             tmp = f.name
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607
             ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", tmp],
-            capture_output=True, timeout=10, cwd=os.path.dirname(tmp),
+            capture_output=True,
+            timeout=10,
+            cwd=os.path.dirname(tmp),
         )
         os.unlink(tmp)
         for ext in (".aux", ".log", ".pdf"):
@@ -68,7 +73,9 @@ def setup_matplotlib(font_size=10):
     """
     use_latex = _latex_available()
     if not use_latex:
-        print("Note: Full LaTeX not available; using mathtext fallback (still serif).")
+        print(
+            "Note: Full LaTeX not available; using mathtext fallback (still serif)."
+        )
 
     plt.rcParams.update(
         {
@@ -103,14 +110,14 @@ def setup_matplotlib(font_size=10):
 
 # Method class → color.  Bregman = cool tones, Pruning = warm tones, Baselines = neutral.
 METHOD_CLASS_COLORS = {
-    "linbreg": "#1f77b4",       # blue
-    "adabreg": "#34be34",       # green
-    "adabregw": "#023703",      # dark red (distinct from blue)
-    "adabregl2": "#8c564b",     # brown
-    "pruning_struct": "#d62728",    # red
+    "linbreg": "#1f77b4",  # blue
+    "adabreg": "#34be34",  # green
+    "adabregw": "#023703",  # dark red (distinct from blue)
+    "adabregl2": "#8c564b",  # brown
+    "pruning_struct": "#d62728",  # red
     "pruning_unstruct": "#ff7f0e",  # orange
-    "vanilla": "#7f7f7f",       # gray
-    "wespeaker": "#9467bd",     # purple
+    "vanilla": "#7f7f7f",  # gray
+    "wespeaker": "#9467bd",  # purple
 }
 
 METHOD_DISPLAY_NAMES = {
@@ -126,22 +133,22 @@ METHOD_DISPLAY_NAMES = {
 
 # Sparsity → marker shape  (consistent everywhere)
 SPARSITY_MARKERS = {
-    None: "s",   # square  — dense / baseline
-    0:    "s",
-    50:   "D",   # diamond
-    75:   "^",   # triangle up
-    90:   "v",   # triangle down
-    95:   "o",   # circle
+    None: "s",  # square  — dense / baseline
+    0: "s",
+    50: "D",  # diamond
+    75: "^",  # triangle up
+    90: "v",  # triangle down
+    95: "o",  # circle
 }
 
 # Sparsity → line dash pattern
 SPARSITY_LINESTYLES = {
     None: "-",
-    0:    "-",
-    50:   (0, (5, 3)),
-    75:   (0, (3, 1, 1, 1)),
-    90:   "--",
-    95:   ":",
+    0: "-",
+    50: (0, (5, 3)),
+    75: (0, (3, 1, 1, 1)),
+    90: "--",
+    95: ":",
 }
 
 # Axis labels for known metric names
@@ -161,24 +168,24 @@ METRIC_LABELS = {
 METRIC_STAGES = {
     "train": ["train_loss", "train/MulticlassAccuracy"],
     "valid": ["valid_loss", "valid/MulticlassAccuracy"],
-    "test":  ["EER", "minDCF"],
+    "test": ["EER", "minDCF"],
     "internal": ["sparsity", "bregman/global_lambda", "bregman/sparsity"],
 }
 
 # metric → set of valid plot types
 METRIC_PLOT_TYPES = {
     # Convergence metrics — time-series curves
-    "train_loss":               {"curves"},
-    "valid_loss":               {"curves"},
+    "train_loss": {"curves"},
+    "valid_loss": {"curves"},
     "train/MulticlassAccuracy": {"curves"},
     "valid/MulticlassAccuracy": {"curves"},
     # Internal / regularizer metrics — curves only
-    "sparsity":                 {"curves"},
-    "bregman/global_lambda":    {"curves"},
-    "bregman/sparsity":         {"curves"},
+    "sparsity": {"curves"},
+    "bregman/global_lambda": {"curves"},
+    "bregman/sparsity": {"curves"},
     # Binary test metrics — bar (comparison) and scatter (correlation)
-    "EER":                      {"bar", "scatter"},
-    "minDCF":                   {"bar", "scatter"},
+    "EER": {"bar", "scatter"},
+    "minDCF": {"bar", "scatter"},
 }
 # Unknown metrics default to {"curves"}
 
@@ -207,6 +214,7 @@ def _stage_of(metric):
 # 3. Experiment name parsing
 # ---------------------------------------------------------------------------
 
+
 def parse_experiment_name(dirname):
     """Parse experiment directory name into structured metadata dict."""
     info = {
@@ -214,12 +222,15 @@ def parse_experiment_name(dirname):
         "sparsity": None,
         "ramp_epochs": None,
         "schedule": None,
+        "variant": None,
     }
 
-    # Sparsity: new format "-sr90" or old format "-sparsity90"
-    m = re.search(r"-(sr|sparsity)(\d+)$", dirname)
+    # Sparsity: "-sr90" or "-sparsity90", possibly followed by a variant suffix
+    m = re.search(r"-(sr|sparsity)(\d+)(?:-(.+))?$", dirname)
     if m:
         info["sparsity"] = int(m.group(2))
+        if m.group(3):
+            info["variant"] = m.group(3)  # e.g. "poor_init", "rescale_prox"
 
     # Ramp: "-ramp10_constant-"
     m = re.search(r"-ramp(\d+)_(\w+)-", dirname)
@@ -232,13 +243,15 @@ def parse_experiment_name(dirname):
     info["model"] = m.group(1) if m else "unknown"
 
     # Method class — order matters (adabregw before adabreg)
-    prefix = dirname.split("-wespeaker")[0] if "-wespeaker" in dirname else dirname
+    prefix = (
+        dirname.split("-wespeaker")[0] if "-wespeaker" in dirname else dirname
+    )
     METHOD_PATTERNS = [
-        ("adabregw",        "adabregw"),
-        ("adabregl2",       "adabregl2"),
-        ("adabreg",         "adabreg"),
-        ("linbreg",         "linbreg"),
-        ("pruning_mag_struct",   "pruning_struct"),
+        ("adabregw", "adabregw"),
+        ("adabregl2", "adabregl2"),
+        ("adabreg", "adabreg"),
+        ("linbreg", "linbreg"),
+        ("pruning_mag_struct", "pruning_struct"),
         ("pruning_mag_unstruct", "pruning_unstruct"),
     ]
     info["method_class"] = "vanilla"  # default
@@ -253,26 +266,55 @@ def parse_experiment_name(dirname):
     return info
 
 
+VARIANT_DISPLAY_NAMES = {
+    "poor_init": "poor init",
+    "rescale_prox": "prox-corr.",
+}
+
+
 def make_label(info):
     """Create a concise, consistent legend label."""
     name = METHOD_DISPLAY_NAMES.get(info["method_class"], info["method_class"])
     if info["sparsity"] is not None:
         pct = r"\%" if plt.rcParams.get("text.usetex") else "%"
-        return f"{name} {info['sparsity']}{pct}"
-    return name
+        label = f"{name} {info['sparsity']}{pct}"
+    else:
+        label = name
+    if info.get("variant"):
+        variant = VARIANT_DISPLAY_NAMES.get(info["variant"], info["variant"])
+        label += f" ({variant})"
+    return label
+
+
+VARIANT_LINESTYLES = {
+    "poor_init": (0, (1, 1)),  # densely dotted
+    "rescale_prox": (0, (3, 1, 1, 1, 1, 1)),  # dash-dot-dot
+}
+
+VARIANT_MARKERS = {
+    "poor_init": "P",  # plus (filled)
+    "rescale_prox": "*",  # star
+}
 
 
 def get_style(info):
-    """Return (color, marker, linestyle) tuple — deterministic from metadata."""
+    """Return (color, marker, linestyle) tuple — deterministic from
+    metadata."""
     color = METHOD_CLASS_COLORS.get(info["method_class"], "#333333")
-    marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
-    ls = SPARSITY_LINESTYLES.get(info["sparsity"], "-")
+    variant = info.get("variant")
+    if variant:
+        marker = VARIANT_MARKERS.get(variant, "x")
+        ls = VARIANT_LINESTYLES.get(variant, "-.")
+    else:
+        marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
+        ls = SPARSITY_LINESTYLES.get(info["sparsity"], "-")
     return color, marker, ls
 
 
 # ---------------------------------------------------------------------------
 # 4. Data loading
 # ---------------------------------------------------------------------------
+
 
 def load_train_log(exp_dir):
     """Load epoch-level metrics from train_log.txt → DataFrame."""
@@ -338,18 +380,33 @@ def discover_experiments(base_dirs, patterns):
         for pattern in patterns:
             for d in all_dirs:
                 full = os.path.join(base_dir, d)
-                if os.path.isdir(full) and d not in seen and glob.fnmatch.fnmatch(d, pattern):
+                if (
+                    os.path.isdir(full)
+                    and d not in seen
+                    and glob.fnmatch.fnmatch(d, pattern)
+                ):
                     seen.add(d)
                     matched.append((full, parse_experiment_name(d)))
 
     # Stable sort: method class order, then sparsity
-    ORDER = ["vanilla", "wespeaker", "linbreg", "adabreg", "adabregw",
-             "adabregl2", "pruning_struct", "pruning_unstruct"]
+    ORDER = [
+        "vanilla",
+        "wespeaker",
+        "linbreg",
+        "adabreg",
+        "adabregw",
+        "adabregl2",
+        "pruning_struct",
+        "pruning_unstruct",
+    ]
 
     def key(item):
         mc = item[1]["method_class"]
-        return (ORDER.index(mc) if mc in ORDER else 99,
-                item[1]["sparsity"] or -1)
+        return (
+            ORDER.index(mc) if mc in ORDER else 99,
+            item[1]["sparsity"] or -1,
+            item[1].get("variant") or "",
+        )
 
     matched.sort(key=key)
     return matched
@@ -359,18 +416,19 @@ def discover_experiments(base_dirs, patterns):
 # 5. Plotting
 # ---------------------------------------------------------------------------
 
+
 def _auto_ylim(ax, metric, margin=0.05):
     """Tighten y-axis to data range with smart zooming.
 
-    For bounded [0,1] metrics like sparsity and accuracy, zooms to the
-    region where the interesting data lives (ignores constant-zero baselines
-    if other curves are far away).
+    For bounded [0,1] metrics like sparsity and accuracy, zooms to the region
+    where the interesting data lives (ignores constant-zero baselines if other
+    curves are far away).
     """
     lines = ax.get_lines()
     if not lines:
         return
 
-    all_y = np.concatenate([l.get_ydata() for l in lines])
+    all_y = np.concatenate([ln.get_ydata() for ln in lines])
     all_y = all_y[np.isfinite(all_y)]
     if len(all_y) == 0:
         return
@@ -398,9 +456,16 @@ def _auto_ylim(ax, metric, margin=0.05):
         ax.set_ylim(ymin - pad, ymax + pad)
 
 
-def plot_training_curves(experiments, metrics, output_path, font_size=10,
-                         fig_width=5.5, fig_height=None, source="train_log",
-                         log_scale=None):
+def plot_training_curves(
+    experiments,
+    metrics,
+    output_path,
+    font_size=10,
+    fig_width=5.5,
+    fig_height=None,
+    source="train_log",
+    log_scale=None,
+):
     """Plot training curves (one subplot per metric, shared x-axis)."""
     if log_scale is None:
         log_scale = set()
@@ -410,12 +475,17 @@ def plot_training_curves(experiments, metrics, output_path, font_size=10,
     if fig_height is None:
         fig_height = 2.4 * n + 0.4
 
-    fig, axes = plt.subplots(n, 1, figsize=(fig_width, fig_height),
-                             sharex=True, squeeze=False)
+    fig, axes = plt.subplots(
+        n, 1, figsize=(fig_width, fig_height), sharex=True, squeeze=False
+    )
     axes = axes.flatten()
 
     for exp_dir, info in experiments:
-        df = load_train_log(exp_dir) if source == "train_log" else load_csv_metrics(exp_dir)
+        df = (
+            load_train_log(exp_dir)
+            if source == "train_log"
+            else load_csv_metrics(exp_dir)
+        )
         x_col = "epoch" if source == "train_log" else "step"
 
         if df is None:
@@ -440,15 +510,21 @@ def plot_training_curves(experiments, metrics, output_path, font_size=10,
             if metric == "sparsity" and y[mask].max() < 1e-6:
                 continue
             ax.plot(
-                x[mask], y[mask],
-                color=color, marker=marker, linestyle=ls,
-                markersize=3.5, markevery=max(1, n_pts // 12),
+                x[mask],
+                y[mask],
+                color=color,
+                marker=marker,
+                linestyle=ls,
+                markersize=3.5,
+                markevery=max(1, n_pts // 12),
                 label=label,
             )
 
     # Axis formatting
     for ax, metric in zip(axes, metrics):
-        ax.set_ylabel(METRIC_LABELS.get(metric, metric.replace("_", " ").title()))
+        ax.set_ylabel(
+            METRIC_LABELS.get(metric, metric.replace("_", " ").title())
+        )
         if metric in log_scale:
             ax.set_yscale("log")
         else:
@@ -466,10 +542,16 @@ def plot_training_curves(experiments, metrics, output_path, font_size=10,
 
     if handles:
         ncol = min(4, len(labels))
-        fig.legend(handles, labels, loc="lower center",
-                   ncol=ncol,
-                   bbox_to_anchor=(0.5, 0.9), frameon=True,
-                   columnspacing=0.8, handletextpad=0.3)
+        fig.legend(
+            handles,
+            labels,
+            loc="lower center",
+            ncol=ncol,
+            bbox_to_anchor=(0.5, 0.9),
+            frameon=True,
+            columnspacing=0.8,
+            handletextpad=0.3,
+        )
 
     fig.align_ylabels(axes)
     fig.subplots_adjust(hspace=0.08)
@@ -480,9 +562,17 @@ def plot_training_curves(experiments, metrics, output_path, font_size=10,
     print(f"Saved: {output_path}")
 
 
-def plot_bar_comparison(experiments, metric, output_path, font_size=10,
-                        fig_width=5.5, fig_height=3.0, epoch=-1):
-    """Grouped bar chart comparing a metric (last epoch), grouped by sparsity."""
+def plot_bar_comparison(
+    experiments,
+    metric,
+    output_path,
+    font_size=10,
+    fig_width=5.5,
+    fig_height=3.0,
+    epoch=-1,
+):
+    """Grouped bar chart comparing a metric (last epoch), grouped by
+    sparsity."""
     from collections import OrderedDict
 
     setup_matplotlib(font_size)
@@ -510,6 +600,7 @@ def plot_bar_comparison(experiments, metric, output_path, font_size=10,
         if sp is None or sp == 0:
             return -1
         return sp
+
     sorted_keys = sorted(groups.keys(), key=_sp_key)
 
     # Build bar positions with intra-group and inter-group gaps
@@ -544,25 +635,47 @@ def plot_bar_comparison(experiments, metric, output_path, font_size=10,
     x_positions = np.array(x_positions)
     values = np.array([v for _, v in bar_infos])
     colors = [get_style(info)[0] for info, _ in bar_infos]
-    tick_labels = [METHOD_DISPLAY_NAMES.get(info["method_class"], info["method_class"])
-                   for info, _ in bar_infos]
+    tick_labels = [
+        METHOD_DISPLAY_NAMES.get(info["method_class"], info["method_class"])
+        for info, _ in bar_infos
+    ]
 
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    bars = ax.bar(x_positions, values, color=colors, edgecolor="white",
-                  linewidth=0.5, width=bar_width)
+    bars = ax.bar(
+        x_positions,
+        values,
+        color=colors,
+        edgecolor="white",
+        linewidth=0.5,
+        width=bar_width,
+    )
     ax.set_xticks(x_positions)
     ax.set_xticklabels(tick_labels, rotation=25, ha="right")
     ax.set_ylabel(METRIC_LABELS.get(metric, metric))
 
     # Value labels on top of each bar
     for bar, v in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, v, f"{v:.3f}",
-                ha="center", va="bottom", fontsize=font_size - 2)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            v,
+            f"{v:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=font_size - 2,
+        )
 
     # Sparsity group labels below x-axis
     for cx, sp_label in group_centers:
-        ax.text(cx, -0.12, sp_label, transform=ax.get_xaxis_transform(),
-                ha="center", va="top", fontweight="bold", fontsize=font_size)
+        ax.text(
+            cx,
+            -0.12,
+            sp_label,
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="top",
+            fontweight="bold",
+            fontsize=font_size,
+        )
 
     # Zoom y-axis if values are clustered (e.g. all near 0.95)
     vmin, vmax = values.min(), values.max()
@@ -581,29 +694,57 @@ def plot_bar_comparison(experiments, metric, output_path, font_size=10,
 # 6. CLI
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Publication-ready experiment visualization.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--base_dirs", nargs="+", required=True,
-                        help="Root dir(s) containing experiment folders.")
-    parser.add_argument("--experiments", nargs="+", required=True,
-                        help="Glob patterns for experiment directory names.")
-    parser.add_argument("--metrics", nargs="+",
-                        default=["train_loss", "train/MulticlassAccuracy", "valid/MulticlassAccuracy", "sparsity"],
-                        help="Metrics to plot (column names).")
-    parser.add_argument("--output", default="results/figures/",
-                        help="Output directory (default: figures/).")
+    parser.add_argument(
+        "--base_dirs",
+        nargs="+",
+        required=True,
+        help="Root dir(s) containing experiment folders.",
+    )
+    parser.add_argument(
+        "--experiments",
+        nargs="+",
+        required=True,
+        help="Glob patterns for experiment directory names.",
+    )
+    parser.add_argument(
+        "--metrics",
+        nargs="+",
+        default=[
+            "train_loss",
+            "train/MulticlassAccuracy",
+            "valid/MulticlassAccuracy",
+            "sparsity",
+        ],
+        help="Metrics to plot (column names).",
+    )
+    parser.add_argument(
+        "--output",
+        default="results/figures/",
+        help="Output directory (default: figures/).",
+    )
     parser.add_argument("--font_size", type=int, default=10)
-    parser.add_argument("--fig_width", type=float, default=5.5,
-                        help="Figure width in inches.")
-    parser.add_argument("--fig_height", type=float, default=None,
-                        help="Figure height in inches (auto if omitted).")
-    parser.add_argument("--source", choices=["train_log", "csv"],
-                        default="csv",
-                        help="Data source: epoch-level or step-level.")
+    parser.add_argument(
+        "--fig_width", type=float, default=5.5, help="Figure width in inches."
+    )
+    parser.add_argument(
+        "--fig_height",
+        type=float,
+        default=None,
+        help="Figure height in inches (auto if omitted).",
+    )
+    parser.add_argument(
+        "--source",
+        choices=["train_log", "csv"],
+        default="csv",
+        help="Data source: epoch-level or step-level.",
+    )
     args = parser.parse_args()
 
     # Resolve output directory (backward compat: if ends with .pdf, use dirname)
@@ -638,10 +779,13 @@ def main():
         # 1. One file per metric (single panel)
         for m in curve_metrics:
             plot_training_curves(
-                experiments, [m],
+                experiments,
+                [m],
                 os.path.join(out_dir, f"{_metric_short_name(m)}.pdf"),
-                font_size=args.font_size, fig_width=args.fig_width,
-                fig_height=None, source=args.source,
+                font_size=args.font_size,
+                fig_width=args.fig_width,
+                fig_height=None,
+                source=args.source,
                 log_scale=METRIC_LOG_SCALE,
             )
 
@@ -652,19 +796,24 @@ def main():
         for stage, ms in stage_metrics.items():
             if len(ms) > 1:
                 plot_training_curves(
-                    experiments, ms,
+                    experiments,
+                    ms,
                     os.path.join(out_dir, f"{stage}_curves.pdf"),
-                    font_size=args.font_size, fig_width=args.fig_width,
-                    fig_height=None, source=args.source,
+                    font_size=args.font_size,
+                    fig_width=args.fig_width,
+                    fig_height=None,
+                    source=args.source,
                     log_scale=METRIC_LOG_SCALE,
                 )
 
     # --- Bar plots ---
     for m in bar_metrics:
         plot_bar_comparison(
-            experiments, m,
+            experiments,
+            m,
             os.path.join(out_dir, f"{_metric_short_name(m)}_bar.pdf"),
-            font_size=args.font_size, fig_width=args.fig_width,
+            font_size=args.font_size,
+            fig_width=args.fig_width,
         )
 
     if not curve_metrics and not bar_metrics:

@@ -47,7 +47,7 @@ SV_DATA_ARCHIVES = [
 
 # sync_results paths - Update these for your specific use case
 # SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, "train/runs/multi_sv/*")
-dataset = "cnceleb" # "cnceleb" or "multi_sv"
+dataset = "cnceleb"  # "cnceleb" or "multi_sv"
 SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, f"train/runs/{dataset}/*")
 # SYNC_DIR_LOCAL = f"/Users/ahmad_aloradi/Desktop/phd/comfort_project/adversarial-robustness-for-sr/results/exps/{dataset}"
 SYNC_DIR_LOCAL = f"/dataHDD/ahmad/comfort26_sem/{dataset}"
@@ -84,9 +84,11 @@ def sync_results():
         upload=False,
     )
 
+
 @task
 def sync_tb():
-    """Rsync only TensorBoard data from the HPC cluster to the local machine."""
+    """Rsync only TensorBoard data from the HPC cluster to the local
+    machine."""
     rsync_project(
         remote_dir=SYNC_DIR_REMOTE,
         local_dir=SYNC_DIR_LOCAL,
@@ -96,23 +98,26 @@ def sync_tb():
         upload=False,
     )
 
+
 @task
 def sync_results_for_test():
-    """Recursively rsync specific artifacts, checkpoints, and logs from the HPC."""
+    """Recursively rsync specific artifacts, checkpoints, and logs from the
+    HPC."""
     rsync_project(
         remote_dir=SYNC_DIR_REMOTE,
         local_dir=SYNC_DIR_LOCAL,
         extra_opts=(
-            "-m "                                     # prune empty directories
-            "--include='*/' "                         # allow traversing directories
-            "--include='**/*artifacts/**' "            # include any artifacts dir + contents
-            "--include='**/checkpoints/**' "          # include any checkpoints dir + contents
-            "--include='**/train_log.txt' "           # include train_log.txt anywhere
-            "--exclude='*'"                           # exclude everything else
+            "-m "  # prune empty directories
+            "--include='*/' "  # allow traversing directories
+            "--include='**/*artifacts/**' "  # include any artifacts dir + contents
+            "--include='**/checkpoints/**' "  # include any checkpoints dir + contents
+            "--include='**/train_log.txt' "  # include train_log.txt anywhere
+            "--exclude='*'"  # exclude everything else
         ),
         delete=False,
         upload=False,
     )
+
 
 def generate_vpc_data_transfer_section(settings):
     """Generate bash code for transferring VPC datasets to local SSD with
@@ -628,7 +633,7 @@ def check_running_pending(job_name):
 
     for host in hosts:
         result = local(
-            f'ssh {ssh_opts} {env.user}@{host} \'{sq}\' 2>/dev/null',
+            f"ssh {ssh_opts} {env.user}@{host} '{sq}' 2>/dev/null",
             capture=True,
         )
         if not result:
@@ -707,8 +712,8 @@ echo 1
 def _remove_completion_markers(test_root):
     """Remove COMPLETE and LAST_RUN markers from all test set subdirectories.
 
-    This allows a previously completed experiment to be re-evaluated.
-    Existing results directories are preserved (new runs get a fresh timestamp).
+    This allows a previously completed experiment to be re-evaluated. Existing
+    results directories are preserved (new runs get a fresh timestamp).
     """
     cmd = f"""
 test_root="{test_root}"
@@ -819,9 +824,9 @@ def run_vpc():
 
 # Per-cluster GPU assignment: dataset -> {cluster -> gpu_partition}
 _GPU_MAP = {
-    "datasets/cnceleb":   {"alex": "a40",  "tinygpu": "v100"},
-    "datasets/voxceleb":  {"alex": "a100", "tinygpu": "a100"},
-    "multi_sv":           {"alex": "a100", "tinygpu": "a100"},
+    "datasets/cnceleb": {"alex": "a40", "tinygpu": "v100"},
+    "datasets/voxceleb": {"alex": "a100", "tinygpu": "a100"},
+    "multi_sv": {"alex": "a100", "tinygpu": "a100"},
     "multi_sv_cnc_train": {"alex": "a100", "tinygpu": "a100"},
 }
 
@@ -853,7 +858,7 @@ def _submit_sv_job(
     transfer_data_bool,
     max_epochs,
     apply_augmentation=False,
-    batch_size_base = 128,
+    batch_size_base=128,
     target_sparsity=None,
     # other options
     gpu_device=GPU,
@@ -870,7 +875,7 @@ def _submit_sv_job(
     num_ckpt_avg = 0  # Number of checkpoints to average for final model (only applicable for certain experiments)
     ramp_up_epochs = 10
     virtual_spks = "False"
-    logger = 'many_loggers' # options tensorboard , many_loggers
+    logger = "many_loggers"  # options tensorboard , many_loggers
 
     settings = {
         "script_name": "src/train.py",
@@ -901,9 +906,13 @@ def _submit_sv_job(
 
     # Specify sparsity if not baseline
     if "bregman" in experiment or "pruning" in experiment:
-        assert target_sparsity is not None, "target_sparsity should be set for pruning and bregman experiments"
+        assert (
+            target_sparsity is not None
+        ), "target_sparsity should be set for pruning and bregman experiments"
     else:
-        assert target_sparsity is None, "target_sparsity should be None for baseline experiments"
+        assert (
+            target_sparsity is None
+        ), "target_sparsity should be None for baseline experiments"
 
     # skip when model type and experiment type disagree
     if is_pretrained != is_onetime:
@@ -948,7 +957,6 @@ def _submit_sv_job(
     )
     num_ckpt_avg_str = f"-avg{num_ckpt_avg}" if num_ckpt_avg > 1 else ""
 
-
     job_name = (
         f"{experiment}{ramp_str}-{sv_model}-{os.path.basename(dataset_name)}"
         f"-virt-{virtual_spks}-bs{batch_size}-vad{apply_vad}"
@@ -980,7 +988,9 @@ def _submit_sv_job(
 
     # Disable checkpoint averaging if num_ckpt_avg is 1 or less
     if num_ckpt_avg > 1:
-        script_arguments["callbacks.checkpoint_averaging.num_checkpoints"] = num_ckpt_avg
+        script_arguments[
+            "callbacks.checkpoint_averaging.num_checkpoints"
+        ] = num_ckpt_avg
     else:
         script_arguments["callbacks.checkpoint_averaging"] = "null"
 
@@ -1109,11 +1119,11 @@ def run_sv(transfer_data="false", force="false"):
         #     "sparsity_rates": default_sparsity_rates,
         #     "dataset_names": dataset_names,
         # },
-        "sv_pruning_mag_unstruct": {
-            "sv_models": default_sv_models,
-            "sparsity_rates": default_sparsity_rates,
-            "dataset_names": dataset_names,
-        },
+        # "sv_pruning_mag_unstruct": {
+        #     "sv_models": default_sv_models,
+        #     "sparsity_rates": default_sparsity_rates,
+        #     "dataset_names": dataset_names,
+        # },
         # "sv_pruning_mag_struct_onetime": {
         #     "sv_models": default_sv_models,
         #     "sparsity_rates": [0.9],
@@ -1154,19 +1164,22 @@ def run_sv(transfer_data="false", force="false"):
         "sv_bregman_adabreg_fixed": {
             "sv_models": mini_default_sv_models,
             "sparsity_rates": mini_exps_sparsity_rates,
-            "dataset_names": ['multi_sv'],
+            "dataset_names": ["multi_sv"],
         },
         "sv_bregman_linbreg_fixed": {
             "sv_models": mini_default_sv_models,
             "sparsity_rates": mini_exps_sparsity_rates,
-            "dataset_names": ['multi_sv'],
+            "dataset_names": ["multi_sv"],
         },
     }
 
     ########################
     # Merge all sparsity experiments
     ########################
-    bregman_experiments = {**main_bregman_experiments, **aux_bregman_experiments}
+    bregman_experiments = {
+        **main_bregman_experiments,
+        **aux_bregman_experiments,
+    }
     sparsity_experiments = {**bregman_experiments, **pruning_experiments}
 
     ########################
@@ -1176,7 +1189,7 @@ def run_sv(transfer_data="false", force="false"):
         "sv_bregman_adabreg": {
             "sv_models": ["wespeaker_ecapa_tdnn"],
             "sparsity_rates": [0.75, 0.9],
-            "dataset_names": ['multi_sv'],
+            "dataset_names": ["multi_sv"],
             "extra_overrides": {
                 "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.1,
                 "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
@@ -1186,7 +1199,7 @@ def run_sv(transfer_data="false", force="false"):
         "sv_bregman_linbreg": {
             "sv_models": ["wespeaker_ecapa_tdnn"],
             "sparsity_rates": [0.75, 0.9],
-            "dataset_names": ['multi_sv'],
+            "dataset_names": ["multi_sv"],
             "extra_overrides": {
                 "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.5,
                 "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
@@ -1202,7 +1215,7 @@ def run_sv(transfer_data="false", force="false"):
         "sv_bregman_adabreg": {
             "sv_models": ["wespeaker_ecapa_tdnn"],
             "sparsity_rates": [0.9],
-            "dataset_names": ['multi_sv'],
+            "dataset_names": ["multi_sv"],
             "extra_overrides": {
                 "callbacks.model_pruning.rescale_prox": True,
             },
@@ -1211,7 +1224,7 @@ def run_sv(transfer_data="false", force="false"):
         "sv_bregman_linbreg": {
             "sv_models": ["wespeaker_ecapa_tdnn"],
             "sparsity_rates": [0.9],
-            "dataset_names": ['multi_sv'],
+            "dataset_names": ["multi_sv"],
             "extra_overrides": {
                 "callbacks.model_pruning.rescale_prox": True,
             },
@@ -1229,24 +1242,33 @@ def run_sv(transfer_data="false", force="false"):
     }
 
     # --- Volume estimation across clusters ---
-    job_counts = {"alex": {"a40": 0, "a100": 0}, "tinygpu": {"v100": 0, "a100": 0}}
+    job_counts = {
+        "alex": {"a40": 0, "a100": 0},
+        "tinygpu": {"v100": 0, "a100": 0},
+    }
 
     for experiment, exp_cfg in sparsity_experiments.items():
         for dataset_name in exp_cfg["dataset_names"]:
             for sparsity in exp_cfg["sparsity_rates"]:
-                cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                cluster, gpu = _get_job_routing(
+                    experiment, dataset_name, sparsity
+                )
                 job_counts[cluster][gpu] += len(exp_cfg["sv_models"])
 
     for experiment, cfg in poor_init_configs.items():
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
-                cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                cluster, gpu = _get_job_routing(
+                    experiment, dataset_name, sparsity
+                )
                 job_counts[cluster][gpu] += len(cfg["sv_models"])
 
     for experiment, cfg in rescale_prox_configs.items():
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
-                cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                cluster, gpu = _get_job_routing(
+                    experiment, dataset_name, sparsity
+                )
                 job_counts[cluster][gpu] += len(cfg["sv_models"])
 
     total_jobs = sum(sum(gpus.values()) for gpus in job_counts.values())
@@ -1256,10 +1278,14 @@ def run_sv(transfer_data="false", force="false"):
         total = sum(gpus.values())
         if total == 0:
             continue
-        gpu_breakdown = ", ".join(f"{g}: {n}" for g, n in gpus.items() if n > 0)
+        gpu_breakdown = ", ".join(
+            f"{g}: {n}" for g, n in gpus.items() if n > 0
+        )
         pct = 100 * total / total_jobs if total_jobs else 0
         marker = " <-- current" if cname == CLUSTER_NAME else ""
-        print(f"  {cname}: {total} jobs ({pct:.0f}%) [{gpu_breakdown}]{marker}")
+        print(
+            f"  {cname}: {total} jobs ({pct:.0f}%) [{gpu_breakdown}]{marker}"
+        )
     print(f"{'='*50}\n")
 
     # --- Submit baseline experiments (only for current cluster) ---
@@ -1268,7 +1294,9 @@ def run_sv(transfer_data="false", force="false"):
             for dataset_name in dataset_names:
                 cluster, gpu = _get_job_routing(experiment, dataset_name)
                 if cluster != CLUSTER_NAME:
-                    print(f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster")
+                    print(
+                        f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
+                    )
                     continue
                 _submit_sv_job(
                     experiment=experiment,
@@ -1286,9 +1314,13 @@ def run_sv(transfer_data="false", force="false"):
         for sv_model in cfg["sv_models"]:
             for dataset_name in cfg["dataset_names"]:
                 for sparsity in cfg["sparsity_rates"]:
-                    cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                    cluster, gpu = _get_job_routing(
+                        experiment, dataset_name, sparsity
+                    )
                     if cluster != CLUSTER_NAME:
-                        print(f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster")
+                        print(
+                            f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
+                        )
                         continue
                     _submit_sv_job(
                         experiment=experiment,
@@ -1309,9 +1341,13 @@ def run_sv(transfer_data="false", force="false"):
         for sv_model in cfg["sv_models"]:
             for dataset_name in cfg["dataset_names"]:
                 for sparsity in cfg["sparsity_rates"]:
-                    cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                    cluster, gpu = _get_job_routing(
+                        experiment, dataset_name, sparsity
+                    )
                     if cluster != CLUSTER_NAME:
-                        print(f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster")
+                        print(
+                            f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
+                        )
                         continue
                     _submit_sv_job(
                         experiment=experiment,
@@ -1335,9 +1371,13 @@ def run_sv(transfer_data="false", force="false"):
         for sv_model in exp_cfg["sv_models"]:
             for dataset_name in exp_cfg["dataset_names"]:
                 for sparsity in exp_cfg["sparsity_rates"]:
-                    cluster, gpu = _get_job_routing(experiment, dataset_name, sparsity)
+                    cluster, gpu = _get_job_routing(
+                        experiment, dataset_name, sparsity
+                    )
                     if cluster != CLUSTER_NAME:
-                        print(f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster")
+                        print(
+                            f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
+                        )
                         continue
                     _submit_sv_job(
                         experiment=experiment,
@@ -1402,8 +1442,10 @@ def eval_sv(force="true"):
     """
     force_retest = force.lower() in ("true", "1", "yes")
 
-    EVAL_OUTPUT_DIR = '/home/hpc/dsnf/dsnf101h/adversarial-robustness-for-sr/logs/eval/runs'
-    TRAINED_MODELS_DIR = '/home/vault/dsnf/dsnf101h/results/train/runs'
+    EVAL_OUTPUT_DIR = (
+        "/home/hpc/dsnf/dsnf101h/adversarial-robustness-for-sr/logs/eval/runs"
+    )
+    TRAINED_MODELS_DIR = "/home/vault/dsnf/dsnf101h/results/train/runs"
 
     exp_paths = [
         ############
@@ -1427,9 +1469,9 @@ def eval_sv(force="true"):
         # Pruning at 90% sparsity
         "sv_pruning_mag_unstruct-ramp10_constant-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs30-data_augFalse",
         "sv_pruning_mag_struct-ramp10_constant-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs30-data_augFalse",
-         # Pruning at 95% sparsity
+        # Pruning at 95% sparsity
         "sv_pruning_mag_unstruct-ramp10_constant-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs30-data_augFalse-sparsity95",
-        "sv_pruning_mag_struct-ramp10_constant-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs30-data_augFalse-sparsity95"
+        "sv_pruning_mag_struct-ramp10_constant-wespeaker_ecapa_tdnn-multi_sv-virtual_spks-False-bs256-vadFalse-ckpt_avg3-max_epochs30-data_augFalse-sparsity95",
     ]
 
     base_settings = {
@@ -1437,7 +1479,7 @@ def eval_sv(force="true"):
         "cluster": CLUSTER_NAME,
         "path_project": PATH_PROJECT,
         "env_name": CONDA_ENV,
-        "gpu": 'v100' if CLUSTER_NAME == "tinyx" else 'a40',
+        "gpu": "v100" if CLUSTER_NAME == "tinyx" else "a40",
         "num_nodes": 1,
         "walltime": "24:00:00",
         "num_gpus": 1,
@@ -1449,7 +1491,11 @@ def eval_sv(force="true"):
         job_name = f"eval-{path}"
 
         # Extract dataset from exp name (assuming it contains either "cnceleb", "voxceleb", or neither for multi_sv)
-        dataset = "cnceleb" if "cnceleb" in path else ("voxceleb" if "voxceleb" in path else "multi_sv")
+        dataset = (
+            "cnceleb"
+            if "cnceleb" in path
+            else ("voxceleb" if "voxceleb" in path else "multi_sv")
+        )
         exp_dir = os.path.join(TRAINED_MODELS_DIR, dataset, path)
         print(f"Preparing evaluation for {exp_dir}")
 
@@ -1458,8 +1504,12 @@ def eval_sv(force="true"):
         #   old: epoch{epoch}-loss_valid{loss}-metric_valid{metric}.ckpt
         #   new: epoch{epoch}-loss_valid{loss}-metric_valid{metric}-sr{sr}.ckpt
         ckpt_dir = os.path.join(exp_dir, "checkpoints")
-        result = run(f"ls -1 {ckpt_dir}/epoch*.ckpt 2>/dev/null || true", quiet=True)
-        ckpt_names = [line.strip() for line in result.splitlines() if line.strip()]
+        result = run(
+            f"ls -1 {ckpt_dir}/epoch*.ckpt 2>/dev/null || true", quiet=True
+        )
+        ckpt_names = [
+            line.strip() for line in result.splitlines() if line.strip()
+        ]
         if not ckpt_names:
             raise ValueError(f"No checkpoints found for {path}")
 
