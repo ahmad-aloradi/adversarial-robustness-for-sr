@@ -1,85 +1,86 @@
 import math
 
 MIN_LAMBDA = 1e-10
+INIT_LAMBDA = 0.1
 
 BREGMAN_LAMBDA_CONFIGS = {
     "AdaBreg": {
         0.5: {
-            "initial_lambda": 0.2,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 2.0,
         },
         0.7: {
-            "initial_lambda": 0.4,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 4.0,
         },
         0.9: {
-            "initial_lambda": 0.5,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 8.0,
         },
         0.95: {
-            "initial_lambda": 2.0,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 14.0,
         },
         0.99: {
-            "initial_lambda": 4.0,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 18.0,
         },
     },
     "LinBreg": {
         0.5: {
-            "initial_lambda": 0.0001,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.001,
         },
         0.7: {
-            "initial_lambda": 0.0005,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.005,
         },
         0.9: {
-            "initial_lambda": 0.01,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.03,
         },
         0.95: {
-            "initial_lambda": 0.01,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.1,
         },
         0.99: {
-            "initial_lambda": 0.05,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.3,
         },
     },
     "ProxSGD": {
         0.5: {
-            "initial_lambda": 0.0001,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.1,
         },
         0.7: {
-            "initial_lambda": 0.0005,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.5,
         },
         0.9: {
-            "initial_lambda": 0.01,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 1.0,
         },
         0.95: {
-            "initial_lambda": 0.01,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 2.0,
         },
         0.99: {
-            "initial_lambda": 0.05,
+            "initial_lambda": INIT_LAMBDA,
             "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 5.0,
         },

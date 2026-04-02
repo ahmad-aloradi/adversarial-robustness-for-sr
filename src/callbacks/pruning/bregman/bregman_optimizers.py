@@ -45,6 +45,8 @@ class LinBreg(torch.optim.Optimizer):
             reg = group['reg'] 
             step_size = group['lr']
             momentum = group['momentum']
+            # rescale updated subgradient when λ changes between steps
+            needs_rescale = reg.rescale_prox and (reg.lamda != reg._prev_lamda)
             
             for p in group['params']:
                 if p.grad is None:
@@ -64,25 +66,29 @@ class LinBreg(torch.optim.Optimizer):
                 # Get current subgradient
                 sub_grad = state['sub_grad']
                 
+                # EN rescaling: adjust sub_grad when λ changed between steps
+                if needs_rescale:
+                    reg.en_rescale_sub_grad(sub_grad, p.data, delta)
+
                 # Update subgradient
                 if momentum > 0.0:
                     mom_buff = state['momentum_buffer']
                     if state['momentum_buffer'] is None:
                         mom_buff = torch.zeros_like(grad)
- 
+
                     mom_buff.mul_(momentum)
-                    mom_buff.add_((1 - momentum) * step_size * grad) 
+                    mom_buff.add_((1 - momentum) * step_size * grad)
                     state['momentum_buffer'] = mom_buff
                     sub_grad.add_(-mom_buff)
                 else:
                     sub_grad.add_(-step_size * grad)
 
                 # Update parameters using proximal operator (safe in-place copy)
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if reg.rescale_prox:
-                    assert reg.lamda > 0
-                    prox_result = prox_result / reg.lamda
-                p.copy_(prox_result)
+                p.copy_(reg.prox(delta * sub_grad, delta))
+
+            # Update lambda tracker after ALL group parameters are processed
+            if needs_rescale:
+                reg.step_lamda_state()
 
         return loss
 
@@ -145,7 +151,9 @@ class AdaBreg(torch.optim.Optimizer):
             lr = group['lr']
             beta1, beta2 = group['betas']
             eps = group['eps']
-            
+            # rescale updated subgradient when λ changes between steps
+            needs_rescale = reg.rescale_prox and (reg.lamda != reg._prev_lamda)
+
             for p in group['params']:
                 if p.grad is None:
                     continue
@@ -167,7 +175,11 @@ class AdaBreg(torch.optim.Optimizer):
                 sub_grad = state['sub_grad']
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
-                
+
+                # EN rescaling: adjust sub_grad when λ changed between steps
+                if reg.rescale_prox:
+                    reg.en_rescale_sub_grad(sub_grad, p.data, delta)
+
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
                 bias_correction2 = 1 - beta2 ** step
@@ -178,19 +190,19 @@ class AdaBreg(torch.optim.Optimizer):
 
                 # Compute denominator
                 denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
-                
+
                 # Compute step size
                 step_size = lr / bias_correction1
-                
+
                 # Update subgradient
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
                 # Update parameters using proximal operator (safe in-place copy)
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if reg.rescale_prox:
-                    assert reg.lamda > 0
-                    prox_result = prox_result / reg.lamda
-                p.copy_(prox_result)
+                p.copy_(reg.prox(delta * sub_grad, delta))
+
+            # Update lambda tracker after ALL group parameters are processed
+            if needs_rescale:
+                reg.step_lamda_state()
 
         return loss
 
@@ -258,6 +270,8 @@ class AdaBregW(AdaBreg):
             beta1, beta2 = group['betas']
             eps = group['eps']
             wd = group.get('weight_decay', self.weight_decay)
+            # rescale updated subgradient when λ changes between steps
+            needs_rescale = reg.rescale_prox and (reg.lamda != reg._prev_lamda)
 
             for p in group['params']:
                 if p.grad is None:
@@ -279,6 +293,10 @@ class AdaBregW(AdaBreg):
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
 
+                # EN rescaling: adjust sub_grad when λ changed between steps
+                if reg.rescale_prox:
+                    reg.en_rescale_sub_grad(sub_grad, p.data, delta)
+
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
                 bias_correction2 = 1 - beta2 ** step
@@ -297,15 +315,16 @@ class AdaBregW(AdaBreg):
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
                 # Proximal step to get candidate weights
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if reg.rescale_prox:
-                    assert reg.lamda > 0
-                    prox_result = prox_result / reg.lamda
-                p.copy_(prox_result)
+                p.copy_(reg.prox(delta * sub_grad, delta))
 
                 # Decoupled weight decay: shrink surviving weights
                 assert wd > 0, "Weight decay must be positive for AdaBregW"
                 p.mul_(1 - lr * wd)
+
+            # Update lambda tracker after ALL group parameters are processed
+            if needs_rescale:
+                reg.step_lamda_state()
+
 
         return loss
 
@@ -357,6 +376,8 @@ class AdaBregL2(AdaBreg):
             beta1, beta2 = group['betas']
             eps = group['eps']
             wd = group.get('weight_decay', self.weight_decay)
+            # rescale updated subgradient when λ changes between steps
+            needs_rescale = reg.rescale_prox and (reg.lamda != reg._prev_lamda)
 
             for p in group['params']:
                 if p.grad is None:
@@ -383,6 +404,10 @@ class AdaBregL2(AdaBreg):
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
 
+                # EN rescaling: adjust sub_grad when λ changed between steps
+                if reg.rescale_prox:
+                    reg.en_rescale_sub_grad(sub_grad, p.data, delta)
+
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
                 bias_correction2 = 1 - beta2 ** step
@@ -401,11 +426,11 @@ class AdaBregL2(AdaBreg):
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
                 # Proximal step
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if reg.rescale_prox:
-                    assert reg.lamda > 0
-                    prox_result = prox_result / reg.lamda
-                p.copy_(prox_result)
+                p.copy_(reg.prox(delta * sub_grad, delta))
+
+            # Update lambda tracker after ALL group parameters are processed
+            if needs_rescale:
+                reg.step_lamda_state()
 
         return loss
 
@@ -456,11 +481,7 @@ class ProxSGD(torch.optim.Optimizer):
                 # Gradient step
                 p.add_(-step_size * grad)
                 # Proximal step (safe in-place copy)
-                prox_result = reg.prox(p.data, step_size)
-                if reg.rescale_prox:
-                    assert reg.lamda > 0
-                    prox_result = prox_result / reg.lamda
-                p.copy_(prox_result)
+                p.copy_(reg.prox(p.data, step_size))
         
         return loss
                 

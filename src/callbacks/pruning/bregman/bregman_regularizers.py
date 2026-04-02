@@ -17,8 +17,7 @@ class BregmanRegularizer:
     def __init__(self, lamda: float = 1.0, delta: float = 1.0):
         self.lamda = lamda
         self.rescale_prox = False
-        # Note: delta parameter is kept for compatibility but not stored
-        # It's passed directly to prox() method during optimization
+        self._prev_lamda = lamda
 
     def __call__(self, x: torch.Tensor) -> float:
         raise NotImplementedError
@@ -28,6 +27,24 @@ class BregmanRegularizer:
 
     def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
+
+    def en_rescale_sub_grad(
+        self, sub_grad: torch.Tensor, theta: torch.Tensor, delta: float
+    ) -> None:
+        """Elastic net subgradient rescaling when lambda changes.
+
+        For φ = (1/2δ)||·||² + β||·||₁, changing β from β_old to β_new:
+            p_new = (β_new/β_old) p_old + (1 - β_new/β_old) θ/δ
+
+        ensures p_new ∈ ∂φ_new(θ). Modifies sub_grad in-place.
+        """
+        ratio = self.lamda / (self._prev_lamda + 1e-12)  # Avoid division by zero
+        sub_grad.mul_(ratio).add_(theta, alpha=(1 - ratio) / delta)
+
+
+    def step_lamda_state(self):
+            """Updates the state AFTER the whole parameter group is processed."""
+            self._prev_lamda = self.lamda
 
 
 class RegNone(BregmanRegularizer):
