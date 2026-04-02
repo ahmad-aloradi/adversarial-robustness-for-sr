@@ -49,14 +49,14 @@ callbacks:
   early_stopping:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'}
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
 
   margin_scheduler:
     _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
     initial_margin: 0.0
     final_margin: 0.2
-    start_epoch: ${oc.eval:'int(${trainer.max_epochs} * 0.133)'}
-    warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.133)'}
+    start_epoch: ${oc.eval:'int(${trainer.max_epochs} * 0.1)'}
+    warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.1)'}
     increase_type: exp
 
   model_pruning:
@@ -76,7 +76,7 @@ callbacks:
       min_lambda: ${_bregman_min_lambda}
       max_lambda: 1000
       warmup_epochs: 0 #${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
-      update_frequency: 200
+      update_frequency: 50
       damping_zone: 0.01
       damping_acceleration_divisor: 5 # This means the acceleration will be 10x slower in the damping zone
       damping_frequency_multiplier: 2 # This means updates will be 10x less frequent in the damping zone

@@ -58,7 +58,7 @@ callbacks:
   early_stopping:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'}
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
 
   # Progressive margin scheduler (same as sv_wespeaker)
   margin_scheduler:

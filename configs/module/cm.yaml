@@ -81,6 +81,6 @@ callbacks:
   early_stopping:
     mode: min
     monitor: valid/minDCF
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'}
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
   epoch_summary_logger:
     monitor: valid/minDCF

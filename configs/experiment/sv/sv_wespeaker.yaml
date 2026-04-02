@@ -59,7 +59,7 @@ callbacks:
   early_stopping:
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.3)'} # ~30% of epochs
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'} # 50% of epochs
   # Progressive margin scheduler (WeSpeaker-style, auto-scaled to max_epochs)
   # WeSpeaker: margin starts at 13% (20/150), ends at 27% (40/150), exponential curve
   margin_scheduler:

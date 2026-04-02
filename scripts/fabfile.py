@@ -1111,67 +1111,87 @@ def run_sv(transfer_data="false", force="false"):
     ]
 
     ########################
+    # Switch controls
+    ########################
+    # Master switch per group of experiments
+    RUN_PRUNING_EXPS = False
+    RUN_Bregman_EXPS = False
+    RUN_AUX_BREGMAN_EXPS = False
+    RUN_POOR_INIT_Bregman_EXPS = False
+    RUN_RESCALE_PROX_Bregman_EXPS = True
+
+    ########################
     # Pruning experiments
     ########################
-    pruning_experiments = {
-        # "sv_pruning_mag_struct": {
-        #     "sv_models": default_sv_models,
-        #     "sparsity_rates": default_sparsity_rates,
-        #     "dataset_names": dataset_names,
-        # },
-        # "sv_pruning_mag_unstruct": {
-        #     "sv_models": default_sv_models,
-        #     "sparsity_rates": default_sparsity_rates,
-        #     "dataset_names": dataset_names,
-        # },
-        # "sv_pruning_mag_struct_onetime": {
-        #     "sv_models": default_sv_models,
-        #     "sparsity_rates": [0.9],
-        #     "dataset_names": dataset_names,
-        # },
-        # "sv_pruning_mag_unstruct_onetime": {
-        #     "sv_models": default_sv_models,
-        #     "sparsity_rates": [0.9],
-        #     "dataset_names": dataset_names,
-        # },
-    }
+    if not RUN_PRUNING_EXPS:
+        pruning_experiments = {}
+    else:
+        pruning_experiments = {
+            "sv_pruning_mag_struct": {
+                "sv_models": default_sv_models,
+                "sparsity_rates": default_sparsity_rates,
+                "dataset_names": dataset_names,
+            },
+            "sv_pruning_mag_unstruct": {
+                "sv_models": default_sv_models,
+                "sparsity_rates": default_sparsity_rates,
+                "dataset_names": dataset_names,
+            },
+            # "sv_pruning_mag_struct_onetime": {
+            #     "sv_models": default_sv_models,
+            #     "sparsity_rates": [0.9],
+            #     "dataset_names": dataset_names,
+            # },
+            # "sv_pruning_mag_unstruct_onetime": {
+            #     "sv_models": default_sv_models,
+            #     "sparsity_rates": [0.9],
+            #     "dataset_names": dataset_names,
+            # },
+        }
 
     ########################
     # Bregman experiments
     ########################
-    main_bregman_experiments = {
-        "sv_bregman_linbreg": {
-            "sv_models": default_sv_models,
-            "sparsity_rates": default_sparsity_rates,
-            "dataset_names": dataset_names,
-        },
-        "sv_bregman_adabreg": {
-            "sv_models": default_sv_models,
-            "sparsity_rates": default_sparsity_rates,
-            "dataset_names": dataset_names,
-        },
-    }
+    if not RUN_Bregman_EXPS:
+        main_bregman_experiments = {}
+    else:
+        main_bregman_experiments = {
+            "sv_bregman_linbreg": {
+                "sv_models": default_sv_models,
+                "sparsity_rates": default_sparsity_rates,
+                "dataset_names": dataset_names,
+            },
+            "sv_bregman_adabreg": {
+                "sv_models": default_sv_models,
+                "sparsity_rates": default_sparsity_rates,
+                "dataset_names": dataset_names,
+            },
+        }
 
     # use a smaller sweep for auxiliary experiments to keep the total number of jobs manageable
     mini_exps_sparsity_rates = [0.90]
     mini_default_sv_models = ["wespeaker_ecapa_tdnn"]
-    aux_bregman_experiments = {
-        "sv_bregman_proxsgd": {
-            "sv_models": mini_default_sv_models,
-            "sparsity_rates": mini_exps_sparsity_rates,
-            "dataset_names": dataset_names,
-        },
-        "sv_bregman_adabreg_fixed": {
-            "sv_models": mini_default_sv_models,
-            "sparsity_rates": mini_exps_sparsity_rates,
-            "dataset_names": ["multi_sv"],
-        },
-        "sv_bregman_linbreg_fixed": {
-            "sv_models": mini_default_sv_models,
-            "sparsity_rates": mini_exps_sparsity_rates,
-            "dataset_names": ["multi_sv"],
-        },
-    }
+
+    if not RUN_AUX_BREGMAN_EXPS:
+        aux_bregman_experiments = {}
+    else:
+        aux_bregman_experiments = {
+            "sv_bregman_proxsgd": {
+                "sv_models": mini_default_sv_models,
+                "sparsity_rates": mini_exps_sparsity_rates,
+                "dataset_names": dataset_names,
+            },
+            "sv_bregman_adabreg_fixed": {
+                "sv_models": mini_default_sv_models,
+                "sparsity_rates": mini_exps_sparsity_rates,
+                "dataset_names": ["multi_sv"],
+            },
+            "sv_bregman_linbreg_fixed": {
+                "sv_models": mini_default_sv_models,
+                "sparsity_rates": mini_exps_sparsity_rates,
+                "dataset_names": ["multi_sv"],
+            },
+        }
 
     ########################
     # Merge all sparsity experiments
@@ -1185,61 +1205,58 @@ def run_sv(transfer_data="false", force="false"):
     ########################
     # Poor-init experiments: swapped initial_lambda + fast update frequency
     ########################
-    poor_init_configs = {
-        "sv_bregman_adabreg": {
-            "sv_models": ["wespeaker_ecapa_tdnn"],
-            "sparsity_rates": [0.75, 0.9],
-            "dataset_names": ["multi_sv"],
-            "extra_overrides": {
-                "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.1,
-                "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
+    if not RUN_POOR_INIT_Bregman_EXPS:
+        poor_init_configs = {}
+    else:
+        poor_init_configs = {
+            "sv_bregman_adabreg": {
+                "sv_models": ["wespeaker_ecapa_tdnn"],
+                "sparsity_rates": [0.75, 0.9],
+                "dataset_names": ["multi_sv"],
+                "extra_overrides": {
+                    "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.1,
+                    "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
+                },
+                "suffix": "-poor_init",
             },
-            "suffix": "-poor_init",
-        },
-        "sv_bregman_linbreg": {
-            "sv_models": ["wespeaker_ecapa_tdnn"],
-            "sparsity_rates": [0.75, 0.9],
-            "dataset_names": ["multi_sv"],
-            "extra_overrides": {
-                "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.5,
-                "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
+            "sv_bregman_linbreg": {
+                "sv_models": ["wespeaker_ecapa_tdnn"],
+                "sparsity_rates": [0.75, 0.9],
+                "dataset_names": ["multi_sv"],
+                "extra_overrides": {
+                    "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.5,
+                    "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
+                },
+                "suffix": "-poor_init",
             },
-            "suffix": "-poor_init",
-        },
-    }
+        }
 
     ########################
     # Rescale-prox experiments: divide prox output by lambda (dual averaging)
     ########################
-    rescale_prox_configs = {
-        "sv_bregman_adabreg": {
-            "sv_models": ["wespeaker_ecapa_tdnn"],
-            "sparsity_rates": [0.9],
-            "dataset_names": ["multi_sv"],
-            "extra_overrides": {
-                "callbacks.model_pruning.rescale_prox": True,
+    if not RUN_RESCALE_PROX_Bregman_EXPS:
+        rescale_prox_configs = {}
+    else:
+        rescale_prox_configs = {
+            "sv_bregman_adabreg": {
+                "sv_models": ["wespeaker_ecapa_tdnn"],
+                "sparsity_rates": [0.9, 0.99],
+                "dataset_names": ["multi_sv"],
+                "extra_overrides": {
+                    "callbacks.model_pruning.rescale_prox": True,
+                },
+                "suffix": "-rescale_prox_V2",
             },
-            "suffix": "-rescale_prox",
-        },
-        "sv_bregman_linbreg": {
-            "sv_models": ["wespeaker_ecapa_tdnn"],
-            "sparsity_rates": [0.9],
-            "dataset_names": ["multi_sv"],
-            "extra_overrides": {
-                "callbacks.model_pruning.rescale_prox": True,
+            "sv_bregman_linbreg": {
+                "sv_models": ["wespeaker_ecapa_tdnn"],
+                "sparsity_rates": [0.9, 0.99],
+                "dataset_names": ["multi_sv"],
+                "extra_overrides": {
+                    "callbacks.model_pruning.rescale_prox": True,
+                },
+                "suffix": "-rescale_prox_V2",
             },
-            "suffix": "-rescale_prox",
-        },
-        # "sv_bregman_proxsgd": {
-        #     "sv_models": ["wespeaker_ecapa_tdnn"],
-        #     "sparsity_rates": [0.9],
-        #     "dataset_names": ['multi_sv'],
-        #     "extra_overrides": {
-        #         "callbacks.model_pruning.rescale_prox": True,
-        #     },
-        #     "suffix": "-rescale_prox",
-        # },
-    }
+        }
 
     # --- Volume estimation across clusters ---
     job_counts = {
