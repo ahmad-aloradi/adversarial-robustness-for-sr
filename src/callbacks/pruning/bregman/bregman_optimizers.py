@@ -2,6 +2,7 @@
 Bregman optimizers adapted from BregmanLearning repository.
 These implement linearized Bregman iterations for sparse neural network training.
 """
+from librosa.feature import delta
 import torch
 import math
 from typing import Optional
@@ -104,13 +105,9 @@ class LinBreg(torch.optim.Optimizer):
         return loss
 
     def initialize_sub_grad(self, p: torch.Tensor, reg: BregmanRegularizer, delta: float):
-        """Initialize subgradient for Bregman iterations.
-
-        Nestrov's adaptive update scales by λ so that (1/λ)·prox(δv₀) recovers θ₀.
-        """
+        """Initialize subgradient for Bregman iterations."""
         p_init = p.data.clone()
-        scale = reg.lamda if getattr(reg, 'rescale_mode', 'none') == "nestrovs_adaptive_update" else 1.0
-        return scale / delta * p_init + reg.sub_grad(p_init)
+        return 1/delta * p_init + reg.sub_grad(p_init)
 
     @torch.no_grad()
     def evaluate_reg(self):
@@ -232,13 +229,9 @@ class AdaBreg(torch.optim.Optimizer):
         return loss
 
     def initialize_sub_grad(self, p: torch.Tensor, reg: BregmanRegularizer, delta: float):
-        """Initialize subgradient for Bregman iterations.
-
-        Nestrov's adaptive update scales by λ so that (1/λ)·prox(δv₀) recovers θ₀.
-        """
+        """Initialize subgradient for Bregman iterations."""
         p_init = p.data.clone()
-        scale = reg.lamda if getattr(reg, 'rescale_mode', 'none') == "nestrovs_adaptive_update" else 1.0
-        return scale / delta * p_init + reg.sub_grad(p_init)
+        return 1/delta * p_init + reg.sub_grad(p_init)
 
     @torch.no_grad()
     def evaluate_reg(self):
