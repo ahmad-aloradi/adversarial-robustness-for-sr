@@ -45,7 +45,7 @@ class BregmanPruner(Callback):
         lambda_scheduler: Optional[LambdaScheduler] = None,
         target_sparsity: Optional[float] = None,
         tolerance: float = 0.01,
-        rescale_prox: bool = False,
+        rescale_mode: str = "none",
     ):
         """
         Args:
@@ -53,15 +53,17 @@ class BregmanPruner(Callback):
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
             lambda_scheduler: Optional scheduler for dynamic lambda updates.
             target_sparsity: Target sparsity for validation suppression.
-            rescale_prox: If True and lambda_scheduler is active, divide prox
-                output by lambda (dual averaging rescaling).
+            rescale_mode: How to handle λ changes in the proximal step.
+                "none": no rescaling (default).
+                "subgradient_correction": adjust subgradient v to remain in ∂φ_new(θ).
+                "nestrovs_adaptive_update": use ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv).
         """
         super().__init__()
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
         self.target_sparsity = target_sparsity
-        self.rescale_prox = rescale_prox
+        self.rescale_mode = rescale_mode
 
         self.manager: Optional[PruningManager] = None
         self._initialized = False
@@ -104,12 +106,12 @@ class BregmanPruner(Callback):
         if is_resuming and self._ckpt_scheduler_state:
             log.info("Restored lambda values to optimizer parameter groups.")
 
-        if self.lambda_scheduler is not None and self.rescale_prox:
+        if self.lambda_scheduler is not None and self.rescale_mode != "none":
             for group in optimizer.param_groups:
                 if "reg" in group:
-                    group["reg"].rescale_prox = True
+                    group["reg"].rescale_mode = self.rescale_mode
             log.info(
-                "BregmanPruner: rescale_prox enabled (EN subgradient rescaling)."
+                f"BregmanPruner: rescale_mode='{self.rescale_mode}' enabled."
             )
 
         self._initialized = True

@@ -59,7 +59,7 @@ callbacks:
     verbose: 2
     target_sparsity: ${_bregman_target_sparsity}
     tolerance: 0.01
-    rescale_prox: false
+    rescale_mode: "none"
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
@@ -71,7 +71,7 @@ callbacks:
       warmup_epochs: 0
       update_frequency: 50
       damping_zone: 0.01
-      damping_acceleration_divisor: 5
+      damping_acceleration_divisor: 10
       damping_frequency_multiplier: 2
 
 datamodule:

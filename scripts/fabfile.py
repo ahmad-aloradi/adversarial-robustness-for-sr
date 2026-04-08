@@ -1118,7 +1118,8 @@ def run_sv(transfer_data="false", force="false"):
     RUN_Bregman_EXPS = False
     RUN_AUX_BREGMAN_EXPS = False
     RUN_POOR_INIT_Bregman_EXPS = False
-    RUN_RESCALE_PROX_Bregman_EXPS = True
+    RUN_NESTROV_RESCALE_PROX_Bregman_EXPS = True
+    RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS = True
 
     ########################
     # Pruning experiments
@@ -1234,29 +1235,62 @@ def run_sv(transfer_data="false", force="false"):
     ########################
     # Rescale-prox experiments: divide prox output by lambda (dual averaging)
     ########################
-    if not RUN_RESCALE_PROX_Bregman_EXPS:
-        rescale_prox_configs = {}
+    if not RUN_NESTROV_RESCALE_PROX_Bregman_EXPS:
+        nestrovs_rescale_prox_configs = {}
     else:
-        rescale_prox_configs = {
+        nestrovs_rescale_prox_configs = {
+            "sv_bregman_adabreg": {
+                "sv_models": default_sv_models,
+                "sparsity_rates": default_sparsity_rates,
+                "dataset_names": dataset_names,
+                "extra_overrides": {
+                    "callbacks.model_pruning.rescale_mode": "nestrovs_adaptive_update",
+                },
+                "suffix": "-rescale_prox",
+            },
+            "sv_bregman_linbreg": {
+                "sv_models": default_sv_models,
+                "sparsity_rates": default_sparsity_rates,
+                "dataset_names": dataset_names,
+                "extra_overrides": {
+                    "callbacks.model_pruning.rescale_mode": "nestrovs_adaptive_update",
+                },
+                "suffix": "-rescale_prox",
+            },
+        }
+
+
+    ########################
+    # Rescale-prox experiments: Subgradient correction 
+    ########################
+    if not RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS:
+        subgrad_corr_rescale_prox_configs = {}
+    else:
+        subgrad_corr_rescale_prox_configs = {
             "sv_bregman_adabreg": {
                 "sv_models": ["wespeaker_ecapa_tdnn"],
-                "sparsity_rates": [0.9, 0.99],
+                "sparsity_rates": [0.9],
                 "dataset_names": ["multi_sv"],
                 "extra_overrides": {
-                    "callbacks.model_pruning.rescale_prox": True,
+                    "callbacks.model_pruning.rescale_mode": "subgradient_correction",
                 },
                 "suffix": "-rescale_prox_V2",
             },
             "sv_bregman_linbreg": {
                 "sv_models": ["wespeaker_ecapa_tdnn"],
-                "sparsity_rates": [0.9, 0.99],
+                "sparsity_rates": [0.9],
                 "dataset_names": ["multi_sv"],
                 "extra_overrides": {
-                    "callbacks.model_pruning.rescale_prox": True,
+                    "callbacks.model_pruning.rescale_mode": "subgradient_correction",
                 },
                 "suffix": "-rescale_prox_V2",
             },
         }
+
+    rescale_prox_configs = {
+        **nestrovs_rescale_prox_configs,
+        **subgrad_corr_rescale_prox_configs,
+    }
 
     # --- Volume estimation across clusters ---
     job_counts = {

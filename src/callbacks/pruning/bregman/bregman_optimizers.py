@@ -8,6 +8,7 @@ from typing import Optional
 from .bregman_regularizers import BregmanRegularizer, RegNone
 
 
+
 class LinBreg(torch.optim.Optimizer):
     """Linearized Bregman optimizer.
     
@@ -45,16 +46,18 @@ class LinBreg(torch.optim.Optimizer):
             reg = group['reg'] 
             step_size = group['lr']
             momentum = group['momentum']
-            # rescale updated subgradient when λ changes between steps
-            needs_rescale = reg.rescale_prox and (reg.lamda != reg._prev_lamda)
-            
+            # rescaling mode when λ changes between steps
+            rescale_mode = getattr(reg, 'rescale_mode', 'none')
+            needs_subgrad_correction = rescale_mode == "subgradient_correction" and (reg.lamda != reg._prev_lamda)
+            use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
+
             for p in group['params']:
                 if p.grad is None:
                     continue
-                    
+
                 grad = p.grad.data
                 state = self.state[p]
-                
+
                 if len(state) == 0:
                     state['step'] = 0
                     state['sub_grad'] = self.initialize_sub_grad(p, reg, delta)
@@ -65,12 +68,8 @@ class LinBreg(torch.optim.Optimizer):
 
                 # Get current subgradient
                 sub_grad = state['sub_grad']
-                
-                # EN rescaling: adjust sub_grad when λ changed between steps
-                if needs_rescale:
-                    reg.en_rescale_sub_grad(sub_grad, p.data, delta)
 
-                # Update subgradient
+                # Step 1: p̃^(k+1) = p^(k) − τ∇L(θ^(k))
                 if momentum > 0.0:
                     mom_buff = state['momentum_buffer']
                     if state['momentum_buffer'] is None:
@@ -83,20 +82,36 @@ class LinBreg(torch.optim.Optimizer):
                 else:
                     sub_grad.add_(-step_size * grad)
 
-                # Update parameters using proximal operator (safe in-place copy)
-                p.copy_(reg.prox(delta * sub_grad, delta))
+                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1)) — prox with OLD λ
+                if needs_subgrad_correction:
+                    saved_lamda = reg.lamda
+                    reg.lamda = reg._prev_lamda
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if needs_subgrad_correction:
+                    reg.lamda = saved_lamda
+                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)/δ
+                    reg.apply_subgradient_correction(sub_grad, prox_result, delta)
+
+                # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
+                if use_nestrov_update:
+                    prox_result = prox_result / max(reg.lamda, 1e-12)
+                p.copy_(prox_result)
 
             # Update lambda tracker after ALL group parameters are processed
-            if needs_rescale:
+            if needs_subgrad_correction:
                 reg.step_lamda_state()
 
         return loss
 
     def initialize_sub_grad(self, p: torch.Tensor, reg: BregmanRegularizer, delta: float):
-        """Initialize subgradient for Bregman iterations."""
+        """Initialize subgradient for Bregman iterations.
+
+        Nestrov's adaptive update scales by λ so that (1/λ)·prox(δv₀) recovers θ₀.
+        """
         p_init = p.data.clone()
-        return 1/delta * p_init + reg.sub_grad(p_init)
-    
+        scale = reg.lamda if getattr(reg, 'rescale_mode', 'none') == "nestrovs_adaptive_update" else 1.0
+        return scale / delta * p_init + reg.sub_grad(p_init)
+
     @torch.no_grad()
     def evaluate_reg(self):
         """Evaluate regularization terms."""
@@ -104,12 +119,12 @@ class LinBreg(torch.optim.Optimizer):
         for group in self.param_groups:
             group_reg_val = 0.0
             reg = group['reg']
-            
+
             for p in group['params']:
                 group_reg_val += reg(p)
-                
+
             reg_vals.append(group_reg_val)
-            
+
         return reg_vals
 
 
@@ -151,34 +166,32 @@ class AdaBreg(torch.optim.Optimizer):
             lr = group['lr']
             beta1, beta2 = group['betas']
             eps = group['eps']
-            # rescale updated subgradient when λ changes between steps
-            needs_rescale = reg.rescale_prox and (reg.lamda != reg._prev_lamda)
+            # rescaling mode when λ changes between steps
+            rescale_mode = getattr(reg, 'rescale_mode', 'none')
+            needs_subgrad_correction = rescale_mode == "subgradient_correction" and (reg.lamda != reg._prev_lamda)
+            use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
                 if p.grad is None:
                     continue
-                    
+
                 grad = p.grad.data
                 state = self.state[p]
-                
+
                 if len(state) == 0:
                     state['step'] = 0
                     state['sub_grad'] = self.initialize_sub_grad(p, reg, delta)
                     state['exp_avg'] = torch.zeros_like(state['sub_grad'])
                     state['exp_avg_sq'] = torch.zeros_like(state['sub_grad'])
-                
+
                 # Update step
                 state['step'] += 1
                 step = state['step']
-                
+
                 # Get state variables
                 sub_grad = state['sub_grad']
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
-
-                # EN rescaling: adjust sub_grad when λ changed between steps
-                if reg.rescale_prox:
-                    reg.en_rescale_sub_grad(sub_grad, p.data, delta)
 
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
@@ -194,23 +207,39 @@ class AdaBreg(torch.optim.Optimizer):
                 # Compute step size
                 step_size = lr / bias_correction1
 
-                # Update subgradient
+                # Step 1: p̃^(k+1) = p^(k) − τ·adam_step
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                # Update parameters using proximal operator (safe in-place copy)
-                p.copy_(reg.prox(delta * sub_grad, delta))
+                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1)) — prox with OLD λ
+                if needs_subgrad_correction:
+                    saved_lamda = reg.lamda
+                    reg.lamda = reg._prev_lamda
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if needs_subgrad_correction:
+                    reg.lamda = saved_lamda
+                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)/δ
+                    reg.apply_subgradient_correction(sub_grad, prox_result, delta)
+
+                # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
+                if use_nestrov_update:
+                    prox_result = prox_result / max(reg.lamda, 1e-12)
+                p.copy_(prox_result)
 
             # Update lambda tracker after ALL group parameters are processed
-            if needs_rescale:
+            if needs_subgrad_correction:
                 reg.step_lamda_state()
 
         return loss
 
     def initialize_sub_grad(self, p: torch.Tensor, reg: BregmanRegularizer, delta: float):
-        """Initialize subgradient for Bregman iterations."""
+        """Initialize subgradient for Bregman iterations.
+
+        Nestrov's adaptive update scales by λ so that (1/λ)·prox(δv₀) recovers θ₀.
+        """
         p_init = p.data.clone()
-        return 1/delta * p_init + reg.sub_grad(p_init)
-    
+        scale = reg.lamda if getattr(reg, 'rescale_mode', 'none') == "nestrovs_adaptive_update" else 1.0
+        return scale / delta * p_init + reg.sub_grad(p_init)
+
     @torch.no_grad()
     def evaluate_reg(self):
         """Evaluate regularization terms."""
@@ -218,12 +247,12 @@ class AdaBreg(torch.optim.Optimizer):
         for group in self.param_groups:
             group_reg_val = 0.0
             reg = group['reg']
-            
+
             for p in group['params']:
                 group_reg_val += reg(p)
-                
+
             reg_vals.append(group_reg_val)
-            
+
         return reg_vals
 
 
@@ -270,8 +299,10 @@ class AdaBregW(AdaBreg):
             beta1, beta2 = group['betas']
             eps = group['eps']
             wd = group.get('weight_decay', self.weight_decay)
-            # rescale updated subgradient when λ changes between steps
-            needs_rescale = reg.rescale_prox and (reg.lamda != reg._prev_lamda)
+            # rescaling mode when λ changes between steps
+            rescale_mode = getattr(reg, 'rescale_mode', 'none')
+            needs_subgrad_correction = rescale_mode == "subgradient_correction" and (reg.lamda != reg._prev_lamda)
+            use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
                 if p.grad is None:
@@ -293,10 +324,6 @@ class AdaBregW(AdaBreg):
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
 
-                # EN rescaling: adjust sub_grad when λ changed between steps
-                if reg.rescale_prox:
-                    reg.en_rescale_sub_grad(sub_grad, p.data, delta)
-
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
                 bias_correction2 = 1 - beta2 ** step
@@ -311,18 +338,30 @@ class AdaBregW(AdaBreg):
                 # Compute step size
                 step_size = lr / bias_correction1
 
-                # Update subgradient (same as AdaBreg)
+                # Step 1: p̃^(k+1) = p^(k) − τ·adam_step
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                # Proximal step to get candidate weights
-                p.copy_(reg.prox(delta * sub_grad, delta))
+                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1)) — prox with OLD λ
+                if needs_subgrad_correction:
+                    saved_lamda = reg.lamda
+                    reg.lamda = reg._prev_lamda
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if needs_subgrad_correction:
+                    reg.lamda = saved_lamda
+                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)/δ
+                    reg.apply_subgradient_correction(sub_grad, prox_result, delta)
+
+                # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
+                if use_nestrov_update:
+                    prox_result = prox_result / max(reg.lamda, 1e-12)
+                p.copy_(prox_result)
 
                 # Decoupled weight decay: shrink surviving weights
                 assert wd > 0, "Weight decay must be positive for AdaBregW"
                 p.mul_(1 - lr * wd)
 
             # Update lambda tracker after ALL group parameters are processed
-            if needs_rescale:
+            if needs_subgrad_correction:
                 reg.step_lamda_state()
 
 
@@ -376,8 +415,10 @@ class AdaBregL2(AdaBreg):
             beta1, beta2 = group['betas']
             eps = group['eps']
             wd = group.get('weight_decay', self.weight_decay)
-            # rescale updated subgradient when λ changes between steps
-            needs_rescale = reg.rescale_prox and (reg.lamda != reg._prev_lamda)
+            # rescaling mode when λ changes between steps
+            rescale_mode = getattr(reg, 'rescale_mode', 'none')
+            needs_subgrad_correction = rescale_mode == "subgradient_correction" and (reg.lamda != reg._prev_lamda)
+            use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
                 if p.grad is None:
@@ -404,10 +445,6 @@ class AdaBregL2(AdaBreg):
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
 
-                # EN rescaling: adjust sub_grad when λ changed between steps
-                if reg.rescale_prox:
-                    reg.en_rescale_sub_grad(sub_grad, p.data, delta)
-
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
                 bias_correction2 = 1 - beta2 ** step
@@ -422,14 +459,26 @@ class AdaBregL2(AdaBreg):
                 # Compute step size
                 step_size = lr / bias_correction1
 
-                # Update subgradient (L2-augmented gradient flows through here)
+                # Step 1: p̃^(k+1) = p^(k) − τ·adam_step (L2-augmented gradient)
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                # Proximal step
-                p.copy_(reg.prox(delta * sub_grad, delta))
+                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1)) — prox with OLD λ
+                if needs_subgrad_correction:
+                    saved_lamda = reg.lamda
+                    reg.lamda = reg._prev_lamda
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if needs_subgrad_correction:
+                    reg.lamda = saved_lamda
+                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)/δ
+                    reg.apply_subgradient_correction(sub_grad, prox_result, delta)
+
+                # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
+                if use_nestrov_update:
+                    prox_result = prox_result / max(reg.lamda, 1e-12)
+                p.copy_(prox_result)
 
             # Update lambda tracker after ALL group parameters are processed
-            if needs_rescale:
+            if needs_subgrad_correction:
                 reg.step_lamda_state()
 
         return loss
@@ -480,7 +529,7 @@ class ProxSGD(torch.optim.Optimizer):
                     
                 # Gradient step
                 p.add_(-step_size * grad)
-                # Proximal step (safe in-place copy)
+                # Proximal step
                 p.copy_(reg.prox(p.data, step_size))
         
         return loss

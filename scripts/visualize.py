@@ -139,6 +139,7 @@ SPARSITY_MARKERS = {
     75: "^",  # triangle up
     90: "v",  # triangle down
     95: "o",  # circle
+    99: "x",  # x-mark
 }
 
 # Sparsity → line dash pattern
@@ -149,6 +150,7 @@ SPARSITY_LINESTYLES = {
     75: (0, (3, 1, 1, 1)),
     90: "--",
     95: ":",
+    99: (0, (1, 1)),
 }
 
 # Axis labels for known metric names
@@ -268,8 +270,32 @@ def parse_experiment_name(dirname):
 
 VARIANT_DISPLAY_NAMES = {
     "poor_init": "poor init",
-    "rescale_prox": "prox-corr.",
+    "rescale_prox": "Rescale Prox.",
+    "rescale_prox_V2": "SubGrad Corr.",
 }
+
+# Variant color adjustments: (hue_shift, saturation_shift, lightness_shift)
+# Hue rotates the color wheel (0-1 wraps), saturation/lightness are additive.
+# This keeps variants visually related to their base method but clearly distinct.
+VARIANT_COLOR_ADJUSTMENTS = {
+    "poor_init": (-0.08, -0.15, -0.12),       # shift hue toward red, desaturate, darken
+    "rescale_prox": (0.10, 0.05, 0.15),        # shift hue toward cyan, slightly brighter
+    "rescale_prox_V2": (0.18, -0.10, -0.05),   # shift hue further, slightly muted
+}
+
+
+def _adjust_color(hex_color, hue_shift, sat_shift, light_shift):
+    """Adjust a hex color in HLS space: shift hue, saturation, and lightness."""
+    import colorsys
+
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    h = (h + hue_shift) % 1.0
+    s = max(0.0, min(1.0, s + sat_shift))
+    l = max(0.05, min(0.95, l + light_shift))
+    r, g, b = colorsys.hls_to_rgb(h, l, s)
+    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
 
 def make_label(info):
@@ -286,28 +312,17 @@ def make_label(info):
     return label
 
 
-VARIANT_LINESTYLES = {
-    "poor_init": (0, (1, 1)),  # densely dotted
-    "rescale_prox": (0, (3, 1, 1, 1, 1, 1)),  # dash-dot-dot
-}
-
-VARIANT_MARKERS = {
-    "poor_init": "P",  # plus (filled)
-    "rescale_prox": "*",  # star
-}
-
-
 def get_style(info):
     """Return (color, marker, linestyle) tuple — deterministic from
     metadata."""
     color = METHOD_CLASS_COLORS.get(info["method_class"], "#333333")
     variant = info.get("variant")
     if variant:
-        marker = VARIANT_MARKERS.get(variant, "x")
-        ls = VARIANT_LINESTYLES.get(variant, "-.")
-    else:
-        marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
-        ls = SPARSITY_LINESTYLES.get(info["sparsity"], "-")
+        adj = VARIANT_COLOR_ADJUSTMENTS.get(variant)
+        if adj:
+            color = _adjust_color(color, *adj)
+    marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
+    ls = SPARSITY_LINESTYLES.get(info["sparsity"], "-")
     return color, marker, ls
 
 
