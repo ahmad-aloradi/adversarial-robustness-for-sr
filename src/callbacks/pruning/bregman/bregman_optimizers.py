@@ -2,7 +2,6 @@
 Bregman optimizers adapted from BregmanLearning repository.
 These implement linearized Bregman iterations for sparse neural network training.
 """
-from librosa.feature import delta
 import torch
 import math
 from typing import Optional
@@ -83,19 +82,17 @@ class LinBreg(torch.optim.Optimizer):
                 else:
                     sub_grad.add_(-step_size * grad)
 
-                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1)) — prox with OLD λ
+                # Step 2 (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
                 if needs_subgrad_correction:
-                    saved_lamda = reg.lamda
-                    reg.lamda = reg._prev_lamda
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if needs_subgrad_correction:
-                    reg.lamda = saved_lamda
-                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)/δ
-                    reg.apply_subgradient_correction(sub_grad, prox_result, delta)
-
-                # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
-                if use_nestrov_update:
-                    prox_result = prox_result / max(reg.lamda, 1e-12)
+                    # prox with β^(k) (old lambda)
+                    prox_result = reg.prox(delta * sub_grad, delta, lamda=reg._prev_lamda)
+                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)
+                    reg.apply_subgradient_correction(sub_grad, prox_result)
+                elif use_nestrov_update:
+                    # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
+                    prox_result = reg.prox(delta * sub_grad, delta) / (reg.lamda + 1e-12)
+                else:
+                    prox_result = reg.prox(delta * sub_grad, delta)
                 p.copy_(prox_result)
 
             # Update lambda tracker after ALL group parameters are processed
@@ -207,19 +204,17 @@ class AdaBreg(torch.optim.Optimizer):
                 # Step 1: p̃^(k+1) = p^(k) − τ·adam_step
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1)) — prox with OLD λ
+                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
                 if needs_subgrad_correction:
-                    saved_lamda = reg.lamda
-                    reg.lamda = reg._prev_lamda
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if needs_subgrad_correction:
-                    reg.lamda = saved_lamda
-                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)/δ
-                    reg.apply_subgradient_correction(sub_grad, prox_result, delta)
-
-                # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
-                if use_nestrov_update:
-                    prox_result = prox_result / max(reg.lamda, 1e-12)
+                    # prox with β^(k) (old lambda)
+                    prox_result = reg.prox(delta * sub_grad, delta, lamda=reg._prev_lamda)
+                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)
+                    reg.apply_subgradient_correction(sub_grad, prox_result)
+                elif use_nestrov_update:
+                    # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
+                    prox_result = reg.prox(delta * sub_grad, delta) / (reg.lamda + 1e-12)
+                else:
+                    prox_result = reg.prox(delta * sub_grad, delta)
                 p.copy_(prox_result)
 
             # Update lambda tracker after ALL group parameters are processed
@@ -334,19 +329,17 @@ class AdaBregW(AdaBreg):
                 # Step 1: p̃^(k+1) = p^(k) − τ·adam_step
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1)) — prox with OLD λ
+                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
                 if needs_subgrad_correction:
-                    saved_lamda = reg.lamda
-                    reg.lamda = reg._prev_lamda
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if needs_subgrad_correction:
-                    reg.lamda = saved_lamda
-                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)/δ
-                    reg.apply_subgradient_correction(sub_grad, prox_result, delta)
-
-                # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
-                if use_nestrov_update:
-                    prox_result = prox_result / max(reg.lamda, 1e-12)
+                    # prox with β^(k) (old lambda)
+                    prox_result = reg.prox(delta * sub_grad, delta, lamda=reg._prev_lamda)
+                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)
+                    reg.apply_subgradient_correction(sub_grad, prox_result)
+                elif use_nestrov_update:
+                    # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
+                    prox_result = reg.prox(delta * sub_grad, delta) / (reg.lamda + 1e-12)
+                else:
+                    prox_result = reg.prox(delta * sub_grad, delta)
                 p.copy_(prox_result)
 
                 # Decoupled weight decay: shrink surviving weights
@@ -455,19 +448,17 @@ class AdaBregL2(AdaBreg):
                 # Step 1: p̃^(k+1) = p^(k) − τ·adam_step (L2-augmented gradient)
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1)) — prox with OLD λ
+                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
                 if needs_subgrad_correction:
-                    saved_lamda = reg.lamda
-                    reg.lamda = reg._prev_lamda
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if needs_subgrad_correction:
-                    reg.lamda = saved_lamda
-                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)/δ
-                    reg.apply_subgradient_correction(sub_grad, prox_result, delta)
-
-                # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
-                if use_nestrov_update:
-                    prox_result = prox_result / max(reg.lamda, 1e-12)
+                    # prox with β^(k) (old lambda)
+                    prox_result = reg.prox(delta * sub_grad, delta, lamda=reg._prev_lamda)
+                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)
+                    reg.apply_subgradient_correction(sub_grad, prox_result)
+                elif use_nestrov_update:
+                    # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
+                    prox_result = reg.prox(delta * sub_grad, delta) / (reg.lamda + 1e-12)
+                else:
+                    prox_result = reg.prox(delta * sub_grad, delta)
                 p.copy_(prox_result)
 
             # Update lambda tracker after ALL group parameters are processed

@@ -8,7 +8,6 @@ Each regularizer is initialized with a base strength `lamda`. The `delta` parame
 is passed to the `prox` method during optimization steps.
 """
 import torch
-import torch.nn as nn
 import math
 
 
@@ -22,24 +21,26 @@ class BregmanRegularizer:
     def __call__(self, x: torch.Tensor) -> float:
         raise NotImplementedError
 
-    def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
+    def prox(self, x: torch.Tensor, delta: float = 1.0, lamda: float = None) -> torch.Tensor:
+        """Proximal operator. When lamda is None, uses self.lamda (set by the
+        scheduler). An explicit lamda is needed for subgradient correction,
+        where the prox must use β^(k) (old lambda) while self.lamda already
+        holds β^(k+1) (new lambda)."""
         raise NotImplementedError
 
     def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
     def apply_subgradient_correction(
-        self, sub_grad: torch.Tensor, theta: torch.Tensor, delta: float
-    ) -> None:
+        self, sub_grad: torch.Tensor, theta: torch.Tensor
+        ) -> None:
         """Subgradient correction when lambda changes between steps.
 
         For φ = (1/2δ)||·||² + β||·||₁, changing β from β_old to β_new:
-            v_new = (β_new/β_old) v_old + (1 - β_new/β_old) θ/δ
-
-        ensures v_new ∈ ∂φ_new(θ). Modifies sub_grad in-place.
+            v_new = (β_new/β_old) v_old + (1 - β_new/β_old) θ
         """
-        ratio = self.lamda / max(self._prev_lamda, 1e-12)  # Avoid division by zero
-        sub_grad.mul_(ratio).add_(theta, alpha=(1 - ratio) / delta)
+        ratio = self.lamda / (self._prev_lamda + 1e-12)  # Avoid division by zero
+        sub_grad.mul_(ratio).add_(theta, alpha=(1 - ratio))
 
 
     def step_lamda_state(self):
@@ -52,7 +53,7 @@ class RegNone(BregmanRegularizer):
     def __call__(self, x: torch.Tensor) -> float:
         return 0.0
     
-    def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
+    def prox(self, x: torch.Tensor, delta: float = 1.0, lamda: float = None) -> torch.Tensor:
         return x
     
     def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
@@ -63,9 +64,10 @@ class RegL1(BregmanRegularizer):
     """L1 norm regularizer."""
     def __call__(self, x: torch.Tensor) -> float:
         return self.lamda * torch.norm(x, p=1).item()
-        
-    def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
-        return torch.sign(x) * torch.clamp(torch.abs(x) - (delta * self.lamda), min=0)
+
+    def prox(self, x: torch.Tensor, delta: float = 1.0, lamda: float = None) -> torch.Tensor:
+        lamda = lamda if lamda is not None else self.lamda
+        return torch.sign(x) * torch.clamp(torch.abs(x) - (delta * lamda), min=0)
         
     def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
         return self.lamda * torch.sign(v)
@@ -75,10 +77,11 @@ class RegL1Pos(BregmanRegularizer):
     """L1 norm regularizer with positivity constraint."""
     def __call__(self, x: torch.Tensor) -> float:
         return self.lamda * torch.norm(x, p=1).item()
-        
-    def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
+
+    def prox(self, x: torch.Tensor, delta: float = 1.0, lamda: float = None) -> torch.Tensor:
+        lamda = lamda if lamda is not None else self.lamda
         # Apply soft thresholding first, then clamp to ensure positivity
-        soft_thresholded = torch.sign(x) * torch.clamp(torch.abs(x) - (delta * self.lamda), min=0)
+        soft_thresholded = torch.sign(x) * torch.clamp(torch.abs(x) - (delta * lamda), min=0)
         return torch.clamp(soft_thresholded, min=0)
         
     def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
@@ -90,10 +93,11 @@ class RegL1L2(BregmanRegularizer):
     def __call__(self, x: torch.Tensor) -> float:
         if x.dim() < 2: return 0.0 # Not applicable for vectors
         return self.lamda * math.sqrt(x.shape[-1]) * torch.norm(torch.norm(x, p=2, dim=1), p=1).item()
-        
-    def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
+
+    def prox(self, x: torch.Tensor, delta: float = 1.0, lamda: float = None) -> torch.Tensor:
+        lamda = lamda if lamda is not None else self.lamda
         if x.dim() < 2: return x # Not applicable for vectors
-        thresh = delta * self.lamda * math.sqrt(x.shape[-1])
+        thresh = delta * lamda * math.sqrt(x.shape[-1])
         
         nx = torch.norm(x, p=2, dim=1, keepdim=True)
         # Avoid division by zero by adding a small epsilon where the norm is zero
@@ -119,10 +123,10 @@ class RegL1L2Conv(RegL1L2):
         if x.dim() < 2: return 0.0
         return super().__call__(x.view(x.shape[0] * x.shape[1], -1))
     
-    def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
+    def prox(self, x: torch.Tensor, delta: float = 1.0, lamda: float = None) -> torch.Tensor:
         if x.dim() < 2: return x
         original_shape = x.shape
-        ret = super().prox(x.view(original_shape[0] * original_shape[1], -1), delta)
+        ret = super().prox(x.view(original_shape[0] * original_shape[1], -1), delta, lamda=lamda)
         return ret.view(original_shape)
     
     def sub_grad(self, x: torch.Tensor) -> torch.Tensor:
@@ -137,9 +141,10 @@ class RegSoftBernoulli(BregmanRegularizer):
     def __call__(self, x: torch.Tensor) -> float:
         return self.lamda * torch.norm(x, p=1).item()
     
-    def prox(self, x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
+    def prox(self, x: torch.Tensor, delta: float = 1.0, lamda: float = None) -> torch.Tensor:
+        lamda = lamda if lamda is not None else self.lamda
         return torch.sign(x) * torch.max(
-            torch.clamp(torch.abs(x) - (delta * self.lamda), min=0), 
+            torch.clamp(torch.abs(x) - (delta * lamda), min=0),
             torch.bernoulli(0.01 * torch.ones_like(x))
         )
 
