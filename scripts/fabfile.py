@@ -1103,23 +1103,29 @@ def run_sv(transfer_data="false", force="false"):
         "multi_sv_cnc_train": 20,
     }
 
-    # Per-experiment hparams: models, sparsity_rates, extra_overrides
-    # Omitted keys fall back to defaults above
-    baselines_exps = [
-        "sv_wespeaker",
-        "sv_vanilla",
-    ]
-
     ########################
     # Switch controls
     ########################
     # Master switch per group of experiments
+    RUN_BASELINE_EXPS = False
     RUN_PRUNING_EXPS = False
     RUN_Bregman_EXPS = False
     RUN_AUX_BREGMAN_EXPS = False
     RUN_POOR_INIT_Bregman_EXPS = False
     RUN_NESTROV_RESCALE_PROX_Bregman_EXPS = True
     RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS = True
+
+
+    ########################
+    # Pruning experiments
+    ########################
+    if not RUN_BASELINE_EXPS:
+        baselines_exps = []
+    else:
+        baselines_exps = [
+            "sv_wespeaker",
+            "sv_vanilla",
+        ]
 
     ########################
     # Pruning experiments
@@ -1287,10 +1293,10 @@ def run_sv(transfer_data="false", force="false"):
             },
         }
 
-    rescale_prox_configs = {
-        **nestrovs_rescale_prox_configs,
-        **subgrad_corr_rescale_prox_configs,
-    }
+    rescale_prox_configs = [
+        *nestrovs_rescale_prox_configs.items(),
+        *subgrad_corr_rescale_prox_configs.items(),
+    ]
 
     # --- Volume estimation across clusters ---
     job_counts = {
@@ -1314,7 +1320,7 @@ def run_sv(transfer_data="false", force="false"):
                 )
                 job_counts[cluster][gpu] += len(cfg["sv_models"])
 
-    for experiment, cfg in rescale_prox_configs.items():
+    for experiment, cfg in rescale_prox_configs:
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
                 cluster, gpu = _get_job_routing(
@@ -1388,7 +1394,7 @@ def run_sv(transfer_data="false", force="false"):
                     )
 
     # --- Submit rescale-prox experiments (only for current cluster) ---
-    for experiment, cfg in rescale_prox_configs.items():
+    for experiment, cfg in rescale_prox_configs:
         for sv_model in cfg["sv_models"]:
             for dataset_name in cfg["dataset_names"]:
                 for sparsity in cfg["sparsity_rates"]:

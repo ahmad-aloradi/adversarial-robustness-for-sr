@@ -70,7 +70,7 @@ callbacks:
       max_lambda: 1000
       warmup_epochs: 0
       update_frequency: 50
-      damping_zone: 0.01
+      damping_zone: 0.005
       damping_acceleration_divisor: 10
       damping_frequency_multiplier: 2
 
