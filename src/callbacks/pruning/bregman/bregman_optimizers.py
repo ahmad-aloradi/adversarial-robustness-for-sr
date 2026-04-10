@@ -48,7 +48,7 @@ class LinBreg(torch.optim.Optimizer):
             momentum = group['momentum']
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
-            needs_subgrad_correction = rescale_mode == "subgradient_correction" and (reg.lamda != reg._prev_lamda)
+            use_subgrad_correction = rescale_mode == "subgradient_correction"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
@@ -69,7 +69,11 @@ class LinBreg(torch.optim.Optimizer):
                 # Get current subgradient
                 sub_grad = state['sub_grad']
 
-                # Step 1: p̃^(k+1) = p^(k) − τ∇L(θ^(k))
+                # Subgradient correction (before dual update)
+                if use_subgrad_correction:
+                    reg.apply_subgradient_correction(sub_grad, p.data)
+
+                # Dual update: p̃^(k+1) = p^(k) − τ∇L(θ^(k))
                 if momentum > 0.0:
                     mom_buff = state['momentum_buffer']
                     if state['momentum_buffer'] is None:
@@ -82,21 +86,13 @@ class LinBreg(torch.optim.Optimizer):
                 else:
                     sub_grad.add_(-step_size * grad)
 
-                # Step 2 (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
-                if needs_subgrad_correction:
-                    # prox with β^(k) (old lambda)
-                    prox_result = reg.prox(delta * sub_grad, delta, lamda=reg._prev_lamda)
-                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)
-                    reg.apply_subgradient_correction(sub_grad, prox_result)
-                elif use_nestrov_update:
-                    # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
-                    prox_result = reg.prox(delta * sub_grad, delta) / (reg.lamda + 1e-12)
-                else:
-                    prox_result = reg.prox(delta * sub_grad, delta)
+                # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if use_nestrov_update:
+                    prox_result /= (reg.lamda + 1e-12)
                 p.copy_(prox_result)
 
-            # Update lambda tracker after ALL group parameters are processed
-            if needs_subgrad_correction:
+            if use_subgrad_correction:
                 reg.step_lamda_state()
 
         return loss
@@ -162,7 +158,7 @@ class AdaBreg(torch.optim.Optimizer):
             eps = group['eps']
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
-            needs_subgrad_correction = rescale_mode == "subgradient_correction" and (reg.lamda != reg._prev_lamda)
+            use_subgrad_correction = rescale_mode == "subgradient_correction"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
@@ -187,6 +183,10 @@ class AdaBreg(torch.optim.Optimizer):
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
 
+                # Subgradient correction (before dual update)
+                if use_subgrad_correction:
+                    reg.apply_subgradient_correction(sub_grad, p.data)
+
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
                 bias_correction2 = 1 - beta2 ** step
@@ -201,24 +201,16 @@ class AdaBreg(torch.optim.Optimizer):
                 # Compute step size
                 step_size = lr / bias_correction1
 
-                # Step 1: p̃^(k+1) = p^(k) − τ·adam_step
+                # Dual update: p̃^(k+1) = p^(k) − τ·adam_step
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
-                if needs_subgrad_correction:
-                    # prox with β^(k) (old lambda)
-                    prox_result = reg.prox(delta * sub_grad, delta, lamda=reg._prev_lamda)
-                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)
-                    reg.apply_subgradient_correction(sub_grad, prox_result)
-                elif use_nestrov_update:
-                    # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
-                    prox_result = reg.prox(delta * sub_grad, delta) / (reg.lamda + 1e-12)
-                else:
-                    prox_result = reg.prox(delta * sub_grad, delta)
+                # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if use_nestrov_update:
+                    prox_result /= (reg.lamda + 1e-12)
                 p.copy_(prox_result)
 
-            # Update lambda tracker after ALL group parameters are processed
-            if needs_subgrad_correction:
+            if use_subgrad_correction:
                 reg.step_lamda_state()
 
         return loss
@@ -289,7 +281,7 @@ class AdaBregW(AdaBreg):
             wd = group.get('weight_decay', self.weight_decay)
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
-            needs_subgrad_correction = rescale_mode == "subgradient_correction" and (reg.lamda != reg._prev_lamda)
+            use_subgrad_correction = rescale_mode == "subgradient_correction"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
@@ -312,6 +304,10 @@ class AdaBregW(AdaBreg):
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
 
+                # Subgradient correction (before dual update)
+                if use_subgrad_correction:
+                    reg.apply_subgradient_correction(sub_grad, p.data)
+
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
                 bias_correction2 = 1 - beta2 ** step
@@ -326,30 +322,21 @@ class AdaBregW(AdaBreg):
                 # Compute step size
                 step_size = lr / bias_correction1
 
-                # Step 1: p̃^(k+1) = p^(k) − τ·adam_step
+                # Dual update: p̃^(k+1) = p^(k) − τ·adam_step
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
-                if needs_subgrad_correction:
-                    # prox with β^(k) (old lambda)
-                    prox_result = reg.prox(delta * sub_grad, delta, lamda=reg._prev_lamda)
-                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)
-                    reg.apply_subgradient_correction(sub_grad, prox_result)
-                elif use_nestrov_update:
-                    # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
-                    prox_result = reg.prox(delta * sub_grad, delta) / (reg.lamda + 1e-12)
-                else:
-                    prox_result = reg.prox(delta * sub_grad, delta)
+                # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if use_nestrov_update:
+                    prox_result /= (reg.lamda + 1e-12)
                 p.copy_(prox_result)
 
                 # Decoupled weight decay: shrink surviving weights
                 assert wd > 0, "Weight decay must be positive for AdaBregW"
                 p.mul_(1 - lr * wd)
 
-            # Update lambda tracker after ALL group parameters are processed
-            if needs_subgrad_correction:
+            if use_subgrad_correction:
                 reg.step_lamda_state()
-
 
         return loss
 
@@ -403,7 +390,7 @@ class AdaBregL2(AdaBreg):
             wd = group.get('weight_decay', self.weight_decay)
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
-            needs_subgrad_correction = rescale_mode == "subgradient_correction" and (reg.lamda != reg._prev_lamda)
+            use_subgrad_correction = rescale_mode == "subgradient_correction"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
@@ -431,6 +418,10 @@ class AdaBregL2(AdaBreg):
                 exp_avg = state['exp_avg']
                 exp_avg_sq = state['exp_avg_sq']
 
+                # Subgradient correction (before dual update)
+                if use_subgrad_correction:
+                    reg.apply_subgradient_correction(sub_grad, p.data)
+
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
                 bias_correction2 = 1 - beta2 ** step
@@ -445,24 +436,16 @@ class AdaBregL2(AdaBreg):
                 # Compute step size
                 step_size = lr / bias_correction1
 
-                # Step 1: p̃^(k+1) = p^(k) − τ·adam_step (L2-augmented gradient)
+                # Dual update: p̃^(k+1) = p^(k) − τ·adam_step (L2-augmented gradient)
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                # Step 2: θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
-                if needs_subgrad_correction:
-                    # prox with β^(k) (old lambda)
-                    prox_result = reg.prox(delta * sub_grad, delta, lamda=reg._prev_lamda)
-                    # Step 3: p^(k+1) = (β_new/β_old)·p̃ + (1 − β_new/β_old)·θ^(k+1)
-                    reg.apply_subgradient_correction(sub_grad, prox_result)
-                elif use_nestrov_update:
-                    # Nestrov's adaptive update: ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv)
-                    prox_result = reg.prox(delta * sub_grad, delta) / (reg.lamda + 1e-12)
-                else:
-                    prox_result = reg.prox(delta * sub_grad, delta)
+                # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
+                prox_result = reg.prox(delta * sub_grad, delta)
+                if use_nestrov_update:
+                    prox_result /= (reg.lamda + 1e-12)
                 p.copy_(prox_result)
 
-            # Update lambda tracker after ALL group parameters are processed
-            if needs_subgrad_correction:
+            if use_subgrad_correction:
                 reg.step_lamda_state()
 
         return loss

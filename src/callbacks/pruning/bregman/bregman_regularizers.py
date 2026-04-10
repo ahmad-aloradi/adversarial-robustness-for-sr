@@ -32,15 +32,21 @@ class BregmanRegularizer:
         raise NotImplementedError
 
     def apply_subgradient_correction(
-        self, sub_grad: torch.Tensor, theta: torch.Tensor
+        self, sub_grad: torch.Tensor, p: torch.Tensor
         ) -> None:
         """Subgradient correction when lambda changes between steps.
 
-        For φ = (1/2δ)||·||² + β||·||₁, changing β from β_old to β_new:
-            v_new = (β_new/β_old) v_old + (1 - β_new/β_old) θ
+        Applied BEFORE the sub-gradient update step. For zero, non-zero
+        weights z and nz respectively, the correction (when β changes) is:
+            v[nz] = (β_new/β_old) v[nz] + (1 - β_new/β_old) p[nz]
+            v[z] <- clamp to [-β_new, β_new] (prevents revival)
         """
-        ratio = self.lamda / (self._prev_lamda + 1e-12)  # Avoid division by zero
-        sub_grad.mul_(ratio).add_(theta, alpha=(1 - ratio))
+        if self.lamda == self._prev_lamda:
+            return
+        ratio = self.lamda / (self._prev_lamda + 1e-12)
+        nonzero = torch.abs(p) > 0.
+        sub_grad[nonzero] = ratio * sub_grad[nonzero] + (1 - ratio) * p[nonzero]
+        sub_grad[~nonzero] = torch.clamp(sub_grad[~nonzero], -self.lamda, self.lamda)
 
 
     def step_lamda_state(self):
