@@ -12,6 +12,7 @@ log = pylogger.get_pylogger(__name__)
 _WESPEAKER_REGISTRY = {
     "campplus": "wespeaker.models.campplus.CAMPPlus",
     "resnet34": "wespeaker.models.resnet.ResNet34",
+    "resnet50": "wespeaker.models.resnet.ResNet50",
     "resnet152": "wespeaker.models.resnet.ResNet152",
     "resnet221": "wespeaker.models.resnet.ResNet221",
     "resnet293": "wespeaker.models.resnet.ResNet293",
