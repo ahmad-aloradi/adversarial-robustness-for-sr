@@ -48,6 +48,15 @@ class BregmanRegularizer:
         sub_grad[nonzero] = ratio * sub_grad[nonzero] + (1 - ratio) * p[nonzero]
         sub_grad[~nonzero] = torch.clamp(sub_grad[~nonzero], -self.lamda, self.lamda)
 
+    def apply_subgradient_correction_wo_clip(
+        self, sub_grad: torch.Tensor, p: torch.Tensor
+        ) -> None:
+        if self.lamda == self._prev_lamda:
+            return
+        dlam = self.lamda - self._prev_lamda
+        nonzero = torch.abs(p) > 0.
+        sub_grad[nonzero] += dlam * torch.sign(p[nonzero])
+
 
     def step_lamda_state(self):
             """Updates the state AFTER the whole parameter group is processed."""

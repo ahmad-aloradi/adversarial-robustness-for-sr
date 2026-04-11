@@ -49,6 +49,7 @@ class LinBreg(torch.optim.Optimizer):
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
             use_subgrad_correction = rescale_mode == "subgradient_correction"
+            use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
@@ -86,13 +87,16 @@ class LinBreg(torch.optim.Optimizer):
                 else:
                     sub_grad.add_(-step_size * grad)
 
+                if use_subgrad_correction_wo_clip:
+                    reg.apply_subgradient_correction_wo_clip(sub_grad, p.data)
+
                 # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
                 prox_result = reg.prox(delta * sub_grad, delta)
                 if use_nestrov_update:
                     prox_result /= (reg.lamda + 1e-12)
                 p.copy_(prox_result)
 
-            if use_subgrad_correction:
+            if use_subgrad_correction or use_subgrad_correction_wo_clip:
                 reg.step_lamda_state()
 
         return loss
@@ -159,6 +163,7 @@ class AdaBreg(torch.optim.Optimizer):
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
             use_subgrad_correction = rescale_mode == "subgradient_correction"
+            use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
@@ -204,13 +209,16 @@ class AdaBreg(torch.optim.Optimizer):
                 # Dual update: p̃^(k+1) = p^(k) − τ·adam_step
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
+                if use_subgrad_correction_wo_clip:
+                    reg.apply_subgradient_correction_wo_clip(sub_grad, p.data)
+
                 # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
                 prox_result = reg.prox(delta * sub_grad, delta)
                 if use_nestrov_update:
                     prox_result /= (reg.lamda + 1e-12)
                 p.copy_(prox_result)
 
-            if use_subgrad_correction:
+            if use_subgrad_correction or use_subgrad_correction_wo_clip:
                 reg.step_lamda_state()
 
         return loss
@@ -282,6 +290,7 @@ class AdaBregW(AdaBreg):
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
             use_subgrad_correction = rescale_mode == "subgradient_correction"
+            use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
@@ -325,6 +334,9 @@ class AdaBregW(AdaBreg):
                 # Dual update: p̃^(k+1) = p^(k) − τ·adam_step
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
+                if use_subgrad_correction_wo_clip:
+                    reg.apply_subgradient_correction_wo_clip(sub_grad, p.data)
+
                 # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
                 prox_result = reg.prox(delta * sub_grad, delta)
                 if use_nestrov_update:
@@ -335,7 +347,7 @@ class AdaBregW(AdaBreg):
                 assert wd > 0, "Weight decay must be positive for AdaBregW"
                 p.mul_(1 - lr * wd)
 
-            if use_subgrad_correction:
+            if use_subgrad_correction or use_subgrad_correction_wo_clip:
                 reg.step_lamda_state()
 
         return loss
@@ -391,6 +403,7 @@ class AdaBregL2(AdaBreg):
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
             use_subgrad_correction = rescale_mode == "subgradient_correction"
+            use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
 
             for p in group['params']:
@@ -439,13 +452,16 @@ class AdaBregL2(AdaBreg):
                 # Dual update: p̃^(k+1) = p^(k) − τ·adam_step (L2-augmented gradient)
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
+                if use_subgrad_correction_wo_clip:
+                    reg.apply_subgradient_correction_wo_clip(sub_grad, p.data)
+
                 # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
                 prox_result = reg.prox(delta * sub_grad, delta)
                 if use_nestrov_update:
                     prox_result /= (reg.lamda + 1e-12)
                 p.copy_(prox_result)
 
-            if use_subgrad_correction:
+            if use_subgrad_correction or use_subgrad_correction_wo_clip:
                 reg.step_lamda_state()
 
         return loss
