@@ -93,7 +93,7 @@ class LinBreg(torch.optim.Optimizer):
                 # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
                 prox_result = reg.prox(delta * sub_grad, delta)
                 if use_nestrov_update:
-                    prox_result /= (reg.lamda / (reg.prev_lamda + 1e-12))
+                    prox_result /= (reg.lamda / (reg._prev_lamda + 1e-12))
                 p.copy_(prox_result)
 
             if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update:
