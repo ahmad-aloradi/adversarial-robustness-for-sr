@@ -122,7 +122,9 @@ METHOD_CLASS_COLORS = {
 
 METHOD_DISPLAY_NAMES = {
     "linbreg": "LinBreg",
+    "linbreg_fixed": "LinBreg (Fixed $\lambda$)",
     "adabreg": "AdaBreg",
+    "adabreg_fixed": "AdaBreg (Fixed $\lambda$)",
     "adabregw": "AdaBregW",
     "adabregl2": "AdaBregL2",
     "pruning_struct": "Struct. Pruning",
@@ -251,7 +253,9 @@ def parse_experiment_name(dirname):
     METHOD_PATTERNS = [
         ("adabregw", "adabregw"),
         ("adabregl2", "adabregl2"),
+        ("adabreg_fixed", "adabreg"),   # must come before adabreg
         ("adabreg", "adabreg"),
+        ("linbreg_fixed", "linbreg"),   # must come before linbreg
         ("linbreg", "linbreg"),
         ("pruning_mag_struct", "pruning_struct"),
         ("pruning_mag_unstruct", "pruning_unstruct"),
@@ -260,6 +264,8 @@ def parse_experiment_name(dirname):
     for pattern, cls in METHOD_PATTERNS:
         if pattern in prefix:
             info["method_class"] = cls
+            if pattern.endswith("_fixed") and not info.get("variant"):
+                info["variant"] = "fixed"
             break
     else:
         if prefix.replace("sv_", "") == "wespeaker":
@@ -270,8 +276,11 @@ def parse_experiment_name(dirname):
 
 VARIANT_DISPLAY_NAMES = {
     "poor_init": "poor init",
+    "fixed": "Fixed $\lambda$",
     "rescale_prox": "Rescale Prox.",
+    "rescale_prox_v2": "Rescale Prox. V2",
     "rescale_prox_V2": "SubGrad Corr.",
+    "subgrad_corr_v2": "SubGrad Corr. V2",
 }
 
 # Variant color adjustments: (hue_shift, saturation_shift, lightness_shift)
@@ -280,7 +289,10 @@ VARIANT_DISPLAY_NAMES = {
 VARIANT_COLOR_ADJUSTMENTS = {
     "poor_init": (-0.08, -0.15, -0.12),       # shift hue toward red, desaturate, darken
     "rescale_prox": (0.10, 0.05, 0.15),        # shift hue toward cyan, slightly brighter
+    "rescale_prox_v2": (0.10, 0.05, 0.15),     # shift hue toward cyan, slightly brighter
     "rescale_prox_V2": (0.18, -0.10, -0.05),   # shift hue further, slightly muted
+    "subgrad_corr_v2": (0.18, -0.10, -0.05),   # shift hue further, slightly muted,
+    "fixed": (0.0, -0.38, 0.12),              # slightly brighter/desaturated — same hue, visually distinct
 }
 
 

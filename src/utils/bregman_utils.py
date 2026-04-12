@@ -1,9 +1,9 @@
 import math
 
 MIN_LAMBDA = 1e-10
-INIT_LAMBDA_LINBERG = 1.0
-INIT_LAMBDA_ADABREG = 0.1
-INIT_LAMBDA_PROXSGD = 0.5
+INIT_LAMBDA_ADABREG = 2.0
+INIT_LAMBDA_LINBERG = 0.1
+INIT_LAMBDA_PROXSGD = 0.25
 
 BREGMAN_LAMBDA_CONFIGS = {
     "AdaBreg": {
@@ -20,12 +20,12 @@ BREGMAN_LAMBDA_CONFIGS = {
         0.9: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
             "min_lambda": MIN_LAMBDA,
-            "fixed_lambda": 8.0,
+            "fixed_lambda": 10.0,
         },
         0.95: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
             "min_lambda": MIN_LAMBDA,
-            "fixed_lambda": 14.0,
+            "fixed_lambda": 15.0,
         },
         0.99: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
@@ -47,17 +47,17 @@ BREGMAN_LAMBDA_CONFIGS = {
         0.9: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
             "min_lambda": MIN_LAMBDA,
-            "fixed_lambda": 0.03,
+            "fixed_lambda": 0.025,
         },
         0.95: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
             "min_lambda": MIN_LAMBDA,
-            "fixed_lambda": 0.1,
+            "fixed_lambda": 0.05,
         },
         0.99: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
             "min_lambda": MIN_LAMBDA,
-            "fixed_lambda": 0.3,
+            "fixed_lambda": 0.2,
         },
     },
     "ProxSGD": {
