@@ -57,6 +57,24 @@ class BregmanRegularizer:
         nonzero = torch.abs(p) > 0.
         sub_grad[nonzero] += dlam * torch.sign(p[nonzero])
 
+    def apply_predictive_correction(
+        self, sub_grad: torch.Tensor, p: torch.Tensor, delta: float
+        ) -> None:
+        """Predictive subgradient correction (Method 4) when λ changes.
+
+        Applied BEFORE the dual update step. Computes what the weights would
+        be under λ_new via the prox, then adjusts v so its fixed-point
+        condition (v = θ/δ + λ·sign(θ)) is consistent with the new λ and
+        the predicted weights. The prox nonlinearity correctly handles
+        zero/nonzero boundary transitions, unlike the additive patch which
+        can resurrect dying weights and cause divergence at small λ.
+        """
+        if self.lamda == self._prev_lamda:
+            return
+        w_pred = self.prox(delta * sub_grad, delta)
+        sub_grad += (w_pred - p) / delta \
+            + self.lamda * torch.sign(w_pred) - self._prev_lamda * torch.sign(p)
+
 
     def step_lamda_state(self):
             """Updates the state AFTER the whole parameter group is processed."""

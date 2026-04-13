@@ -51,6 +51,7 @@ class LinBreg(torch.optim.Optimizer):
             use_subgrad_correction = rescale_mode == "subgradient_correction"
             use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
+            use_predictive_correction = rescale_mode == "predictive_correction"
 
             for p in group['params']:
                 if p.grad is None:
@@ -73,6 +74,8 @@ class LinBreg(torch.optim.Optimizer):
                 # Subgradient correction (before dual update)
                 if use_subgrad_correction:
                     reg.apply_subgradient_correction(sub_grad, p.data)
+                if use_predictive_correction:
+                    reg.apply_predictive_correction(sub_grad, p.data, delta)
 
                 # Dual update: p̃^(k+1) = p^(k) − τ∇L(θ^(k))
                 if momentum > 0.0:
@@ -96,7 +99,7 @@ class LinBreg(torch.optim.Optimizer):
                     prox_result *= (1 / (reg.lamda + 1e-12))
                 p.copy_(prox_result)
 
-            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update:
+            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update or use_predictive_correction:
                 reg.step_lamda_state()
 
         return loss
@@ -165,6 +168,7 @@ class AdaBreg(torch.optim.Optimizer):
             use_subgrad_correction = rescale_mode == "subgradient_correction"
             use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
+            use_predictive_correction = rescale_mode == "predictive_correction"
 
             for p in group['params']:
                 if p.grad is None:
@@ -191,6 +195,8 @@ class AdaBreg(torch.optim.Optimizer):
                 # Subgradient correction (before dual update)
                 if use_subgrad_correction:
                     reg.apply_subgradient_correction(sub_grad, p.data)
+                if use_predictive_correction:
+                    reg.apply_predictive_correction(sub_grad, p.data, delta)
 
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
@@ -218,7 +224,7 @@ class AdaBreg(torch.optim.Optimizer):
                     prox_result *= (1 / (reg.lamda + 1e-12))
                 p.copy_(prox_result)
 
-            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update:
+            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update or use_predictive_correction:
                 reg.step_lamda_state()
 
         return loss
@@ -292,6 +298,7 @@ class AdaBregW(AdaBreg):
             use_subgrad_correction = rescale_mode == "subgradient_correction"
             use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
+            use_predictive_correction = rescale_mode == "predictive_correction"
 
             for p in group['params']:
                 if p.grad is None:
@@ -316,6 +323,8 @@ class AdaBregW(AdaBreg):
                 # Subgradient correction (before dual update)
                 if use_subgrad_correction:
                     reg.apply_subgradient_correction(sub_grad, p.data)
+                if use_predictive_correction:
+                    reg.apply_predictive_correction(sub_grad, p.data, delta)
 
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
@@ -347,7 +356,7 @@ class AdaBregW(AdaBreg):
                 assert wd > 0, "Weight decay must be positive for AdaBregW"
                 p.mul_(1 - lr * wd)
 
-            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update:
+            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update or use_predictive_correction:
                 reg.step_lamda_state()
 
         return loss
@@ -405,6 +414,7 @@ class AdaBregL2(AdaBreg):
             use_subgrad_correction = rescale_mode == "subgradient_correction"
             use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
+            use_predictive_correction = rescale_mode == "predictive_correction"
 
             for p in group['params']:
                 if p.grad is None:
@@ -434,6 +444,8 @@ class AdaBregL2(AdaBreg):
                 # Subgradient correction (before dual update)
                 if use_subgrad_correction:
                     reg.apply_subgradient_correction(sub_grad, p.data)
+                if use_predictive_correction:
+                    reg.apply_predictive_correction(sub_grad, p.data, delta)
 
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
@@ -461,7 +473,7 @@ class AdaBregL2(AdaBreg):
                     prox_result *= (1 / (reg.lamda + 1e-12))
                 p.copy_(prox_result)
 
-            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update:
+            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update or use_predictive_correction:
                 reg.step_lamda_state()
 
         return loss
