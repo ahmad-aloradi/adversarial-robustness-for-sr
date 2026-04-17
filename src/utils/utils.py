@@ -495,7 +495,15 @@ def _resolve_test_ckpt_path(trainer: Trainer) -> Optional[str]:
             return str(avg_path)
 
     if ckpt_cb is not None:
-        return ckpt_cb.best_model_path or None
+        best = ckpt_cb.best_model_path or None
+        if best and not Path(best).exists() and ckpt_cb.dirpath:
+            # best_model_path may have a stale prefix (e.g. from a checkpoint
+            # restored from a different storage mount); look for the same
+            # filename under the current checkpoint directory.
+            candidate = Path(ckpt_cb.dirpath) / Path(best).name
+            if candidate.exists():
+                best = str(candidate)
+        return best
 
     return None
 
