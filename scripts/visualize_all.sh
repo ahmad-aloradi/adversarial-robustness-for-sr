@@ -1,25 +1,28 @@
 #!/bin/bash
-# Available sources: train_log --> epoch-mean, csv --> batch-step
 
 export PYTHONPATH="$HOME/adversarial-robustness-for-sr"
+source=csv # # Sources: train_log --> epoch-mean, csv --> batch-step
 
 stage_visualize=true
-stage_aggregate_and_vis=false
+stage_aggregate_and_vis=true
 stage_test_viz=false
-stage_weight_norms=false
-
-eva_model='ecapa_tdnn'
+stage_weight_norms=true
 force_recompute=true
 
+# Experiment selection criteria
+eval_model='ecapa_tdnn' # 'resnet34' 'ecapa_tdnn'
+eval_data='multi_sv'
+sparsity_rate='sr90' # 'sr90', 'sr95', 'sr99'
+experiment='sv_bregman*' # e.g. 'sv_bregman', 'sv_pruning', 'sv_vanilla', 'sv_wespeaker'
+
 base_dirs=(
-    '/dataHDD/ahmad/21_03_2026'
-    # '/dataHDD/ahmad/comfort26_sem'
+    '/data/ahmad/results'
 )
 experiments=(
-    "sv_bregman_adabreg*${eva_model}*"
-    "sv_bregman_linbreg*${eva_model}sr99*"
-    # "sv_vanilla_*${eva_model}*"
-    # "sv_wespeaker*${eva_model}*augFalse"
+    "${experiment}*${eval_model}*${eval_data}*-subgrad_corr_v2"
+    "*fixed*${eval_model}*${eval_data}*"
+    "${experiment}*${eval_model}*${eval_data}*${sparsity_rate}"
+    "sv_vanilla_*${eval_model}*"
     )
 
 # Build list of dataset subdirs across all base_dirs
@@ -28,7 +31,6 @@ for bd in "${base_dirs[@]}"; do
     exp_dirs+=(
         "$bd/cnceleb"
         "$bd/multi_sv"
-        # "$bd/multi_sv_cnc_train"
         )
 done
 
@@ -42,11 +44,10 @@ if [ "$stage_visualize" = true ]; then
         "bregman/global_lambda" "bregman/sparsity" #"sparsity"
         )
 
-    # shellcheck disable=SC2068
     python scripts/visualize.py \
         --base_dirs "${exp_dirs[@]}" \
         --experiments ${experiments[@]} \
-        --source "csv" \
+        --source ${source} \
         --output results/cross_exp_comparison/convergence_curves \
         --metrics "${metrics[@]}"
 fi
@@ -75,7 +76,6 @@ if [ "$stage_test_viz" = true ]; then
         force_flag="--force_recompute"
     fi
 
-    # shellcheck disable=SC2068
     python scripts/visualize_test_artifacts.py \
         --base_dirs "${exp_dirs[@]}" \
         --experiments ${experiments[@]} \
@@ -90,7 +90,6 @@ fi
 # Weight Norms Visualization
 ############################
 if [ "$stage_weight_norms" = true ]; then
-    # shellcheck disable=SC2068
     python scripts/visualize_weight_norms.py \
         --base_dirs "${exp_dirs[@]}" \
         --experiments ${experiments[@]} \

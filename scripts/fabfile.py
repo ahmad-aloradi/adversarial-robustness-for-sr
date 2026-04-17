@@ -33,7 +33,7 @@ CONDA_ENV = "comfort"
 
 WOODY_DIR = f"/home/woody/{env.user[: 4]}/{env.user}"
 VAULT_DIR = f"/home/vault/{env.user[: 4]}/{env.user}"
-RESULTS_DIR = os.path.join(WOODY_DIR, "results")
+RESULTS_DIR = os.path.join(VAULT_DIR, "results")
 DATA_DIR = os.path.join(WOODY_DIR, "datasets")
 
 # Speaker-verification datasets packaged as fast-to-extract .tar.zst files.
@@ -572,6 +572,16 @@ def run_bash_script(pbs):
 
 
 @task
+def clean_timelimit_logs():
+    """Delete *.o* log files whose job was killed by the SLURM time limit.
+
+    Scans every *.o* file in the project root on the remote cluster and removes
+    those that contain the SLURM termination marker 'DUE TO TIME LIMIT ***'.
+    """
+    with cd(PATH_PROJECT):
+        run("bash scripts/cleanup_timelimit_logs.sh .")
+
+@task
 def scancel():
     """Stop all jobs associated to your username."""
     run("squeue | grep $USER | tr -s ' ' | cut -d ' ' -f 2 | xargs scancel")
@@ -825,7 +835,7 @@ def run_vpc():
 # Per-cluster GPU assignment: dataset -> {cluster -> gpu_partition}
 _GPU_MAP = {
     "datasets/cnceleb": {"alex": "a40", "tinygpu": "v100"},
-    "datasets/voxceleb": {"alex": "a100", "tinygpu": "a100"},
+    "datasets/voxceleb": {"alex": "a100", "tinygpu": "v100"},
     "multi_sv": {"alex": "a100", "tinygpu": "a100"},
     "multi_sv_cnc_train": {"alex": "a100", "tinygpu": "a100"},
 }
@@ -836,12 +846,21 @@ def _get_job_routing(experiment, dataset_name, sparsity=None):
 
     Targeting ~80% alex / ~20% tinygpu when all experiment types are active:
     - ProxSGD -> tinygpu (baseline comparison, ~1/5 of experiment types)
+    - Rescale Prox v2 (lambda/prev_lambda) -> tinygpu
     - All other Bregman/pruning -> alex
     - Baselines (sparsity=None) -> current cluster (run on whichever is active)
     """
     if sparsity is None:
         cluster = CLUSTER_NAME
     elif "proxsgd" in experiment:
+        cluster = "tinygpu"
+    elif "rescale_prox_v2" in experiment:
+        cluster = "tinygpu"
+    # elif "new_test_run" in experiment:
+    #     cluster = "tinygpu"
+    elif "subgrad_corr_v3" in experiment:
+        cluster = "tinygpu"
+    elif "fixed" in experiment:
         cluster = "tinygpu"
     else:
         cluster = "alex"
@@ -1086,6 +1105,7 @@ def run_sv(transfer_data="false", force="false"):
     batch_sizes = {
         "wespeaker_ecapa_tdnn": 128,
         "wespeaker_resnet34": 64,
+        "wespeaker_resnet50": 32,
     }
 
     # Default hparams shared across experiments
@@ -1111,10 +1131,13 @@ def run_sv(transfer_data="false", force="false"):
     RUN_PRUNING_EXPS = False
     RUN_Bregman_EXPS = False
     RUN_AUX_BREGMAN_EXPS = False
+    RUN_REG_L1_CONV_EXPS = True
+    # Adaptation experiments 
     RUN_POOR_INIT_Bregman_EXPS = False
-    RUN_NESTROV_RESCALE_PROX_Bregman_EXPS = True
-    RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS = True
-
+    RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS = False
+    RUN_NESTROV_RESCALE_PROX_Bregman_EXPS = False
+    RUN_SUBGRADIENT_CORR_V3_Bregman_EXPS = False
+    RUN_SUBGRADIENT_CORR_V4_Bregman_EXPS = False
 
     ########################
     # Pruning experiments
@@ -1134,11 +1157,11 @@ def run_sv(transfer_data="false", force="false"):
         pruning_experiments = {}
     else:
         pruning_experiments = {
-            "sv_pruning_mag_struct": {
-                "sv_models": default_sv_models,
-                "sparsity_rates": default_sparsity_rates,
-                "dataset_names": dataset_names,
-            },
+            # "sv_pruning_mag_struct": {
+            #     "sv_models": default_sv_models,
+            #     "sparsity_rates": default_sparsity_rates,
+            #     "dataset_names": dataset_names,
+            # },
             "sv_pruning_mag_unstruct": {
                 "sv_models": default_sv_models,
                 "sparsity_rates": default_sparsity_rates,
@@ -1175,28 +1198,29 @@ def run_sv(transfer_data="false", force="false"):
             },
         }
 
-    # use a smaller sweep for auxiliary experiments to keep the total number of jobs manageable
-    mini_exps_sparsity_rates = [0.90]
-    mini_default_sv_models = ["wespeaker_ecapa_tdnn"]
-
+    ########################
+    # Bregman's "auxiliary" experiments
+    ########################
     if not RUN_AUX_BREGMAN_EXPS:
         aux_bregman_experiments = {}
     else:
         aux_bregman_experiments = {
-            "sv_bregman_proxsgd": {
-                "sv_models": mini_default_sv_models,
-                "sparsity_rates": mini_exps_sparsity_rates,
-                "dataset_names": dataset_names,
-            },
+            # "sv_bregman_proxsgd_fixed": {
+            #     "sv_models": ["wespeaker_ecapa_tdnn"],
+            #     "sparsity_rates": [0.90],
+            #     "dataset_names": ["datasets/cnceleb"],
+            # },
             "sv_bregman_adabreg_fixed": {
-                "sv_models": mini_default_sv_models,
-                "sparsity_rates": mini_exps_sparsity_rates,
-                "dataset_names": ["multi_sv"],
+                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
+                "sparsity_rates": [0.90],
+                "dataset_names": ["datasets/cnceleb"],
+                "extra_overrides": {"trainer.max_epochs": 50},
             },
             "sv_bregman_linbreg_fixed": {
-                "sv_models": mini_default_sv_models,
-                "sparsity_rates": mini_exps_sparsity_rates,
-                "dataset_names": ["multi_sv"],
+                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
+                "sparsity_rates": [0.90],
+                "dataset_names": ["datasets/cnceleb"],
+                "extra_overrides": {"trainer.max_epochs": 50},
             },
         }
 
@@ -1246,22 +1270,22 @@ def run_sv(transfer_data="false", force="false"):
     else:
         nestrovs_rescale_prox_configs = {
             "sv_bregman_adabreg": {
-                "sv_models": default_sv_models,
-                "sparsity_rates": default_sparsity_rates,
-                "dataset_names": dataset_names,
+                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet50"],
+                "sparsity_rates": [0.90, 0.99],
+                "dataset_names": ['datasets/cnceleb'],
                 "extra_overrides": {
                     "callbacks.model_pruning.rescale_mode": "nestrovs_adaptive_update",
                 },
-                "suffix": "-rescale_prox",
+                "suffix": "-rescale_prox_v2",
             },
             "sv_bregman_linbreg": {
-                "sv_models": default_sv_models,
-                "sparsity_rates": default_sparsity_rates,
-                "dataset_names": dataset_names,
+                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet50"],
+                "sparsity_rates": [0.90, 0.99],
+                "dataset_names": ['datasets/cnceleb'],
                 "extra_overrides": {
                     "callbacks.model_pruning.rescale_mode": "nestrovs_adaptive_update",
                 },
-                "suffix": "-rescale_prox",
+                "suffix": "-rescale_prox_v2",
             },
         }
 
@@ -1274,28 +1298,117 @@ def run_sv(transfer_data="false", force="false"):
     else:
         subgrad_corr_rescale_prox_configs = {
             "sv_bregman_adabreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn"],
-                "sparsity_rates": [0.9],
-                "dataset_names": ["multi_sv"],
+                "sv_models": default_sv_models,
+                "sparsity_rates": default_sparsity_rates,
+                "dataset_names": dataset_names,
                 "extra_overrides": {
                     "callbacks.model_pruning.rescale_mode": "subgradient_correction",
                 },
-                "suffix": "-rescale_prox_V2",
+                "suffix": "-subgrad_corr_v2",
+            },
+            "sv_bregman_linbreg": {
+                "sv_models": default_sv_models,
+                "sparsity_rates": default_sparsity_rates,
+                "dataset_names": dataset_names,
+                "extra_overrides": {
+                    "callbacks.model_pruning.rescale_mode": "subgradient_correction",
+                },
+                "suffix": "-subgrad_corr_v2",
+            },
+        }
+
+    ########################
+    # Rescale-prox experiments: Subgradient correction v3
+    ########################
+    if not RUN_SUBGRADIENT_CORR_V3_Bregman_EXPS:
+        subgrad_corr_rescale_prox_v3_configs = {}
+    else:
+        subgrad_corr_rescale_prox_v3_configs = {
+            "sv_bregman_adabreg": {
+                "sv_models": ["wespeaker_ecapa_tdnn"],
+                "sparsity_rates": [0.90, 0.95, 0.99],
+                "dataset_names": ['datasets/cnceleb'],  # run a smaller sweep for adabreg to keep total job count manageable
+                "extra_overrides": {
+                    "callbacks.model_pruning.rescale_mode": "subgradient_correction_wo_clip",
+                },
+                "suffix": "-subgrad_corr_v3",
             },
             "sv_bregman_linbreg": {
                 "sv_models": ["wespeaker_ecapa_tdnn"],
-                "sparsity_rates": [0.9],
-                "dataset_names": ["multi_sv"],
+                "sparsity_rates": [0.90, 0.95, 0.99],  # run a smaller sweep for linbreg to keep total job count manageable
+                "dataset_names": ['datasets/cnceleb'],  # run a smaller sweep for linbreg to keep total job count manageable
                 "extra_overrides": {
-                    "callbacks.model_pruning.rescale_mode": "subgradient_correction",
+                    "callbacks.model_pruning.rescale_mode": "subgradient_correction_wo_clip",
                 },
-                "suffix": "-rescale_prox_V2",
+                "suffix": "-subgrad_corr_v3",
+            },
+        }        
+
+    ########################
+    # Rescale-prox experiments: Subgradient correction v4
+    ########################
+    if not RUN_SUBGRADIENT_CORR_V4_Bregman_EXPS:
+        subgrad_corr_rescale_prox_v4_configs = {}
+    else:
+        subgrad_corr_rescale_prox_v4_configs = {
+            "sv_bregman_adabreg": {
+                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
+                "sparsity_rates": [0.90, 0.99],
+                "dataset_names": ['datasets/cnceleb'],  # run a smaller sweep for adabreg to keep total job count manageable
+                "extra_overrides": {
+                    "callbacks.model_pruning.rescale_mode": "predictive_correction",
+                },
+                "suffix": "-subgrad_corr_v4",
+            },
+            "sv_bregman_linbreg": {
+                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
+                "sparsity_rates": [0.90, 0.99],  # run a smaller sweep for linbreg to keep total job count manageable
+                "dataset_names": ['datasets/cnceleb'],  # run a smaller sweep for linbreg to keep total job count manageable
+                "extra_overrides": {
+                    "callbacks.model_pruning.rescale_mode": "predictive_correction",
+                },
+                "suffix": "-subgrad_corr_v4",
             },
         }
+
+    ########################
+    # RegL1 conv experiments: resnet34 + cnceleb, replacing RegL1L2Conv with RegL1 for conv layers
+    ########################
+    if not RUN_REG_L1_CONV_EXPS:
+        reg_l1_conv_configs = {}
+    else:
+        reg_l1_conv_configs = {
+            "sv_bregman_adabreg": {
+                "sv_models": ["wespeaker_resnet34"],
+                "sparsity_rates": [0.90, 0.95, 0.99],
+                # "sparsity_rates": [0.90, 0.99],
+                "dataset_names": ["datasets/cnceleb", "multi_sv"],  # run on both datasets to see if the effect of conv-only RegL1 is consistent
+                # "dataset_names": ["datasets/cnceleb"],  # run on both datasets to see if the effect of conv-only RegL1 is consistent
+                "extra_overrides": {
+                    "module.model.pruning_groups.0.optimizer_settings.reg._target_": "src.callbacks.pruning.bregman.bregman_regularizers.RegL1",
+                },
+                "suffix": "-regl1_conv",
+            },
+            "sv_bregman_linbreg": {
+                "sv_models": ["wespeaker_resnet34"],
+                "sparsity_rates": [0.90, 0.95, 0.99],
+                # "sparsity_rates": [0.90, 0.99],
+                "dataset_names": ["datasets/cnceleb", "multi_sv"],  # run on both datasets to see if the effect of conv-only RegL1 is consistent
+                # "dataset_names": ["datasets/cnceleb"],  # run on both datasets to see if the effect of conv-only RegL1 is consistent
+                "extra_overrides": {
+                    "module.model.pruning_groups.0.optimizer_settings.reg._target_": "src.callbacks.pruning.bregman.bregman_regularizers.RegL1",
+                },
+                "suffix": "-regl1_conv",
+            },
+        }
+
 
     rescale_prox_configs = [
         *nestrovs_rescale_prox_configs.items(),
         *subgrad_corr_rescale_prox_configs.items(),
+        *subgrad_corr_rescale_prox_v3_configs.items(),
+        *subgrad_corr_rescale_prox_v4_configs.items(),
+        *reg_l1_conv_configs.items(),
     ]
 
     # --- Volume estimation across clusters ---
@@ -1324,7 +1437,7 @@ def run_sv(transfer_data="false", force="false"):
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
                 cluster, gpu = _get_job_routing(
-                    experiment, dataset_name, sparsity
+                    experiment + cfg.get("suffix", ""), dataset_name, sparsity
                 )
                 job_counts[cluster][gpu] += len(cfg["sv_models"])
 
@@ -1399,7 +1512,7 @@ def run_sv(transfer_data="false", force="false"):
             for dataset_name in cfg["dataset_names"]:
                 for sparsity in cfg["sparsity_rates"]:
                     cluster, gpu = _get_job_routing(
-                        experiment, dataset_name, sparsity
+                        experiment + cfg.get("suffix", ""), dataset_name, sparsity
                     )
                     if cluster != CLUSTER_NAME:
                         print(

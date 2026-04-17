@@ -161,8 +161,8 @@ METRIC_LABELS = {
     "valid_loss": "Valid. Loss",
     "train/MulticlassAccuracy": "Train Acc.",
     "valid/MulticlassAccuracy": "Valid. Acc.",
-    "sparsity": "Sparsity",
-    "bregman/sparsity": "Sparsity",
+    "sparsity": r"$s(\theta)$",
+    "bregman/sparsity": r"$s(\theta)$",
     "bregman/global_lambda": r"$\lambda$",
     "EER": "EER",
     "minDCF": "minDCF",
@@ -281,6 +281,8 @@ VARIANT_DISPLAY_NAMES = {
     "rescale_prox_v2": "Rescale Prox. V2",
     "rescale_prox_V2": "SubGrad Corr.",
     "subgrad_corr_v2": "SubGrad Corr. V2",
+    "subgrad_corr_v3": "SubGrad Corr. V3",
+    "subgrad_corr_v4": "SubGrad Corr. V4",
 }
 
 # Variant color adjustments: (hue_shift, saturation_shift, lightness_shift)
@@ -292,6 +294,8 @@ VARIANT_COLOR_ADJUSTMENTS = {
     "rescale_prox_v2": (0.10, 0.05, 0.15),     # shift hue toward cyan, slightly brighter
     "rescale_prox_V2": (0.18, -0.10, -0.05),   # shift hue further, slightly muted
     "subgrad_corr_v2": (0.18, -0.10, -0.05),   # shift hue further, slightly muted,
+    "subgrad_corr_v3": (0.36, -0.20, -0.1),   # shift hue further, slightly muted,
+    "subgrad_corr_v4": (-0.18, 0.10, 0.05),
     "fixed": (0.0, -0.38, 0.12),              # slightly brighter/desaturated — same hue, visually distinct
 }
 
@@ -313,6 +317,10 @@ def _adjust_color(hex_color, hue_shift, sat_shift, light_shift):
 def make_label(info):
     """Create a concise, consistent legend label."""
     name = METHOD_DISPLAY_NAMES.get(info["method_class"], info["method_class"])
+    if info.get("variant") == "fixed" and info.get("fixed_lambda") is not None:
+        lam = info["fixed_lambda"]
+        lam_sym = r"$\lambda$" if plt.rcParams.get("text.usetex") else "λ"
+        return f"{name} ({lam_sym}={lam:g})"
     if info["sparsity"] is not None:
         pct = r"\%" if plt.rcParams.get("text.usetex") else "%"
         label = f"{name} {info['sparsity']}{pct}"
@@ -343,11 +351,28 @@ def get_style(info):
 # ---------------------------------------------------------------------------
 
 
+def load_fixed_lambda(exp_dir):
+    """Extract _bregman_lambda from config_tree.log, or None if not found."""
+    path = os.path.join(exp_dir, "config_tree.log")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Expected config_tree.log not found in {exp_dir}")
+    
+    with open(path) as f:
+        lines = f.readlines()
+    for i, line in enumerate(lines):
+        if "_bregman_lambda" in line and i + 1 < len(lines):
+            m = re.search(r"[\d.]+", lines[i + 1])
+            if m:
+                return float(m.group())
+    
+    raise ValueError(f"_bregman_lambda value not found in config_tree.log of {exp_dir}")
+
+
 def load_train_log(exp_dir):
     """Load epoch-level metrics from train_log.txt → DataFrame."""
     path = os.path.join(exp_dir, "train_log.txt")
     if not os.path.exists(path):
-        return None
+        raise FileNotFoundError(f"Expected train_log.txt not found in {exp_dir}")
 
     rows = []
     with open(path) as f:
@@ -413,7 +438,10 @@ def discover_experiments(base_dirs, patterns):
                     and glob.fnmatch.fnmatch(d, pattern)
                 ):
                     seen.add(d)
-                    matched.append((full, parse_experiment_name(d)))
+                    info = parse_experiment_name(d)
+                    if info.get("variant") == "fixed":
+                        info["fixed_lambda"] = load_fixed_lambda(full)
+                    matched.append((full, info))
 
     # Stable sort: method class order, then sparsity
     ORDER = [
@@ -556,7 +584,11 @@ def plot_training_curves(
             ax.set_yscale("log")
         else:
             _auto_ylim(ax, metric)
-    axes[-1].set_xlabel("Epoch" if source == "train_log" else "Steps [k]")
+    axes[-1].set_xlabel("Epoch" if source == "train_log" else "Step [K]")
+    if source == "train_log":
+        from matplotlib.ticker import MaxNLocator
+        for ax in axes:
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     # Deduplicated legend at top
     handles, labels = [], []
@@ -756,7 +788,7 @@ def main():
         default="results/figures/",
         help="Output directory (default: figures/).",
     )
-    parser.add_argument("--font_size", type=int, default=10)
+    parser.add_argument("--font_size", type=int, default=16)
     parser.add_argument(
         "--fig_width", type=float, default=5.5, help="Figure width in inches."
     )
