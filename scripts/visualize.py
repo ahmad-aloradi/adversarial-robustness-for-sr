@@ -161,8 +161,8 @@ METRIC_LABELS = {
     "valid_loss": "Valid. Loss",
     "train/MulticlassAccuracy": "Train Acc.",
     "valid/MulticlassAccuracy": "Valid. Acc.",
-    "sparsity": r"$s(\theta)$",
-    "bregman/sparsity": r"$s(\theta)$",
+    "sparsity": "Sparsity", #r"$s(\theta)$",
+    "bregman/sparsity": "Sparsity", #r"$s(\theta)$",
     "bregman/global_lambda": r"$\lambda$",
     "EER": "EER",
     "minDCF": "minDCF",
@@ -277,6 +277,7 @@ def parse_experiment_name(dirname):
 VARIANT_DISPLAY_NAMES = {
     "poor_init": "poor init",
     "fixed": "Fixed $\lambda$",
+    "regl1_conv": "",
     "rescale_prox": "Rescale Prox.",
     "rescale_prox_v2": "Rescale Prox. V2",
     "rescale_prox_V2": "SubGrad Corr.",
@@ -328,7 +329,7 @@ def make_label(info):
         label = name
     if info.get("variant"):
         variant = VARIANT_DISPLAY_NAMES.get(info["variant"], info["variant"])
-        label += f" ({variant})"
+        label += f" ({variant})" if variant else ""
     return label
 
 

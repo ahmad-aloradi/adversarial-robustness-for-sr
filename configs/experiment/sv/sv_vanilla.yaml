@@ -102,7 +102,7 @@ module:
   optimizer:
     _target_: torch.optim.AdamW
     _partial_: True
-    lr: 0.1
+    lr: 1e-3
     weight_decay: 1.0e-4
 
   data_augmentation: null # No augmentation for vanilla baseline

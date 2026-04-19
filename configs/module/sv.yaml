@@ -11,14 +11,14 @@ model:
 
 ### criteria and metrics ###
 criterion:
-  aam: &_amm_
+  aam:
     _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
     loss_fn:
       _target_: speechbrain.nnet.losses.AdditiveAngularMargin
       margin: 0.2
       scale: 30.0
-  train_criterion: *_amm_
-  valid_criterion: *_amm_
+  train_criterion: ${module.criterion.aam}
+  valid_criterion: ${module.criterion.aam}
 
   # For callbacks
   loss: ${module.criterion.train_criterion}
