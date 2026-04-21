@@ -1,18 +1,42 @@
 import math
 from numbers import Real
-from typing import Optional
+from typing import List, Optional, Sequence, Union
 
 from src import utils
 
 log = utils.get_pylogger(__name__)
 
 
+def _normalize_target_schedule(
+    target: Union[float, Sequence[float]]
+) -> List[float]:
+    """Coerce a scalar or sequence of targets into a validated list."""
+    if isinstance(target, Real):
+        schedule = [float(target)]
+    else:
+        try:
+            schedule = [float(v) for v in target]
+        except TypeError as exc:
+            raise TypeError(
+                f"target_sparsity must be a float or a sequence of floats, got {type(target)}"
+            ) from exc
+        if len(schedule) == 0:
+            raise ValueError("target_sparsity schedule must not be empty")
+    for i, v in enumerate(schedule):
+        if not math.isfinite(v) or not (0.0 < v <= 1.0):
+            raise ValueError(
+                f"target_sparsity[{i}]={v} must be finite and in (0.0, 1.0]"
+            )
+    return schedule
+
+
 class LambdaScheduler:
     """Lambda scheduler for Bregman target sparsity control.
 
     This scheduler updates lambda once per call to :meth:`step` (i.e., per-batch when
-    called from a batch-end hook). The scheduler maintains a fixed `target_sparsity`
-    and updates lambda once per call to :meth:`step` (typically called at each batch end).
+    called from a batch-end hook). ``target_sparsity`` may be a single float or a
+    per-epoch list; when a list is provided, the i-th entry is the target for
+    epoch ``i`` and the final entry is held for all subsequent epochs.
 
     When sparsity enters within ``damping_zone`` of the target, the scheduler reduces
     oscillation by increasing the effective update frequency (fewer updates) and
@@ -22,8 +46,9 @@ class LambdaScheduler:
     ----------
     initial_lambda : float
         Initial lambda value for regularization
-    target_sparsity : float
-        Target sparsity level to achieve.
+    target_sparsity : float or list of float
+        Target sparsity level to achieve. A list specifies a per-epoch schedule;
+        the last value is held for all epochs beyond ``len(list) - 1``.
     acceleration_factor : float, default=0.25
         Factor multiplied by the sparsity difference between current and target
         to control how aggressively to update lambda
@@ -46,7 +71,7 @@ class LambdaScheduler:
     def __init__(
         self,
         initial_lambda: float = 1e-3,
-        target_sparsity: float = 0.9,
+        target_sparsity: Union[float, List[float]] = 0.9,
         acceleration_factor: float = 0.25,
         min_lambda: float = 1e-6,
         max_lambda: float = 1e3,
@@ -56,10 +81,7 @@ class LambdaScheduler:
         damping_frequency_multiplier: int = 10,
         damping_acceleration_divisor: float = 5.0,
     ):
-        if not (0.0 < target_sparsity <= 1.0):
-            raise ValueError(
-                f"target_sparsity must be in (0.0, 1.0], got {target_sparsity}"
-            )
+        self._target_schedule = _normalize_target_schedule(target_sparsity)
         if acceleration_factor < 0.0:
             raise ValueError(
                 f"acceleration_factor must be >= 0.0, got {acceleration_factor}"
@@ -80,10 +102,13 @@ class LambdaScheduler:
         self.min_lambda = min_lambda
         self.max_lambda = max_lambda
         self._last_sparsity = None
-        self.target_sparsity = target_sparsity
         self.warmup_epochs = warmup_epochs
         # Resolved to actual steps by BregmanPruner.resolve_warmup_steps()
         self.warmup_steps = 0
+        # Populated via resolve_warmup_steps() so target_sparsity property can
+        # derive the current-epoch target from self._last_step.
+        self._steps_per_epoch: Optional[int] = None
+        self._last_step: int = 0
         assert (
             update_frequency >= 1
         ), f"update_frequency must be >= 1, got {update_frequency}"
@@ -91,6 +116,24 @@ class LambdaScheduler:
         self.damping_zone = damping_zone
         self.damping_frequency_multiplier = damping_frequency_multiplier
         self.damping_acceleration_divisor = damping_acceleration_divisor
+
+    @property
+    def target_sparsity(self) -> float:
+        """Current-epoch target sparsity derived from ``_last_step``.
+
+        Before training starts (``_steps_per_epoch`` unset), returns the first
+        entry of the schedule — this is what consumers log at setup time.
+        """
+        if self._steps_per_epoch is None or self._steps_per_epoch == 0:
+            return self._target_schedule[0]
+        epoch = self._last_step // self._steps_per_epoch
+        idx = min(epoch, len(self._target_schedule) - 1)
+        return self._target_schedule[idx]
+
+    @property
+    def target_schedule(self) -> List[float]:
+        """Full per-epoch target schedule (at least one element)."""
+        return list(self._target_schedule)
 
     def step(
         self,
@@ -112,6 +155,11 @@ class LambdaScheduler:
         float
             Current lambda value
         """
+        # Track current step before any early return so the target_sparsity
+        # property reflects the correct epoch even during warmup.
+        if current_step is not None:
+            self._last_step = int(current_step)
+
         if self.warmup_steps > 0 and current_step <= self.warmup_steps:
             if current_step == 0:
                 log.info(
@@ -204,6 +252,7 @@ class LambdaScheduler:
 
         Called by BregmanPruner once the trainer is available.
         """
+        self._steps_per_epoch = int(steps_per_epoch)
         self.warmup_steps = self.warmup_epochs * steps_per_epoch
         if self.warmup_steps > 0:
             log.info(
@@ -219,7 +268,11 @@ class LambdaScheduler:
         """Get scheduler state for checkpointing."""
         return {
             "lambda_value": self.lambda_value,
+            # Kept for backward compatibility with older checkpoints; readers
+            # should prefer `_target_schedule`.
             "target_sparsity": self.target_sparsity,
+            "_target_schedule": list(self._target_schedule),
+            "_last_step": self._last_step,
             "_last_sparsity": self._last_sparsity,
             "acceleration_factor": self.acceleration_factor,
             "min_lambda": self.min_lambda,
@@ -229,9 +282,24 @@ class LambdaScheduler:
         }
 
     def load_state(self, state: dict) -> None:
-        """Load scheduler state from a checkpoint."""
+        """Load scheduler state from a checkpoint.
+
+        Supports both new-style checkpoints (with ``_target_schedule``) and
+        legacy ones that only stored the scalar ``target_sparsity``.
+        """
         self.lambda_value = state["lambda_value"]
-        self.target_sparsity = state["target_sparsity"]
+
+        if "_target_schedule" in state:
+            self._target_schedule = _normalize_target_schedule(
+                state["_target_schedule"]
+            )
+        elif "target_sparsity" in state:
+            # Legacy scalar-only checkpoint.
+            self._target_schedule = _normalize_target_schedule(
+                state["target_sparsity"]
+            )
+        self._last_step = int(state.get("_last_step", self._last_step))
+
         self._last_sparsity = state.get("_last_sparsity")
         if self._last_sparsity is not None:
             # Ensure restored state is consistent with strict Bregman assumptions.

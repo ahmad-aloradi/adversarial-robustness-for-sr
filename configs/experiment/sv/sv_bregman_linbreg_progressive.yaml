@@ -1,0 +1,20 @@
+# @package _global_
+# Progressive-target LinBreg: linear ramp 50% -> 90% over 10 epochs, then hold.
+# The initial sparsity (0.99 via sparsity_rate) and the high initial lambda stay
+# as-is; only the moving target changes so lambda first eases off (letting the
+# model recover) and then climbs again as the target rises.
+#
+# The scalar `_bregman_target_sparsity_final` feeds the `bregman_lambda`
+# resolver (which expects a single float); `_bregman_target_sparsity` is the
+# per-epoch list consumed by both the scheduler and pruner.
+
+defaults:
+  - sv/sv_bregman_linbreg
+  - _self_
+
+_bregman_target_sparsity_final: 0.9
+_bregman_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity_final},initial_lambda}
+_bregman_min_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity_final},min_lambda}
+
+_bregman_target_sparsity:
+  [0.50, 0.544, 0.589, 0.633, 0.678, 0.722, 0.767, 0.811, 0.856, 0.90]

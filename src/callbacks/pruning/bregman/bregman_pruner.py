@@ -6,7 +6,7 @@ and allows it to become denser during training. The lambda scheduler adjusts
 regularization strength to drive sparsity toward a target level.
 """
 
-from typing import Any, Optional, Literal
+from typing import Any, List, Optional, Literal, Union
 
 import torch
 from pytorch_lightning import Callback, LightningModule, Trainer
@@ -19,7 +19,7 @@ from src.callbacks.pruning.shared_prune_utils import (
 )
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
-from .lambda_scheduler import LambdaScheduler
+from .lambda_scheduler import LambdaScheduler, _normalize_target_schedule
 
 log = utils.get_pylogger(__name__)
 
@@ -43,7 +43,7 @@ class BregmanPruner(Callback):
         sparsity_threshold: float = 1e-12,
         verbose: int = 1,
         lambda_scheduler: Optional[LambdaScheduler] = None,
-        target_sparsity: Optional[float] = None,
+        target_sparsity: Optional[Union[float, List[float]]] = None,
         tolerance: float = 0.01,
         rescale_mode: str = "none",
     ):
@@ -52,7 +52,9 @@ class BregmanPruner(Callback):
             sparsity_threshold: Threshold below which a weight is considered zero.
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
             lambda_scheduler: Optional scheduler for dynamic lambda updates.
-            target_sparsity: Target sparsity for validation suppression.
+            target_sparsity: Target sparsity for validation suppression. A list
+                specifies a per-epoch schedule; the last value is held for all
+                epochs beyond ``len(list) - 1``.
             rescale_mode: How to handle λ changes in the proximal step.
                 "none": no rescaling (default).
                 "subgradient_correction": adjust subgradient v to remain in ∂φ_new(θ).
@@ -62,6 +64,12 @@ class BregmanPruner(Callback):
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
+        if target_sparsity is None:
+            self._target_schedule: Optional[List[float]] = None
+        else:
+            self._target_schedule = _normalize_target_schedule(target_sparsity)
+        # Public attribute kept for logging/back-compat: scalar when single
+        # target, list when a schedule was provided.
         self.target_sparsity = target_sparsity
         self.rescale_mode = rescale_mode
 
@@ -71,6 +79,17 @@ class BregmanPruner(Callback):
         self._ckpt_scheduler_state: Optional[dict] = None
         self._ckpt_last_sparsity: Optional[float] = None
         self._suppressor = ValidationSuppressor(tolerance=tolerance)
+
+    def _current_target(self, epoch: int) -> Optional[float]:
+        """Return the suppressor target for a given epoch, or None.
+
+        For a per-epoch schedule, returns ``schedule[min(epoch, len-1)]``.
+        For the legacy scalar, returns that scalar.
+        """
+        if self._target_schedule is None:
+            return None
+        idx = min(max(epoch, 0), len(self._target_schedule) - 1)
+        return self._target_schedule[idx]
 
     # -------------------------------------------------------------------------
     # Lightning hooks
@@ -142,10 +161,15 @@ class BregmanPruner(Callback):
         # Check suppression: uses previous epoch's sparsity, but this is the
         # only hook that fires when validation is suppressed. on_validation_start
         # provides a second check with fresh sparsity when validation does run.
-        if self.target_sparsity is not None:
+        # Resolve the current epoch's target so suppression follows the ramp
+        # rather than the final-epoch value — otherwise early-epoch validation
+        # would be wrongly suppressed while sparsity (0.99) sits far above the
+        # ramp's first target (e.g. 0.5).
+        active_target = self._current_target(trainer.current_epoch)
+        if active_target is not None:
             current_sparsity = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
             self._suppressor.check(
-                trainer, current_sparsity, self.target_sparsity
+                trainer, current_sparsity, active_target
             )
 
     def on_train_batch_end(
@@ -200,10 +224,13 @@ class BregmanPruner(Callback):
         Can suppress this validation if sparsity drifted away from target
         during the training epoch. Cannot restore — that's on_train_epoch_start's job.
         """
-        if not self._initialized or self.target_sparsity is None:
+        if not self._initialized:
+            return
+        active_target = self._current_target(trainer.current_epoch)
+        if active_target is None:
             return
         current_sparsity = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
-        self._suppressor.check(trainer, current_sparsity, self.target_sparsity)
+        self._suppressor.check(trainer, current_sparsity, active_target)
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict

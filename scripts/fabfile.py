@@ -581,6 +581,7 @@ def clean_timelimit_logs():
     with cd(PATH_PROJECT):
         run("bash scripts/cleanup_timelimit_logs.sh .")
 
+
 @task
 def scancel():
     """Stop all jobs associated to your username."""
@@ -653,11 +654,15 @@ def check_running_pending(job_name):
         text = str(result) if result else ""
         marker_idx = text.rfind("__SQ_EXIT__")
         if marker_idx < 0:
-            print(f"[warn] squeue probe on {host} produced no marker; skipping")
+            print(
+                f"[warn] squeue probe on {host} produced no marker; skipping"
+            )
             continue
-        exit_code = text[marker_idx + len("__SQ_EXIT__"):].strip()
+        exit_code = text[marker_idx + len("__SQ_EXIT__") :].strip()
         if exit_code != "0":
-            print(f"[warn] squeue probe on {host} exited {exit_code}; skipping")
+            print(
+                f"[warn] squeue probe on {host} exited {exit_code}; skipping"
+            )
             continue
         answered = True
         body = text[:marker_idx]
@@ -733,6 +738,46 @@ def check_file_exists(file_path):
     raise RuntimeError(
         f"check_file_exists got ambiguous output for {file_path}: {text!r}"
     )
+
+
+def _find_latest_last_ckpt(ckpt_dir):
+    """Return the newest-by-mtime ``last*.ckpt`` in ``ckpt_dir``, or None.
+
+    Lightning's ``ModelCheckpoint(save_last=True)`` emits versioned
+    ``last-v{N}.ckpt`` when ``last.ckpt`` already exists from a prior run,
+    so ``last.ckpt`` ends up frozen at the first run's epoch. Picking the
+    newest real save by mtime recovers the actual latest state.
+
+    Raises RuntimeError if the probe can't answer cleanly — same reasoning
+    as check_file_exists: never let "unknown" masquerade as "absent".
+
+    Args:
+        ckpt_dir (str): Absolute path to the checkpoints directory.
+
+    Returns:
+        str | None: Full path to newest last*.ckpt, or None if none exist.
+    """
+    probe = (
+        f"find {ckpt_dir} -maxdepth 1 -type f -name 'last*.ckpt' "
+        f"-printf '%T@\\t%p\\n' 2>/dev/null | sort -rn | head -1 | cut -f2-; "
+        f"echo __FL__$?"
+    )
+    result = run(probe, quiet=True, warn_only=True)
+    text = str(result) if result is not None else ""
+    marker_idx = text.rfind("__FL__")
+    if marker_idx < 0:
+        raise RuntimeError(
+            f"_find_latest_last_ckpt probe produced no marker "
+            f"for {ckpt_dir}: {text!r}"
+        )
+    exit_code = text[marker_idx + len("__FL__"):].strip()
+    body = text[:marker_idx].strip()
+    if exit_code != "0":
+        raise RuntimeError(
+            f"_find_latest_last_ckpt probe failed (exit {exit_code}) "
+            f"for {ckpt_dir}: {text!r}"
+        )
+    return body or None
 
 
 def check_test_artifacts_complete(run_dir):
@@ -928,7 +973,9 @@ def _get_job_routing(experiment, dataset_name, sparsity=None):
         cluster = "tinygpu"
     elif "fixed" in experiment:
         cluster = "tinygpu"
-    elif "linbreg" in experiment:  # TODO: temporary — offload linbreg to tinygpu
+    elif (
+        "linbreg" in experiment
+    ):  # TODO: temporary — offload linbreg to tinygpu
         cluster = "tinygpu"
     else:
         cluster = "alex"
@@ -947,6 +994,10 @@ def _submit_sv_job(
     apply_augmentation=False,
     batch_size_base=128,
     target_sparsity=None,
+    # progressive ramp (Bregman only)
+    progressive=False,
+    initial_target_sparsity=None,
+    ramp_epochs=None,
     # other options
     gpu_device=GPU,
     bypass_exps=None,
@@ -1042,13 +1093,22 @@ def _submit_sv_job(
         if target_sparsity is not None
         else ""
     )
+    progressive_str = (
+        f"-ramp{int(initial_target_sparsity * 100)}to"
+        f"{int(target_sparsity * 100)}_{ramp_epochs}ep"
+        if progressive
+        and initial_target_sparsity is not None
+        and target_sparsity is not None
+        and ramp_epochs is not None
+        else ""
+    )
     num_ckpt_avg_str = f"-avg{num_ckpt_avg}" if num_ckpt_avg > 1 else ""
 
     job_name = (
         f"{experiment}{ramp_str}-{sv_model}-{os.path.basename(dataset_name)}"
         f"-virt-{virtual_spks}-bs{batch_size}-vad{apply_vad}"
         f"{num_ckpt_avg_str}-ep{max_epochs}-aug{apply_augmentation}"
-        f"{sparsity_str}{job_name_suffix}"
+        f"{sparsity_str}{progressive_str}{job_name_suffix}"
     )
 
     settings = settings.copy()
@@ -1102,7 +1162,35 @@ def _submit_sv_job(
 
     if target_sparsity is not None:
         if "bregman" in experiment:
-            script_arguments["_bregman_target_sparsity"] = target_sparsity
+            if progressive:
+                assert (
+                    initial_target_sparsity is not None and ramp_epochs is not None
+                ), "progressive=True requires initial_target_sparsity and ramp_epochs"
+                assert (
+                    ramp_epochs >= 2
+                ), f"ramp_epochs must be >= 2 to interpolate, got {ramp_epochs}"
+                # Linear ramp: initial_target_sparsity -> target_sparsity over
+                # ramp_epochs entries; the final value is held beyond the list.
+                schedule = [
+                    initial_target_sparsity
+                    + (target_sparsity - initial_target_sparsity)
+                    * i
+                    / (ramp_epochs - 1)
+                    for i in range(ramp_epochs)
+                ]
+                # Format as a Hydra CLI list literal; wrap in single quotes so
+                # the shell preserves the brackets.
+                schedule_literal = (
+                    "[" + ",".join(f"{v:.6f}" for v in schedule) + "]"
+                )
+                script_arguments[
+                    "_bregman_target_sparsity"
+                ] = f"'{schedule_literal}'"
+                script_arguments[
+                    "_bregman_target_sparsity_final"
+                ] = target_sparsity
+            else:
+                script_arguments["_bregman_target_sparsity"] = target_sparsity
         elif "pruning" in experiment:
             script_arguments[
                 "callbacks.model_pruning.amount"
@@ -1132,18 +1220,26 @@ def _submit_sv_job(
         print(f"Skipping {job_name} - in bypass list for testing")
         return
 
-    # If a checkpoint exists, resume from it. This can happen when a job was previously running and got interrupted
+    # If a checkpoint exists, resume from it. This can happen when a job was previously running and got interrupted.
+    # Lightning's save_last sometimes writes last-v{N}.ckpt instead of
+    # overwriting last.ckpt, so last.ckpt can be stale — pick newest by mtime.
     ckpt_dir = os.path.join(run_dir, "checkpoints")
-    last_ckpt = os.path.join(ckpt_dir, "last.ckpt")
-    if check_file_exists(last_ckpt):
-        script_arguments["ckpt_path"] = last_ckpt
-        print(f"Resuming {job_name} from checkpoint")
+    latest_last = _find_latest_last_ckpt(ckpt_dir)
+    if latest_last:
+        script_arguments["ckpt_path"] = latest_last
+        latest_name = os.path.basename(latest_last)
+        if latest_name != "last.ckpt":
+            print(
+                f"[warn] {job_name}: last.ckpt is stale — "
+                f"resuming from {latest_name} instead"
+            )
+        print(f"Resuming {job_name} from {latest_name}")
         if any(lg in logger for lg in ["wandb"]):
             script_arguments["logger.wandb.id"] = name
             print(f"Resuming run in wandb dashboard with id: {name}")
     elif check_dir_exists(ckpt_dir):
         raise RuntimeError(
-            f"Checkpoints dir exists but last.ckpt is missing for {job_name}.\n"
+            f"Checkpoints dir exists but no last*.ckpt found for {job_name}.\n"
             f"  dir: {ckpt_dir}\n"
             f"Refusing to start from scratch and overwrite existing checkpoints."
         )
@@ -1204,9 +1300,10 @@ def run_sv(transfer_data="false", force="false"):
     # Master switch per group of experiments
     RUN_BASELINE_EXPS = False
     RUN_PRUNING_EXPS = False
-    RUN_Bregman_EXPS = True
+    RUN_Bregman_EXPS = False
     RUN_AUX_BREGMAN_EXPS = False
-    # Adaptation experiments 
+    RUN_PROGRESSIVE_Bregman_EXPS = True
+    # Adaptation experiments
     RUN_POOR_INIT_Bregman_EXPS = False
     RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS = False
     RUN_NESTROV_RESCALE_PROX_Bregman_EXPS = False
@@ -1281,7 +1378,6 @@ def run_sv(transfer_data="false", force="false"):
                 "per_model": {"wespeaker_resnet34": _resnet34_regl1},
             },
         }
-  
 
     ########################
     # Bregman's "auxiliary" experiments
@@ -1357,7 +1453,7 @@ def run_sv(transfer_data="false", force="false"):
             "sv_bregman_adabreg": {
                 "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet50"],
                 "sparsity_rates": [0.90, 0.99],
-                "dataset_names": ['datasets/cnceleb'],
+                "dataset_names": ["datasets/cnceleb"],
                 "extra_overrides": {
                     "callbacks.model_pruning.rescale_mode": "nestrovs_adaptive_update",
                 },
@@ -1366,14 +1462,13 @@ def run_sv(transfer_data="false", force="false"):
             "sv_bregman_linbreg": {
                 "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet50"],
                 "sparsity_rates": [0.90, 0.99],
-                "dataset_names": ['datasets/cnceleb'],
+                "dataset_names": ["datasets/cnceleb"],
                 "extra_overrides": {
                     "callbacks.model_pruning.rescale_mode": "nestrovs_adaptive_update",
                 },
                 "suffix": "-rescale_prox_v2",
             },
         }
-
 
     ########################
     # Subgradient correction (v1) experiments
@@ -1412,7 +1507,9 @@ def run_sv(transfer_data="false", force="false"):
             "sv_bregman_adabreg": {
                 "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
                 "sparsity_rates": [0.90, 0.99],
-                "dataset_names": ['datasets/cnceleb'],  # run a smaller sweep for adabreg to keep total job count manageable
+                "dataset_names": [
+                    "datasets/cnceleb"
+                ],  # run a smaller sweep for adabreg to keep total job count manageable
                 "extra_overrides": {
                     "callbacks.model_pruning.rescale_mode": "predictive_correction",
                 },
@@ -1420,8 +1517,13 @@ def run_sv(transfer_data="false", force="false"):
             },
             "sv_bregman_linbreg": {
                 "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
-                "sparsity_rates": [0.90, 0.99],  # run a smaller sweep for linbreg to keep total job count manageable
-                "dataset_names": ['datasets/cnceleb'],  # run a smaller sweep for linbreg to keep total job count manageable
+                "sparsity_rates": [
+                    0.90,
+                    0.99,
+                ],  # run a smaller sweep for linbreg to keep total job count manageable
+                "dataset_names": [
+                    "datasets/cnceleb"
+                ],  # run a smaller sweep for linbreg to keep total job count manageable
                 "extra_overrides": {
                     "callbacks.model_pruning.rescale_mode": "predictive_correction",
                 },
@@ -1434,6 +1536,30 @@ def run_sv(transfer_data="false", force="false"):
         *subgrad_corr_rescale_prox_configs.items(),
         *subgrad_corr_rescale_prox_v4_configs.items(),
     ]
+
+    ########################
+    # Progressive-target experiments: linear ramp from initial_target_sparsity
+    # up to sparsity_rate over ramp_epochs epochs, then held.
+    ########################
+    if not RUN_PROGRESSIVE_Bregman_EXPS:
+        progressive_bregman_experiments = {}
+    else:
+        progressive_bregman_experiments = {
+            "sv_bregman_adabreg_progressive": {
+                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
+                "sparsity_rates": [0.90],  # final targets
+                "initial_target_sparsity": 0.5,
+                "ramp_epochs": 10,
+                "dataset_names": ["multi_sv"],
+            },
+            "sv_bregman_linbreg_progressive": {
+                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
+                "sparsity_rates": [0.90],
+                "initial_target_sparsity": 0.5,
+                "ramp_epochs": 10,
+                "dataset_names": ["multi_sv"],
+            },
+        }
 
     # --- Volume estimation across clusters ---
     job_counts = {
@@ -1462,6 +1588,14 @@ def run_sv(transfer_data="false", force="false"):
             for sparsity in cfg["sparsity_rates"]:
                 cluster, gpu = _get_job_routing(
                     experiment + cfg.get("suffix", ""), dataset_name, sparsity
+                )
+                job_counts[cluster][gpu] += len(cfg["sv_models"])
+
+    for experiment, cfg in progressive_bregman_experiments.items():
+        for dataset_name in cfg["dataset_names"]:
+            for sparsity in cfg["sparsity_rates"]:
+                cluster, gpu = _get_job_routing(
+                    experiment, dataset_name, sparsity
                 )
                 job_counts[cluster][gpu] += len(cfg["sv_models"])
 
@@ -1536,7 +1670,9 @@ def run_sv(transfer_data="false", force="false"):
             for dataset_name in cfg["dataset_names"]:
                 for sparsity in cfg["sparsity_rates"]:
                     cluster, gpu = _get_job_routing(
-                        experiment + cfg.get("suffix", ""), dataset_name, sparsity
+                        experiment + cfg.get("suffix", ""),
+                        dataset_name,
+                        sparsity,
                     )
                     if cluster != CLUSTER_NAME:
                         print(
@@ -1565,7 +1701,10 @@ def run_sv(transfer_data="false", force="false"):
 
         for sv_model in exp_cfg["sv_models"]:
             pm = per_model_cfg.get(sv_model, {})
-            extra_overrides = {**base_overrides, **(pm.get("extra_overrides") or {})}
+            extra_overrides = {
+                **base_overrides,
+                **(pm.get("extra_overrides") or {}),
+            }
             suffix = pm.get("suffix", base_suffix)
 
             for dataset_name in exp_cfg["dataset_names"]:
@@ -1590,6 +1729,41 @@ def run_sv(transfer_data="false", force="false"):
                         force_retest=force_retest,
                         extra_overrides=extra_overrides or None,
                         job_name_suffix=suffix,
+                    )
+
+    # --- Submit progressive-target Bregman experiments (only for current cluster) ---
+    for experiment, cfg in progressive_bregman_experiments.items():
+        initial_ts = cfg["initial_target_sparsity"]
+        ramp_eps = cfg["ramp_epochs"]
+        base_overrides = cfg.get("extra_overrides") or {}
+        base_suffix = cfg.get("suffix", "")
+
+        for sv_model in cfg["sv_models"]:
+            for dataset_name in cfg["dataset_names"]:
+                for sparsity in cfg["sparsity_rates"]:
+                    cluster, gpu = _get_job_routing(
+                        experiment, dataset_name, sparsity
+                    )
+                    if cluster != CLUSTER_NAME:
+                        print(
+                            f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
+                        )
+                        continue
+                    _submit_sv_job(
+                        experiment=experiment,
+                        sv_model=sv_model,
+                        dataset_name=dataset_name,
+                        batch_size_base=batch_sizes[sv_model],
+                        transfer_data_bool=transfer_data_bool,
+                        max_epochs=base_max_epochs[dataset_name],
+                        target_sparsity=sparsity,
+                        progressive=True,
+                        initial_target_sparsity=initial_ts,
+                        ramp_epochs=ramp_eps,
+                        gpu_device=gpu,
+                        force_retest=force_retest,
+                        extra_overrides=base_overrides or None,
+                        job_name_suffix=base_suffix,
                     )
 
 
