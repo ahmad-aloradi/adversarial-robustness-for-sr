@@ -631,6 +631,9 @@ def check_running_pending(job_name):
     cluster login nodes.  Each cluster is queried separately to test if the job is running.
     on either cluster.
 
+    Raises RuntimeError if no login node answers, so a transient SSH failure
+    can't masquerade as 'not running' and cause duplicate submissions.
+
     Args:
         job_name (str): Name of the job to check
 
@@ -641,21 +644,71 @@ def check_running_pending(job_name):
     sq = 'squeue -t PENDING,RUNNING --format "%200j" -h'
     ssh_opts = "-o ConnectTimeout=5 -o BatchMode=yes"
 
+    answered = False
     for host in hosts:
         result = local(
-            f"ssh {ssh_opts} {env.user}@{host} '{sq}' 2>/dev/null",
+            f"ssh {ssh_opts} {env.user}@{host} '{sq}'; echo __SQ_EXIT__$?",
             capture=True,
         )
-        if not result:
+        text = str(result) if result else ""
+        marker_idx = text.rfind("__SQ_EXIT__")
+        if marker_idx < 0:
+            print(f"[warn] squeue probe on {host} produced no marker; skipping")
             continue
-        jobs = [line.strip() for line in result.splitlines() if line.strip()]
+        exit_code = text[marker_idx + len("__SQ_EXIT__"):].strip()
+        if exit_code != "0":
+            print(f"[warn] squeue probe on {host} exited {exit_code}; skipping")
+            continue
+        answered = True
+        body = text[:marker_idx]
+        jobs = [line.strip() for line in body.splitlines() if line.strip()]
         if job_name in jobs:
             return True
+
+    if not answered:
+        raise RuntimeError(
+            f"Could not query squeue on any login node ({hosts}); aborting to avoid duplicate submission of {job_name}"
+        )
     return False
+
+
+def check_dir_exists(dir_path):
+    """Check if a directory exists on the remote cluster.
+
+    Raises RuntimeError on ambiguous probe output for the same reason as
+    check_file_exists — we never want 'unknown' coerced to 'absent'.
+
+    Args:
+        dir_path (str): Absolute path to the directory to check
+
+    Returns:
+        bool: True if directory exists, False otherwise
+    """
+    result = run(
+        f"test -d {dir_path} && echo __DE__1 || echo __DE__0",
+        quiet=True,
+        warn_only=True,
+    )
+    text = str(result) if result is not None else ""
+    if getattr(result, "failed", False):
+        raise RuntimeError(
+            f"check_dir_exists probe failed for {dir_path}: {text!r}"
+        )
+    if "__DE__1" in text:
+        return True
+    if "__DE__0" in text:
+        return False
+    raise RuntimeError(
+        f"check_dir_exists got ambiguous output for {dir_path}: {text!r}"
+    )
 
 
 def check_file_exists(file_path):
     """Check if a file exists on the remote cluster.
+
+    Raises RuntimeError if the probe cannot answer cleanly (SSH error, empty
+    output) — treating "unknown" as "absent" caused silent fresh-starts that
+    overwrote resumable checkpoints.
 
     Args:
         file_path (str): Path to the file to check
@@ -663,8 +716,23 @@ def check_file_exists(file_path):
     Returns:
         bool: True if file exists, False otherwise
     """
-    result = run(f"test -f {file_path} && echo 1 || echo 0", quiet=True)
-    return result.strip() == "1"
+    result = run(
+        f"test -f {file_path} && echo __FE__1 || echo __FE__0",
+        quiet=True,
+        warn_only=True,
+    )
+    text = str(result) if result is not None else ""
+    if getattr(result, "failed", False):
+        raise RuntimeError(
+            f"check_file_exists probe failed for {file_path}: {text!r}"
+        )
+    if "__FE__1" in text:
+        return True
+    if "__FE__0" in text:
+        return False
+    raise RuntimeError(
+        f"check_file_exists got ambiguous output for {file_path}: {text!r}"
+    )
 
 
 def check_test_artifacts_complete(run_dir):
@@ -856,11 +924,11 @@ def _get_job_routing(experiment, dataset_name, sparsity=None):
         cluster = "tinygpu"
     elif "rescale_prox_v2" in experiment:
         cluster = "tinygpu"
-    # elif "new_test_run" in experiment:
-    #     cluster = "tinygpu"
     elif "subgrad_corr_v3" in experiment:
         cluster = "tinygpu"
     elif "fixed" in experiment:
+        cluster = "tinygpu"
+    elif "linbreg" in experiment:  # TODO: temporary — offload linbreg to tinygpu
         cluster = "tinygpu"
     else:
         cluster = "alex"
@@ -1065,13 +1133,20 @@ def _submit_sv_job(
         return
 
     # If a checkpoint exists, resume from it. This can happen when a job was previously running and got interrupted
-    last_ckpt = os.path.join(run_dir, "checkpoints/last.ckpt")
+    ckpt_dir = os.path.join(run_dir, "checkpoints")
+    last_ckpt = os.path.join(ckpt_dir, "last.ckpt")
     if check_file_exists(last_ckpt):
         script_arguments["ckpt_path"] = last_ckpt
         print(f"Resuming {job_name} from checkpoint")
         if any(lg in logger for lg in ["wandb"]):
             script_arguments["logger.wandb.id"] = name
             print(f"Resuming run in wandb dashboard with id: {name}")
+    elif check_dir_exists(ckpt_dir):
+        raise RuntimeError(
+            f"Checkpoints dir exists but last.ckpt is missing for {job_name}.\n"
+            f"  dir: {ckpt_dir}\n"
+            f"Refusing to start from scratch and overwrite existing checkpoints."
+        )
 
     if force_retest:
         script_arguments["+module.force_retest"] = True
@@ -1129,14 +1204,12 @@ def run_sv(transfer_data="false", force="false"):
     # Master switch per group of experiments
     RUN_BASELINE_EXPS = False
     RUN_PRUNING_EXPS = False
-    RUN_Bregman_EXPS = False
+    RUN_Bregman_EXPS = True
     RUN_AUX_BREGMAN_EXPS = False
-    RUN_REG_L1_CONV_EXPS = True
     # Adaptation experiments 
     RUN_POOR_INIT_Bregman_EXPS = False
     RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS = False
     RUN_NESTROV_RESCALE_PROX_Bregman_EXPS = False
-    RUN_SUBGRADIENT_CORR_V3_Bregman_EXPS = False
     RUN_SUBGRADIENT_CORR_V4_Bregman_EXPS = False
 
     ########################
@@ -1182,21 +1255,33 @@ def run_sv(transfer_data="false", force="false"):
     ########################
     # Bregman experiments
     ########################
+    # Group Norm for conv layers in ECAPA
     if not RUN_Bregman_EXPS:
         main_bregman_experiments = {}
     else:
+        # ECAPA uses the default GroupNorm regularizer on conv layers.
+        # ResNet34 uses L1 norm on Conv and Linear layers (per-model override).
+        _resnet34_regl1 = {
+            "extra_overrides": {
+                "module.model.pruning_groups.0.optimizer_settings.reg._target_": "src.callbacks.pruning.bregman.bregman_regularizers.RegL1",
+            },
+            "suffix": "-regl1_conv",
+        }
         main_bregman_experiments = {
             "sv_bregman_linbreg": {
-                "sv_models": default_sv_models,
-                "sparsity_rates": default_sparsity_rates,
+                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
+                "sparsity_rates": [0.75, 0.90, 0.95, 0.99],
                 "dataset_names": dataset_names,
+                "per_model": {"wespeaker_resnet34": _resnet34_regl1},
             },
             "sv_bregman_adabreg": {
-                "sv_models": default_sv_models,
-                "sparsity_rates": default_sparsity_rates,
+                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
+                "sparsity_rates": [0.75, 0.90, 0.95, 0.99],
                 "dataset_names": dataset_names,
+                "per_model": {"wespeaker_resnet34": _resnet34_regl1},
             },
         }
+  
 
     ########################
     # Bregman's "auxiliary" experiments
@@ -1291,7 +1376,7 @@ def run_sv(transfer_data="false", force="false"):
 
 
     ########################
-    # Rescale-prox experiments: Subgradient correction 
+    # Subgradient correction (v1) experiments
     ########################
     if not RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS:
         subgrad_corr_rescale_prox_configs = {}
@@ -1318,34 +1403,7 @@ def run_sv(transfer_data="false", force="false"):
         }
 
     ########################
-    # Rescale-prox experiments: Subgradient correction v3
-    ########################
-    if not RUN_SUBGRADIENT_CORR_V3_Bregman_EXPS:
-        subgrad_corr_rescale_prox_v3_configs = {}
-    else:
-        subgrad_corr_rescale_prox_v3_configs = {
-            "sv_bregman_adabreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn"],
-                "sparsity_rates": [0.90, 0.95, 0.99],
-                "dataset_names": ['datasets/cnceleb'],  # run a smaller sweep for adabreg to keep total job count manageable
-                "extra_overrides": {
-                    "callbacks.model_pruning.rescale_mode": "subgradient_correction_wo_clip",
-                },
-                "suffix": "-subgrad_corr_v3",
-            },
-            "sv_bregman_linbreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn"],
-                "sparsity_rates": [0.90, 0.95, 0.99],  # run a smaller sweep for linbreg to keep total job count manageable
-                "dataset_names": ['datasets/cnceleb'],  # run a smaller sweep for linbreg to keep total job count manageable
-                "extra_overrides": {
-                    "callbacks.model_pruning.rescale_mode": "subgradient_correction_wo_clip",
-                },
-                "suffix": "-subgrad_corr_v3",
-            },
-        }        
-
-    ########################
-    # Rescale-prox experiments: Subgradient correction v4
+    # Subgradient correction (v4) experiments
     ########################
     if not RUN_SUBGRADIENT_CORR_V4_Bregman_EXPS:
         subgrad_corr_rescale_prox_v4_configs = {}
@@ -1371,44 +1429,10 @@ def run_sv(transfer_data="false", force="false"):
             },
         }
 
-    ########################
-    # RegL1 conv experiments: resnet34 + cnceleb, replacing RegL1L2Conv with RegL1 for conv layers
-    ########################
-    if not RUN_REG_L1_CONV_EXPS:
-        reg_l1_conv_configs = {}
-    else:
-        reg_l1_conv_configs = {
-            "sv_bregman_adabreg": {
-                "sv_models": ["wespeaker_resnet34"],
-                "sparsity_rates": [0.90, 0.95, 0.99],
-                # "sparsity_rates": [0.90, 0.99],
-                "dataset_names": ["datasets/cnceleb", "multi_sv"],  # run on both datasets to see if the effect of conv-only RegL1 is consistent
-                # "dataset_names": ["datasets/cnceleb"],  # run on both datasets to see if the effect of conv-only RegL1 is consistent
-                "extra_overrides": {
-                    "module.model.pruning_groups.0.optimizer_settings.reg._target_": "src.callbacks.pruning.bregman.bregman_regularizers.RegL1",
-                },
-                "suffix": "-regl1_conv",
-            },
-            "sv_bregman_linbreg": {
-                "sv_models": ["wespeaker_resnet34"],
-                "sparsity_rates": [0.90, 0.95, 0.99],
-                # "sparsity_rates": [0.90, 0.99],
-                "dataset_names": ["datasets/cnceleb", "multi_sv"],  # run on both datasets to see if the effect of conv-only RegL1 is consistent
-                # "dataset_names": ["datasets/cnceleb"],  # run on both datasets to see if the effect of conv-only RegL1 is consistent
-                "extra_overrides": {
-                    "module.model.pruning_groups.0.optimizer_settings.reg._target_": "src.callbacks.pruning.bregman.bregman_regularizers.RegL1",
-                },
-                "suffix": "-regl1_conv",
-            },
-        }
-
-
     rescale_prox_configs = [
         *nestrovs_rescale_prox_configs.items(),
         *subgrad_corr_rescale_prox_configs.items(),
-        *subgrad_corr_rescale_prox_v3_configs.items(),
         *subgrad_corr_rescale_prox_v4_configs.items(),
-        *reg_l1_conv_configs.items(),
     ]
 
     # --- Volume estimation across clusters ---
@@ -1535,10 +1559,15 @@ def run_sv(transfer_data="false", force="false"):
 
     # --- Submit sparsity experiments (only for current cluster) ---
     for experiment, exp_cfg in sparsity_experiments.items():
-        extra_overrides = exp_cfg.get("extra_overrides")
-        suffix = exp_cfg.get("suffix", "")
+        base_overrides = exp_cfg.get("extra_overrides") or {}
+        base_suffix = exp_cfg.get("suffix", "")
+        per_model_cfg = exp_cfg.get("per_model", {})
 
         for sv_model in exp_cfg["sv_models"]:
+            pm = per_model_cfg.get(sv_model, {})
+            extra_overrides = {**base_overrides, **(pm.get("extra_overrides") or {})}
+            suffix = pm.get("suffix", base_suffix)
+
             for dataset_name in exp_cfg["dataset_names"]:
                 for sparsity in exp_cfg["sparsity_rates"]:
                     cluster, gpu = _get_job_routing(
@@ -1559,7 +1588,7 @@ def run_sv(transfer_data="false", force="false"):
                         target_sparsity=sparsity,
                         gpu_device=gpu,
                         force_retest=force_retest,
-                        extra_overrides=extra_overrides,
+                        extra_overrides=extra_overrides or None,
                         job_name_suffix=suffix,
                     )
 

@@ -4,25 +4,28 @@ export PYTHONPATH="$HOME/adversarial-robustness-for-sr"
 source=csv # # Sources: train_log --> epoch-mean, csv --> batch-step
 
 stage_visualize=true
-stage_aggregate_and_vis=true
+stage_aggregate_and_vis=false
 stage_test_viz=false
-stage_weight_norms=true
+stage_weight_norms=false
 force_recompute=true
 
 # Experiment selection criteria
 eval_model='ecapa_tdnn' # 'resnet34' 'ecapa_tdnn'
-eval_data='multi_sv'
-sparsity_rate='sr90' # 'sr90', 'sr95', 'sr99'
+eval_data='cnceleb' # 'cnceleb', 'multi_sv'
+sparsity_rate='*' # 'sr90', 'sr95', 'sr99'
 experiment='sv_bregman*' # e.g. 'sv_bregman', 'sv_pruning', 'sv_vanilla', 'sv_wespeaker'
+suffix=''   # e.g., subgrad_corr_v2 * 
 
 base_dirs=(
     '/data/ahmad/results'
 )
 experiments=(
-    "${experiment}*${eval_model}*${eval_data}*-subgrad_corr_v2"
-    "*fixed*${eval_model}*${eval_data}*"
+    # "${experiment}*${eval_model}*${eval_data}*-${suffix}"
+    # "${experiment}*${eval_model}*${eval_data}*-subgrad_corr_v2"
+    # "*fixed*${eval_model}*${eval_data}*"
     "${experiment}*${eval_model}*${eval_data}*${sparsity_rate}"
     "sv_vanilla_*${eval_model}*"
+    "sv_wespeaker_*${eval_model}*"
     )
 
 # Build list of dataset subdirs across all base_dirs
@@ -42,6 +45,7 @@ if [ "$stage_visualize" = true ]; then
         "EER" "minDCF" \
         "train_loss" "train/MulticlassAccuracy" "valid/MulticlassAccuracy" \
         "bregman/global_lambda" "bregman/sparsity" #"sparsity"
+        "lr" "train/margin"
         )
 
     python scripts/visualize.py \

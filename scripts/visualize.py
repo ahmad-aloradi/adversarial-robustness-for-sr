@@ -118,6 +118,7 @@ METHOD_CLASS_COLORS = {
     "pruning_unstruct": "#ff7f0e",  # orange
     "vanilla": "#7f7f7f",  # gray
     "wespeaker": "#9467bd",  # purple
+    "proxsgd": "#c7c7c7",  # light gray
 }
 
 METHOD_DISPLAY_NAMES = {
@@ -129,8 +130,9 @@ METHOD_DISPLAY_NAMES = {
     "adabregl2": "AdaBregL2",
     "pruning_struct": "Struct. Pruning",
     "pruning_unstruct": "Unstruct. Pruning",
-    "vanilla": "Baseline Adam",
-    "wespeaker": "Baseline SGD",
+    "proxsgd": "ProxSGD",
+    "vanilla": "Dense (AdamW)",
+    "wespeaker": "Dense (SGD)",
 }
 
 # Sparsity → marker shape  (consistent everywhere)
@@ -166,6 +168,8 @@ METRIC_LABELS = {
     "bregman/global_lambda": r"$\lambda$",
     "EER": "EER",
     "minDCF": "minDCF",
+    "train/margin": "AAM margin $m$",
+    "lr": "Learning rate",
 }
 
 # stage → metrics in that stage
@@ -174,6 +178,7 @@ METRIC_STAGES = {
     "valid": ["valid_loss", "valid/MulticlassAccuracy"],
     "test": ["EER", "minDCF"],
     "internal": ["sparsity", "bregman/global_lambda", "bregman/sparsity"],
+    "schedule": ["lr", "train/margin"],
 }
 
 # metric → set of valid plot types
@@ -187,6 +192,9 @@ METRIC_PLOT_TYPES = {
     "sparsity": {"curves"},
     "bregman/global_lambda": {"curves"},
     "bregman/sparsity": {"curves"},
+    # Schedule metrics (lr, margin) — curves only
+    "lr": {"curves"},
+    "train/margin": {"curves"},
     # Binary test metrics — bar (comparison) and scatter (correlation)
     "EER": {"bar", "scatter"},
     "minDCF": {"bar", "scatter"},
@@ -196,7 +204,55 @@ METRIC_PLOT_TYPES = {
 # Metrics that use log-scale y-axis by default
 METRIC_LOG_SCALE = {
     "bregman/global_lambda",
+    "lr",
 }
+
+# Method-class → (preferred lr column regex, verify-against column regex).
+# For Bregman methods we assume conv_layers is a proxy for the shared lr,
+# and verify it matches linear_layers per-experiment before using it.
+LR_COLUMN_RULES = {
+    "vanilla":   (r"^lr-(AdamW|Adam|SGD)$", None),
+    "wespeaker": (r"^lr-SGD$", None),
+    "linbreg":   (r"^lr-LinBreg/conv_layers$", r"^lr-LinBreg/linear_layers$"),
+    "adabreg":   (r"^lr-AdaBreg/conv_layers$", r"^lr-AdaBreg/linear_layers$"),
+    "proxsgd":   (r"^lr-ProxSGD/conv_layers$", r"^lr-ProxSGD/linear_layers$"),
+    "adabregw":  (r"^lr-AdaBregW?/conv_layers$", r"^lr-AdaBregW?/linear_layers$"),
+    "adabregl2": (r"^lr-AdaBreg(L2)?/conv_layers$", r"^lr-AdaBreg(L2)?/linear_layers$"),
+}
+
+
+def resolve_lr_column(df, info):
+    """Resolve the virtual 'lr' metric to an actual column in df.
+
+    For Bregman methods we use conv_layers as a proxy and verify it equals
+    linear_layers (they share the same scheduler group). Returns (col, None)
+    on success or (None, reason) if no suitable column is found.
+    """
+    method = info.get("method_class", "vanilla")
+    preferred, verify = LR_COLUMN_RULES.get(
+        method, LR_COLUMN_RULES["vanilla"]
+    )
+    pref_cols = [c for c in df.columns if re.match(preferred, c)]
+    if not pref_cols:
+        # Fallback: any lr-* column
+        any_lr = [c for c in df.columns if c.startswith("lr-")]
+        if not any_lr:
+            return None, "no lr-* columns"
+        return any_lr[0], None
+
+    col = pref_cols[0]
+    if verify is not None:
+        ver_cols = [c for c in df.columns if re.match(verify, c)]
+        if ver_cols:
+            a = df[[col, ver_cols[0]]].dropna()
+            if len(a) and not np.allclose(
+                a[col].values, a[ver_cols[0]].values, rtol=0, atol=1e-12
+            ):
+                print(
+                    f"  [warn] {info['dirname']}: {col} differs from "
+                    f"{ver_cols[0]} — conv-layer proxy may be misleading."
+                )
+    return col, None
 
 
 def _valid_plot_types(metric):
@@ -257,6 +313,8 @@ def parse_experiment_name(dirname):
         ("adabreg", "adabreg"),
         ("linbreg_fixed", "linbreg"),   # must come before linbreg
         ("linbreg", "linbreg"),
+        ("proxsgd_fixed", "proxsgd"),
+        ("proxsgd", "proxsgd"),
         ("pruning_mag_struct", "pruning_struct"),
         ("pruning_mag_unstruct", "pruning_unstruct"),
     ]
@@ -552,12 +610,20 @@ def plot_training_curves(
         label = make_label(info)
 
         for ax, metric in zip(axes, metrics):
-            if metric not in df.columns:
+            # Virtual 'lr' metric → resolve per-experiment
+            if metric == "lr":
+                col, reason = resolve_lr_column(df, info)
+                if col is None:
+                    print(f"  [skip] {info['dirname']}: lr — {reason}")
+                    continue
+            else:
+                col = metric
+            if col not in df.columns:
                 continue
             x = df[x_col].copy()
             if source == "csv":
                 x = x / 1000.0
-            y = df[metric]
+            y = df[col]
             mask = y.notna()
             n_pts = mask.sum()
             if n_pts == 0:

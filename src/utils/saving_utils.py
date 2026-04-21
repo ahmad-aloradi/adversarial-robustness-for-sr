@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 from collections import OrderedDict
 import shutil
 from pathlib import Path
@@ -146,6 +147,26 @@ def save_state_dicts(
     if best_ckpt_path == "":
         log.warning("Best ckpt not found! Skipping...")
         return
+
+    # Re-anchor stale absolute paths (e.g. run dir moved between filesystems):
+    # if the recorded path doesn't exist, look for the same basename in the
+    # current checkpoint dir.
+    if not os.path.isfile(best_ckpt_path):
+        current_dir = trainer.checkpoint_callback.dirpath or os.path.dirname(
+            trainer.checkpoint_callback.last_model_path or ""
+        )
+        candidate = os.path.join(current_dir, os.path.basename(best_ckpt_path))
+        if os.path.isfile(candidate):
+            log.warning(
+                f"best_model_path moved: {best_ckpt_path} -> {candidate}"
+            )
+            best_ckpt_path = candidate
+        else:
+            log.error(
+                f"Best ckpt missing at {best_ckpt_path} and no fallback "
+                f"in {current_dir}; skipping."
+            )
+            return
 
     best_ckpt_score = trainer.checkpoint_callback.best_model_score
     if best_ckpt_score is not None:
