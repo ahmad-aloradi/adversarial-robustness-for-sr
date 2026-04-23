@@ -542,22 +542,48 @@ class SpeakerVerification(pl.LightningModule):
             # --- Standard Optimizer Logic ---
             optimizer = optimizer_partial(params=self.parameters())
 
-        # --- Common Scheduler Logic ---
-        if self.hparams.get("lr_scheduler"):
-            # Instantiate the scheduler, which now receives a fully formed optimizer
-            scheduler = instantiate(
-                self.hparams.lr_scheduler.scheduler, optimizer=optimizer
+        if not self.hparams.get("lr_scheduler"):
+            return {"optimizer": optimizer}
+
+        cfg = self.hparams.lr_scheduler.scheduler
+        extras = self.hparams.lr_scheduler.get("extras") or {}
+        scheduler = instantiate(
+            cfg,
+            optimizer=optimizer,
+            **self._resolve_scheduler_runtime_kwargs(cfg, extras),
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, **dict(extras)},
+        }
+
+    def _resolve_scheduler_runtime_kwargs(self, cfg, extras) -> Dict[str, Any]:
+        """Fill scheduler kwargs that depend on trainer state and can't be
+        resolved at config-load time (e.g. `steps_per_epoch` for
+        `WarmupExponentialLR` in per-step mode)."""
+        target = cfg.get("_target_", "") if cfg else ""
+        if not target.endswith("WarmupExponentialLR"):
+            return {}
+        if "steps_per_epoch" in cfg:
+            return {}  # YAML-specified value wins
+
+        interval = extras.get("interval", "epoch")
+        if interval != "step":
+            return {"steps_per_epoch": None}  # Epoch mode
+
+        max_epochs = self.trainer.max_epochs
+        if not isinstance(max_epochs, int) or max_epochs <= 0:
+            raise RuntimeError(
+                f"WarmupExponentialLR with interval='step' requires "
+                f"trainer.max_epochs to be a positive int; got {max_epochs!r}."
             )
-
-            lr_scheduler_dict = {"scheduler": scheduler}
-            if self.hparams.lr_scheduler.get("extras"):
-                for key, value in self.hparams.lr_scheduler.get(
-                    "extras"
-                ).items():
-                    lr_scheduler_dict[key] = value
-            return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_dict}
-
-        return {"optimizer": optimizer}
+        total = self.trainer.estimated_stepping_batches
+        if not total or total == float("inf"):
+            raise RuntimeError(
+                f"WarmupExponentialLR with interval='step' requires finite "
+                f"trainer.estimated_stepping_batches; got {total!r}."
+            )
+        return {"steps_per_epoch": max(1, int(total) // max_epochs)}
 
     # Dev and eval utils
     def _get_test_artifacts_dir(self, test_filename: str) -> Path:

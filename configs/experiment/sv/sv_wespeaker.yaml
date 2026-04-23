@@ -103,17 +103,17 @@ module:
         scale: 32.0
 
   # WeSpeaker-style LR schedule: warmup + exponential decay (auto-scaled)
-  # LR: 0.0 -> 0.1 (warmup, 4% of epochs) -> 0.00005 (gamma decay)
+  # LR: base/(W+1) -> 0.1 (warmup over 4% of epochs) -> 0.00005 (gamma decay)
   # gamma computed to reach final_lr=0.00005 from initial_lr=0.1
   lr_scheduler:
     scheduler:
       _target_: src.utils.schedulers.WarmupExponentialLR
       warmup_epochs: ${oc.eval:'max(1, int(${trainer.max_epochs} * 0.04))'} # 4% warmup (WeSpeaker: 6/150)
-      warmup_start_factor: 0.0 # WeSpeaker: warm_from_zero=True
+      warmup_start_factor: ${oc.eval:'0.0 if "${..extras.interval}" == "step" else 1.0 / (max(1, int(${trainer.max_epochs} * 0.04)) + 1)'}
       gamma: ${oc.eval:'pow(0.0005, 1.0 / (${trainer.max_epochs} - max(1, int(${trainer.max_epochs} * 0.04))))'} # decay to 0.00005
     extras:
-      interval: "epoch"
-      frequency: ${trainer.check_val_every_n_epoch}
+      interval: "step"
+      frequency: 1
 
   # WeSpeaker-exact SGD optimizer
   optimizer:
