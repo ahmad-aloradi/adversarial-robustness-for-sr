@@ -66,6 +66,12 @@ class LambdaScheduler:
         Multiply ``update_frequency`` by this when inside the damping zone.
     damping_acceleration_divisor : float, default=5.0
         Divide ``acceleration_factor`` by this when inside the damping zone.
+    max_relative_change : float, optional
+        If set, bounds the per-update relative change in lambda such that
+        ``|lambda_new - lambda_prev| / lambda_prev <= max_relative_change``.
+        Only active once the first epoch has completed
+        (``_last_step >= _steps_per_epoch``) to allow sparsity to settle
+        from the initial state. ``None`` (default) disables the clamp.
     """
 
     def __init__(
@@ -80,6 +86,7 @@ class LambdaScheduler:
         damping_zone: float = 0.0,
         damping_frequency_multiplier: int = 10,
         damping_acceleration_divisor: float = 5.0,
+        max_relative_change: Optional[float] = None,
     ):
         self._target_schedule = _normalize_target_schedule(target_sparsity)
         if acceleration_factor < 0.0:
@@ -116,6 +123,11 @@ class LambdaScheduler:
         self.damping_zone = damping_zone
         self.damping_frequency_multiplier = damping_frequency_multiplier
         self.damping_acceleration_divisor = damping_acceleration_divisor
+        if max_relative_change is not None and max_relative_change <= 0.0:
+            raise ValueError(
+                f"max_relative_change must be > 0.0 when set, got {max_relative_change}"
+            )
+        self.max_relative_change = max_relative_change
 
     @property
     def target_sparsity(self) -> float:
@@ -210,6 +222,8 @@ class LambdaScheduler:
         self._last_sparsity = sparsity_signal
         sparsity_difference = sparsity_signal - self.target_sparsity
 
+        lambda_prev = self.lambda_value
+
         if sparsity_signal < self.target_sparsity:
             # Increase lambda to encourage more sparsity
             self.lambda_value *= 1 + effective_acceleration * abs(
@@ -220,6 +234,21 @@ class LambdaScheduler:
             self.lambda_value /= 1 + effective_acceleration * abs(
                 sparsity_difference
             )
+
+        # Relative-change clamp — only active once the first epoch has
+        # completed so the initial sparsity settle isn't penalised.
+        if (
+            self.max_relative_change is not None
+            and self._steps_per_epoch is not None
+            and self._steps_per_epoch > 0
+            and self._last_step >= self._steps_per_epoch
+        ):
+            upper = lambda_prev * (1.0 + self.max_relative_change)
+            lower = lambda_prev * (1.0 - self.max_relative_change)
+            if self.lambda_value > upper:
+                self.lambda_value = upper
+            elif self.lambda_value < lower:
+                self.lambda_value = lower
 
         # Clamp lambda to valid range
         self.lambda_value = max(
@@ -279,6 +308,7 @@ class LambdaScheduler:
             "max_lambda": self.max_lambda,
             "warmup_steps": self.warmup_steps,
             "damping_zone": self.damping_zone,
+            "max_relative_change": self.max_relative_change,
         }
 
     def load_state(self, state: dict) -> None:
@@ -309,6 +339,9 @@ class LambdaScheduler:
         self.max_lambda = state["max_lambda"]
         self.warmup_steps = state.get("warmup_steps", self.warmup_steps)
         self.damping_zone = state.get("damping_zone", self.damping_zone)
+        self.max_relative_change = state.get(
+            "max_relative_change", self.max_relative_change
+        )
 
         log.info(
             f"LambdaScheduler state restored. lambda={self.lambda_value:.4f}"

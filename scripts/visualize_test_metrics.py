@@ -316,6 +316,16 @@ def main():
         help="Output directory for figures (default: <input_dir>/figures)",
     )
     parser.add_argument("--font_size", type=int, default=10)
+    parser.add_argument(
+        "--exclude_cnceleb_concatenated",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Skip the cnceleb_concatenated protocol entirely and relabel "
+            "cnceleb_multi as 'CNCeleb-E'. Use --no-exclude_cnceleb_concatenated "
+            "to keep both CNCeleb protocols as side-by-side subplots."
+        ),
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir or os.path.join(args.input_dir, "figures")
@@ -323,6 +333,8 @@ def main():
     # Load data --> de-duplicate based on is_latest flag (keep only the latest)
     csv_path = os.path.join(args.input_dir, "eer_leaderboard.csv")
     df = pd.read_csv(csv_path)
+    if args.exclude_cnceleb_concatenated:
+        df = df[df["dataset"] != "cnceleb_concatenated"].copy()
     if "is_latest" in df.columns:
         stale = df[~df["is_latest"].astype(bool)]
         for _, row in stale.iterrows():
@@ -347,6 +359,8 @@ def main():
     dp = df["dataset"].apply(parse_dataset_protocol)
     df["dataset_name"] = dp.apply(lambda x: x[0])
     df["protocol"] = dp.apply(lambda x: x[1])
+    if args.exclude_cnceleb_concatenated:
+        df.loc[df["dataset"] == "cnceleb_multi", "protocol"] = "CNCeleb-E"
     df["train_dataset"] = df["exp"].apply(parse_train_dataset_protocol)
 
     # Ensure all metric columns are numeric
