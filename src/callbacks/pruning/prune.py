@@ -103,6 +103,14 @@ class MagnitudePruner(Callback):
             self.manager.log_overview()
             self._logged_overview = True
 
+    def on_fit_start(
+        self, trainer: Trainer, pl_module: LightningModule
+    ) -> None:
+        """One-time setup: skip sanity check and start suppressed."""
+        if self.scheduled:
+            ValidationSuppressor.prepare(trainer)
+            trainer.limit_val_batches = 0
+
     def on_train_start(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
@@ -134,11 +142,6 @@ class MagnitudePruner(Callback):
             state = checkpoint["magnitude_pruner_state"]
             self.scheduled = state.get("scheduled", self.scheduled)
 
-            if "validation_suppression_state" in state:
-                self._suppressor.load_state_dict(
-                    state["validation_suppression_state"]
-                )
-
             if self.scheduled:
                 if "scheduler_state" not in state:
                     raise RuntimeError(
@@ -166,7 +169,6 @@ class MagnitudePruner(Callback):
     ) -> None:
         state = {
             "scheduled": self.scheduled,
-            "validation_suppression_state": self._suppressor.state_dict(),
         }
         if self.scheduled and self.scheduler:
             state["scheduler_state"] = self.scheduler.state_dict()
@@ -228,9 +230,9 @@ class MagnitudePruner(Callback):
         else:
             self._last_status = "Maintained"
 
-        # 4. Manage validation suppression during ramp-up
+        # 4. Gate validation based on current sparsity vs final target.
         if self.scheduled:
-            self._suppressor.check(trainer, new_sparsity, self.final_amount)
+            self._suppressor.gate(trainer, new_sparsity, self.final_amount)
 
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule

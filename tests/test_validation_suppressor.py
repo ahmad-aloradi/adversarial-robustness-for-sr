@@ -1,17 +1,26 @@
-"""Tests for ValidationSuppressor and compute_sparsity from suppression.py."""
+"""Tests for ValidationSuppressor and compute_sparsity.
 
+The suppressor is a stateless gate: ``gate(trainer, current, target)`` sets
+``trainer.limit_val_batches`` to ``restore_limit`` if target is met,
+otherwise to 0. ``prepare(trainer)`` runs once at fit start to make sibling
+callbacks (EarlyStopping, ReduceLROnPlateau) tolerant of suppressed epochs.
+
+The 9-case coverage table documented in the conversation is implemented as
+``test_case_N_*`` methods in ``TestGateTransitions``.
+"""
+
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 import torch
 import torch.nn as nn
-from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 from src.callbacks.pruning.shared_prune_utils import (
     ValidationSuppressor,
     compute_sparsity,
 )
+
 
 # =============================================================================
 # compute_sparsity tests
@@ -20,27 +29,21 @@ from src.callbacks.pruning.shared_prune_utils import (
 
 class TestComputeSparsity:
     def test_raw_params_format(self):
-        """Works with List[Parameter] input (Bregman style)."""
         p = nn.Parameter(torch.zeros(10))
         assert compute_sparsity([p]) == 1.0
 
     def test_module_name_pairs_format(self):
-        """Works with List[Tuple[Module, str]] input (magnitude style)."""
         m = nn.Linear(10, 5)
         m.weight.data.zero_()
         assert compute_sparsity([(m, "weight")]) == 1.0
 
     def test_threshold_based_detection(self):
-        """Values at or below threshold count as zero."""
         p = nn.Parameter(torch.tensor([0.0, 1e-7, 1e-5, 1.0]))
-        # threshold=1e-6: 0.0 and 1e-7 are <= 1e-6
         sparsity = compute_sparsity([p], threshold=1e-6)
         assert abs(sparsity - 0.5) < 1e-6
 
     def test_custom_threshold(self):
-        """Custom threshold changes detection."""
         p = nn.Parameter(torch.tensor([0.0, 0.001, 0.01, 1.0]))
-        # threshold=0.005 → 0.0, 0.001 are below
         sparsity = compute_sparsity([p], threshold=0.005)
         assert abs(sparsity - 0.5) < 1e-6
 
@@ -56,245 +59,265 @@ class TestComputeSparsity:
         assert compute_sparsity([p]) == 0.0
 
     def test_skips_non_grad_params(self):
-        """Raw param format skips params with requires_grad=False."""
         p = nn.Parameter(torch.zeros(10), requires_grad=False)
-        assert compute_sparsity([p]) == 0.0  # Skipped → 0 total
+        assert compute_sparsity([p]) == 0.0
 
     def test_module_name_pairs_missing_attr(self):
-        """Gracefully handles missing attribute in (module, name) format."""
         m = nn.Linear(10, 5)
-        # 'nonexistent' doesn't exist → skipped
         assert compute_sparsity([(m, "nonexistent")]) == 0.0
 
     def test_multiple_params(self):
-        """Aggregates across multiple parameters."""
-        p1 = nn.Parameter(torch.zeros(50))  # 50 zeros
-        p2 = nn.Parameter(torch.ones(50))  # 0 zeros
+        p1 = nn.Parameter(torch.zeros(50))
+        p2 = nn.Parameter(torch.ones(50))
         sparsity = compute_sparsity([p1, p2])
         assert abs(sparsity - 0.5) < 1e-6
 
 
 # =============================================================================
-# ValidationSuppressor tests
+# Trainer fixture helpers
 # =============================================================================
 
 
-def _make_trainer(**kwargs):
-    """Create a mock trainer with callbacks."""
-    trainer = MagicMock(spec=Trainer)
-    trainer.limit_val_batches = kwargs.get("limit_val_batches", 1.0)
-    trainer.callbacks = kwargs.get("callbacks", [])
+def _make_trainer(
+    limit_val_batches: float = 1.0,
+    num_sanity_val_steps: int = 2,
+    callbacks=None,
+    lr_configs=None,
+) -> MagicMock:
+    """Build a MagicMock trainer shaped enough to drive gate() / prepare()."""
+    trainer = MagicMock()
+    trainer.limit_val_batches = limit_val_batches
+    trainer.num_sanity_val_steps = num_sanity_val_steps
+    trainer.callbacks = callbacks or []
+    trainer.lr_scheduler_configs = lr_configs or []
     return trainer
 
 
-class TestValidationSuppressor:
-    def test_suppresses_when_below_target(self):
-        """Suppresses validation when sparsity < target."""
-        sup = ValidationSuppressor(tolerance=1e-3)
-        trainer = _make_trainer()
+def _fresh_suppressor_with_prepared_trainer(
+    tolerance: float = 1e-2, restore_limit: float = 1.0
+):
+    """Mirror the pruner's on_fit_start sequence: prepare + start suppressed."""
+    trainer = _make_trainer()
+    ValidationSuppressor.prepare(trainer)
+    trainer.limit_val_batches = 0
+    return ValidationSuppressor(
+        tolerance=tolerance, restore_limit=restore_limit
+    ), trainer
 
-        sup.check(trainer, current_sparsity=0.5, target_sparsity=0.9)
 
-        assert trainer.limit_val_batches == 0
-        assert sup._suppressed
+# =============================================================================
+# prepare() — one-time fit-start setup
+# =============================================================================
 
-    def test_suppresses_model_checkpoint(self):
-        """Sets save_top_k=0 on ModelCheckpoint during suppression."""
-        sup = ValidationSuppressor()
-        ckpt = ModelCheckpoint(
-            monitor="val_loss", save_top_k=3, mode="min", dirpath="/tmp"
-        )
-        trainer = _make_trainer(callbacks=[ckpt])
 
-        sup.check(trainer, current_sparsity=0.1, target_sparsity=0.9)
+class TestPrepare:
+    def test_zeros_sanity_check_steps(self):
+        trainer = _make_trainer(num_sanity_val_steps=2)
+        ValidationSuppressor.prepare(trainer)
+        assert trainer.num_sanity_val_steps == 0
 
-        assert ckpt.save_top_k == 0
-
-    def test_restores_when_target_reached(self):
-        """Restores original values when target is reached."""
-        sup = ValidationSuppressor()
-        ckpt = ModelCheckpoint(
-            monitor="val_loss", save_top_k=3, mode="min", dirpath="/tmp"
-        )
-        trainer = _make_trainer(limit_val_batches=0.5, callbacks=[ckpt])
-
-        # Suppress
-        sup.check(trainer, current_sparsity=0.1, target_sparsity=0.9)
-        assert trainer.limit_val_batches == 0
-        assert ckpt.save_top_k == 0
-
-        # Restore
-        sup.check(trainer, current_sparsity=0.9, target_sparsity=0.9)
-        assert trainer.limit_val_batches == 0.5
-        assert ckpt.save_top_k == 3
-        assert not sup._suppressed
-
-    def test_resets_early_stopping_on_restore(self):
-        """Resets EarlyStopping state when validation is restored."""
-        sup = ValidationSuppressor()
-        es = EarlyStopping(monitor="val_loss", patience=3, mode="min")
-        es.wait_count = 2
-        es.best_score = torch.tensor(0.5)
+    def test_disables_early_stopping_train_epoch_end_check(self):
+        es = EarlyStopping(monitor="val/loss", mode="min")
+        es._check_on_train_epoch_end = True
         trainer = _make_trainer(callbacks=[es])
+        ValidationSuppressor.prepare(trainer)
+        assert es._check_on_train_epoch_end is False
 
-        # Suppress then restore
-        sup.check(trainer, current_sparsity=0.1, target_sparsity=0.9)
-        sup.check(trainer, current_sparsity=0.9, target_sparsity=0.9)
-
-        assert es.wait_count == 0
-        assert es.best_score == torch.tensor(float("inf"))
-
-    def test_resets_early_stopping_max_mode(self):
-        """Resets EarlyStopping best_score to -inf in max mode."""
-        sup = ValidationSuppressor()
-        es = EarlyStopping(monitor="val_acc", patience=3, mode="max")
-        es.best_score = torch.tensor(0.9)
-        trainer = _make_trainer(callbacks=[es])
-
-        sup.check(trainer, current_sparsity=0.1, target_sparsity=0.9)
-        sup.check(trainer, current_sparsity=0.9, target_sparsity=0.9)
-
-        assert es.best_score == torch.tensor(float("-inf"))
-
-    def test_resets_model_checkpoint_on_restore(self):
-        """Resets ModelCheckpoint trackers on restore."""
-        sup = ValidationSuppressor()
-        ckpt = ModelCheckpoint(
-            monitor="val_loss", save_top_k=3, mode="min", dirpath="/tmp"
+    def test_relaxes_reduce_on_plateau_strict(self):
+        cfg = SimpleNamespace(
+            reduce_on_plateau=True, strict=True, monitor="val/loss"
         )
-        # Simulate some recorded state
-        ckpt.best_k_models = {"/tmp/a.ckpt": torch.tensor(0.5)}
-        ckpt.kth_best_model_path = "/tmp/a.ckpt"
-        trainer = _make_trainer(callbacks=[ckpt])
+        trainer = _make_trainer(lr_configs=[cfg])
+        ValidationSuppressor.prepare(trainer)
+        assert cfg.strict is False
 
-        sup.check(trainer, current_sparsity=0.1, target_sparsity=0.9)
-        sup.check(trainer, current_sparsity=0.9, target_sparsity=0.9)
+    def test_leaves_non_plateau_schedulers_alone(self):
+        cfg = SimpleNamespace(
+            reduce_on_plateau=False, strict=True, monitor=None
+        )
+        trainer = _make_trainer(lr_configs=[cfg])
+        ValidationSuppressor.prepare(trainer)
+        assert cfg.strict is True
 
-        assert ckpt.best_k_models == {}
-        assert ckpt.kth_best_model_path == ""
+    def test_forces_model_checkpoint_save_on_validation(self):
+        mc = ModelCheckpoint(monitor="val/loss", save_top_k=3)
+        mc.save_on_train_epoch_end = True
+        trainer = _make_trainer(callbacks=[mc])
+        ValidationSuppressor.prepare(trainer)
+        # save_on_train_epoch_end -> False so suppressed epochs (no val run)
+        # don't trigger a save against a stale/missing val/loss.
+        assert mc.save_on_train_epoch_end is False
+        # save_top_k must remain whatever the user configured.
+        assert mc.save_top_k == 3
 
-    def test_noop_when_always_at_target(self):
-        """No suppression when sparsity is within tolerance of target."""
-        sup = ValidationSuppressor()
-        trainer = _make_trainer()
 
-        for _ in range(5):
-            sup.check(trainer, current_sparsity=0.9005, target_sparsity=0.9)
+# =============================================================================
+# gate() — the 9 documented transition cases
+# =============================================================================
 
+
+class TestGateTransitions:
+    """Each ``test_case_N_*`` maps to a row in the coverage table."""
+
+    # ---- Case 1: fresh start, epoch 0, target not met → stay suppressed ----
+    def test_case_1_fresh_epoch_0_target_not_met_stays_suppressed(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer()
+        sup.gate(trainer, current_sparsity=0.10, target_sparsity=0.90)
+        assert trainer.limit_val_batches == 0
+
+    # ---- Case 2: end of epoch 0, target met → restore ----
+    def test_case_2_end_epoch_0_target_met_restores(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            restore_limit=1.0
+        )
+        sup.gate(trainer, current_sparsity=0.90, target_sparsity=0.90)
         assert trainer.limit_val_batches == 1.0
-        assert not sup._suppressed
 
-    def test_maintains_suppression_across_epochs(self):
-        """Stays suppressed across multiple calls below target."""
-        sup = ValidationSuppressor()
-        ckpt = ModelCheckpoint(
-            monitor="val_loss", save_top_k=3, mode="min", dirpath="/tmp"
+    # ---- Case 3: end of epoch 0, target not met → stay suppressed ----
+    def test_case_3_end_epoch_0_target_not_met_stays_suppressed(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer()
+        sup.gate(trainer, current_sparsity=0.50, target_sparsity=0.90)
+        assert trainer.limit_val_batches == 0
+
+    # ---- Case 4: epoch ≥ 1, previously suppressed, target met → restore ----
+    def test_case_4_previously_suppressed_target_met_restores(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            restore_limit=0.5
         )
-        trainer = _make_trainer(callbacks=[ckpt])
+        sup.gate(trainer, 0.30, 0.90)
+        assert trainer.limit_val_batches == 0
+        sup.gate(trainer, 0.90, 0.90)
+        assert trainer.limit_val_batches == 0.5
 
-        for sparsity in [0.1, 0.3, 0.5, 0.7]:
-            sup.check(trainer, current_sparsity=sparsity, target_sparsity=0.9)
+    # ---- Case 5: epoch ≥ 1, previously suppressed, target not met → stay ----
+    def test_case_5_previously_suppressed_target_not_met_stays(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer()
+        sup.gate(trainer, 0.30, 0.90)
+        sup.gate(trainer, 0.40, 0.90)
+        assert trainer.limit_val_batches == 0
+
+    # ---- Case 6: epoch ≥ 1, previously restored, target still met → no-op --
+    def test_case_6_previously_restored_target_still_met_no_op(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            restore_limit=1.0
+        )
+        sup.gate(trainer, 0.90, 0.90)
+        assert trainer.limit_val_batches == 1.0
+        sup.gate(trainer, 0.895, 0.90)
+        assert trainer.limit_val_batches == 1.0
+
+    # ---- Case 7: epoch ≥ 1, previously restored, target drifts → re-suppr --
+    def test_case_7_previously_restored_target_drifts_re_suppresses(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            restore_limit=1.0
+        )
+        sup.gate(trainer, 0.90, 0.90)
+        assert trainer.limit_val_batches == 1.0
+        sup.gate(trainer, 0.80, 0.90)
+        assert trainer.limit_val_batches == 0
+
+    # ---- Case 8: resume from suppressed state → first gate call settles ----
+    def test_case_8_resume_from_suppressed_state(self):
+        # New session: fresh trainer, pruner's on_fit_start calls prepare()
+        # and sets limit_val_batches=0. The suppressor instance is fresh too
+        # — no state carries across sessions in the stateless design.
+        sup, trainer = _fresh_suppressor_with_prepared_trainer()
+        sup.gate(trainer, 0.50, 0.90)
+        assert trainer.limit_val_batches == 0
+
+    # ---- Case 9: resume from restored state → first gate call settles ----
+    def test_case_9_resume_from_restored_state(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer()
+        sup.gate(trainer, 0.90, 0.90)
+        assert trainer.limit_val_batches == 1.0
+
+
+# =============================================================================
+# gate() — tolerance boundary and configuration
+# =============================================================================
+
+
+class TestGateBoundaries:
+    def test_just_inside_tolerance_counts_as_met(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            tolerance=0.01, restore_limit=1.0
+        )
+        # Safely inside tolerance; avoids FP rounding at the exact boundary
+        # where 0.01 - 0.01 is sometimes reported as 1e-17 > 0.
+        sup.gate(trainer, 0.895, 0.90)
+        assert trainer.limit_val_batches == 1.0
+
+    def test_exact_tolerance_boundary_counts_as_met(self):
+        # Locks in the IEEE-754 boundary fix: abs(0.91 - 0.90) is
+        # 0.010000000000000009, which used to fail the > tolerance check.
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            tolerance=0.01, restore_limit=1.0
+        )
+        sup.gate(trainer, 0.91, 0.90)
+        assert trainer.limit_val_batches == 1.0
+        sup.gate(trainer, 0.89, 0.90)
+        assert trainer.limit_val_batches == 1.0
+
+    def test_just_outside_tolerance_is_suppressed(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            tolerance=0.01
+        )
+        sup.gate(trainer, 0.88, 0.90)
+        assert trainer.limit_val_batches == 0
+
+    def test_overshoot_within_tolerance_is_met(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            tolerance=0.01, restore_limit=1.0
+        )
+        sup.gate(trainer, 0.905, 0.90)
+        assert trainer.limit_val_batches == 1.0
+
+    def test_custom_restore_limit_is_honored(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            restore_limit=0.25
+        )
+        sup.gate(trainer, 0.90, 0.90)
+        assert trainer.limit_val_batches == 0.25
+
+    def test_tighter_tolerance_suppresses_previously_accepted_value(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            tolerance=1e-4, restore_limit=1.0
+        )
+        sup.gate(trainer, 0.89, 0.90)
+        assert trainer.limit_val_batches == 0
+
+
+# =============================================================================
+# Idempotence and oscillation handling
+# =============================================================================
+
+
+class TestGateIdempotence:
+    def test_repeated_suppress_calls_leave_state_unchanged(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer()
+        for _ in range(5):
+            sup.gate(trainer, 0.30, 0.90)
             assert trainer.limit_val_batches == 0
-            assert ckpt.save_top_k == 0
-            assert sup._suppressed
 
-    def test_resets_early_stopping_each_suppressed_epoch(self):
-        """EarlyStopping is reset every epoch while suppressed."""
-        sup = ValidationSuppressor()
-        es = EarlyStopping(monitor="val_loss", patience=3, mode="min")
-        trainer = _make_trainer(callbacks=[es])
-
-        # First call: suppress
-        sup.check(trainer, current_sparsity=0.1, target_sparsity=0.9)
-
-        # Simulate EarlyStopping accumulating state
-        es.wait_count = 2
-        es.best_score = torch.tensor(0.3)
-
-        # Second call: still suppressed, should reset ES
-        sup.check(trainer, current_sparsity=0.3, target_sparsity=0.9)
-        assert es.wait_count == 0
-        assert es.best_score == torch.tensor(float("inf"))
-
-    def test_tolerance_works_correctly(self):
-        """Sparsity within tolerance band of target counts as reached."""
-        # Below target, within band: |0.8995 - 0.9| ≈ 0.0005 ≤ 0.001 → reached
-        sup = ValidationSuppressor(tolerance=1e-3)
-        trainer = _make_trainer()
-        sup.check(trainer, current_sparsity=0.8995, target_sparsity=0.9)
-        assert trainer.limit_val_batches == 1.0  # Not suppressed
-
-        # Below target, outside band: |0.898 - 0.9| = 0.002 > 0.001 → not reached
-        sup2 = ValidationSuppressor(tolerance=1e-3)
-        trainer2 = _make_trainer()
-        sup2.check(trainer2, current_sparsity=0.898, target_sparsity=0.9)
-        assert trainer2.limit_val_batches == 0  # Suppressed
-
-        # Above target, within band: |0.9005 - 0.9| ≈ 0.0005 ≤ 0.001 → reached
-        sup3 = ValidationSuppressor(tolerance=1e-3)
-        trainer3 = _make_trainer()
-        sup3.check(trainer3, current_sparsity=0.9005, target_sparsity=0.9)
-        assert trainer3.limit_val_batches == 1.0  # Not suppressed
-
-        # Above target, outside band: |0.902 - 0.9| = 0.002 > 0.001 → not reached
-        sup4 = ValidationSuppressor(tolerance=1e-3)
-        trainer4 = _make_trainer()
-        sup4.check(trainer4, current_sparsity=0.902, target_sparsity=0.9)
-        assert trainer4.limit_val_batches == 0  # Suppressed
-
-    def test_state_dict_roundtrip(self):
-        """state_dict / load_state_dict preserves state."""
-        sup = ValidationSuppressor()
-        trainer = _make_trainer(
-            callbacks=[
-                ModelCheckpoint(
-                    monitor="val_loss",
-                    save_top_k=3,
-                    mode="min",
-                    dirpath="/tmp",
-                )
-            ]
+    def test_repeated_restore_calls_leave_state_unchanged(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            restore_limit=1.0
         )
+        for _ in range(5):
+            sup.gate(trainer, 0.90, 0.90)
+            assert trainer.limit_val_batches == 1.0
 
-        # Suppress to populate state
-        sup.check(trainer, current_sparsity=0.1, target_sparsity=0.9)
-
-        state = sup.state_dict()
-        assert state["suppressed"] is True
-        assert state["original_limit_val_batches"] == 1.0
-        assert "val_loss" in state["original_save_top_k"]
-
-        # Load into new instance
-        sup2 = ValidationSuppressor()
-        sup2.load_state_dict(state)
-
-        assert sup2._suppressed is True
-        assert sup2._original_limit_val_batches == 1.0
-        assert sup2._original_save_top_k == {"val_loss": 3}
-
-    def test_strict_load_fails_on_missing_keys(self):
-        """load_state_dict raises KeyError on missing keys."""
-        sup = ValidationSuppressor()
-        with pytest.raises(KeyError):
-            sup.load_state_dict({"suppressed": True})
-
-    def test_multiple_model_checkpoints(self):
-        """Handles multiple ModelCheckpoint callbacks correctly."""
-        sup = ValidationSuppressor()
-        ckpt1 = ModelCheckpoint(
-            monitor="val_loss", save_top_k=3, mode="min", dirpath="/tmp"
+    def test_oscillation_tracks_target_each_call(self):
+        sup, trainer = _fresh_suppressor_with_prepared_trainer(
+            restore_limit=1.0
         )
-        ckpt2 = ModelCheckpoint(
-            monitor="val_eer", save_top_k=1, mode="min", dirpath="/tmp"
-        )
-        trainer = _make_trainer(callbacks=[ckpt1, ckpt2])
-
-        # Suppress
-        sup.check(trainer, current_sparsity=0.1, target_sparsity=0.9)
-        assert ckpt1.save_top_k == 0
-        assert ckpt2.save_top_k == 0
-
-        # Restore
-        sup.check(trainer, current_sparsity=0.9, target_sparsity=0.9)
-        assert ckpt1.save_top_k == 3
-        assert ckpt2.save_top_k == 1
+        pattern = [
+            (0.900, 1.0),
+            (0.800, 0),
+            (0.905, 1.0),
+            (0.700, 0),
+            (0.895, 1.0),
+        ]
+        for current, expected in pattern:
+            sup.gate(trainer, current, 0.90)
+            assert trainer.limit_val_batches == expected

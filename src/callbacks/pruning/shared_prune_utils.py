@@ -1,7 +1,7 @@
-"""Shared validation/checkpoint suppression and sparsity utilities for pruners.
+"""Shared validation-gating and sparsity utilities for pruners.
 
-ValidationSuppressor: Composition-based class that suppresses validation,
-ModelCheckpoint, EarlyStopping, and ReduceLROnPlateau during sparsity ramp-up.
+ValidationSuppressor: stateless gate that toggles `trainer.limit_val_batches`
+based on whether current sparsity matches the target.
 
 compute_sparsity: Unified sparsity computation for both magnitude and Bregman
 pruning (handles raw Parameter lists and (Module, name) pairs).
@@ -9,10 +9,9 @@ pruning (handles raw Parameter lists and (Module, name) pairs).
 
 from typing import List, Tuple, Union
 
-import torch
-import torch.nn as nn
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+import torch.nn as nn
 
 from src.utils import get_pylogger
 
@@ -43,7 +42,6 @@ def compute_sparsity(
     total = 0
     zeros = 0
 
-    # Detect calling convention from first element
     first = params[0]
     is_tuple = isinstance(first, (tuple, list))
 
@@ -69,198 +67,77 @@ def compute_sparsity(
 
 
 class ValidationSuppressor:
-    """Suppresses validation, ModelCheckpoint, EarlyStopping, and
-    ReduceLROnPlateau during sparsity ramp-up. Restores and resets trackers
-    when target is reached.
+    """Stateless validation gate driven by sparsity.
 
-    Intended to be instantiated internally by each pruner (composition).
+    Usage (from a pruner callback):
+
+      # Once, in on_fit_start — prevents sanity check and makes the
+      # val-monitoring callbacks tolerant of skipped validations:
+      ValidationSuppressor.prepare(trainer)
+
+      # Each time you want to gate validation (e.g. on_validation_epoch_start
+      # or on_train_epoch_start, whichever fires first for your pruner):
+      suppressor.gate(trainer, current_sparsity, target_sparsity)
+
+    ``gate`` sets ``trainer.limit_val_batches`` to 0 if sparsity is outside
+    tolerance of target, otherwise to ``restore_limit``. No save/restore, no
+    transitions, no state — the truth lives on the trainer. Safe to call on
+    every hook without special-casing epoch 0, resume, or oscillation.
     """
 
-    def __init__(self, tolerance: float = 1e-2):
+    def __init__(self, tolerance: float = 1e-2, restore_limit: float = 1.0):
         self.tolerance = tolerance
-        self._suppressed = False
-        self._original_limit_val_batches = None
-        # Keyed by monitor name for cross-process stability
-        self._original_save_top_k: dict[str, int] = {}
-        self._original_es_check_on_train: dict[str, bool] = {}
-        self._original_lr_strict: dict[str, bool] = {}
+        self.restore_limit = restore_limit
+        self._was_suppressed = True  # only used for log throttling
 
-    def check(
+    def gate(
         self,
         trainer: Trainer,
         current_sparsity: float,
         target_sparsity: float,
     ) -> None:
-        """Check sparsity vs target and suppress/restore accordingly."""
-        target_reached = (
-            abs(current_sparsity - target_sparsity) <= self.tolerance
+        # +1e-9 absorbs IEEE-754 rounding at the exact boundary, e.g.
+        # abs(0.91 - 0.90) == 0.010000000000000009 > 0.01 without the slack.
+        suppress = (
+            abs(current_sparsity - target_sparsity) > self.tolerance + 1e-9
         )
-
-        if not target_reached and not self._suppressed:
-            # Transition: unsuppressed -> suppressed
-            self._suppress(trainer, current_sparsity, target_sparsity)
-        elif not target_reached and self._suppressed:
-            # Still suppressed — re-apply settings (idempotent; also fixes
-            # resume-from-checkpoint where trainer state is not persisted)
-            # and reset EarlyStopping each epoch.
-            self._apply_suppression_to_trainer(trainer)
-            self._reset_early_stoppings(trainer)
-            logger.info(
-                f"Validation still suppressed (sparsity {current_sparsity:.2%}"
-                f" outside target {target_sparsity:.2%}"
-                f" ± {self.tolerance:.1%})"
-            )
-        elif target_reached and self._suppressed:
-            # Transition: suppressed -> restored
-            self._restore(trainer, current_sparsity, target_sparsity)
-        # else: target_reached and not suppressed — no-op
-
-    # -- State persistence ---------------------------------------------------
-
-    def state_dict(self) -> dict:
-        return {
-            "suppressed": self._suppressed,
-            "original_limit_val_batches": self._original_limit_val_batches,
-            "original_save_top_k": dict(self._original_save_top_k),
-            "original_es_check_on_train": dict(
-                self._original_es_check_on_train
-            ),
-            "original_lr_strict": dict(self._original_lr_strict),
-        }
-
-    def load_state_dict(self, state: dict) -> None:
-        self._suppressed = state["suppressed"]
-        self._original_limit_val_batches = state["original_limit_val_batches"]
-        self._original_save_top_k = dict(state["original_save_top_k"])
-        self._original_es_check_on_train = dict(
-            state.get("original_es_check_on_train", {})
+        trainer.limit_val_batches = (
+            0 if suppress else self.restore_limit
         )
-        self._original_lr_strict = dict(state.get("original_lr_strict", {}))
+        if suppress != self._was_suppressed:
+            self._was_suppressed = suppress
+            if suppress:
+                logger.info(
+                    f"Validation suppressed (sparsity {current_sparsity:.2%}"
+                    f" outside target {target_sparsity:.2%}"
+                    f" ± {self.tolerance:.1%})"
+                )
+            else:
+                logger.info(
+                    f"Validation restored (sparsity {current_sparsity:.2%}"
+                    f" reached target {target_sparsity:.2%})"
+                )
 
-    # -- Internal helpers ----------------------------------------------------
+    @staticmethod
+    def prepare(trainer: Trainer) -> None:
+        """One-time setup in ``on_fit_start``.
 
-    def _apply_suppression_to_trainer(self, trainer: Trainer) -> None:
-        """Apply suppression settings to the trainer (idempotent).
-
-        Safe to call multiple times — does not touch saved originals. Called by
-        both _suppress() and the "still suppressed" branch of check() to handle
-        resume-from-checkpoint correctly.
+        Configures sibling callbacks to tolerate skipped validations:
+        - ``num_sanity_val_steps = 0``: skip the pre-training sanity check.
+        - ``EarlyStopping._check_on_train_epoch_end = False``: prevent ES
+          from firing on training metrics while val is suppressed.
+        - ``ModelCheckpoint.save_on_train_epoch_end = False``: force saves to
+          occur at end of validation, so suppressed epochs simply skip saving
+          rather than checkpointing on a missing monitor.
+        - ``ReduceLROnPlateau.strict = False``: tolerate the missing val
+          monitor metric during suppressed epochs.
         """
-        trainer.limit_val_batches = 0
+        trainer.num_sanity_val_steps = 0
         for cb in trainer.callbacks:
-            if isinstance(cb, ModelCheckpoint):
-                cb.save_top_k = 0
             if isinstance(cb, EarlyStopping):
                 cb._check_on_train_epoch_end = False
-        for config in trainer.lr_scheduler_configs:
-            if config.reduce_on_plateau:
-                config.strict = False
-
-    def _suppress(
-        self,
-        trainer: Trainer,
-        current_sparsity: float,
-        target_sparsity: float,
-    ) -> None:
-        # Save originals before applying suppression
-        self._original_limit_val_batches = trainer.limit_val_batches
-        for cb in trainer.callbacks:
-            if isinstance(cb, ModelCheckpoint):
-                key = cb.monitor or ""
-                self._original_save_top_k[key] = cb.save_top_k
-            if isinstance(cb, EarlyStopping):
-                key = cb.monitor or ""
-                self._original_es_check_on_train[
-                    key
-                ] = cb._check_on_train_epoch_end
-        for config in trainer.lr_scheduler_configs:
-            if config.reduce_on_plateau:
-                key = config.monitor or ""
-                self._original_lr_strict[key] = config.strict
-
-        self._apply_suppression_to_trainer(trainer)
-        self._suppressed = True
-        logger.info(
-            f"Validation suppressed (sparsity {current_sparsity:.2%}"
-            f" outside target {target_sparsity:.2%}"
-            f" ± {self.tolerance:.1%})"
-        )
-
-    def _restore(
-        self,
-        trainer: Trainer,
-        current_sparsity: float,
-        target_sparsity: float,
-    ) -> None:
-        # Restore limit_val_batches
-        if self._original_limit_val_batches is not None:
-            trainer.limit_val_batches = self._original_limit_val_batches
-
-        # Restore and reset ModelCheckpoint / EarlyStopping
-        for cb in trainer.callbacks:
-            if isinstance(cb, ModelCheckpoint):
-                key = cb.monitor or ""
-                if key in self._original_save_top_k:
-                    cb.save_top_k = self._original_save_top_k[key]
-                _reset_model_checkpoint(cb)
-            if isinstance(cb, EarlyStopping):
-                key = cb.monitor or ""
-                if key in self._original_es_check_on_train:
-                    cb._check_on_train_epoch_end = (
-                        self._original_es_check_on_train[key]
-                    )
-                _reset_early_stopping(cb)
-
-        # Restore strict metric enforcement on ReduceLROnPlateau
-        for config in trainer.lr_scheduler_configs:
-            if config.reduce_on_plateau:
-                key = config.monitor or ""
-                if key in self._original_lr_strict:
-                    config.strict = self._original_lr_strict[key]
-
-        self._suppressed = False
-        self._original_limit_val_batches = None
-        self._original_save_top_k = {}
-        self._original_es_check_on_train = {}
-        self._original_lr_strict = {}
-        logger.info(
-            f"Validation restored (sparsity {current_sparsity:.2%}"
-            f" reached target {target_sparsity:.2%})"
-        )
-
-    def _reset_early_stoppings(self, trainer: Trainer) -> None:
-        for cb in trainer.callbacks:
-            if isinstance(cb, EarlyStopping):
-                _reset_early_stopping(cb)
-
-
-# ---------------------------------------------------------------------------
-# Reset helpers (moved from MagnitudePruner)
-# ---------------------------------------------------------------------------
-
-
-def _get_extreme_value(mode: str) -> float:
-    return float("inf") if mode == "min" else float("-inf")
-
-
-def _reset_early_stopping(cb: EarlyStopping) -> None:
-    cb.wait_count = 0
-    cb.stopped_epoch = 0
-    extreme_val = _get_extreme_value(cb.mode)
-    if isinstance(cb.best_score, torch.Tensor):
-        cb.best_score = torch.tensor(extreme_val, device=cb.best_score.device)
-    else:
-        cb.best_score = torch.tensor(extreme_val)
-
-
-def _reset_model_checkpoint(cb: ModelCheckpoint) -> None:
-    cb.best_k_models = {}
-    cb.kth_best_model_path = ""
-    extreme_val = _get_extreme_value(cb.mode)
-    if isinstance(cb.best_model_score, torch.Tensor):
-        cb.kth_value = torch.tensor(
-            extreme_val, device=cb.best_model_score.device
-        )
-    else:
-        cb.kth_value = torch.tensor(extreme_val)
-    cb.best_model_score = cb.kth_value
+            elif isinstance(cb, ModelCheckpoint):
+                cb.save_on_train_epoch_end = False
+        for c in trainer.lr_scheduler_configs:
+            if c.reduce_on_plateau:
+                c.strict = False

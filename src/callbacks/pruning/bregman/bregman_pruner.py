@@ -137,20 +137,23 @@ class BregmanPruner(Callback):
         self._log_configuration(optimizer)
         self._log_group_assignments(pl_module)
 
+        # One-time setup: skip sanity check and make val-monitoring callbacks
+        # tolerant of epochs where we gate validation off.
+        ValidationSuppressor.prepare(trainer)
+        trainer.limit_val_batches = 0  # start suppressed; gate() flips it
+
     def on_train_epoch_start(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
-        """Resolve warmup steps and restore validation if target reached.
+        """Resolve warmup steps and gate validation based on current sparsity.
 
-        When validation is suppressed (limit_val_batches=0), on_validation_start
-        never fires, so this is the only place that can restore it. We check
-        here so that PL sees the restored limit_val_batches before deciding
-        whether to run the validation loop.
+        Sets ``limit_val_batches`` before Lightning decides whether to run the
+        end-of-epoch validation loop. Runs on epoch 0 too — validation begins
+        suppressed (see on_fit_start) and only opens once sparsity hits target.
         """
         if not self._initialized:
             return
 
-        # Resolve warmup on first epoch (num_training_batches is now available)
         if self.lambda_scheduler is not None and not self._warmup_resolved:
             if hasattr(self.lambda_scheduler, "resolve_warmup_steps"):
                 self.lambda_scheduler.resolve_warmup_steps(
@@ -158,19 +161,13 @@ class BregmanPruner(Callback):
                 )
             self._warmup_resolved = True
 
-        # Check suppression: uses previous epoch's sparsity, but this is the
-        # only hook that fires when validation is suppressed. on_validation_start
-        # provides a second check with fresh sparsity when validation does run.
-        # Resolve the current epoch's target so suppression follows the ramp
-        # rather than the final-epoch value — otherwise early-epoch validation
-        # would be wrongly suppressed while sparsity (0.99) sits far above the
-        # ramp's first target (e.g. 0.5).
+        # Track the per-epoch ramp target rather than the final-epoch value so
+        # early-epoch validation isn't wrongly suppressed while sparsity sits
+        # far above the ramp's first target.
         active_target = self._current_target(trainer.current_epoch)
         if active_target is not None:
             current_sparsity = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
-            self._suppressor.check(
-                trainer, current_sparsity, active_target
-            )
+            self._suppressor.gate(trainer, current_sparsity, active_target)
 
     def on_train_batch_end(
         self,
@@ -218,11 +215,8 @@ class BregmanPruner(Callback):
     def on_validation_start(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
-        """Second suppression check with fresh (post-training) sparsity.
-
-        Only fires when validation is about to run (limit_val_batches > 0).
-        Can suppress this validation if sparsity drifted away from target
-        during the training epoch. Cannot restore — that's on_train_epoch_start's job.
+        """Re-gate right before validation runs, in case sparsity drifted
+        between ``on_train_epoch_start`` and the end of the training epoch.
         """
         if not self._initialized:
             return
@@ -230,32 +224,25 @@ class BregmanPruner(Callback):
         if active_target is None:
             return
         current_sparsity = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
-        self._suppressor.check(trainer, current_sparsity, active_target)
+        self._suppressor.gate(trainer, current_sparsity, active_target)
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
     ) -> None:
-        """Save scheduler and suppressor state to checkpoint."""
+        """Save scheduler state to checkpoint."""
         if self.lambda_scheduler is not None:
             checkpoint[
                 "lambda_scheduler_state"
             ] = self.lambda_scheduler.get_state()
             checkpoint["bregman_last_sparsity"
                        ] = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
-        checkpoint[
-            "validation_suppression_state"
-        ] = self._suppressor.state_dict()
 
     def on_load_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
     ) -> None:
-        """Load scheduler and suppressor state from checkpoint."""
+        """Load scheduler state from checkpoint."""
         self._ckpt_scheduler_state = checkpoint.get("lambda_scheduler_state")
         self._ckpt_last_sparsity = checkpoint.get("bregman_last_sparsity")
-        if "validation_suppression_state" in checkpoint:
-            self._suppressor.load_state_dict(
-                checkpoint["validation_suppression_state"]
-            )
 
     # -------------------------------------------------------------------------
     # Scheduler management
