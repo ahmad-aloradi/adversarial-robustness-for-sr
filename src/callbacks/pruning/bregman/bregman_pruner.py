@@ -46,6 +46,7 @@ class BregmanPruner(Callback):
         target_sparsity: Optional[Union[float, List[float]]] = None,
         tolerance: float = 0.01,
         rescale_mode: str = "none",
+        lr_reduction_factor: float = 0.25,
     ):
         """
         Args:
@@ -59,8 +60,15 @@ class BregmanPruner(Callback):
                 "none": no rescaling (default).
                 "subgradient_correction": adjust subgradient v to remain in ∂φ_new(θ).
                 "nestrovs_adaptive_update": use ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv).
+            lr_reduction_factor: Multiplier applied to optimizer LR when the
+                scheduler detects uncontrolled sparsity oscillation. Must be
+                in (0.0, 1.0).
         """
         super().__init__()
+        if not (0.0 < lr_reduction_factor < 1.0):
+            raise ValueError(
+                f"lr_reduction_factor must be in (0.0, 1.0), got {lr_reduction_factor}"
+            )
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
@@ -72,6 +80,7 @@ class BregmanPruner(Callback):
         # target, list when a schedule was provided.
         self.target_sparsity = target_sparsity
         self.rescale_mode = rescale_mode
+        self.lr_reduction_factor = float(lr_reduction_factor)
 
         self.manager: Optional[PruningManager] = None
         self._initialized = False
@@ -289,10 +298,37 @@ class BregmanPruner(Callback):
             current_sparsity, last_sparsity, trainer.global_step
         )
 
+        # for group in trainer.optimizers[0].param_groups:
+        #     if self._group_has_regularizer(group):
+        #         scale = group.get("lambda_scale", 1.0)
+        #         group["reg"].lamda = new_lambda * scale
+
+        # Sparsity-oscillation detection is meaningless during lambda warmup
+        # (lambda is frozen, so any drift isn't the scheduler's doing).
+        warmup_steps = getattr(self.lambda_scheduler, "warmup_steps", 0)
+        in_warmup = warmup_steps > 0 and trainer.global_step <= warmup_steps
+        detected_oscillation = (
+            not in_warmup
+            and self.lambda_scheduler.detect_uncontrolled_oscillation(
+                current_sparsity,
+                tolerance=0.01,
+                window_steps=1000,
+                min_crossings=50,
+            )
+        )
+
         for group in trainer.optimizers[0].param_groups:
             if self._group_has_regularizer(group):
                 scale = group.get("lambda_scale", 1.0)
                 group["reg"].lamda = new_lambda * scale
+
+            if detected_oscillation:
+                old_lr = group["lr"]
+                group["lr"] = old_lr * self.lr_reduction_factor
+                log.warning(
+                    f"LR: {old_lr:.2e} -> {group['lr']:.2e} in group "
+                    f"{group.get('name', 'Unknown')} due to sparsity oscillation."
+                )
 
     def _apply_lambda_to_groups(self, trainer: Trainer) -> None:
         """Apply current scheduler lambda to all regularized groups."""

@@ -1,4 +1,5 @@
 import math
+from collections import deque
 from numbers import Real
 from typing import List, Optional, Sequence, Union
 
@@ -128,6 +129,8 @@ class LambdaScheduler:
                 f"max_relative_change must be > 0.0 when set, got {max_relative_change}"
             )
         self.max_relative_change = max_relative_change
+        # Lazily sized by detect_uncontrolled_oscillation() on first call.
+        self._oscillation_history: Optional[deque] = None
 
     @property
     def target_sparsity(self) -> float:
@@ -256,6 +259,96 @@ class LambdaScheduler:
         )
 
         return self.lambda_value
+
+    def detect_uncontrolled_oscillation(
+        self,
+        current_sparsity: float,
+        tolerance: float = 0.01,
+        window_steps: int = 500,
+        min_crossings: int = 50,
+    ) -> bool:
+        """Detect sustained overshoot/undershoot around the target.
+
+        Pure detection: reports whether sparsity has been oscillating around
+        the target outside the tolerance band for a sustained window of steps.
+        Minor oscillations are expected by construction of the multiplicative
+        lambda update, so readings within ``tolerance`` of the target are
+        treated as "converged" and are not counted as target crossings
+
+        Intended to be invoked once per step alongside :meth:`step`.
+
+        Parameters
+        ----------
+        current_sparsity : float
+            Current sparsity reading; appended to the oscillation window.
+        tolerance : float, default=0.01
+            Distance from target within which readings are treated as
+            in-band and ignored for crossing counts.
+        window_steps : int, default=500
+            Size of the rolling detection window, measured in calls to this
+            method.
+        min_crossings : int, default=50
+            Minimum number of out-of-tolerance target crossings within the
+            window required to flag the dynamics as uncontrolled.
+
+        Returns
+        -------
+        bool
+            True iff the window was full and the crossing threshold was
+            exceeded on this call.
+        """
+        if window_steps < 2:
+            raise ValueError(
+                f"window_steps must be >= 2, got {window_steps}"
+            )
+        if min_crossings < 1:
+            raise ValueError(
+                f"min_crossings must be >= 1, got {min_crossings}"
+            )
+        if tolerance < 0.0:
+            raise ValueError(
+                f"tolerance must be >= 0.0, got {tolerance}"
+            )
+        self._validate_sparsity(current_sparsity)
+
+        if (
+            self._oscillation_history is None
+            or self._oscillation_history.maxlen != window_steps
+        ):
+            self._oscillation_history = deque(maxlen=window_steps)
+
+        diff = float(current_sparsity) - self.target_sparsity
+        if abs(diff) <= tolerance:
+            sign = 0
+        else:
+            sign = 1 if diff > 0 else -1
+        self._oscillation_history.append(sign)
+
+        if len(self._oscillation_history) < window_steps:
+            return False
+
+        # Count transitions between opposite non-zero signs; zeros
+        # (in-tolerance readings) are skipped so a brief return to target
+        # doesn't reset a run of overshoot/undershoot flips.
+        crossings = 0
+        last_nonzero = 0
+        for s in self._oscillation_history:
+            if s == 0:
+                continue
+            if last_nonzero != 0 and s != last_nonzero:
+                crossings += 1
+            last_nonzero = s
+
+        if crossings < min_crossings:
+            return False
+
+        log.warning(
+            f"Uncontrolled sparsity oscillation detected: {crossings} target "
+            f"crossings over a {window_steps}-step window outside tolerance "
+            f"±{tolerance}."
+        )
+        self._oscillation_history.clear()
+        return True
 
     def _validate_sparsity(self, current_sparsity: float) -> None:
         """Validate a sparsity reading.

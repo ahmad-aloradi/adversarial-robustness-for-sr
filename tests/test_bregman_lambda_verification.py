@@ -495,3 +495,249 @@ def test_damping_zone_checkpointing():
     )
     new_scheduler.load_state(state)
     assert new_scheduler.damping_zone == 0.02
+
+
+# =============================================================================
+# Progressive-target (per-epoch schedule) tests
+# =============================================================================
+
+
+def test_scheduler_accepts_list_and_ramps():
+    """Per-epoch schedule advances the active target across epoch boundaries."""
+    sched = LambdaScheduler(
+        target_sparsity=[0.5, 0.7, 0.9],
+        initial_lambda=1.0,
+        # High update_frequency + far-from-target sparsity keeps lambda
+        # essentially untouched; we only care about target_sparsity here.
+        update_frequency=10_000,
+    )
+    steps_per_epoch = 10
+    sched.resolve_warmup_steps(steps_per_epoch)
+
+    # Before any step, property returns the first entry.
+    assert sched.target_sparsity == 0.5
+
+    # Epoch 0: steps 0..9
+    sched.step(0.5, current_step=0)
+    assert sched.target_sparsity == 0.5
+    sched.step(0.5, current_step=9)
+    assert sched.target_sparsity == 0.5
+
+    # Epoch 1: steps 10..19 -> idx 1 = 0.7
+    sched.step(0.5, current_step=10)
+    assert sched.target_sparsity == 0.7
+
+    # Epoch 2: steps 20..29 -> idx 2 = 0.9
+    sched.step(0.5, current_step=20)
+    assert sched.target_sparsity == 0.9
+
+    # Epoch 3+: clamped to last entry 0.9
+    sched.step(0.5, current_step=45)
+    assert sched.target_sparsity == 0.9
+
+
+def test_scheduler_state_roundtrip_list():
+    """Checkpoint save/restore preserves the per-epoch schedule and _last_step."""
+    sched = LambdaScheduler(
+        target_sparsity=[0.5, 0.7, 0.9],
+        initial_lambda=1.0,
+    )
+    sched.resolve_warmup_steps(10)
+    sched.step(0.5, current_step=15)  # epoch 1 -> target should be 0.7
+
+    state = sched.get_state()
+    assert state["_target_schedule"] == [0.5, 0.7, 0.9]
+    assert state["_last_step"] == 15
+
+    fresh = LambdaScheduler(
+        target_sparsity=[0.5, 0.7, 0.9],
+        initial_lambda=1.0,
+    )
+    fresh.resolve_warmup_steps(10)
+    fresh.load_state(state)
+
+    assert fresh.target_schedule == [0.5, 0.7, 0.9]
+    assert fresh._last_step == 15
+    assert fresh.target_sparsity == 0.7
+
+
+def test_scheduler_state_backcompat_scalar():
+    """Legacy checkpoint with only scalar `target_sparsity` still loads."""
+    sched = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+    )
+    legacy_state = {
+        "lambda_value": 0.42,
+        "target_sparsity": 0.9,  # no _target_schedule / _last_step
+        "_last_sparsity": 0.85,
+        "acceleration_factor": 0.25,
+        "min_lambda": 1e-6,
+        "max_lambda": 1000.0,
+        "warmup_steps": 0,
+        "damping_zone": 0.0,
+    }
+    sched.load_state(legacy_state)
+
+    assert sched.target_schedule == [0.9]
+    assert sched.target_sparsity == 0.9
+    assert sched.lambda_value == 0.42
+
+
+def test_scheduler_rejects_invalid_list():
+    """List targets are validated element-wise."""
+    with pytest.raises(ValueError, match="must be finite and in"):
+        LambdaScheduler(
+            target_sparsity=[0.5, 1.1],  # > 1.0
+            initial_lambda=1e-3,
+        )
+    with pytest.raises(ValueError, match="must not be empty"):
+        LambdaScheduler(
+            target_sparsity=[],
+            initial_lambda=1e-3,
+        )
+
+
+# =============================================================================
+# Post-epoch relative-change clamp tests
+# =============================================================================
+
+
+def test_max_relative_change_defaults_to_off():
+    """Without the kwarg, scheduler behaves identically to baseline."""
+    # Baseline scheduler — no clamp.
+    baseline = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+    )
+    # Put the baseline past epoch 1 so a clamp (if it existed) would fire.
+    baseline.resolve_warmup_steps(10)
+
+    # Force a large update by reading sparsity far below target.
+    for step in range(20):
+        baseline.step(0.1, current_step=step)
+
+    assert baseline.max_relative_change is None, (
+        "max_relative_change should default to None"
+    )
+    # Baseline should reach the max_lambda ceiling (confirming no clamp).
+    assert baseline.get_lambda() == pytest.approx(1e3), (
+        "default behavior must match pre-change implementation "
+        f"(expected max_lambda=1000, got {baseline.get_lambda()})"
+    )
+
+
+def test_max_relative_change_inactive_during_first_epoch():
+    """Clamp does not fire while _last_step < _steps_per_epoch."""
+    scheduler = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+        max_relative_change=0.05,  # 5% cap
+    )
+    steps_per_epoch = 10
+    scheduler.resolve_warmup_steps(steps_per_epoch)
+
+    lambda_prev = scheduler.get_lambda()
+    # First update, during epoch 0: sparsity_diff=0.8, factor=1.8 -> +80%
+    scheduler.step(0.1, current_step=0)
+    lambda_new = scheduler.get_lambda()
+
+    # Without the clamp we expect ≈ 1.8; definitely well above the 5% cap.
+    rel_change = (lambda_new - lambda_prev) / lambda_prev
+    assert rel_change > 0.05, (
+        f"epoch-0 clamp must not fire; got rel_change={rel_change:.3f}"
+    )
+
+
+def test_max_relative_change_active_after_first_epoch():
+    """Clamp caps |Δλ|/λ_prev at max_relative_change once past epoch 0."""
+    scheduler = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+        max_relative_change=0.05,  # 5% cap
+    )
+    steps_per_epoch = 10
+    scheduler.resolve_warmup_steps(steps_per_epoch)
+
+    # Advance _last_step past the first-epoch boundary.
+    scheduler._last_step = steps_per_epoch
+
+    eps = 1e-12
+    for step in range(steps_per_epoch, steps_per_epoch + 20):
+        lambda_prev = scheduler.get_lambda()
+        # Push hard with sparsity far below target, each call is a new step.
+        scheduler.step(0.1, current_step=step)
+        lambda_new = scheduler.get_lambda()
+
+        rel_change = abs(lambda_new - lambda_prev) / lambda_prev
+        assert rel_change <= 0.05 + eps, (
+            f"step {step}: |Δλ|/λ_prev={rel_change:.6f} exceeds 0.05 cap"
+        )
+
+
+def test_max_relative_change_symmetric():
+    """Clamp applies to both increasing and decreasing updates."""
+    # Increasing direction: sparsity below target.
+    up = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+        max_relative_change=0.05,
+    )
+    up.resolve_warmup_steps(10)
+    up._last_step = 10  # past epoch 0
+    up.step(0.1, current_step=10)
+    # Exactly at the upper bound: lambda_prev * 1.05 = 1.05
+    assert up.get_lambda() == pytest.approx(1.05, rel=1e-9)
+
+    # Decreasing direction: sparsity above target.
+    down = LambdaScheduler(
+        target_sparsity=0.5,
+        initial_lambda=1.0,
+        acceleration_factor=1.0,
+        max_relative_change=0.05,
+    )
+    down.resolve_warmup_steps(10)
+    down._last_step = 10
+    down.step(0.99, current_step=10)
+    # Exactly at the lower bound: lambda_prev * 0.95 = 0.95
+    assert down.get_lambda() == pytest.approx(0.95, rel=1e-9)
+
+
+def test_max_relative_change_state_roundtrip():
+    """max_relative_change is preserved through checkpoint save/restore."""
+    scheduler = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=1.0,
+        max_relative_change=0.08,
+    )
+
+    state = scheduler.get_state()
+    assert state["max_relative_change"] == 0.08
+
+    fresh = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_lambda=0.5,
+        max_relative_change=None,  # different initial
+    )
+    fresh.load_state(state)
+    assert fresh.max_relative_change == 0.08
+
+
+def test_max_relative_change_rejects_invalid():
+    """Constructor rejects non-positive max_relative_change."""
+    with pytest.raises(ValueError, match="max_relative_change must be > 0.0"):
+        LambdaScheduler(
+            target_sparsity=0.9,
+            initial_lambda=1.0,
+            max_relative_change=-0.1,
+        )
+    with pytest.raises(ValueError, match="max_relative_change must be > 0.0"):
+        LambdaScheduler(
+            target_sparsity=0.9,
+            initial_lambda=1.0,
+            max_relative_change=0.0,
+        )
