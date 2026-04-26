@@ -25,8 +25,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import matplotlib.pyplot as plt
 from visualize import (
     METHOD_CLASS_COLORS,
-    METHOD_DISPLAY_NAMES,
-    parse_experiment_name,
+    VARIANT_COLOR_ADJUSTMENTS,
+    _adjust_color,
+    assign_label_visibility,
+    info_from_csv_row,
+    make_label,
     setup_matplotlib,
 )
 
@@ -64,6 +67,23 @@ METHOD_ORDER = [
 PROTOCOL_ORDER = ["Vox1-O", "Vox1-E", "Vox1-H"]
 
 SPARSITY_HATCHES = {50: ".", 70: "|", 90: "", 95: "/", 99: "x"}
+
+
+def _gradient_color(method_class, variant, value, sorted_values):
+    """Lightness gradient over a swept hyperparameter (e.g. alpha).
+
+    Variant color adjustment is applied first so bars from different variants
+    of the same method remain visually distinct even at the same sweep value.
+    """
+    base = METHOD_CLASS_COLORS.get(method_class, "#333333")
+    adj = VARIANT_COLOR_ADJUSTMENTS.get(variant)
+    if adj:
+        base = _adjust_color(base, *adj)
+    if value is None or len(sorted_values) < 2:
+        return base
+    rank = sorted_values.index(value)
+    t = rank / (len(sorted_values) - 1)
+    return _adjust_color(base, 0, 0, 0.30 - 0.55 * t)
 
 
 def parse_train_dataset_protocol(exp_name):
@@ -158,9 +178,44 @@ def plot_metric_for_dataset(
             else None
         )
 
-        # Get unique methods present, sorted consistently
-        methods = sorted(sub["method_class"].unique(), key=_method_sort_key)
-        n_methods = len(methods)
+        # Pick the swept hparam (alpha or f, whichever varies); expand each
+        # method into one bar per (variant, swept value) so different
+        # variants at the same alpha don't overwrite each other.
+        sweep_param = None
+        for cand in ("alpha", "f"):
+            if cand in sub.columns and sub[cand].dropna().nunique() >= 2:
+                sweep_param = cand
+                break
+
+        units = []  # (method, variant, sweep_value)
+        for method in sorted(sub["method_class"].unique(), key=_method_sort_key):
+            mrows = sub[sub["method_class"] == method]
+            variants = sorted(
+                mrows["variant"].fillna("__none__").unique().tolist()
+            )
+            for var_key in variants:
+                vrows = mrows[mrows["variant"].fillna("__none__") == var_key]
+                if sweep_param and vrows[sweep_param].notna().any():
+                    for v in sorted(vrows[sweep_param].dropna().unique()):
+                        units.append((method, var_key, v))
+                else:
+                    units.append((method, var_key, None))
+
+        n_methods = len(units)
+        # Per-(method, variant) sorted sweep values, used for gradient ranking
+        sweep_value_lookup = {}
+        for method, var_key, _ in units:
+            k = (method, var_key)
+            if k not in sweep_value_lookup:
+                vrows = sub[
+                    (sub["method_class"] == method)
+                    & (sub["variant"].fillna("__none__") == var_key)
+                ]
+                sweep_value_lookup[k] = (
+                    sorted(vrows[sweep_param].dropna().unique().tolist())
+                    if sweep_param
+                    else []
+                )
 
         x = np.arange(n_methods)
         offsets = (
@@ -176,13 +231,26 @@ def plot_metric_for_dataset(
         for sp_idx, sp in enumerate(sparsities):
             vals = []
             colors = []
-            for method in methods:
-                row = sub[
-                    (sub["method_class"] == method) & (sub["sparsity"] == sp)
-                ]
+            for method, var_key, sweep_val in units:
+                cond = (
+                    (sub["method_class"] == method)
+                    & (sub["sparsity"] == sp)
+                    & (sub["variant"].fillna("__none__") == var_key)
+                )
+                if sweep_param and sweep_val is not None:
+                    cond &= sub[sweep_param] == sweep_val
+                row = sub[cond]
                 if len(row) > 0:
                     vals.append(row[metric].values[0])
-                    colors.append(METHOD_CLASS_COLORS.get(method, "#333333"))
+                    actual_variant = var_key if var_key != "__none__" else None
+                    colors.append(
+                        _gradient_color(
+                            method,
+                            actual_variant,
+                            sweep_val,
+                            sweep_value_lookup.get((method, var_key), []),
+                        )
+                    )
                 else:
                     vals.append(0)
                     colors.append("#cccccc")
@@ -259,7 +327,36 @@ def plot_metric_for_dataset(
                         fontweight="bold" if is_best else "normal",
                     )
 
-        tick_labels = [METHOD_DISPLAY_NAMES.get(m, m) for m in methods]
+        # Build per-unit info dicts and let visualize.make_label do the
+        # heavy lifting — that keeps labels identical to convergence_curves
+        # and test_artifacts. Sparsity is stripped from the info because
+        # the bar chart shows sparsity via hatching, not via the tick.
+        unit_infos = []
+        for method, var_key, sweep_val in units:
+            cond = (
+                (sub["method_class"] == method)
+                & (sub["variant"].fillna("__none__") == var_key)
+            )
+            if sweep_param and sweep_val is not None:
+                cond &= sub[sweep_param] == sweep_val
+            matching = sub[cond]
+            if matching.empty:
+                # No data for this unit at any sparsity — fall back to a
+                # synthetic info just so the tick still gets a label.
+                info = {
+                    "method_class": method,
+                    "sparsity": None,
+                    "variant": None if var_key == "__none__" else var_key,
+                    "alpha": sweep_val if sweep_param == "alpha" else None,
+                    "f": sweep_val if sweep_param == "f" else None,
+                }
+            else:
+                info = dict(matching["info"].iloc[0])
+                info["sparsity"] = None
+            unit_infos.append(info)
+
+        assign_label_visibility([(None, info) for info in unit_infos])
+        tick_labels = [make_label(info) for info in unit_infos]
         ax.set_xticks(x)
         ax.set_xticklabels(tick_labels, rotation=30, ha="right")
         ax.set_title(protocol)
@@ -317,6 +414,16 @@ def main():
     )
     parser.add_argument("--font_size", type=int, default=10)
     parser.add_argument(
+        "--base_dirs",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional experiment root dir(s); used only to resolve "
+            "_bregman_lambda from config_tree.log so that fixed-lambda runs "
+            "are labeled e.g. 'AdaBreg (λ=1e-3)' instead of '[fixed]'."
+        ),
+    )
+    parser.add_argument(
         "--exclude_cnceleb_concatenated",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -350,10 +457,18 @@ def main():
         )
     df = df.drop_duplicates(subset=["dataset", "exp"], keep="first")
 
-    # Parse experiment names to get method_class and sparsity
-    parsed = df["exp"].apply(parse_experiment_name)
+    # Parse experiment names to get method_class, sparsity, alpha, f, variant.
+    # Use info_from_csv_row so fixed-lambda runs pick up _bregman_lambda from
+    # config_tree.log when --base_dirs is provided. The scalar columns are
+    # kept for downstream pandas filtering; the full info dict lives in the
+    # "info" column and is the input to make_label.
+    parsed = df["exp"].apply(lambda e: info_from_csv_row(e, args.base_dirs))
+    df["info"] = parsed
     df["method_class"] = parsed.apply(lambda x: x["method_class"])
     df["sparsity"] = parsed.apply(lambda x: x["sparsity"])
+    df["alpha"] = parsed.apply(lambda x: x.get("alpha"))
+    df["f"] = parsed.apply(lambda x: x.get("f"))
+    df["variant"] = parsed.apply(lambda x: x.get("variant"))
 
     # Parse dataset column into (dataset_name, protocol) — raises on unknown
     dp = df["dataset"].apply(parse_dataset_protocol)

@@ -22,12 +22,23 @@ import json
 import os
 import re
 import sys
+from typing import List, Tuple, Union
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+
+from scipy.stats import gaussian_kde
+
+# Hierarchical clustering for ordering
+from scipy.cluster.hierarchy import (
+    dendrogram,
+    linkage,
+    optimal_leaf_ordering,
+)
+from scipy.spatial.distance import squareform
 
 # Reuse shared utilities from visualize.py
 sys.path.insert(0, os.path.dirname(__file__))
@@ -304,7 +315,7 @@ def plot_embedding_projection(
             enrol_coords[i, 1],
             c=[color],
             s=80,
-            marker="*",
+            marker="o", #"*",
             edgecolors="black",
             linewidths=0.5,
             zorder=10,
@@ -422,28 +433,23 @@ def plot_score_distribution(
     )
 
     # KDE overlay
-    try:
-        from scipy.stats import gaussian_kde
-
-        x_range = np.linspace(all_scores.min(), all_scores.max(), 500)
-        kde_imp = gaussian_kde(impostors)
-        kde_tgt = gaussian_kde(targets)
-        ax.plot(
-            x_range,
-            kde_imp(x_range),
-            color="#1f77b4",
-            linewidth=1.0,
-            alpha=0.8,
-        )
-        ax.plot(
-            x_range,
-            kde_tgt(x_range),
-            color="#d62728",
-            linewidth=1.0,
-            alpha=0.8,
-        )
-    except ImportError:
-        pass  # scipy optional for KDE
+    x_range = np.linspace(all_scores.min(), all_scores.max(), 500)
+    kde_imp = gaussian_kde(impostors)
+    kde_tgt = gaussian_kde(targets)
+    ax.plot(
+        x_range,
+        kde_imp(x_range),
+        color="#1f77b4",
+        linewidth=1.0,
+        alpha=0.8,
+    )
+    ax.plot(
+        x_range,
+        kde_tgt(x_range),
+        color="#d62728",
+        linewidth=1.0,
+        alpha=0.8,
+    )
 
     # EER threshold line from metrics JSON
     eer, eer_thresh = _get_eer_for_score_col(metrics, score_col)
@@ -533,26 +539,21 @@ def plot_score_distribution_dual(
             edgecolor="none",
         )
 
-        try:
-            from scipy.stats import gaussian_kde
-
-            x_range = np.linspace(all_scores.min(), all_scores.max(), 500)
-            ax.plot(
-                x_range,
-                gaussian_kde(impostors)(x_range),
-                color="#1f77b4",
-                linewidth=1.0,
-                alpha=0.8,
-            )
-            ax.plot(
-                x_range,
-                gaussian_kde(targets)(x_range),
-                color="#d62728",
-                linewidth=1.0,
-                alpha=0.8,
-            )
-        except ImportError:
-            pass
+        x_range = np.linspace(all_scores.min(), all_scores.max(), 500)
+        ax.plot(
+            x_range,
+            gaussian_kde(impostors)(x_range),
+            color="#1f77b4",
+            linewidth=1.0,
+            alpha=0.8,
+        )
+        ax.plot(
+            x_range,
+            gaussian_kde(targets)(x_range),
+            color="#d62728",
+            linewidth=1.0,
+            alpha=0.8,
+        )
 
         # EER threshold line from metrics JSON
         eer, eer_thresh = _get_eer_for_score_col(metrics, col)
@@ -592,76 +593,188 @@ def plot_score_distribution_dual(
 # Plot 3: Enrollment similarity heatmap
 # ---------------------------------------------------------------------------
 
+def _l2_normalize(x, axis=-1, eps=1e-8):
+    """Row-wise L2 normalization (numpy)."""
+    n = np.maximum(np.linalg.norm(x, axis=axis, keepdims=True), eps)
+    return x / n
 
-def plot_enrollment_heatmap(enrol_embeds, output_path, title=None):
-    """Plot cosine similarity heatmap of enrollment embeddings with
-    hierarchical clustering."""
-    if enrol_embeds is None or len(enrol_embeds) == 0:
-        print("  [skip] no enrollment embeddings")
+
+def _leaf_order_from_centroids(C):
+    """Return a hierarchical-clustering leaf order for rows of C
+    (assumed L2-normalized). Falls back to identity for n <= 2."""
+    n = C.shape[0]
+    if n <= 2:
+        return list(range(n))
+    S_self = C @ C.T
+    dist = np.maximum(1.0 - S_self, 0.0)
+    np.fill_diagonal(dist, 0.0)
+    condensed = squareform(dist)
+    Z = linkage(condensed, method="average")
+    Z = optimal_leaf_ordering(Z, condensed)
+    return dendrogram(Z, no_plot=True)["leaves"]
+
+
+def plot_enrol_vs_test_heatmap(
+    enrol_embeds,
+    test_embeds,
+    output_path,
+    title=None,
+    cluster_speakers=True,
+    intra_speaker_cluster=False,
+    max_test_per_speaker=None,
+):
+    """Cosine-similarity heatmap of enrolment vs test embeddings, organized
+    block-diagonally by speaker.
+
+    Both axes share a single speaker ordering, so target trials (same speaker
+    on row and column) form the diagonal blocks and impostor trials form the
+    off-diagonal blocks. Speaker order is the leaf order from hierarchical
+    clustering of enrolment-speaker centroids; speakers present on only one
+    side are appended at the end of that axis with a heavier separator line.
+
+    Parameters
+    ----------
+    enrol_embeds, test_embeds : dict[str, Tensor]
+        Embedding dicts. Speaker ID is extracted from each key.
+    cluster_speakers : bool
+        If True, order the shared speaker block by clustering enrolment
+        centroids; otherwise sort speakers alphabetically.
+    intra_speaker_cluster : bool
+        If True, also cluster test utterances within each speaker block.
+        Cosmetic — does not change the block structure.
+    max_test_per_speaker : int | None
+        Cap test utterances per speaker (keeps the column count manageable).
+    """
+    if not enrol_embeds or not test_embeds:
+        print("  [skip] Missing enrollment or test embeddings")
         return
 
-    keys = list(enrol_embeds.keys())
-    spk_ids = [extract_speaker_id(k) for k in keys]
-    n = len(keys)
+    # 1. Group embeddings by speaker
+    enrol_by_spk = {}
+    for k, v in enrol_embeds.items():
+        enrol_by_spk.setdefault(extract_speaker_id(k), []).append(v)
+    test_by_spk = {}
+    for k, v in test_embeds.items():
+        test_by_spk.setdefault(extract_speaker_id(k), []).append(v)
 
-    # Stack and L2-normalize
-    E = torch.stack([enrol_embeds[k] for k in keys]).numpy()
-    norms = np.linalg.norm(E, axis=1, keepdims=True)
-    norms = np.maximum(norms, 1e-8)
-    E = E / norms
+    enrol_spks = set(enrol_by_spk)
+    test_spks = set(test_by_spk)
+    common = sorted(enrol_spks & test_spks)
+    enrol_only = sorted(enrol_spks - test_spks)
+    test_only = sorted(test_spks - enrol_spks)
 
-    # Cosine similarity
-    S = E @ E.T
+    if not common:
+        print("  [skip] No speaker overlap between enrolment and test")
+        return
 
-    # Hierarchical clustering for ordering
-    try:
-        from scipy.cluster.hierarchy import (
-            dendrogram,
-            linkage,
-            optimal_leaf_ordering,
-        )
-        from scipy.spatial.distance import squareform
+    # 2. Order common speakers (shared on both axes) via centroid clustering
+    enrol_centroids = {
+        spk: _l2_normalize(
+            _l2_normalize(np.stack([v.numpy() for v in items])).mean(
+                axis=0, keepdims=True
+            )
+        )[0]
+        for spk, items in enrol_by_spk.items()
+    }
+    if cluster_speakers and len(common) > 2:
+        C = np.stack([enrol_centroids[s] for s in common])
+        leaves = _leaf_order_from_centroids(C)
+        common = [common[i] for i in leaves]
 
-        dist = 1.0 - S
-        np.fill_diagonal(dist, 0.0)
-        dist = np.maximum(dist, 0.0)  # numerical safety
-        condensed = squareform(dist)
-        Z = linkage(condensed, method="average")
-        Z = optimal_leaf_ordering(Z, condensed)
-        leaf_order = dendrogram(Z, no_plot=True)["leaves"]
+    row_spk_order = common + enrol_only
+    col_spk_order = common + test_only
 
-        S = S[np.ix_(leaf_order, leaf_order)]
-        spk_ids = [spk_ids[i] for i in leaf_order]
-    except ImportError:
-        pass
+    # 3. Build per-block embedding stacks and remember block sizes
+    def stack_block(items):
+        return _l2_normalize(np.stack([v.numpy() for v in items]))
 
-    fig, ax = plt.subplots(figsize=(8, 7))
-    im = ax.imshow(S, cmap="RdBu_r", vmin=-1, vmax=1, aspect="equal")
+    enrol_blocks, enrol_sizes = [], []
+    for spk in row_spk_order:
+        E = stack_block(enrol_by_spk[spk])
+        enrol_blocks.append(E)
+        enrol_sizes.append(E.shape[0])
 
-    # Tick labels
-    if n <= 50:
-        ax.set_xticks(range(n))
-        ax.set_xticklabels(spk_ids, rotation=90, fontsize=5)
-        ax.set_yticks(range(n))
-        ax.set_yticklabels(spk_ids, fontsize=5)
-    else:
-        step = max(1, n // 30)
-        ticks = list(range(0, n, step))
-        ax.set_xticks(ticks)
-        ax.set_xticklabels(
-            [spk_ids[i] for i in ticks], rotation=90, fontsize=5
-        )
-        ax.set_yticks(ticks)
-        ax.set_yticklabels([spk_ids[i] for i in ticks], fontsize=5)
+    test_blocks, test_sizes = [], []
+    for spk in col_spk_order:
+        items = test_by_spk[spk]
+        if max_test_per_speaker is not None and len(items) > max_test_per_speaker:
+            items = items[:max_test_per_speaker]
+        E = stack_block(items)
+        if intra_speaker_cluster and E.shape[0] > 2:
+            order = _leaf_order_from_centroids(E)
+            E = E[order]
+        test_blocks.append(E)
+        test_sizes.append(E.shape[0])
+
+    E_enrol = np.concatenate(enrol_blocks, axis=0)
+    E_test = np.concatenate(test_blocks, axis=0)
+    S = E_enrol @ E_test.T  # cosine sim, both stacks are L2-normalized
+
+    n_rows, n_cols = S.shape
+    n_common = len(common)
+
+    # 4. Plot
+    aspect_ratio = max(0.5, min(2.0, n_cols / max(n_rows, 1)))
+    fig, ax = plt.subplots(figsize=(8 * aspect_ratio, 7))
+    im = ax.imshow(S, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+
+    # Speaker block boundaries (thin grid lines)
+    row_edges = np.cumsum(enrol_sizes)
+    col_edges = np.cumsum(test_sizes)
+    for e in row_edges[:-1]:
+        ax.axhline(e - 0.5, color="white", linewidth=0.3, alpha=0.5)
+    for e in col_edges[:-1]:
+        ax.axvline(e - 0.5, color="white", linewidth=0.3, alpha=0.5)
+
+    # Heavy separator between common-speaker band and side-only band
+    if n_common < len(row_spk_order):
+        ax.axhline(row_edges[n_common - 1] - 0.5, color="black",
+                   linewidth=0.9, alpha=0.85)
+    if n_common < len(col_spk_order):
+        ax.axvline(col_edges[n_common - 1] - 0.5, color="black",
+                   linewidth=0.9, alpha=0.85)
+
+    # 5. One tick per speaker block, centered on the block
+    def block_centers(sizes):
+        starts = np.concatenate(([0], np.cumsum(sizes)[:-1]))
+        return starts + np.array(sizes) / 2.0 - 0.5
+
+    row_centers = block_centers(enrol_sizes)
+    col_centers = block_centers(test_sizes)
+
+    # Subsample tick labels if too many speakers (avoids unreadable axes)
+    def pick_ticks(n_spks, max_labels=40):
+        step = max(1, int(np.ceil(n_spks / max_labels)))
+        return list(range(0, n_spks, step))
+
+    row_idx = pick_ticks(len(row_spk_order))
+    col_idx = pick_ticks(len(col_spk_order))
+    ax.set_yticks(row_centers[row_idx])
+    ax.set_yticklabels([row_spk_order[i] for i in row_idx], fontsize=5)
+    ax.set_xticks(col_centers[col_idx])
+    ax.set_xticklabels(
+        [col_spk_order[i] for i in col_idx], rotation=90, fontsize=5
+    )
+
+    ax.set_xlabel(
+        f"Test embeddings — grouped by speaker "
+        f"({len(common)} common, {len(test_only)} test-only)",
+        fontsize=8, labelpad=10,
+    )
+    ax.set_ylabel(
+        f"Enrolment embeddings — grouped by speaker "
+        f"({len(common)} common, {len(enrol_only)} enrol-only)",
+        fontsize=8, labelpad=10,
+    )
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
-    cbar.set_label("Cosine Similarity")
+    cbar.set_label("Cosine similarity")
 
     if title:
         ax.set_title(title)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    fig.savefig(output_path, format="pdf")
+    fig.savefig(output_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {output_path}")
 
@@ -815,10 +928,11 @@ def main():
 
             # Enrollment heatmap
             if "heatmap" in plots:
-                enrol = load_embeddings(artifacts_dir, test_set_name)[0]
-                plot_enrollment_heatmap(
+                enrol, test = load_embeddings(artifacts_dir, test_set_name)
+                plot_enrol_vs_test_heatmap(
                     enrol,
-                    os.path.join(out_dir, "enrollment_heatmap.pdf"),
+                    test,
+                    os.path.join(out_dir, "enrol_test_heatmap.pdf"),
                     title=title_prefix,
                 )
 

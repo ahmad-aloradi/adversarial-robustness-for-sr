@@ -157,6 +157,20 @@ SPARSITY_LINESTYLES = {
     99: (0, (1, 1)),
 }
 
+# Variant → line dash pattern (used in sweep mode to keep same-alpha curves
+# from different variants visually distinct).
+VARIANT_LINESTYLES = {
+    None: "-",
+    "regl1_conv": (0, (5, 2)),
+    "poor_init": (0, (3, 1, 1, 1)),
+    "rescale_prox": (0, (1, 1)),
+    "rescale_prox_v2": (0, (3, 1, 1, 1, 1, 1)),
+    "subgrad_corr_v2": (0, (5, 1, 1, 1)),
+    "subgrad_corr_v3": (0, (5, 2, 1, 2)),
+    "subgrad_corr_v4": (0, (1, 2, 5, 2)),
+    "fixed": (0, (4, 2, 1, 2, 1, 2)),
+}
+
 # Axis labels for known metric names
 METRIC_LABELS = {
     "train_loss": "Train Loss",
@@ -276,35 +290,54 @@ def _stage_of(metric):
 
 
 def parse_experiment_name(dirname):
-    """Parse experiment directory name into structured metadata dict."""
+    """Parse experiment directory name into structured metadata dict.
+
+    When ``-alpha<v>`` / ``-f<v>`` are absent we default to alpha=1.0 and
+    f=50 so old runs sit naturally inside an alpha/f sweep.
+    """
     info = {
         "dirname": dirname,
         "sparsity": None,
         "ramp_epochs": None,
         "schedule": None,
         "variant": None,
+        "alpha": 1.0,
+        "f": 50,
     }
 
+    # Strip alpha/f hyperparameter suffixes (always at the end, e.g. "-alpha0.25-f50").
+    # Order: -f<int> is innermost, then -alpha<float>. We strip both before
+    # running the variant regex so they don't pollute the variant field.
+    work = dirname
+    m_f = re.search(r"-f(\d+)$", work)
+    if m_f:
+        info["f"] = int(m_f.group(1))
+        work = work[: m_f.start()]
+    m_alpha = re.search(r"-alpha([\d.]+)$", work)
+    if m_alpha:
+        info["alpha"] = float(m_alpha.group(1))
+        work = work[: m_alpha.start()]
+
     # Sparsity: "-sr90" or "-sparsity90", possibly followed by a variant suffix
-    m = re.search(r"-(sr|sparsity)(\d+)(?:-(.+))?$", dirname)
+    m = re.search(r"-(sr|sparsity)(\d+)(?:-(.+))?$", work)
     if m:
         info["sparsity"] = int(m.group(2))
         if m.group(3):
             info["variant"] = m.group(3)  # e.g. "poor_init", "rescale_prox"
 
     # Ramp: "-ramp10_constant-"
-    m = re.search(r"-ramp(\d+)_(\w+)-", dirname)
+    m = re.search(r"-ramp(\d+)_(\w+)-", work)
     if m:
         info["ramp_epochs"] = int(m.group(1))
         info["schedule"] = m.group(2)
 
     # Model backbone
-    m = re.search(r"-(wespeaker_\w+)-", dirname)
+    m = re.search(r"-(wespeaker_\w+)-", work)
     info["model"] = m.group(1) if m else "unknown"
 
     # Method class — order matters (adabregw before adabreg)
     prefix = (
-        dirname.split("-wespeaker")[0] if "-wespeaker" in dirname else dirname
+        work.split("-wespeaker")[0] if "-wespeaker" in work else work
     )
     METHOD_PATTERNS = [
         ("adabregw", "adabregw"),
@@ -386,23 +419,112 @@ def make_label(info):
     else:
         label = name
     if info.get("variant"):
-        variant = VARIANT_DISPLAY_NAMES.get(info["variant"], info["variant"])
-        label += f" ({variant})" if variant else ""
+        # Honor an explicit "" override as "suppress entirely"; fall back to
+        # the raw name only for variants not listed in VARIANT_DISPLAY_NAMES,
+        # so unknown variants still produce distinct labels.
+        if info["variant"] in VARIANT_DISPLAY_NAMES:
+            variant = VARIANT_DISPLAY_NAMES[info["variant"]]
+        else:
+            variant = info["variant"]
+        if variant:
+            label += f" ({variant})"
+    extras = []
+    if info.get("_show_alpha"):
+        sym = r"$\alpha$" if plt.rcParams.get("text.usetex") else "α"
+        extras.append(f"{sym}={info['alpha']:g}")
+    if info.get("_show_f"):
+        sym = r"$f$" if plt.rcParams.get("text.usetex") else "f"
+        extras.append(f"{sym}={info['f']}")
+    if extras:
+        label += " " + ", ".join(extras)
     return label
 
 
 def get_style(info):
     """Return (color, marker, linestyle) tuple — deterministic from
-    metadata."""
-    color = METHOD_CLASS_COLORS.get(info["method_class"], "#333333")
-    variant = info.get("variant")
-    if variant:
-        adj = VARIANT_COLOR_ADJUSTMENTS.get(variant)
-        if adj:
-            color = _adjust_color(color, *adj)
-    marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
-    ls = SPARSITY_LINESTYLES.get(info["sparsity"], "-")
+    metadata.
+
+    In sweep mode (gradient color set), variant drives linestyle so that
+    same-alpha curves from different variants remain visually distinct
+    even though they share a color.
+    """
+    color = info.get("_gradient_color")
+    if color is not None:
+        marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
+        ls = VARIANT_LINESTYLES.get(info.get("variant"), "-")
+    else:
+        color = METHOD_CLASS_COLORS.get(info["method_class"], "#333333")
+        variant = info.get("variant")
+        if variant:
+            adj = VARIANT_COLOR_ADJUSTMENTS.get(variant)
+            if adj:
+                color = _adjust_color(color, *adj)
+        marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
+        ls = SPARSITY_LINESTYLES.get(info["sparsity"], "-")
     return color, marker, ls
+
+
+def assign_gradient_colors(experiments):
+    """Within each (method_class, sparsity), gradient-color by whichever of
+    {alpha, f} varies. Color is keyed off the swept value (not the rank
+    among experiments) so two runs with the same alpha share a color
+    regardless of variant — variants are then distinguished by linestyle
+    in :func:`get_style`. This avoids both color collisions across
+    variants and silent overwrites.
+    """
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    for _, info in experiments:
+        groups[(info["method_class"], info.get("sparsity"))].append(info)
+
+    for (method, _), members in groups.items():
+        if len(members) < 2:
+            continue
+        param = None
+        for cand in ("alpha", "f"):
+            vals = {m.get(cand) for m in members if m.get(cand) is not None}
+            if len(vals) >= 2:
+                param = cand
+                break
+        if param is None:
+            continue
+        unique_vals = sorted(
+            {m[param] for m in members if m.get(param) is not None}
+        )
+        n = len(unique_vals)
+        if n < 2:
+            continue
+        base = METHOD_CLASS_COLORS.get(method, "#333333")
+        for info in members:
+            v = info.get(param)
+            if v is None:
+                continue
+            t = unique_vals.index(v) / (n - 1)
+            info["_gradient_color"] = _adjust_color(base, 0, 0, 0.30 - 0.55 * t)
+
+
+def assign_label_visibility(experiments):
+    """Set `_show_alpha`/`_show_f` per info based on whether the field
+    takes >=2 distinct values across the full matched set. None counts
+    as a distinct value (mixed presence is still variation). Only
+    Bregman methods carry alpha/f — they are Bregman-only hyperparameters,
+    so dense baselines and pruning runs never get them stamped on the
+    label even when alpha varies elsewhere in the matched set.
+    """
+    if not experiments:
+        return
+    infos = [info for _, info in experiments]
+    show_alpha = len({i.get("alpha") for i in infos}) >= 2
+    show_f = len({i.get("f") for i in infos}) >= 2
+    for info in infos:
+        is_bregman = "breg" in info.get("method_class")
+        info["_show_alpha"] = (
+            show_alpha and info.get("alpha") is not None and is_bregman
+        )
+        info["_show_f"] = (
+            show_f and info.get("f") is not None and is_bregman
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +547,27 @@ def load_fixed_lambda(exp_dir):
                 return float(m.group())
     
     raise ValueError(f"_bregman_lambda value not found in config_tree.log of {exp_dir}")
+
+
+def info_from_csv_row(exp_name, base_dirs=None):
+    """Build an info dict for a CSV-leaderboard row.
+
+    Mirrors what :func:`discover_experiments` does for a single dirname:
+    parses the name and, when ``variant=='fixed'`` and ``base_dirs`` are
+    provided, locates the experiment directory and loads the fixed lambda
+    from ``config_tree.log``. Used by CSV-based downstream scripts so they
+    produce labels identical to the directory-based pipeline.
+    """
+    info = parse_experiment_name(exp_name)
+    if info.get("variant") == "fixed" and base_dirs:
+        for bd in base_dirs:
+            full = os.path.join(bd, exp_name)
+            if os.path.isdir(full) and os.path.exists(
+                os.path.join(full, "config_tree.log")
+            ):
+                info["fixed_lambda"] = load_fixed_lambda(full)
+                break
+    return info
 
 
 def load_train_log(exp_dir):
@@ -516,13 +659,18 @@ def discover_experiments(base_dirs, patterns):
 
     def key(item):
         mc = item[1]["method_class"]
+        info = item[1]
         return (
             ORDER.index(mc) if mc in ORDER else 99,
-            item[1]["sparsity"] or -1,
-            item[1].get("variant") or "",
+            info["sparsity"] or -1,
+            info.get("variant") or "",
+            info["alpha"] if info.get("alpha") is not None else -1.0,
+            info["f"] if info.get("f") is not None else -1,
         )
 
     matched.sort(key=key)
+    assign_gradient_colors(matched)
+    assign_label_visibility(matched)
     return matched
 
 

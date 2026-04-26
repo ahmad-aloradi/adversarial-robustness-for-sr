@@ -26,7 +26,12 @@ import matplotlib.pyplot as plt
 from visualize import (
     METHOD_CLASS_COLORS,
     METHOD_DISPLAY_NAMES,
-    parse_experiment_name,
+    VARIANT_COLOR_ADJUSTMENTS,
+    VARIANT_LINESTYLES,
+    _adjust_color,
+    assign_label_visibility,
+    info_from_csv_row,
+    make_label,
     setup_matplotlib,
 )
 from visualize_test_metrics import (
@@ -149,7 +154,7 @@ def plot_sparsity_trends(
             if label not in legend_entries:
                 legend_entries[label] = line
 
-        # --- Sparsity curves: one line per method ---
+        # --- Sparsity curves: one line per (method, alpha) combo ---
         sparse_df = sub[~sub["method_class"].isin(BASELINE_METHODS)].copy()
         sparse_df = sparse_df.dropna(subset=[metric_col, "sparsity"])
 
@@ -161,19 +166,90 @@ def plot_sparsity_trends(
         )
 
         y_cap = Y_CAP_MIN
+        use_latex = plt.rcParams.get("text.usetex", False)
+        # Track next vertical offset (pts) for capped annotations per x position
+        ann_next_offset: dict[float, int] = {}
 
+        # Pick the swept hparam (alpha or f), build one curve per
+        # (method, variant, sweep_value) so different variants at the same
+        # alpha don't overwrite each other.
+        sweep_param = None
+        for cand in ("alpha", "f"):
+            if cand in sparse_df.columns and sparse_df[cand].dropna().nunique() >= 2:
+                sweep_param = cand
+                break
+
+        curve_units = []
         for method in methods:
-            mdf = sparse_df[sparse_df["method_class"] == method].sort_values(
-                "sparsity"
+            mdf = sparse_df[sparse_df["method_class"] == method]
+            for var_key in sorted(mdf["variant"].fillna("__none__").unique()):
+                vrows = mdf[mdf["variant"].fillna("__none__") == var_key]
+                if sweep_param and vrows[sweep_param].notna().any():
+                    vals = sorted(vrows[sweep_param].dropna().unique().tolist())
+                    for v in vals:
+                        curve_units.append((method, var_key, v, vals))
+                else:
+                    curve_units.append((method, var_key, None, []))
+
+        # Build per-unit info dicts and route label generation through
+        # visualize.make_label so legend strings match the other viz
+        # scripts. Sparsity is stripped because it's the x-axis here.
+        curve_unit_infos = []
+        for method, var_key, sweep_val, _ in curve_units:
+            cond = (
+                (sparse_df["method_class"] == method)
+                & (sparse_df["variant"].fillna("__none__") == var_key)
             )
+            if sweep_param and sweep_val is not None:
+                cond &= sparse_df[sweep_param] == sweep_val
+            matching = sparse_df[cond]
+            if matching.empty:
+                info = {
+                    "method_class": method,
+                    "sparsity": None,
+                    "variant": None if var_key == "__none__" else var_key,
+                    "alpha": sweep_val if sweep_param == "alpha" else None,
+                    "f": sweep_val if sweep_param == "f" else None,
+                }
+            else:
+                info = dict(matching["info"].iloc[0])
+                info["sparsity"] = None
+            curve_unit_infos.append(info)
+        assign_label_visibility([(None, info) for info in curve_unit_infos])
+        curve_labels = [make_label(info) for info in curve_unit_infos]
+
+        for unit_idx, (method, var_key, sweep_val, sweep_vals) in enumerate(
+            curve_units
+        ):
+            base_mask = (
+                (sparse_df["method_class"] == method)
+                & (sparse_df["variant"].fillna("__none__") == var_key)
+            )
+            if sweep_param and sweep_val is not None:
+                mdf = sparse_df[base_mask & (sparse_df[sweep_param] == sweep_val)]
+            else:
+                mdf = sparse_df[base_mask]
+            mdf = mdf.sort_values("sparsity")
             if mdf.empty:
                 continue
 
             x = mdf["sparsity"].values
             y_raw = mdf[metric_col].values * 100
-            color = METHOD_CLASS_COLORS.get(method, "#333333")
+
+            base_color = METHOD_CLASS_COLORS.get(method, "#333333")
+            actual_variant = var_key if var_key != "__none__" else None
+            variant_adj = VARIANT_COLOR_ADJUSTMENTS.get(actual_variant)
+            if variant_adj:
+                base_color = _adjust_color(base_color, *variant_adj)
+            if sweep_val is not None and len(sweep_vals) >= 2:
+                t = sweep_vals.index(sweep_val) / (len(sweep_vals) - 1)
+                color = _adjust_color(base_color, 0, 0, 0.30 - 0.55 * t)
+            else:
+                color = base_color
+
             marker = METHOD_MARKERS.get(method, "o")
-            label = METHOD_DISPLAY_NAMES.get(method, method)
+            linestyle = VARIANT_LINESTYLES.get(actual_variant, "-")
+            label = curve_labels[unit_idx]
 
             # Split into in-range segments (connected) and capped points (isolated)
             in_range = y_raw <= y_cap
@@ -194,6 +270,7 @@ def plot_sparsity_trends(
                             marker=marker,
                             markersize=6,
                             linewidth=1.5,
+                            linestyle=linestyle,
                             label=label,
                         )
                         if line_handle is None:
@@ -208,6 +285,7 @@ def plot_sparsity_trends(
                     marker=marker,
                     markersize=6,
                     linewidth=1.5,
+                    linestyle=linestyle,
                     label=label,
                 )
                 if line_handle is None:
@@ -215,8 +293,8 @@ def plot_sparsity_trends(
                 label = None
 
             # Plot capped points as isolated markers at the cap line
-            use_latex = plt.rcParams.get("text.usetex", False)
             pct = r"\%" if use_latex else "%"
+
             for xi, yi, ok in zip(x, y_raw, in_range):
                 if not ok:
                     (h,) = ax.plot(
@@ -231,27 +309,31 @@ def plot_sparsity_trends(
                     if line_handle is None:
                         line_handle = h
                     label = None
-                    short_name = METHOD_DISPLAY_NAMES.get(method, method)
+                    # Stack annotations vertically so multiple capped methods
+                    # at the same x don't overwrite each other.
+                    x_key = round(float(xi), 4)
+                    y_offset = ann_next_offset.get(x_key, 4)
+                    ann_next_offset[x_key] = y_offset + 12
                     ax.annotate(
-                        f"{short_name}: {yi:.1f}{pct}",
+                        f"{yi:.1f}{pct}",
                         xy=(xi, y_cap),
                         fontsize=font_size - 2,
-                        alpha=0.85,
+                        color=color,
+                        alpha=0.9,
                         ha="center",
                         va="bottom",
                         textcoords="offset points",
-                        xytext=(0, 4),
+                        xytext=(0, y_offset),
                     )
 
             if line_handle is not None:
-                disp_label = METHOD_DISPLAY_NAMES.get(method, method)
+                disp_label = curve_labels[unit_idx]
                 if disp_label not in legend_entries:
                     legend_entries[disp_label] = line_handle
 
         ax.set_ylim(top=y_cap * 1.008)  # small headroom for annotations
 
         # --- Axis formatting ---
-        use_latex = plt.rcParams.get("text.usetex", False)
         pct_str = r"\%" if use_latex else "%"
         title = protocol if dataset_name == "VoxCeleb" else dataset_name
         ax.set_title(title)
@@ -304,6 +386,16 @@ def main():
     )
     parser.add_argument("--font_size", type=int, default=10)
     parser.add_argument(
+        "--base_dirs",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional experiment root dir(s); used only to resolve "
+            "_bregman_lambda from config_tree.log so that fixed-lambda runs "
+            "are labeled e.g. 'AdaBreg (λ=1e-3)' instead of '[fixed]'."
+        ),
+    )
+    parser.add_argument(
         "--cnceleb_protocol",
         default="Embeds Averaging",
         help="CNCeleb protocol for the 4th subplot (default: Embeds Averaging)",
@@ -317,10 +409,16 @@ def main():
     df = pd.read_csv(csv_path)
     df = df.drop_duplicates(subset=["dataset", "exp"])
 
-    # Parse experiment names
-    parsed = df["exp"].apply(parse_experiment_name)
+    # Parse experiment names. info_from_csv_row also loads _bregman_lambda
+    # from config_tree.log when --base_dirs is provided, so fixed-lambda
+    # runs get labels like "AdaBreg (λ=1e-3)" instead of "[fixed]".
+    parsed = df["exp"].apply(lambda e: info_from_csv_row(e, args.base_dirs))
+    df["info"] = parsed
     df["method_class"] = parsed.apply(lambda x: x["method_class"])
     df["sparsity"] = parsed.apply(lambda x: x["sparsity"])
+    df["alpha"] = parsed.apply(lambda x: x.get("alpha"))
+    df["f"] = parsed.apply(lambda x: x.get("f"))
+    df["variant"] = parsed.apply(lambda x: x.get("variant"))
 
     # Parse dataset column
     dp = df["dataset"].apply(parse_dataset_protocol)
