@@ -67,7 +67,13 @@ METHOD_ORDER = [
 
 PROTOCOL_ORDER = ["Vox1-O", "Vox1-E", "Vox1-H"]
 
-SPARSITY_HATCHES = {75: "+", 90: "-", 95: "/", 99: "x"}
+SPARSITY_HATCHES = {75: "//", 90: "*", 95: "oo", 99: "\\"}
+
+# Extra x-space inserted between consecutive (method, variant) groups so
+# single-bar methods (e.g. AdamW, SGD baselines) don't visually merge with
+# their neighbors when many sweep × sparsity bars sit next to them.
+GROUP_GAP = 0.6
+# SPARSITY_HATCHES = {75: "///", 90: "\\\\\\", 95: "xxx", 99: "..."}
 
 
 def _gradient_color(method_class, variant, value, sorted_values):
@@ -124,6 +130,72 @@ def _method_sort_key(method_class):
         return len(METHOD_ORDER)
 
 
+def _protocol_sort_key(p):
+    try:
+        return PROTOCOL_ORDER.index(p)
+    except ValueError:
+        return len(PROTOCOL_ORDER)
+
+
+def _build_units(sub):
+    """Enumerate (method, variant, sweep_value, sparsity) bars for a slice.
+
+    Lifted out of plot_metric_for_dataset so figure sizing can scale with
+    the actual bar count instead of just n_protocols.
+    """
+    sweep_param = None
+    for cand in ("alpha", "f"):
+        if cand in sub.columns and sub[cand].dropna().nunique() >= 2:
+            sweep_param = cand
+            break
+    units = []
+    for method in sorted(sub["method_class"].unique(), key=_method_sort_key):
+        mrows = sub[sub["method_class"] == method]
+        for var_key in sorted(
+            mrows["variant"].fillna("__none__").unique().tolist()
+        ):
+            vrows = mrows[mrows["variant"].fillna("__none__") == var_key]
+            spars_levels = sorted(vrows["sparsity"].dropna().unique().tolist())
+            if vrows["sparsity"].isna().any():
+                spars_levels = [None] + spars_levels
+            for sp in spars_levels:
+                srows = (
+                    vrows[vrows["sparsity"].isna()]
+                    if sp is None
+                    else vrows[vrows["sparsity"] == sp]
+                )
+                if sweep_param and srows[sweep_param].notna().any():
+                    for v in sorted(srows[sweep_param].dropna().unique()):
+                        units.append((method, var_key, v, sp))
+                else:
+                    units.append((method, var_key, None, sp))
+    return units, sweep_param
+
+
+def _unit_x_positions(units, gap=GROUP_GAP):
+    """X-coordinates for each unit with `gap` inserted at group boundaries."""
+    n = len(units)
+    if n == 0:
+        return np.zeros(0, dtype=float)
+    x = np.zeros(n, dtype=float)
+    cur = 0.0
+    prev_key = (units[0][0], units[0][1])
+    for i in range(1, n):
+        cur_key = (units[i][0], units[i][1])
+        cur += 1.0 + (gap if cur_key != prev_key else 0.0)
+        x[i] = cur
+        prev_key = cur_key
+    return x
+
+
+def _effective_width(units, gap=GROUP_GAP):
+    """Total x-extent (in bar slots) for a list of units, including gaps."""
+    if not units:
+        return 1.0
+    x = _unit_x_positions(units, gap=gap)
+    return float(x[-1] - x[0] + 1.0)
+
+
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
@@ -136,7 +208,7 @@ def plot_metric_for_dataset(
     metric,
     output_path,
     font_size=16,
-    fig_height=6,
+    fig_height=5.0,
 ):
     """Grouped bar chart for one dataset.
 
@@ -144,14 +216,29 @@ def plot_metric_for_dataset(
     """
     setup_matplotlib(font_size)
 
-    n_protocols = len(protocols)
-    fig_width = max(6.0, 4.0 * n_protocols)
+    # Resolve the bar layout per protocol upfront. Subplot widths scale
+    # with the bar count via gridspec width_ratios, and figure width
+    # scales with total bars, so dense methods don't get cramped when a
+    # neighboring protocol only has a few bars.
+    protocol_data = []  # (protocol, sub, units, sweep_param)
+    for protocol in sorted(protocols, key=_protocol_sort_key):
+        sub = df[df["protocol"] == protocol].copy()
+        units, sweep_param = _build_units(sub)
+        protocol_data.append((protocol, sub, units, sweep_param))
+
+    n_protocols = len(protocol_data)
+    width_ratios = [_effective_width(u) for _, _, u, _ in protocol_data]
+    total_units = sum(width_ratios)
+    # ~0.45" per bar (gap-inflated so single-bar methods get more horizontal
+    # room) plus per-protocol padding for axis labels and titles.
+    fig_width = max(6.0, 0.45 * total_units + 1.2 * n_protocols)
     fig, axes = plt.subplots(
         1,
         n_protocols,
-        figsize=(fig_width, fig_height),
+        figsize=(fig_width, fig_width // len(protocol_data)),
         sharey=True,
         squeeze=False,
+        gridspec_kw={"width_ratios": width_ratios},
     )
     axes = axes[0]
 
@@ -170,21 +257,22 @@ def plot_metric_for_dataset(
         return
     q1, q3 = np.percentile(all_vals, [25, 75])
     iqr = q3 - q1
-    outlier_thresh = q3 + 2.5 * iqr
-    non_outlier_max = all_vals[all_vals <= outlier_thresh].max()
+    non_outliers = all_vals[all_vals <= q3 + 3.0 * iqr]
+    non_outlier_max = (
+        non_outliers.max() if len(non_outliers) > 0 else all_vals.max()
+    )
     y_cap = non_outlier_max * 1.35  # headroom for annotations
+    # Outlier bars get clipped near the top of the chart so the broken-bar
+    # break + small cap + value annotation render right next to y_cap and
+    # clearly read as "this bar exceeds the chart" rather than appearing
+    # mid-figure. The outlier criterion is v > y_cap, so the indicator only
+    # fires when the bar would actually exceed the visible range.
+    clip_height = y_cap * 0.93
 
-    def _protocol_sort_key(p):
-        try:
-            return PROTOCOL_ORDER.index(p)
-        except ValueError:
-            return len(PROTOCOL_ORDER)
-
-    for ax_idx, protocol in enumerate(
-        sorted(protocols, key=_protocol_sort_key)
+    for ax_idx, (protocol, sub, units, sweep_param) in enumerate(
+        protocol_data
     ):
         ax = axes[ax_idx]
-        sub = df[df["protocol"] == protocol].copy()
 
         # Best (lowest) score in this protocol for bold highlighting
         valid_vals = sub[metric].dropna()
@@ -200,42 +288,11 @@ def plot_metric_for_dataset(
         ax.yaxis.grid(True, alpha=0.3, linewidth=0.4)
         ax.xaxis.grid(False)
 
-        # Pick the swept hparam (alpha or f, whichever varies); expand each
-        # method into one bar per (variant, swept value, sparsity) so the
-        # bar layout is invariant to which buckets each method covers.
-        sweep_param = None
-        for cand in ("alpha", "f"):
-            if cand in sub.columns and sub[cand].dropna().nunique() >= 2:
-                sweep_param = cand
-                break
-
-        # One unit per (method, variant, sweep_value, sparsity) actually
-        # present in the data. Each unit becomes a single, evenly-spaced
-        # bar — this avoids the gaps that appeared in the prior
-        # grouped-by-sparsity layout when a method only had data in some
-        # of the global sparsity buckets (e.g. dense baselines paired
-        # with sparse Bregman runs).
-        units = []  # (method, variant, sweep_value, sparsity)
-        for method in sorted(sub["method_class"].unique(), key=_method_sort_key):
-            mrows = sub[sub["method_class"] == method]
-            for var_key in sorted(
-                mrows["variant"].fillna("__none__").unique().tolist()
-            ):
-                vrows = mrows[mrows["variant"].fillna("__none__") == var_key]
-                spars_levels = sorted(vrows["sparsity"].dropna().unique().tolist())
-                if vrows["sparsity"].isna().any():
-                    spars_levels = [None] + spars_levels
-                for sp in spars_levels:
-                    srows = (
-                        vrows[vrows["sparsity"].isna()]
-                        if sp is None
-                        else vrows[vrows["sparsity"] == sp]
-                    )
-                    if sweep_param and srows[sweep_param].notna().any():
-                        for v in sorted(srows[sweep_param].dropna().unique()):
-                            units.append((method, var_key, v, sp))
-                    else:
-                        units.append((method, var_key, None, sp))
+        # Show the protocol name above each subplot only when there are
+        # multiple side-by-side protocols (e.g. Vox1-O / Vox1-E / Vox1-H).
+        # Single-protocol figures (e.g. CNCeleb-E alone) don't need it.
+        if n_protocols > 1:
+            ax.set_title(protocol, fontsize=font_size + 1, pad=6)
 
         n_units = len(units)
         # Per-(method, variant) sorted sweep values, used for gradient ranking
@@ -254,9 +311,8 @@ def plot_metric_for_dataset(
                 )
 
         # Resolve value, color, and hatch per unit
-        clip_height = non_outlier_max * 1.5
         bar_width = 0.7
-        x = np.arange(n_units, dtype=float)
+        x = _unit_x_positions(units)
         vals = np.zeros(n_units)
         colors = ["#cccccc"] * n_units
         hatches = [""] * n_units
@@ -283,7 +339,7 @@ def plot_metric_for_dataset(
                 )
             hatches[i] = "" if sp is None else SPARSITY_HATCHES.get(sp, "")
 
-        display_vals = np.clip(vals, 0, clip_height)
+        display_vals = np.where(vals > y_cap, clip_height, vals)
 
         # Render bars in hatch-grouped batches (matplotlib bar() takes one
         # hatch per call, so units sharing a hatch are drawn together).
@@ -297,8 +353,8 @@ def plot_metric_for_dataset(
                 display_vals[idxs],
                 bar_width,
                 color=[colors[i] for i in idxs],
-                edgecolor="white",
-                linewidth=0.5,
+                edgecolor="#222222",
+                linewidth=0.7,
                 hatch=h,
             )
             for j, bar in zip(idxs, sub_bars):
@@ -313,7 +369,7 @@ def plot_metric_for_dataset(
             if v <= 0:
                 continue
             raw_text = f"{v:.1f}"
-            is_outlier = v > outlier_thresh
+            is_outlier = v > y_cap
             is_best = best_display is not None and raw_text == best_display
             if is_outlier:
                 bx = bar.get_x()
@@ -335,8 +391,8 @@ def plot_metric_for_dataset(
                     bw,
                     bottom=cap_bot,
                     color=c,
-                    edgecolor="white",
-                    linewidth=0.5,
+                    edgecolor="#222222",
+                    linewidth=0.7,
                     hatch=h,
                     zorder=3,
                 )
@@ -430,7 +486,7 @@ def plot_metric_for_dataset(
         group_label_y = -0.05 if any_sparsity_tick else -0.05
         for label, run_start, run_end in runs:
             ax.text(
-                (run_start + run_end) / 2.0,
+                (x[run_start] + x[run_end]) / 2.0,
                 group_label_y,
                 _bold(label),
                 transform=ax.get_xaxis_transform(),
@@ -454,7 +510,8 @@ def plot_metric_for_dataset(
             legend_handles.append(
                 Patch(
                     facecolor="#aaaaaa",
-                    edgecolor="white",
+                    edgecolor="#222222",
+                    linewidth=0.7,
                     label="Dense",
                 )
             )
@@ -463,13 +520,14 @@ def plot_metric_for_dataset(
             legend_handles.append(
                 Patch(
                     facecolor="#aaaaaa",
-                    edgecolor="white",
+                    edgecolor="#222222",
+                    linewidth=0.7,
                     hatch=hatch,
                     label=f"{int(sp)}{pct}",
                 )
             )
-    if legend_handles:
-        fig.legend(handles=legend_handles, loc="upper center", framealpha=0.9, ncols=len(legend_handles))
+    # if legend_handles:
+    #     fig.legend(handles=legend_handles, loc="upper right", framealpha=0.9, ncols=len(legend_handles)//2)
 
     metric_clean = metric.replace("_raw", "").replace("_norm", "")
     # if 'vox' in dataset_name.lower():

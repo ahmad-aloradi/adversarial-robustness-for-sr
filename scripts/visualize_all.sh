@@ -4,28 +4,35 @@ export PYTHONPATH="$HOME/adversarial-robustness-for-sr"
 source=csv # # Sources: train_log --> epoch-mean, csv --> batch-step
 
 stage_visualize=true
-stage_aggregate_and_vis=false
+stage_aggregate_and_vis=true
 stage_test_viz=false
 stage_weight_norms=false
 force_recompute=true
 
 # Experiment selection criteria
-eval_model='ecapa_tdnn' # 'resnet34' 'ecapa_tdnn'
-eval_data='cnceleb' # 'cnceleb', 'multi_sv'
-sparsity_rate='*' # 'sr90', 'sr95', 'sr99'
-experiment='sv_bregman*' # e.g. 'sv_bregman', 'sv_pruning', 'sv_vanilla', 'sv_wespeaker'
-suffix=''   # e.g., subgrad_corr_v2 * 
+eval_model='resnet34' # 'resnet34' 'ecapa_tdnn'
+eval_data='multi_sv' # 'cnceleb', 'multi_sv'
+sparsity_rate='sr[7-9][0-9]' #  'sr75' 'sr90', 'sr95', 'sr99'
+experiment='sv_bregman_*breg-wespeaker' # e.g. 'sv_bregman', 'sv_pruning', 'sv_vanilla', 'sv_wespeaker'
+experiment2='sv_pruning_mag_unstruct' # e.g. 'sv_bregman', 'sv_pruning', 'sv_vanilla', 'sv_wespeaker'
+
+if [ "$eval_model" = 'resnet34' ]; then
+    suffix=*'regl1_conv'    # '*regl1_conv'  regl1_conv-alpha0.5-f50
+    echo "Using suffix: $suffix for experiment filtering"
+else
+    suffix=''
+    echo "No suffix for experiment filtering"
+fi 
 
 base_dirs=(
-    '/data/ahmad/results'
+    '/data/aloradad/results'
 )
 experiments=(
-    # "${experiment}*${eval_model}*${eval_data}*-${suffix}"
-    # "${experiment}*${eval_model}*${eval_data}*-subgrad_corr_v2"
-    # "*fixed*${eval_model}*${eval_data}*"
-    "${experiment}*${eval_model}*${eval_data}*${sparsity_rate}"
-    "sv_vanilla_*${eval_model}*"
-    "sv_wespeaker_*${eval_model}*"
+    # sv_bregman_linbreg_fixed-wespeaker_ecapa_tdnn-cnceleb-virt-False-bs256-vadFalse-ep40-augFalse-sr90
+    "${experiment}*${eval_model}*${eval_data}*${sparsity_rate}*${suffix}"
+    "${experiment2}*${eval_model}*${eval_data}*${sparsity_rate}*"
+    "sv_vanilla-*${eval_model}*${eval_data}*"
+    "sv_wespeaker-*${eval_model}*${eval_data}*"
     )
 
 # Build list of dataset subdirs across all base_dirs
@@ -65,10 +72,14 @@ if [ "$stage_aggregate_and_vis" = true ]; then
          --output_dir results/cross_exp_comparison/test_metrics
 
     python scripts/visualize_test_metrics.py \
-        --input_dir results/cross_exp_comparison/test_metrics
+        --input_dir results/cross_exp_comparison/test_metrics \
+        --base_dirs "${exp_dirs[@]}" \
+        --experiments ${experiments[@]}
 
     python scripts/visualize_sparsity_trend.py \
-        --input_dir results/cross_exp_comparison/test_metrics
+        --input_dir results/cross_exp_comparison/test_metrics \
+        --base_dirs "${exp_dirs[@]}" \
+        --experiments ${experiments[@]}
 fi
 
 ############################

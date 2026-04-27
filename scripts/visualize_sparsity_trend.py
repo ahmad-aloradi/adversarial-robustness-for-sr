@@ -55,9 +55,6 @@ CNCELEB_POS = (1, 1)
 # Methods treated as dense baselines (horizontal lines, not sparsity curves)
 BASELINE_METHODS = {"vanilla", "wespeaker"}
 
-# Y-axis cap: values above this are clipped and annotated at the top
-Y_CAP_MIN = 10  # percent — ensures outliers don't blow the scale
-
 # Method ordering for consistent legend
 METHOD_ORDER = [
     "adabreg",
@@ -166,7 +163,19 @@ def plot_sparsity_trends(
             else len(METHOD_ORDER),
         )
 
-        y_cap = Y_CAP_MIN
+        # Per-subplot cap: CNCeleb-E and the VoxCeleb protocols cover very
+        # different metric ranges, so each panel scales independently via
+        # IQR rather than sharing a fixed global cap.
+        sub_vals = sub[metric_col].dropna().values * 100
+        if len(sub_vals) == 0:
+            continue
+        q1, q3 = np.percentile(sub_vals, [25, 75])
+        iqr = q3 - q1
+        non_outliers = sub_vals[sub_vals <= q3 + 3.5 * iqr]
+        non_outlier_max = (
+            non_outliers.max() if len(non_outliers) > 0 else sub_vals.max()
+        )
+        y_cap = non_outlier_max * 1.25  # headroom for capped-point annotations
         use_latex = plt.rcParams.get("text.usetex", False)
         # Track next vertical offset (pts) for capped annotations per x position
         ann_next_offset: dict[float, int] = {}
@@ -332,7 +341,7 @@ def plot_sparsity_trends(
                 if disp_label not in legend_entries:
                     legend_entries[disp_label] = line_handle
 
-        ax.set_ylim(top=y_cap * 1.008)  # small headroom for annotations
+        ax.set_ylim(top=y_cap * 1.01)  # small headroom for annotations
 
         # --- Axis formatting ---
         pct_str = r"\%" if use_latex else "%"
@@ -364,9 +373,9 @@ def plot_sparsity_trends(
             legend_entries.values(),
             legend_entries.keys(),
             loc="lower center",
-            ncol=min(len(legend_entries), 4),
+            ncol=min(len(legend_entries), 3),
             framealpha=0.9,
-            bbox_to_anchor=(0.5, -0.02),
+            bbox_to_anchor=(0.5, -0.1),
         )
 
     fig.tight_layout(rect=[0, 0.06, 1, 1])

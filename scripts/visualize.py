@@ -110,15 +110,16 @@ def setup_matplotlib(font_size=10):
 
 # Method class → color.  Bregman = cool tones, Pruning = warm tones, Baselines = neutral.
 METHOD_CLASS_COLORS = {
-    "linbreg": "#1f77b4",  # blue
-    "adabreg": "#34be34",  # green
-    "adabregw": "#023703",  # dark red (distinct from blue)
-    "adabregl2": "#8c564b",  # brown
-    "pruning_struct": "#d62728",  # red
-    "pruning_unstruct": "#ff7f0e",  # orange
-    "vanilla": "#7f7f7f",  # gray
-    "wespeaker": "#9467bd",  # purple
-    "proxsgd": "#c7c7c7",  # light gray
+    "linbreg": "#1f77b4",  # deep blue
+    "adabreg": "#1a501b",  # vibrant cyan
+    "pruning_struct": "#ed8d61",  # strong red
+    "pruning_unstruct": "#ff7f0e",  # bright orange
+    "vanilla": "#8c564b",  # distinct brown (baseline)
+    "wespeaker": "#743C3C",  # dark charcoal
+    # forget about those other methods for now, just make them black so they stand out as "other"
+    "proxsgd": "#000000",  # light gray
+    "adabregw": "#000000",  # deep navy blue
+    "adabregl2": "#000000",  # muted purple
 }
 
 METHOD_DISPLAY_NAMES = {
@@ -128,11 +129,11 @@ METHOD_DISPLAY_NAMES = {
     "adabreg_fixed": "AdaBreg (Fixed $\lambda$)",
     "adabregw": "AdaBregW",
     "adabregl2": "AdaBregL2",
-    "pruning_struct": "Struct. Pruning",
-    "pruning_unstruct": "Unstruct. Pruning",
+    "pruning_struct": "Str. Prun.",
+    "pruning_unstruct": "Unst. Prun.",
     "proxsgd": "ProxSGD",
-    "vanilla": "Dense (AdamW)",
-    "wespeaker": "Dense (SGD)",
+    "vanilla": "AdamW",
+    "wespeaker": "SGD",
 }
 
 # Sparsity → marker shape  (consistent everywhere)
@@ -735,7 +736,7 @@ def plot_training_curves(
 
     n = len(metrics)
     if fig_height is None:
-        fig_height = 2.4 * n + 0.4
+        fig_height = 2.3 * n + 0.4
 
     fig, axes = plt.subplots(
         n, 1, figsize=(fig_width, fig_height), sharex=True, squeeze=False
