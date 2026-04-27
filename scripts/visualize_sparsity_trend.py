@@ -35,6 +35,7 @@ from visualize import (
     setup_matplotlib,
 )
 from visualize_test_metrics import (
+    filter_by_exp_patterns,
     parse_dataset_protocol,
     parse_train_dataset_protocol,
 )
@@ -55,7 +56,7 @@ CNCELEB_POS = (1, 1)
 BASELINE_METHODS = {"vanilla", "wespeaker"}
 
 # Y-axis cap: values above this are clipped and annotated at the top
-Y_CAP_MIN = 15  # percent — ensures outliers don't blow the scale
+Y_CAP_MIN = 10  # percent — ensures outliers don't blow the scale
 
 # Method ordering for consistent legend
 METHOD_ORDER = [
@@ -337,10 +338,21 @@ def plot_sparsity_trends(
         pct_str = r"\%" if use_latex else "%"
         title = protocol if dataset_name == "VoxCeleb" else dataset_name
         ax.set_title(title)
-        ax.set_xlabel(f"Target sparsity ({pct_str})")
+        ax.set_xlabel(f"Sparsity [{pct_str}]")
         if idx % ncols == 0:
             metric_label = metric_col.replace("_raw", "").replace("_norm", "")
-            ax.set_ylabel(f"{metric_label} ({pct_str})")
+            ax.set_ylabel(f"{metric_label} [{pct_str}]")
+
+        # X ticks at the actual sparsity levels present (e.g. 50, 75, 90, 95, 99)
+        sparsity_levels = sorted(
+            sparse_df["sparsity"].dropna().unique().tolist()
+        )
+        if sparsity_levels:
+            ax.set_xticks(sparsity_levels)
+            ax.set_xticklabels([f"{int(s)}" for s in sparsity_levels])
+
+        # Place gridlines behind data
+        ax.set_axisbelow(True)
 
     # Hide unused axes (e.g. 3 specs in a 2×2 grid)
     for idx in range(n, nrows * ncols):
@@ -384,7 +396,7 @@ def main():
         default=None,
         help="Output directory for figures (default: <input_dir>/figures)",
     )
-    parser.add_argument("--font_size", type=int, default=10)
+    parser.add_argument("--font_size", type=int, default=14)
     parser.add_argument(
         "--base_dirs",
         nargs="+",
@@ -393,6 +405,17 @@ def main():
             "Optional experiment root dir(s); used only to resolve "
             "_bregman_lambda from config_tree.log so that fixed-lambda runs "
             "are labeled e.g. 'AdaBreg (λ=1e-3)' instead of '[fixed]'."
+        ),
+    )
+    parser.add_argument(
+        "--experiments",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional fnmatch glob patterns to keep only matching `exp` rows "
+            "from the leaderboard CSV. Use the same patterns you pass to "
+            "scripts/visualize.py so the trend plots match the convergence "
+            "curves and bar charts."
         ),
     )
     parser.add_argument(
@@ -407,6 +430,21 @@ def main():
     # Load data
     csv_path = os.path.join(args.input_dir, "eer_leaderboard.csv")
     df = pd.read_csv(csv_path)
+    df = filter_by_exp_patterns(df, args.experiments)
+    if args.experiments:
+        if df.empty:
+            print(
+                f"No experiments in {csv_path} matched any of "
+                f"{args.experiments!r}; nothing to plot."
+            )
+            return
+        kept = sorted(df["exp"].astype(str).unique())
+        print(
+            f"Filtering by --experiments kept {len(kept)} experiments "
+            f"from {csv_path}:"
+        )
+        for name in kept:
+            print(f"  - {name}")
     df = df.drop_duplicates(subset=["dataset", "exp"])
 
     # Parse experiment names. info_from_csv_row also loads _bregman_lambda
@@ -426,34 +464,32 @@ def main():
     df["protocol"] = dp.apply(lambda x: x[1])
     df["train_dataset"] = df["exp"].apply(parse_train_dataset_protocol)
 
-    # Ensure metric columns are numeric
+    # Ensure metric columns are numeric. Norm-cohort variants are
+    # intentionally ignored: trends only plot the raw metric.
     base_metrics = ["EER", "minDCF"]
     for base in base_metrics:
-        for col in [base, f"{base}_raw", f"{base}_norm"]:
+        for col in [base, f"{base}_raw"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Build metric variants list
+    # One column per base metric: prefer "_raw" when present, otherwise the
+    # unqualified column. This avoids two iterations writing the same PDF.
     metric_variants = []
     for base in base_metrics:
-        for suffix, subdir in [
-            ("_raw", "raw"),
-            ("_norm", "norm"),
-            ("", "raw"),
-        ]:
-            col = f"{base}{suffix}"
-            if col in df.columns and df[col].notna().any():
-                metric_variants.append((col, base, subdir))
+        raw_col = f"{base}_raw"
+        if raw_col in df.columns and df[raw_col].notna().any():
+            metric_variants.append((raw_col, base))
+        elif base in df.columns and df[base].notna().any():
+            metric_variants.append((base, base))
 
-    # Generate one PDF per (train_dataset, metric_variant)
-    for col, base_name, subdir in metric_variants:
+    # Generate one PDF per (train_dataset, metric)
+    for col, base_name in metric_variants:
         for train_ds, train_group in df.groupby("train_dataset"):
             if train_group[col].notna().sum() == 0:
                 continue
             out_path = os.path.join(
                 output_dir,
                 train_ds,
-                subdir,
                 f"sparsity_trend_{base_name.lower()}.pdf",
             )
             plot_sparsity_trends(

@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import fnmatch
 import os
 import sys
 
@@ -66,7 +67,7 @@ METHOD_ORDER = [
 
 PROTOCOL_ORDER = ["Vox1-O", "Vox1-E", "Vox1-H"]
 
-SPARSITY_HATCHES = {50: ".", 70: "|", 90: "", 95: "/", 99: "x"}
+SPARSITY_HATCHES = {75: "+", 90: "-", 95: "/", 99: "x"}
 
 
 def _gradient_color(method_class, variant, value, sorted_values):
@@ -84,6 +85,20 @@ def _gradient_color(method_class, variant, value, sorted_values):
     rank = sorted_values.index(value)
     t = rank / (len(sorted_values) - 1)
     return _adjust_color(base, 0, 0, 0.30 - 0.55 * t)
+
+
+def filter_by_exp_patterns(df, patterns):
+    """Keep rows whose `exp` matches at least one fnmatch glob pattern."""
+    if not patterns:
+        return df
+    mask = np.zeros(len(df), dtype=bool)
+    exps = df["exp"].astype(str).values
+    for i, name in enumerate(exps):
+        for pat in patterns:
+            if fnmatch.fnmatch(name, pat):
+                mask[i] = True
+                break
+    return df[mask].copy()
 
 
 def parse_train_dataset_protocol(exp_name):
@@ -120,8 +135,8 @@ def plot_metric_for_dataset(
     protocols,
     metric,
     output_path,
-    font_size=10,
-    fig_height=3.5,
+    font_size=16,
+    fig_height=6,
 ):
     """Grouped bar chart for one dataset.
 
@@ -130,7 +145,7 @@ def plot_metric_for_dataset(
     setup_matplotlib(font_size)
 
     n_protocols = len(protocols)
-    fig_width = max(4.0, 3.0 * n_protocols)
+    fig_width = max(6.0, 4.0 * n_protocols)
     fig, axes = plt.subplots(
         1,
         n_protocols,
@@ -140,14 +155,16 @@ def plot_metric_for_dataset(
     )
     axes = axes[0]
 
-    # Discover sparsity levels present
-    sparsities = sorted(df["sparsity"].dropna().unique())
-    n_sparsity = len(sparsities)
-    bar_width = 0.7 / max(n_sparsity, 1)
+    # Sparsity buckets present anywhere in the figure — drives the legend.
+    # Dense (NaN) is listed first so its legend entry leads.
+    sparsity_levels = sorted(df["sparsity"].dropna().unique().tolist())
+    has_dense = df["sparsity"].isna().any()
+    sparsity_buckets = ([None] if has_dense else []) + sparsity_levels
 
     # Determine y-axis limit: use IQR to detect outliers, cap y to show
     # the non-outlier range clearly while still reporting outlier values.
-    all_vals = df[metric].dropna().values
+    # Work in percent throughout so axis ticks line up with bar annotations.
+    all_vals = df[metric].dropna().values * 100.0
     if len(all_vals) == 0:
         plt.close(fig)
         return
@@ -178,33 +195,52 @@ def plot_metric_for_dataset(
             else None
         )
 
+        # Light horizontal gridlines behind bars improve readability.
+        ax.set_axisbelow(True)
+        ax.yaxis.grid(True, alpha=0.3, linewidth=0.4)
+        ax.xaxis.grid(False)
+
         # Pick the swept hparam (alpha or f, whichever varies); expand each
-        # method into one bar per (variant, swept value) so different
-        # variants at the same alpha don't overwrite each other.
+        # method into one bar per (variant, swept value, sparsity) so the
+        # bar layout is invariant to which buckets each method covers.
         sweep_param = None
         for cand in ("alpha", "f"):
             if cand in sub.columns and sub[cand].dropna().nunique() >= 2:
                 sweep_param = cand
                 break
 
-        units = []  # (method, variant, sweep_value)
+        # One unit per (method, variant, sweep_value, sparsity) actually
+        # present in the data. Each unit becomes a single, evenly-spaced
+        # bar — this avoids the gaps that appeared in the prior
+        # grouped-by-sparsity layout when a method only had data in some
+        # of the global sparsity buckets (e.g. dense baselines paired
+        # with sparse Bregman runs).
+        units = []  # (method, variant, sweep_value, sparsity)
         for method in sorted(sub["method_class"].unique(), key=_method_sort_key):
             mrows = sub[sub["method_class"] == method]
-            variants = sorted(
+            for var_key in sorted(
                 mrows["variant"].fillna("__none__").unique().tolist()
-            )
-            for var_key in variants:
+            ):
                 vrows = mrows[mrows["variant"].fillna("__none__") == var_key]
-                if sweep_param and vrows[sweep_param].notna().any():
-                    for v in sorted(vrows[sweep_param].dropna().unique()):
-                        units.append((method, var_key, v))
-                else:
-                    units.append((method, var_key, None))
+                spars_levels = sorted(vrows["sparsity"].dropna().unique().tolist())
+                if vrows["sparsity"].isna().any():
+                    spars_levels = [None] + spars_levels
+                for sp in spars_levels:
+                    srows = (
+                        vrows[vrows["sparsity"].isna()]
+                        if sp is None
+                        else vrows[vrows["sparsity"] == sp]
+                    )
+                    if sweep_param and srows[sweep_param].notna().any():
+                        for v in sorted(srows[sweep_param].dropna().unique()):
+                            units.append((method, var_key, v, sp))
+                    else:
+                        units.append((method, var_key, None, sp))
 
-        n_methods = len(units)
+        n_units = len(units)
         # Per-(method, variant) sorted sweep values, used for gradient ranking
         sweep_value_lookup = {}
-        for method, var_key, _ in units:
+        for method, var_key, _, _ in units:
             k = (method, var_key)
             if k not in sweep_value_lookup:
                 vrows = sub[
@@ -217,132 +253,145 @@ def plot_metric_for_dataset(
                     else []
                 )
 
-        x = np.arange(n_methods)
-        offsets = (
-            np.linspace(
-                -(n_sparsity - 1) / 2 * bar_width,
-                (n_sparsity - 1) / 2 * bar_width,
-                n_sparsity,
+        # Resolve value, color, and hatch per unit
+        clip_height = non_outlier_max * 1.5
+        bar_width = 0.7
+        x = np.arange(n_units, dtype=float)
+        vals = np.zeros(n_units)
+        colors = ["#cccccc"] * n_units
+        hatches = [""] * n_units
+        for i, (method, var_key, sweep_val, sp) in enumerate(units):
+            sparsity_match = (
+                sub["sparsity"].isna() if sp is None else (sub["sparsity"] == sp)
             )
-            if n_sparsity > 1
-            else [0.0]
-        )
-
-        for sp_idx, sp in enumerate(sparsities):
-            vals = []
-            colors = []
-            for method, var_key, sweep_val in units:
-                cond = (
-                    (sub["method_class"] == method)
-                    & (sub["sparsity"] == sp)
-                    & (sub["variant"].fillna("__none__") == var_key)
-                )
-                if sweep_param and sweep_val is not None:
-                    cond &= sub[sweep_param] == sweep_val
-                row = sub[cond]
-                if len(row) > 0:
-                    vals.append(row[metric].values[0])
-                    actual_variant = var_key if var_key != "__none__" else None
-                    colors.append(
-                        _gradient_color(
-                            method,
-                            actual_variant,
-                            sweep_val,
-                            sweep_value_lookup.get((method, var_key), []),
-                        )
-                    )
-                else:
-                    vals.append(0)
-                    colors.append("#cccccc")
-
-            vals = np.array(vals)
-            clip_height = non_outlier_max * 1.12
-            display_vals = np.clip(vals, 0, clip_height)
-            hatch = SPARSITY_HATCHES.get(sp, "")
-            bars = ax.bar(
-                x + offsets[sp_idx],
-                display_vals,
-                bar_width,
-                color=colors,
-                edgecolor="white",
-                linewidth=0.5,
-                hatch=hatch,
-            )
-
-            use_latex = plt.rcParams.get("text.usetex", False)
-
-            def _bold(s):
-                return rf"\textbf{{{s}}}" if use_latex else s
-
-            for bar, v, c in zip(bars, vals, colors):
-                if v <= 0:
-                    continue
-                raw_text = f"{v * 100:.1f}"
-                is_outlier = v > outlier_thresh
-                is_best = best_display is not None and raw_text == best_display
-                if is_outlier:
-                    bx = bar.get_x()
-                    bw = bar.get_width()
-                    top = bar.get_height()
-                    band_h = y_cap * 0.015
-                    ax.fill_between(
-                        [bx, bx + bw],
-                        top - band_h,
-                        top + band_h,
-                        color="white",
-                        zorder=4,
-                    )
-                    cap_h = y_cap * 0.025
-                    cap_bot = top + band_h + y_cap * 0.005
-                    ax.bar(
-                        bar.get_x() + bw / 2,
-                        cap_h,
-                        bw,
-                        bottom=cap_bot,
-                        color=c,
-                        edgecolor="white",
-                        linewidth=0.5,
-                        hatch=hatch,
-                        zorder=3,
-                    )
-                    ax.text(
-                        bx + bw / 2,
-                        cap_bot + cap_h,
-                        raw_text,
-                        ha="center",
-                        va="bottom",
-                        fontsize=font_size - 1.5,
-                        rotation=60,
-                    )
-                else:
-                    text = _bold(raw_text) if is_best else raw_text
-                    ax.text(
-                        bar.get_x() + bar.get_width() / 2,
-                        bar.get_height(),
-                        text,
-                        ha="center",
-                        va="bottom",
-                        fontsize=font_size - (1.5 if is_best else 2.5),
-                        rotation=60,
-                        fontweight="bold" if is_best else "normal",
-                    )
-
-        # Build per-unit info dicts and let visualize.make_label do the
-        # heavy lifting — that keeps labels identical to convergence_curves
-        # and test_artifacts. Sparsity is stripped from the info because
-        # the bar chart shows sparsity via hatching, not via the tick.
-        unit_infos = []
-        for method, var_key, sweep_val in units:
             cond = (
                 (sub["method_class"] == method)
+                & sparsity_match
                 & (sub["variant"].fillna("__none__") == var_key)
             )
             if sweep_param and sweep_val is not None:
                 cond &= sub[sweep_param] == sweep_val
+            row = sub[cond]
+            if len(row) > 0:
+                vals[i] = float(row[metric].values[0]) * 100.0
+                actual_variant = var_key if var_key != "__none__" else None
+                colors[i] = _gradient_color(
+                    method,
+                    actual_variant,
+                    sweep_val,
+                    sweep_value_lookup.get((method, var_key), []),
+                )
+            hatches[i] = "" if sp is None else SPARSITY_HATCHES.get(sp, "")
+
+        display_vals = np.clip(vals, 0, clip_height)
+
+        # Render bars in hatch-grouped batches (matplotlib bar() takes one
+        # hatch per call, so units sharing a hatch are drawn together).
+        bars = [None] * n_units
+        hatch_groups = {}
+        for i, h in enumerate(hatches):
+            hatch_groups.setdefault(h, []).append(i)
+        for h, idxs in hatch_groups.items():
+            sub_bars = ax.bar(
+                x[idxs],
+                display_vals[idxs],
+                bar_width,
+                color=[colors[i] for i in idxs],
+                edgecolor="white",
+                linewidth=0.5,
+                hatch=h,
+            )
+            for j, bar in zip(idxs, sub_bars):
+                bars[j] = bar
+
+        use_latex = plt.rcParams.get("text.usetex", False)
+
+        def _bold(s):
+            return rf"\textbf{{{s}}}" if use_latex else s
+
+        for i, (bar, v, c, h) in enumerate(zip(bars, vals, colors, hatches)):
+            if v <= 0:
+                continue
+            raw_text = f"{v:.1f}"
+            is_outlier = v > outlier_thresh
+            is_best = best_display is not None and raw_text == best_display
+            if is_outlier:
+                bx = bar.get_x()
+                bw = bar.get_width()
+                top = bar.get_height()
+                band_h = y_cap * 0.015
+                ax.fill_between(
+                    [bx, bx + bw],
+                    top - band_h,
+                    top + band_h,
+                    color="white",
+                    zorder=4,
+                )
+                cap_h = y_cap * 0.025
+                cap_bot = top + band_h + y_cap * 0.005
+                ax.bar(
+                    bar.get_x() + bw / 2,
+                    cap_h,
+                    bw,
+                    bottom=cap_bot,
+                    color=c,
+                    edgecolor="white",
+                    linewidth=0.5,
+                    hatch=h,
+                    zorder=3,
+                )
+                ax.text(
+                    bx + bw / 2,
+                    cap_bot + cap_h,
+                    raw_text,
+                    ha="center",
+                    va="bottom",
+                    fontsize=font_size - 1.5,
+                    rotation=60,
+                )
+            else:
+                text = _bold(raw_text) if is_best else raw_text
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    text,
+                    ha="center",
+                    va="bottom",
+                    fontsize=font_size - 1.5,
+                    rotation=60,
+                    fontweight="bold" if is_best else "normal",
+                )
+
+        # --- Two-tier x labels ---
+        # Top tier (per-bar tick): sparsity only, e.g. "75%". Blank for
+        # dense baselines so they get just a single method label below.
+        # Bottom tier: method/variant name written ONCE, centered under
+        # each consecutive run of bars sharing it (e.g. AdaBreg's four
+        # sparsity bars get one "AdaBreg" label spanning them). Saves
+        # horizontal space and avoids repeating the method name.
+        use_latex_x = plt.rcParams.get("text.usetex", False)
+        pct_str_tick = r"\%" if use_latex_x else "%"
+        bar_tick_labels = [
+            f"{int(sp)}{pct_str_tick}" if sp is not None else ""
+            for _, _, _, sp in units
+        ]
+
+        # Build per-unit info with sparsity stripped — the per-bar tick
+        # already shows it, so make_label only contributes method/variant.
+        unit_infos = []
+        for method, var_key, sweep_val, sp in units:
+            cond = (
+                (sub["method_class"] == method)
+                & (sub["variant"].fillna("__none__") == var_key)
+            )
+            if sp is None:
+                cond &= sub["sparsity"].isna()
+            else:
+                cond &= sub["sparsity"] == sp
+            if sweep_param and sweep_val is not None:
+                cond &= sub[sweep_param] == sweep_val
             matching = sub[cond]
             if matching.empty:
-                # No data for this unit at any sparsity — fall back to a
-                # synthetic info just so the tick still gets a label.
                 info = {
                     "method_class": method,
                     "sparsity": None,
@@ -356,34 +405,75 @@ def plot_metric_for_dataset(
             unit_infos.append(info)
 
         assign_label_visibility([(None, info) for info in unit_infos])
-        tick_labels = [make_label(info) for info in unit_infos]
+        group_labels = [make_label(info) for info in unit_infos]
+
         ax.set_xticks(x)
-        ax.set_xticklabels(tick_labels, rotation=30, ha="right")
-        ax.set_title(protocol)
+        ax.set_xticklabels(bar_tick_labels, rotation=0, ha="center")
         ax.set_ylim(0, y_cap)
+        ax.tick_params(axis="x", which="both", length=0)
+
+        # Render the method/variant label once per consecutive run of
+        # units that share it. Position is in axis-fraction y (just below
+        # the per-bar ticks) and data-x (run midpoint).
+        runs = []
+        if group_labels:
+            run_start = 0
+            for i in range(1, len(group_labels)):
+                if group_labels[i] != group_labels[i - 1]:
+                    runs.append((group_labels[i - 1], run_start, i - 1))
+                    run_start = i
+            runs.append((group_labels[-1], run_start, len(group_labels) - 1))
+
+        any_sparsity_tick = any(bar_tick_labels)
+        # Push the group label further down when there are sparsity ticks
+        # above it, so the two tiers don't visually crowd each other.
+        group_label_y = -0.05 if any_sparsity_tick else -0.05
+        for label, run_start, run_end in runs:
+            ax.text(
+                (run_start + run_end) / 2.0,
+                group_label_y,
+                _bold(label),
+                transform=ax.get_xaxis_transform(),
+                ha="center",
+                va="top",
+                fontsize=font_size + 2,
+            )
 
         if ax_idx == 0:
-            ax.set_ylabel(metric)
+            pct = r"\%" if plt.rcParams.get("text.usetex") else "%"
+            metric_label = metric.replace("_raw", "").replace("_norm", "")
+            ax.set_ylabel(f"{metric_label} [{pct}]")
 
     # Legend: neutral gray patches distinguished by hatch pattern
     from matplotlib.patches import Patch
 
     pct = r"\%" if plt.rcParams.get("text.usetex") else "%"
     legend_handles = []
-    for sp in sparsities:
-        hatch = SPARSITY_HATCHES.get(sp, "")
-        legend_handles.append(
-            Patch(
-                facecolor="#aaaaaa",
-                edgecolor="white",
-                hatch=hatch,
-                label=f"{int(sp)}{pct} sparsity",
+    for sp in sparsity_buckets:
+        if sp is None:
+            legend_handles.append(
+                Patch(
+                    facecolor="#aaaaaa",
+                    edgecolor="white",
+                    label="Dense",
+                )
             )
-        )
+        else:
+            hatch = SPARSITY_HATCHES.get(sp, "")
+            legend_handles.append(
+                Patch(
+                    facecolor="#aaaaaa",
+                    edgecolor="white",
+                    hatch=hatch,
+                    label=f"{int(sp)}{pct}",
+                )
+            )
     if legend_handles:
-        fig.legend(handles=legend_handles, loc="upper right", framealpha=0.9)
+        fig.legend(handles=legend_handles, loc="upper center", framealpha=0.9, ncols=len(legend_handles))
 
-    fig.suptitle(f"{dataset_name} — {metric}", y=1.02)
+    metric_clean = metric.replace("_raw", "").replace("_norm", "")
+    # if 'vox' in dataset_name.lower():
+    #     fig.suptitle(f"{dataset_name} — {metric_clean}", y=1.02, fontweight="bold")
     fig.tight_layout()
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -424,6 +514,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--experiments",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional fnmatch glob patterns to keep only matching `exp` rows "
+            "from the leaderboard CSV. Use the same patterns you pass to "
+            "scripts/visualize.py so the bar charts match the convergence "
+            "curves."
+        ),
+    )
+    parser.add_argument(
         "--exclude_cnceleb_concatenated",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -440,6 +541,21 @@ def main():
     # Load data --> de-duplicate based on is_latest flag (keep only the latest)
     csv_path = os.path.join(args.input_dir, "eer_leaderboard.csv")
     df = pd.read_csv(csv_path)
+    df = filter_by_exp_patterns(df, args.experiments)
+    if args.experiments:
+        if df.empty:
+            print(
+                f"No experiments in {csv_path} matched any of "
+                f"{args.experiments!r}; nothing to plot."
+            )
+            return
+        kept = sorted(df["exp"].astype(str).unique())
+        print(
+            f"Filtering by --experiments kept {len(kept)} experiments "
+            f"from {csv_path}:"
+        )
+        for name in kept:
+            print(f"  - {name}")
     if args.exclude_cnceleb_concatenated:
         df = df[df["dataset"] != "cnceleb_concatenated"].copy()
     if "is_latest" in df.columns:
@@ -478,27 +594,26 @@ def main():
         df.loc[df["dataset"] == "cnceleb_multi", "protocol"] = "CNCeleb-E"
     df["train_dataset"] = df["exp"].apply(parse_train_dataset_protocol)
 
-    # Ensure all metric columns are numeric
+    # Ensure all metric columns are numeric. Norm-cohort variants are
+    # intentionally ignored: the bar charts only plot the raw metric.
     base_metrics = ["EER", "minDCF"]
     for base in base_metrics:
-        for col in [base, f"{base}_raw", f"{base}_norm"]:
+        for col in [base, f"{base}_raw"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Build list of (column_name, subdir_name) for each qualifier present
+    # One column per base metric: prefer "_raw" when present, otherwise the
+    # unqualified column. This avoids two iterations writing the same PDF.
     metric_variants = []
     for base in base_metrics:
-        for suffix, subdir in [
-            ("_raw", "raw"),
-            ("_norm", "norm"),
-            ("", "raw"),
-        ]:
-            col = f"{base}{suffix}"
-            if col in df.columns and df[col].notna().any():
-                metric_variants.append((col, base, subdir))
+        raw_col = f"{base}_raw"
+        if raw_col in df.columns and df[raw_col].notna().any():
+            metric_variants.append((raw_col, base))
+        elif base in df.columns and df[base].notna().any():
+            metric_variants.append((base, base))
 
-    # Generate one PDF per (train_dataset, dataset, metric_variant)
-    for col, base_name, subdir in metric_variants:
+    # Generate one PDF per (train_dataset, dataset, metric)
+    for col, base_name in metric_variants:
         for train_ds, train_group in df.groupby("train_dataset"):
             for dataset_name, group in train_group.groupby("dataset_name"):
                 # Skip if this group has no data for this column
@@ -509,7 +624,6 @@ def main():
                 out_path = os.path.join(
                     output_dir,
                     train_ds,
-                    subdir,
                     f"{safe_name}_{base_name.lower()}.pdf",
                 )
                 plot_metric_for_dataset(
