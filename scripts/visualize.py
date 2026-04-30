@@ -23,6 +23,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+SHOW_ALPHA = False
+SHOW_f = False
+
 # ---------------------------------------------------------------------------
 # 1. LaTeX-style rendering setup
 # ---------------------------------------------------------------------------
@@ -111,11 +114,11 @@ def setup_matplotlib(font_size=10):
 # Method class → color.  Bregman = cool tones, Pruning = warm tones, Baselines = neutral.
 METHOD_CLASS_COLORS = {
     "linbreg": "#1f77b4",  # deep blue
-    "adabreg": "#1a501b",  # vibrant cyan
+    "adabreg": "#2A662B",  # vibrant cyan
     "pruning_struct": "#ed8d61",  # strong red
     "pruning_unstruct": "#ff7f0e",  # bright orange
-    "vanilla": "#8c564b",  # distinct brown (baseline)
-    "wespeaker": "#743C3C",  # dark charcoal
+    "vanilla": "#61291e",  # distinct brown (baseline)
+    "wespeaker": "#9C4F4F",  # dark charcoal
     # forget about those other methods for now, just make them black so they stand out as "other"
     "proxsgd": "#000000",  # light gray
     "adabregw": "#000000",  # deep navy blue
@@ -178,8 +181,8 @@ METRIC_LABELS = {
     "valid_loss": "Valid. Loss",
     "train/MulticlassAccuracy": "Train Acc.",
     "valid/MulticlassAccuracy": "Valid. Acc.",
-    "sparsity": "Sparsity", #r"$s(\theta)$",
-    "bregman/sparsity": "Sparsity", #r"$s(\theta)$",
+    "sparsity": r"$s(\theta)$", # "Sparsity"
+    "bregman/sparsity": r"$s(\theta)$",
     "bregman/global_lambda": r"$\lambda$",
     "EER": "EER",
     "minDCF": "minDCF",
@@ -521,10 +524,10 @@ def assign_label_visibility(experiments):
     for info in infos:
         is_bregman = "breg" in info.get("method_class")
         info["_show_alpha"] = (
-            show_alpha and info.get("alpha") is not None and is_bregman
+            show_alpha and info.get("alpha") is not None and is_bregman and SHOW_ALPHA
         )
         info["_show_f"] = (
-            show_f and info.get("f") is not None and is_bregman
+            show_f and info.get("f") is not None and is_bregman and SHOW_f
         )
 
 
@@ -602,16 +605,108 @@ CSV_COLUMN_ALIASES = {
 
 
 def load_csv_metrics(exp_dir):
-    """Load step-level metrics from csv/version_0/metrics.csv → DataFrame."""
-    path = os.path.join(exp_dir, "csv", "version_0", "metrics.csv")
-    if not os.path.exists(path):
+    """Load step-level metrics from csv/version_*/metrics.csv → DataFrame.
+
+    Lightning's CSVLogger creates a fresh ``version_N`` directory on every run
+    or resume. All non-empty versions are merged into a single continuous
+    curve; where step ranges overlap, the highest version wins (it represents
+    the most recent training run, which superseded the earlier one). Prints a
+    clear warning if numeric metrics jump abruptly across a version boundary.
+    """
+    csv_root = os.path.join(exp_dir, "csv")
+    if not os.path.isdir(csv_root):
         return None
 
-    df = pd.read_csv(path)
+    version_files = []
+    for entry in sorted(os.listdir(csv_root)):
+        m = re.match(r"version_(\d+)$", entry)
+        if not m:
+            continue
+        path = os.path.join(csv_root, entry, "metrics.csv")
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            version_files.append((int(m.group(1)), path))
+    if not version_files:
+        return None
+    version_files.sort(key=lambda t: t[0])
+
+    dfs = []
+    for vidx, vpath in version_files:
+        try:
+            df_v = pd.read_csv(vpath)
+        except pd.errors.EmptyDataError:
+            continue
+        if df_v.empty:
+            continue
+        df_v["__version__"] = vidx
+        dfs.append(df_v)
+    if not dfs:
+        return None
+
+    df = pd.concat(dfs, ignore_index=True, sort=False)
     if "step" in df.columns:
-        df = df.groupby("step").last().reset_index()
+        df = (
+            df.sort_values(["step", "__version__"])
+              .groupby("step", as_index=False)
+              .last()
+        )
+        if len(dfs) > 1:
+            _warn_on_version_discontinuity(df, exp_dir)
+
+    df.drop(columns=["__version__"], errors="ignore", inplace=True)
     df.rename(columns=CSV_COLUMN_ALIASES, inplace=True)
     return df
+
+
+def _warn_on_version_discontinuity(df, exp_dir, window=5, rel_tol=0.5):
+    """Print a warning if metrics jump abruptly at a version boundary.
+
+    For each step where ``__version__`` increases, compare the mean of the
+    last ``window`` non-null samples before the boundary to the first
+    ``window`` after; flag any numeric column whose relative jump exceeds
+    ``rel_tol``.
+    """
+    if "step" not in df.columns or "__version__" not in df.columns:
+        return
+    sdf = df.sort_values("step").reset_index(drop=True)
+    boundary_idxs = [
+        i for i in range(1, len(sdf))
+        if sdf.loc[i, "__version__"] > sdf.loc[i - 1, "__version__"]
+    ]
+    if not boundary_idxs:
+        return
+
+    skip = {"step", "epoch", "__version__"}
+    metric_cols = [
+        c for c in sdf.columns
+        if c not in skip and pd.api.types.is_numeric_dtype(sdf[c])
+    ]
+
+    for b in boundary_idxs:
+        v_prev = int(sdf.loc[b - 1, "__version__"])
+        v_next = int(sdf.loc[b, "__version__"])
+        boundary_step = int(sdf.loc[b, "step"])
+        flagged = []
+        for c in metric_cols:
+            before = sdf.iloc[max(0, b - window):b][c].dropna()
+            after = sdf.iloc[b:b + window][c].dropna()
+            if len(before) < 2 or len(after) < 2:
+                continue
+            a, z = float(before.mean()), float(after.mean())
+            if not (np.isfinite(a) and np.isfinite(z)):
+                continue
+            denom = max(abs(a), abs(z), 1e-9)
+            if abs(z - a) / denom > rel_tol:
+                flagged.append((c, a, z))
+        if not flagged:
+            continue
+        print(
+            f"Warning: discontinuity across version_{v_prev}→version_{v_next} "
+            f"boundary (step ~{boundary_step}) in {exp_dir}"
+        )
+        for c, a, z in flagged[:8]:
+            print(f"    {c}: {a:.4g} → {z:.4g}")
+        if len(flagged) > 8:
+            print(f"    ... and {len(flagged) - 8} more")
 
 
 def discover_experiments(base_dirs, patterns):
@@ -798,9 +893,13 @@ def plot_training_curves(
         )
         if metric in log_scale:
             ax.set_yscale("log")
+        elif metric in ("sparsity", "bregman/sparsity"):
+            from matplotlib.ticker import FixedLocator
+            ax.set_ylim(0.7, 1.005)
+            ax.yaxis.set_major_locator(FixedLocator([0.75, 0.80, 0.85, 0.90, 0.95, 0.99]))
         else:
             _auto_ylim(ax, metric)
-    axes[-1].set_xlabel("Epoch" if source == "train_log" else "Step [K]")
+    axes[-1].set_xlabel("Epoch" if source == "train_log" else "iteration [K]")
     if source == "train_log":
         from matplotlib.ticker import MaxNLocator
         for ax in axes:

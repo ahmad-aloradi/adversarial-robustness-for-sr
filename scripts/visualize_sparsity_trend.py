@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Line plots of EER / minDCF vs target sparsity for each method.
+"""Line plots of EER / minDCF vs target for each method.
 
 Reads eer_leaderboard.csv (produced by aggregate_json_scores.py) and generates
 publication-quality line plots — one PDF per (train_dataset, metric) pair.
@@ -23,11 +23,11 @@ import pandas as pd
 # Import shared utilities from visualize.py (same directory)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from visualize import (
     METHOD_CLASS_COLORS,
     METHOD_DISPLAY_NAMES,
     VARIANT_COLOR_ADJUSTMENTS,
-    VARIANT_LINESTYLES,
     _adjust_color,
     assign_label_visibility,
     info_from_csv_row,
@@ -44,6 +44,10 @@ from visualize_test_metrics import (
 # Subplot layout: (row, col) → (dataset_name, protocol)
 # CNCeleb protocol is configurable; default = "Embeds Averaging" (cnceleb_multi)
 # ---------------------------------------------------------------------------
+VARIANT_LINESTYLES = {
+    None: "-",
+}
+
 
 VOXCELEB_SUBPLOTS = [
     (0, 0, "VoxCeleb", "Vox1-O"),
@@ -261,64 +265,40 @@ def plot_sparsity_trends(
             linestyle = VARIANT_LINESTYLES.get(actual_variant, "-")
             label = curve_labels[unit_idx]
 
-            # Split into in-range segments (connected) and capped points (isolated)
-            in_range = y_raw <= y_cap
+            # Capped points appear at y_cap; connections to them are dashed.
+            y_plot = np.minimum(y_raw, y_cap)
+            is_capped = y_raw > y_cap
 
-            # Plot connected segments for consecutive in-range points
-            line_handle = None
-            seg_x, seg_y = [], []
-            for xi, yi, ok in zip(x, y_raw, in_range):
-                if ok:
-                    seg_x.append(xi)
-                    seg_y.append(yi)
-                else:
-                    if seg_x:
-                        (h,) = ax.plot(
-                            seg_x,
-                            seg_y,
-                            color=color,
-                            marker=marker,
-                            markersize=6,
-                            linewidth=1.5,
-                            linestyle=linestyle,
-                            label=label,
-                        )
-                        if line_handle is None:
-                            line_handle = h
-                        label = None  # avoid duplicate legend entries
-                        seg_x, seg_y = [], []
-            if seg_x:
-                (h,) = ax.plot(
-                    seg_x,
-                    seg_y,
+            # Proxy artist for the legend (line + marker, no data plotted)
+            line_handle = Line2D(
+                [], [],
+                color=color,
+                marker=marker,
+                markersize=6,
+                linewidth=1.5,
+                linestyle=linestyle,
+                label=label,
+            )
+            label = None  # avoid duplicate legend entries
+
+            # Markers at their (possibly capped) y positions
+            ax.plot(x, y_plot, color=color, marker=marker, markersize=6, linewidth=0)
+
+            # Segments: solid for in-range pairs, dashed when either endpoint is capped
+            for i in range(len(x) - 1):
+                seg_ls = "--" if (is_capped[i] or is_capped[i + 1]) else linestyle
+                ax.plot(
+                    [x[i], x[i + 1]],
+                    [y_plot[i], y_plot[i + 1]],
                     color=color,
-                    marker=marker,
-                    markersize=6,
                     linewidth=1.5,
-                    linestyle=linestyle,
-                    label=label,
+                    linestyle=seg_ls,
                 )
-                if line_handle is None:
-                    line_handle = h
-                label = None
 
-            # Plot capped points as isolated markers at the cap line
+            # Annotate capped points with their true value
             pct = r"\%" if use_latex else "%"
-
-            for xi, yi, ok in zip(x, y_raw, in_range):
-                if not ok:
-                    (h,) = ax.plot(
-                        xi,
-                        y_cap,
-                        color=color,
-                        marker=marker,
-                        markersize=6,
-                        linewidth=0,
-                        label=label,
-                    )
-                    if line_handle is None:
-                        line_handle = h
-                    label = None
+            for xi, yi, capped in zip(x, y_raw, is_capped):
+                if capped:
                     # Stack annotations vertically so multiple capped methods
                     # at the same x don't overwrite each other.
                     x_key = round(float(xi), 4)
@@ -327,13 +307,13 @@ def plot_sparsity_trends(
                     ax.annotate(
                         f"{yi:.1f}{pct}",
                         xy=(xi, y_cap),
-                        fontsize=font_size - 2,
+                        fontsize=font_size - 6,
                         color=color,
                         alpha=0.9,
                         ha="center",
-                        va="bottom",
+                        va="top",
                         textcoords="offset points",
-                        xytext=(0, y_offset),
+                        xytext=(0, -2 * y_offset),
                     )
 
             if line_handle is not None:
@@ -345,9 +325,10 @@ def plot_sparsity_trends(
 
         # --- Axis formatting ---
         pct_str = r"\%" if use_latex else "%"
-        title = protocol if dataset_name == "VoxCeleb" else dataset_name
+        s_star = r"$s^{\ast}$" if use_latex else "s*"
+        title = protocol if dataset_name == "VoxCeleb" else "CNCeleb-E"
         ax.set_title(title)
-        ax.set_xlabel(f"Sparsity [{pct_str}]")
+        ax.set_xlabel(f"{s_star} [{pct_str}]")
         if idx % ncols == 0:
             metric_label = metric_col.replace("_raw", "").replace("_norm", "")
             ax.set_ylabel(f"{metric_label} [{pct_str}]")
@@ -373,9 +354,10 @@ def plot_sparsity_trends(
             legend_entries.values(),
             legend_entries.keys(),
             loc="lower center",
+            fontsize=font_size - 2,
             ncol=min(len(legend_entries), 3),
             framealpha=0.9,
-            bbox_to_anchor=(0.5, -0.1),
+            bbox_to_anchor=(0.5, -0.03) if n > 1 else (0.5, -0.1),
         )
 
     fig.tight_layout(rect=[0, 0.06, 1, 1])
@@ -405,7 +387,7 @@ def main():
         default=None,
         help="Output directory for figures (default: <input_dir>/figures)",
     )
-    parser.add_argument("--font_size", type=int, default=14)
+    parser.add_argument("--font_size", type=int, default=18)
     parser.add_argument(
         "--base_dirs",
         nargs="+",
@@ -476,16 +458,18 @@ def main():
     # Ensure metric columns are numeric. Norm-cohort variants are
     # intentionally ignored: trends only plot the raw metric.
     base_metrics = ["EER", "minDCF"]
+    SCORES =  "norm" # "raw" "norm"
     for base in base_metrics:
-        for col in [base, f"{base}_raw"]:
+        for col in [base, f"{base}_{SCORES}"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # One column per base metric: prefer "_raw" when present, otherwise the
+    # One column per base metric: prefer SCORES when present, otherwise the
     # unqualified column. This avoids two iterations writing the same PDF.
     metric_variants = []
+
     for base in base_metrics:
-        raw_col = f"{base}_raw"
+        raw_col = f"{base}_{SCORES}"
         if raw_col in df.columns and df[raw_col].notna().any():
             metric_variants.append((raw_col, base))
         elif base in df.columns and df[base].notna().any():

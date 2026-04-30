@@ -757,14 +757,16 @@ def plot_enrol_vs_test_heatmap(
     )
 
     ax.set_xlabel(
-        f"Test embeddings — grouped by speaker "
-        f"({len(common)} common, {len(test_only)} test-only)",
-        fontsize=8, labelpad=10,
+        f"Test embeddings",
+        # f"Test embeddings — grouped by speaker "
+        # f"({len(common)} common, {len(test_only)} test-only)",
+        fontsize=12, labelpad=10,
     )
     ax.set_ylabel(
-        f"Enrolment embeddings — grouped by speaker "
-        f"({len(common)} common, {len(enrol_only)} enrol-only)",
-        fontsize=8, labelpad=10,
+        f"Enrolment embeddings",
+        # f"Enrolment embeddings — grouped by speaker "
+        # f"({len(common)} common, {len(enrol_only)} enrol-only)",
+        fontsize=12, labelpad=10,
     )
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)

@@ -146,10 +146,15 @@ class BregmanPruner(Callback):
         self._log_configuration(optimizer)
         self._log_group_assignments(pl_module)
 
-        # One-time setup: skip sanity check and make val-monitoring callbacks
-        # tolerant of epochs where we gate validation off.
-        ValidationSuppressor.prepare(trainer)
-        trainer.limit_val_batches = 0  # start suppressed; gate() flips it
+        # Only activate validation suppression when a lambda scheduler is
+        # actively driving sparsity toward a target. Fixed-lambda experiments
+        # (lambda_scheduler=None) run validation unconditionally.
+        if self.lambda_scheduler is not None and self._target_schedule is not None:
+            ValidationSuppressor.prepare(trainer)
+            trainer.limit_val_batches = 0  # start suppressed; gate() flips it
+            log.info("Validation suppression ENABLED for Fixed Lambda case!")
+        else:
+            log.info("Validation suppression DISABLED (no target schedule provided).")
 
     def on_train_epoch_start(
         self, trainer: Trainer, pl_module: LightningModule

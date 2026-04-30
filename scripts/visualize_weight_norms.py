@@ -33,9 +33,9 @@ matplotlib.use("pdf")
 
 # Layer group display config: (csv_prefix, display_name, color)
 LAYER_GROUPS = [
-    ("conv_layers", "Conv Layers", "#1f77b4"),
+    ("conv_layers", "Conv Layers", "#050bb8"),
     ("linear_layers", "Linear Layers", "#ff7f0e"),
-    ("classifier", "Classifier", "#2ca02c"),
+    ("classifier", "Final Classifier", "#5d361a"),
 ]
 
 VISUALIZE_GAMMA = False
@@ -173,7 +173,7 @@ def plot_weight_norms_comparison(all_data, output_path):
     ax.set_ylabel(r"$L_2$ Norm")
     ax.set_title("Total Model $L_2$ Norm")
     ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax.legend(loc="best", fontsize=12)
+    ax.legend(loc="best", fontsize=16)
 
     # Panel B: Classifier sparsity
     if VISUALIZE_MEAN_SPARSITY:
@@ -238,7 +238,7 @@ def main():
         default="results/weight_norms_vis/",
         help="Output root directory.",
     )
-    parser.add_argument("--font_size", type=int, default=10)
+    parser.add_argument("--font_size", type=int, default=16)
     args = parser.parse_args()
 
     setup_matplotlib(args.font_size)
