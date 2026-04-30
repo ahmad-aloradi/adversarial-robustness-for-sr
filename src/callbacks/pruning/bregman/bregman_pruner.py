@@ -152,7 +152,7 @@ class BregmanPruner(Callback):
         if self.lambda_scheduler is not None and self._target_schedule is not None:
             ValidationSuppressor.prepare(trainer)
             trainer.limit_val_batches = 0  # start suppressed; gate() flips it
-            log.info("Validation suppression ENABLED for Fixed Lambda case!")
+            log.info("Validation suppression ENABLED for adaptive lambda scheduling.")
         else:
             log.info("Validation suppression DISABLED (no target schedule provided).")
 
@@ -178,10 +178,11 @@ class BregmanPruner(Callback):
         # Track the per-epoch ramp target rather than the final-epoch value so
         # early-epoch validation isn't wrongly suppressed while sparsity sits
         # far above the ramp's first target.
-        active_target = self._current_target(trainer.current_epoch)
-        if active_target is not None:
-            current_sparsity = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
-            self._suppressor.gate(trainer, current_sparsity, active_target)
+        if self.lambda_scheduler is not None:
+            active_target = self._current_target(trainer.current_epoch)
+            if active_target is not None:
+                current_sparsity = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
+                self._suppressor.gate(trainer, current_sparsity, active_target)
 
     def on_train_batch_end(
         self,
@@ -232,7 +233,7 @@ class BregmanPruner(Callback):
         """Re-gate right before validation runs, in case sparsity drifted
         between ``on_train_epoch_start`` and the end of the training epoch.
         """
-        if not self._initialized:
+        if not self._initialized or self.lambda_scheduler is None:
             return
         active_target = self._current_target(trainer.current_epoch)
         if active_target is None:
