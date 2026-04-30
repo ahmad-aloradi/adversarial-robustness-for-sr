@@ -76,17 +76,42 @@ ZERO_TOL = 1e-12  # treat |w| < tol as pruned for already-baked checkpoints
 PERFECT_LINE_KW = dict(color="#444444", linestyle="--", linewidth=0.8, alpha=0.6, zorder=0)
 ANNOTATE_LAYER_WISE_SPARSITY = False
 
+_TEST_CKPT_LOG_RE = re.compile(r"Test ckpt path:\s*(\S+\.ckpt)")
+
 # ---------------------------------------------------------------------------
 # Checkpoint introspection
 # ---------------------------------------------------------------------------
 
-def find_best_ckpt(exp_dir: str) -> Optional[str]:
-    """Return the most useful checkpoint under {exp_dir}/checkpoints.
+def find_best_ckpt(exp_dir: str, info: Optional[Dict] = None) -> Optional[str]:
+    """Return the checkpoint that was actually used for testing in this run.
 
-    Prefers ``last.ckpt`` (or ``last-vN.ckpt``) — that's where the trained
-    sparse weights live in this codebase. Falls back to the highest-epoch
-    file if no last.ckpt exists.
+    For Bregman methods, reads ``train.log`` and extracts the path on the
+    ``Test ckpt path:`` line — the exact monitor-best file that was evaluated.
+    Pruning methods always use ``last.ckpt`` because the final checkpoint
+    carries the fully-converged mask/hook state.
+
+    Falls back to ``last.ckpt`` (or ``last-vN.ckpt``), then the highest-epoch
+    file, when the log is absent, has no such line, or the file cannot be found.
     """
+    is_pruning = "pruning" in (info or {}).get("method_class", "")
+
+    if not is_pruning:
+        # Primary: exact test ckpt recorded in the training log.
+        # The logged path may point to the original training cluster (not this
+        # machine), so resolve by basename inside exp_dir/checkpoints/.
+        log_path = os.path.join(exp_dir, "train.log")
+        if os.path.exists(log_path):
+            with open(log_path) as f:
+                for line in f:
+                    if "Test ckpt path:" not in line:
+                        continue
+                    m = _TEST_CKPT_LOG_RE.search(line)
+                    if m:
+                        local = os.path.join(exp_dir, "checkpoints", os.path.basename(m.group(1)))
+                        if os.path.exists(local):
+                            return local
+        log.warning("Best ckpt not found in train.log for %s — falling back to last", exp_dir)
+    # Fallback: last.ckpt or highest-epoch file in checkpoints/
     ckpt_dir = os.path.join(exp_dir, "checkpoints")
     if not os.path.isdir(ckpt_dir):
         return None
@@ -304,6 +329,9 @@ def _short_layer_name(name: str, max_len: int = 36) -> str:
     s = re.sub(r"^fc$", "FC", s)
     s = re.sub(r"^classifier$", "Classifier", s)
 
+    # ResNet34 / WeSpeaker structural block
+    s = re.sub(r"seg_1$", "Linear", s)
+
     if len(s) > max_len:
         s = "…" + s[-(max_len - 1):]
     return s
@@ -359,6 +387,60 @@ def plot_layerwise_sparsity(layers: List[Dict], out_path: str, title: str) -> No
     cb = fig.colorbar(sm, ax=ax, pad=0.02, fraction=0.04)
     cb.set_label("Structural density (row×col surviving after pruning)", fontsize=8)
     cb.ax.tick_params(labelsize=7)
+
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def _fmt_params(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def plot_layerwise_sparsity_nparams(layers: List[Dict], out_path: str, title: str) -> None:
+    """Same horizontal-bar layout as plot_layerwise_sparsity but bars are
+    colored by the number of parameters in each layer (min → max)."""
+    setup_matplotlib(font_size=9)
+
+    n = len(layers)
+    if n == 0:
+        return
+    fig, ax = plt.subplots(figsize=(6.4, max(2.4, 0.18 * n + 1.0)))
+    names = [_short_layer_name(s["name"]) for s in layers]
+    sparsities = [s["stats"]["nominal_sparsity"] * 100 for s in layers]
+    n_params = [s["stats"]["n_params"] for s in layers]
+
+    min_p, max_p = min(n_params), max(n_params)
+    cmap = plt.get_cmap("plasma")
+    norm = plt.Normalize(min_p, max_p)
+    colors = [cmap(norm(p)) for p in n_params]
+
+    y = np.arange(n)
+    ax.barh(y, sparsities, color=colors, edgecolor="black", linewidth=0.4)
+    ax.set_yticks(y)
+    ax.set_yticklabels(names, fontsize=7)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 100)
+    s_metric = r"$s(\theta)$" if plt.rcParams.get("text.usetex") else "Sparsity (%)"
+    ax.set_xlabel(f"{s_metric}")
+    ax.set_title(title, fontsize=9)
+
+    for yi, sp, p in zip(y, sparsities, n_params):
+        ax.text(min(sp + 1, 98), yi, _fmt_params(p),
+                va="center", ha="left", fontsize=4, color="#454444")
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cb = fig.colorbar(sm, ax=ax, pad=0.02, fraction=0.04)
+    cb.set_label(
+        f"\# parameters ({_fmt_params(min_p)} → {_fmt_params(max_p)})", fontsize=8
+    )
+    cb.ax.tick_params(labelsize=7)
+    cb.formatter = plt.FuncFormatter(lambda x, _: _fmt_params(int(x)))
+    cb.update_ticks()
 
     fig.savefig(out_path)
     plt.close(fig)
@@ -829,7 +911,7 @@ def plot_rtf_vs_sparsity(summaries: List[Dict], out_path: str) -> None:
 
 def process_experiment(exp_dir: str, info: Dict, out_root: str,
                        rtf_args: Optional[Dict]) -> Optional[Dict]:
-    ckpt = find_best_ckpt(exp_dir)
+    ckpt = find_best_ckpt(exp_dir, info=info)
     if ckpt is None:
         log.warning("No checkpoint found in %s — skipping", exp_dir)
         return None
@@ -862,6 +944,7 @@ def process_experiment(exp_dir: str, info: Dict, out_root: str,
     title = f"{make_label(info)}"
     if enriched:
         plot_layerwise_sparsity(enriched, os.path.join(out_dir, "layerwise_sparsity.pdf"), title)
+        plot_layerwise_sparsity_nparams(enriched, os.path.join(out_dir, "layerwise_sparsity_nparams.pdf"), title)
         plot_per_filter_histograms(enriched, os.path.join(out_dir, "per_filter_sparsity_hist.pdf"), title)
         plot_mask_heatmaps(enriched, os.path.join(out_dir, "mask_heatmap.pdf"), title)
 
