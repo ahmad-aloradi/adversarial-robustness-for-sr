@@ -331,6 +331,8 @@ def _short_layer_name(name: str, max_len: int = 36) -> str:
 
     # ResNet34 / WeSpeaker structural block
     s = re.sub(r"seg_1$", "Linear", s)
+    # L4.0.shortcut.0 -> L4.residual
+    s = re.sub(r"L(\d+)\.\d+\.shortcut\.\d+", r"L\1.residual", s)
 
     if len(s) > max_len:
         s = "…" + s[-(max_len - 1):]

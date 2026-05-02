@@ -30,6 +30,7 @@ from visualize import (
     VARIANT_COLOR_ADJUSTMENTS,
     _adjust_color,
     assign_label_visibility,
+    export_standalone_legend,
     info_from_csv_row,
     make_label,
     setup_matplotlib,
@@ -38,6 +39,7 @@ from visualize_test_metrics import (
     filter_by_exp_patterns,
     parse_dataset_protocol,
     parse_train_dataset_protocol,
+    resolve_actual_sparsity,
 )
 
 # ---------------------------------------------------------------------------
@@ -91,10 +93,21 @@ def plot_sparsity_trends(
     output_path,
     font_size=10,
     cnceleb_protocol="Embeds Averaging",
+    sparsity_label="target",
+    legend_mode="inline",
+    layout="1x4",
 ):
     """Line plot: metric vs sparsity, one subplot per protocol.
 
-    Automatically determines layout from available data — up to 2×2 grid.
+    layout:
+        "1x4" — single row of up to 4 subplots (default).
+        "2x2" — 2×2 grid.
+
+    legend_mode:
+        "inline" — embed the shared legend at the bottom of the figure (default).
+        "split"  — omit the inline legend and write a separate
+                   ``<output_path stem>_legend.pdf`` containing only the
+                   legend, so two figures can share one legend in LaTeX.
     """
     setup_matplotlib(font_size)
 
@@ -119,13 +132,13 @@ def plot_sparsity_trends(
         return
 
     # Choose grid layout
-    if n <= 2:
+    if layout == "2x2":
+        nrows, ncols = (1, n) if n <= 2 else (2, 2)
+    else:  # "1x4" (default)
         nrows, ncols = 1, n
-    else:
-        nrows, ncols = 2, 2
 
     fig, axes = plt.subplots(
-        nrows, ncols, figsize=(4 * ncols, 3.5 * nrows), squeeze=False
+        nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), squeeze=False
     )
 
     # Collect all legend handles across subplots (deduplicated)
@@ -247,8 +260,30 @@ def plot_sparsity_trends(
             if mdf.empty:
                 continue
 
-            x = mdf["sparsity"].values
+            # Fixed-lambda Bregman runs land off-target (e.g. 89.5 instead of
+            # 90), so plot them at their realized sparsity. Same recipe as
+            # visualize_test_metrics: actual_sparsity is resolved per-row in
+            # main() via resolve_actual_sparsity. Falls back to target if
+            # unresolved (e.g. --base_dirs not given).
+            x_target = mdf["sparsity"].values.astype(float)
+            is_fixed = var_key == "fixed"
+            if "actual_sparsity" in mdf.columns and (
+                is_fixed or sparsity_label == "actual"
+            ):
+                actual = pd.to_numeric(
+                    mdf["actual_sparsity"], errors="coerce"
+                ).values
+                x = np.where(np.isnan(actual), x_target, actual * 100)
+            else:
+                x = x_target
             y_raw = mdf[metric_col].values * 100
+
+            # Re-sort by x; actual sparsity can perturb the target ordering
+            # enough to produce a non-monotonic line.
+            if len(x) > 1 and not np.all(np.diff(x) >= 0):
+                order = np.argsort(x)
+                x = x[order]
+                y_raw = y_raw[order]
 
             base_color = METHOD_CLASS_COLORS.get(method, "#333333")
             actual_variant = var_key if var_key != "__none__" else None
@@ -348,17 +383,30 @@ def plot_sparsity_trends(
     for idx in range(n, nrows * ncols):
         axes[idx // ncols, idx % ncols].set_visible(False)
 
-    # --- Shared legend at bottom ---
+    # --- Shared legend ---
     if legend_entries:
-        fig.legend(
-            legend_entries.values(),
-            legend_entries.keys(),
-            loc="lower center",
-            fontsize=font_size - 2,
-            ncol=min(len(legend_entries), 3),
-            framealpha=0.9,
-            bbox_to_anchor=(0.5, -0.03) if n > 1 else (0.5, -0.1),
-        )
+        handles = list(legend_entries.values())
+        labels = list(legend_entries.keys())
+        ncol = min(len(legend_entries), 10)
+        if legend_mode == "inline":
+            fig.legend(
+                handles,
+                labels,
+                loc="upper center",
+                fontsize=font_size - 2,
+                ncol=ncol,
+                framealpha=0.9,
+                bbox_to_anchor=(0.5, -0.03) if n > 1 else (0.5, -0.1),
+            )
+        elif legend_mode == "split":
+            legend_path = os.path.splitext(output_path)[0] + "_legend.pdf"
+            export_standalone_legend(
+                handles, labels, legend_path, ncol, font_size=font_size
+            )
+        else:
+            raise ValueError(
+                f"legend_mode must be 'inline' or 'split', got {legend_mode!r}"
+            )
 
     fig.tight_layout(rect=[0, 0.06, 1, 1])
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -414,6 +462,49 @@ def main():
         default="Embeds Averaging",
         help="CNCeleb protocol for the 4th subplot (default: Embeds Averaging)",
     )
+    parser.add_argument(
+        "--sparsity_label",
+        choices=["target", "actual"],
+        default="target",
+        help=(
+            "X position of plotted points: 'target' uses the integer from "
+            "the experiment name (e.g. 90); 'actual' uses the realized "
+            "sparsity. Fixed-lambda Bregman runs always use the realized "
+            "sparsity regardless of this toggle."
+        ),
+    )
+    parser.add_argument(
+        "--fixed_lambda_test_ckpt",
+        choices=["best", "last"],
+        default="best",
+        help=(
+            "For Bregman fixed-lambda runs only: how the test was performed. "
+            "'best' parses the sr fraction from the test ckpt path in "
+            "train.log (same as non-fixed runs). 'last' uses the last "
+            "bregman/sparsity from csv/version_*/metrics.csv, since last.ckpt "
+            "has no sr in its filename."
+        ),
+    )
+    parser.add_argument(
+        "--legend-mode",
+        dest="legend_mode",
+        choices=["inline", "split"],
+        default="inline",
+        help=(
+            "inline: embed legend in figure (default). "
+            "split: omit legend from figure and save it as a separate "
+            "<metric>_legend.pdf for shared use in LaTeX side-by-side layouts."
+        ),
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["1x4", "2x2"],
+        default="1x4",
+        help=(
+            "Subplot grid layout. '1x4' (default) places all protocols in a "
+            "single row; '2x2' uses a 2×2 grid."
+        ),
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir or os.path.join(args.input_dir, "figures")
@@ -448,6 +539,17 @@ def main():
     df["alpha"] = parsed.apply(lambda x: x.get("alpha"))
     df["f"] = parsed.apply(lambda x: x.get("f"))
     df["variant"] = parsed.apply(lambda x: x.get("variant"))
+
+    # Realized sparsity per run (best ckpt's sr, or last logged for
+    # fixed-lambda + last.ckpt). Falls back to None if base_dirs not given
+    # or the source files aren't present; the curve then drops back to the
+    # target sparsity on the x-axis for that point.
+    df["actual_sparsity"] = df.apply(
+        lambda r: resolve_actual_sparsity(
+            r["exp"], args.base_dirs, r["info"], args.fixed_lambda_test_ckpt
+        ),
+        axis=1,
+    )
 
     # Parse dataset column
     dp = df["dataset"].apply(parse_dataset_protocol)
@@ -491,6 +593,9 @@ def main():
                 out_path,
                 font_size=args.font_size,
                 cnceleb_protocol=args.cnceleb_protocol,
+                sparsity_label=args.sparsity_label,
+                legend_mode=args.legend_mode,
+                layout=args.layout,
             )
 
 

@@ -107,6 +107,30 @@ def setup_matplotlib(font_size=10):
     )
 
 
+def export_standalone_legend(
+    handles, labels, output_path, ncol, font_size=10, frameon=True
+):
+    """Save a tightly-cropped, legend-only PDF using the same handles/labels
+    as the inline legend so side-by-side LaTeX figures can share one legend."""
+    setup_matplotlib(font_size)
+    fig = plt.figure(figsize=(0.01, 0.01))
+    leg = fig.legend(
+        handles,
+        labels,
+        loc="center",
+        ncol=ncol,
+        frameon=frameon,
+        columnspacing=0.8,
+        handletextpad=0.3,
+    )
+    fig.canvas.draw()
+    bbox = leg.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    fig.savefig(output_path, format="pdf", bbox_inches=bbox.expanded(1.05, 1.10))
+    plt.close(fig)
+    print(f"Saved: {output_path}")
+
+
 # ---------------------------------------------------------------------------
 # 2. Visual encoding — consistent across all plots
 # ---------------------------------------------------------------------------
@@ -181,7 +205,7 @@ METRIC_LABELS = {
     "valid_loss": "Valid. Loss",
     "train/MulticlassAccuracy": "Train Acc.",
     "valid/MulticlassAccuracy": "Valid. Acc.",
-    "sparsity": r"$s(\theta)$", # "Sparsity"
+    "sparsity": r"$s(\theta)$",
     "bregman/sparsity": r"$s(\theta)$",
     "bregman/global_lambda": r"$\lambda$",
     "EER": "EER",
@@ -823,8 +847,16 @@ def plot_training_curves(
     fig_height=None,
     source="train_log",
     log_scale=None,
+    legend_mode="inline",
 ):
-    """Plot training curves (one subplot per metric, shared x-axis)."""
+    """Plot training curves (one subplot per metric, shared x-axis).
+
+    legend_mode:
+        "inline" — embed the legend at the top of the figure (default).
+        "split"  — omit the inline legend and write a separate
+                   ``<output_path stem>_legend.pdf`` containing only the
+                   legend, so two figures can share one legend in LaTeX.
+    """
     if log_scale is None:
         log_scale = set()
     setup_matplotlib(font_size)
@@ -915,17 +947,28 @@ def plot_training_curves(
             labels.append(l)
 
     if handles:
-        ncol = min(4, len(labels))
-        fig.legend(
-            handles,
-            labels,
-            loc="lower center",
-            ncol=ncol,
-            bbox_to_anchor=(0.5, 0.9),
-            frameon=True,
-            columnspacing=0.8,
-            handletextpad=0.3,
-        )
+        # ncol = min(4, len(labels))
+        ncol = min(10 , len(labels))
+        if legend_mode == "inline":
+            fig.legend(
+                handles,
+                labels,
+                loc="lower center",
+                ncol=ncol,
+                bbox_to_anchor=(0.5, 0.9),
+                frameon=True,
+                columnspacing=0.8,
+                handletextpad=0.3,
+            )
+        elif legend_mode == "split":
+            legend_path = os.path.splitext(output_path)[0] + "_legend.pdf"
+            export_standalone_legend(
+                handles, labels, legend_path, ncol, font_size=font_size
+            )
+        else:
+            raise ValueError(
+                f"legend_mode must be 'inline' or 'split', got {legend_mode!r}"
+            )
 
     fig.align_ylabels(axes)
     fig.subplots_adjust(hspace=0.08)
@@ -1119,6 +1162,17 @@ def main():
         default="csv",
         help="Data source: epoch-level or step-level.",
     )
+    parser.add_argument(
+        "--legend-mode",
+        dest="legend_mode",
+        choices=["inline", "split"],
+        default="inline",
+        help=(
+            "inline: embed legend in figure (default). "
+            "split: omit legend from figure and save it as a separate "
+            "<metric>_legend.pdf for shared use in LaTeX side-by-side layouts."
+        ),
+    )
     args = parser.parse_args()
 
     # Resolve output directory (backward compat: if ends with .pdf, use dirname)
@@ -1161,6 +1215,7 @@ def main():
                 fig_height=None,
                 source=args.source,
                 log_scale=METRIC_LOG_SCALE,
+                legend_mode=args.legend_mode,
             )
 
         # 2. Per-stage groupings (only if stage has >1 metric)
@@ -1178,6 +1233,7 @@ def main():
                     fig_height=None,
                     source=args.source,
                     log_scale=METRIC_LOG_SCALE,
+                    legend_mode=args.legend_mode,
                 )
 
     # --- Bar plots ---
