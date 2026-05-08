@@ -395,7 +395,7 @@ def plot_metric_for_dataset(
         return
     q1, q3 = np.percentile(all_vals, [25, 75])
     iqr = q3 - q1
-    non_outliers = all_vals[all_vals <= q3 + 3.0 * iqr]
+    non_outliers = all_vals[all_vals <= q3 + 12.0 * iqr]
     non_outlier_max = (
         non_outliers.max() if len(non_outliers) > 0 else all_vals.max()
     )
@@ -591,7 +591,7 @@ def plot_metric_for_dataset(
                 bar_tick_labels.append("")
                 continue
             is_fixed = var_key == "fixed"
-            force_actual = is_fixed and fixed_lambda_test_ckpt == "last"
+            force_actual = is_fixed
             want_actual = force_actual or sparsity_label == "actual"
             if want_actual and asp is not None:
                 bar_tick_labels.append(f"{asp * 100:.1f}{pct_str_tick}")

@@ -174,6 +174,12 @@ SPARSITY_MARKERS = {
     99: "x",  # x-mark
 }
 
+# Variant → marker shape override.  Fixed-lambda runs land at an uncontrolled
+# sparsity, so their marker should not encode a sparsity level.
+VARIANT_MARKERS = {
+    "fixed": "*",  # star — visually distinct from every sparsity marker
+}
+
 # Sparsity → line dash pattern
 SPARSITY_LINESTYLES = {
     None: "-",
@@ -189,14 +195,14 @@ SPARSITY_LINESTYLES = {
 # from different variants visually distinct).
 VARIANT_LINESTYLES = {
     None: "-",
-    "regl1_conv": (0, (5, 2)),
+    "regl1_conv": "-", #(0, (5, 2)),
     "poor_init": (0, (3, 1, 1, 1)),
     "rescale_prox": (0, (1, 1)),
     "rescale_prox_v2": (0, (3, 1, 1, 1, 1, 1)),
     "subgrad_corr_v2": (0, (5, 1, 1, 1)),
     "subgrad_corr_v3": (0, (5, 2, 1, 2)),
     "subgrad_corr_v4": (0, (1, 2, 5, 2)),
-    "fixed": (0, (4, 2, 1, 2, 1, 2)),
+    "fixed": "-", #(0, (4, 2, 1, 2, 1, 2)),
 }
 
 # Axis labels for known metric names
@@ -205,8 +211,8 @@ METRIC_LABELS = {
     "valid_loss": "Valid. Loss",
     "train/MulticlassAccuracy": "Train Acc.",
     "valid/MulticlassAccuracy": "Valid. Acc.",
-    "sparsity": r"$s(\theta)$",
-    "bregman/sparsity": r"$s(\theta)$",
+    "sparsity": r"$\mathsf{s}(\theta)$",
+    "bregman/sparsity": r"$\mathsf{s}(\theta)$",
     "bregman/global_lambda": r"$\lambda$",
     "EER": "EER",
     "minDCF": "minDCF",
@@ -329,6 +335,7 @@ def parse_experiment_name(dirname):
         "ramp_epochs": None,
         "schedule": None,
         "variant": None,
+        "reg_style": None,
         "alpha": 1.0,
         "f": 50,
     }
@@ -345,6 +352,14 @@ def parse_experiment_name(dirname):
     if m_alpha:
         info["alpha"] = float(m_alpha.group(1))
         work = work[: m_alpha.start()]
+    # Regularization-style suffix (e.g. "-regl1_conv"). Strip before the
+    # sparsity regex so it doesn't get captured as `variant` — otherwise
+    # fixed-lambda runs on ResNet34 (which carry this suffix) lose their
+    # variant="fixed" label/style routing.
+    m_reg = re.search(r"-(regl[12]\w*)$", work)
+    if m_reg:
+        info["reg_style"] = m_reg.group(1)
+        work = work[: m_reg.start()]
 
     # Sparsity: "-sr90" or "-sparsity90", possibly followed by a variant suffix
     m = re.search(r"-(sr|sparsity)(\d+)(?:-(.+))?$", work)
@@ -416,7 +431,7 @@ VARIANT_COLOR_ADJUSTMENTS = {
     "subgrad_corr_v2": (0.18, -0.10, -0.05),   # shift hue further, slightly muted,
     "subgrad_corr_v3": (0.36, -0.20, -0.1),   # shift hue further, slightly muted,
     "subgrad_corr_v4": (-0.18, 0.10, 0.05),
-    "fixed": (0.0, -0.38, 0.12),              # slightly brighter/desaturated — same hue, visually distinct
+    "fixed": (0.12, -0.0, 0.18),              # shift hue toward purple, slightly darker
 }
 
 
@@ -434,10 +449,17 @@ def _adjust_color(hex_color, hue_shift, sat_shift, light_shift):
     return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
 
-def make_label(info):
-    """Create a concise, consistent legend label."""
+def make_label(info, *, fixed_as_token: bool = True):
+    """Create a concise, consistent legend label.
+
+    Fixed-λ runs render as ``Method (fixed)`` by default to keep cross-model
+    legends compact for paper figures. Pass ``fixed_as_token=False`` to render
+    ``Method (λ=value)`` with the numeric λ instead.
+    """
     name = METHOD_DISPLAY_NAMES.get(info["method_class"], info["method_class"])
     if info.get("variant") == "fixed" and info.get("fixed_lambda") is not None:
+        if fixed_as_token:
+            return f"{name} (fixed)"
         lam = info["fixed_lambda"]
         lam_sym = r"$\lambda$" if plt.rcParams.get("text.usetex") else "λ"
         return f"{name} ({lam_sym}={lam:g})"
@@ -478,8 +500,9 @@ def get_style(info):
     """
     color = info.get("_gradient_color")
     if color is not None:
-        marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
-        ls = VARIANT_LINESTYLES.get(info.get("variant"), "-")
+        variant = info.get("variant")
+        marker = VARIANT_MARKERS.get(variant, SPARSITY_MARKERS.get(info["sparsity"], "x"))
+        ls = VARIANT_LINESTYLES.get(variant, "-")
     else:
         color = METHOD_CLASS_COLORS.get(info["method_class"], "#333333")
         variant = info.get("variant")
@@ -487,8 +510,15 @@ def get_style(info):
             adj = VARIANT_COLOR_ADJUSTMENTS.get(variant)
             if adj:
                 color = _adjust_color(color, *adj)
-        marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
-        ls = SPARSITY_LINESTYLES.get(info["sparsity"], "-")
+        # Fixed-lambda runs land at an uncontrolled sparsity, so encoding
+        # marker/linestyle by sparsity target is misleading. Route through
+        # VARIANT_MARKERS / VARIANT_LINESTYLES["fixed"] instead.
+        if variant == "fixed":
+            marker = VARIANT_MARKERS.get("fixed", SPARSITY_MARKERS.get(info["sparsity"], "x"))
+            ls = VARIANT_LINESTYLES.get("fixed", SPARSITY_LINESTYLES.get(info["sparsity"], "-"))
+        else:
+            marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
+            ls = SPARSITY_LINESTYLES.get(info["sparsity"], "-")
     return color, marker, ls
 
 
@@ -504,6 +534,13 @@ def assign_gradient_colors(experiments):
 
     groups = defaultdict(list)
     for _, info in experiments:
+        # Fixed-lambda runs use default alpha/f (1.0/50) and aren't part of any
+        # sweep; pooling them with non-fixed runs at the same sparsity creates a
+        # spurious 2-point "sweep" that maps the fixed run to the darkest end of
+        # the gradient (visually black) and overrides VARIANT_COLOR_ADJUSTMENTS
+        # ["fixed"] in get_style. Skip them so they keep their fixed-variant color.
+        if info.get("variant") == "fixed":
+            continue
         groups[(info["method_class"], info.get("sparsity"))].append(info)
 
     for (method, _), members in groups.items():
@@ -733,6 +770,49 @@ def _warn_on_version_discontinuity(df, exp_dir, window=5, rel_tol=0.5):
             print(f"    ... and {len(flagged) - 8} more")
 
 
+# Logical legend grouping (not alphabetical). Used wherever experiments need
+# to be sorted in a way that matches how readers expect the legend to read:
+#   Group 0: dense baselines (AdamW / SGD)
+#   Group 1: pruning (structured, then unstructured)
+#   Group 2: fixed-lambda Bregman runs
+#   Group 3: adaptive Bregman runs, by sparsity sweep
+EXPERIMENT_ORDER = [
+    "vanilla",
+    "wespeaker",
+    "pruning_struct",
+    "pruning_unstruct",
+    "linbreg",
+    "adabreg",
+    "adabregw",
+    "adabregl2",
+]
+
+
+def experiment_sort_key(info):
+    """Sort key turning an experiment ``info`` dict into a tuple ordered by
+    the logical legend groups above. Reused by downstream scripts so they
+    can re-sort their own legend handles to match this script's ordering.
+    """
+    mc = info.get("method_class", "")
+    variant = info.get("variant")
+    if mc in ("vanilla", "wespeaker"):
+        group = 0
+    elif mc in ("pruning_struct", "pruning_unstruct"):
+        group = 1
+    elif variant == "fixed":
+        group = 2
+    else:
+        group = 3
+    return (
+        group,
+        EXPERIMENT_ORDER.index(mc) if mc in EXPERIMENT_ORDER else 99,
+        info.get("sparsity") or -1,
+        info.get("variant") or "",
+        info["alpha"] if info.get("alpha") is not None else -1.0,
+        info["f"] if info.get("f") is not None else -1,
+    )
+
+
 def discover_experiments(base_dirs, patterns):
     """Find experiment directories matching glob patterns. Returns sorted list.
 
@@ -765,30 +845,7 @@ def discover_experiments(base_dirs, patterns):
                         info["fixed_lambda"] = load_fixed_lambda(full)
                     matched.append((full, info))
 
-    # Stable sort: method class order, then sparsity
-    ORDER = [
-        "vanilla",
-        "wespeaker",
-        "linbreg",
-        "adabreg",
-        "adabregw",
-        "adabregl2",
-        "pruning_struct",
-        "pruning_unstruct",
-    ]
-
-    def key(item):
-        mc = item[1]["method_class"]
-        info = item[1]
-        return (
-            ORDER.index(mc) if mc in ORDER else 99,
-            info["sparsity"] or -1,
-            info.get("variant") or "",
-            info["alpha"] if info.get("alpha") is not None else -1.0,
-            info["f"] if info.get("f") is not None else -1,
-        )
-
-    matched.sort(key=key)
+    matched.sort(key=lambda item: experiment_sort_key(item[1]))
     assign_gradient_colors(matched)
     assign_label_visibility(matched)
     return matched
@@ -894,6 +951,17 @@ def plot_training_curves(
                     continue
             else:
                 col = metric
+            # Fixed-lambda Bregman runs never log bregman/global_lambda because
+            # the scheduler doesn't run. Synthesize a constant column from the
+            # fixed_lambda parsed out of config_tree.log so the horizontal line
+            # appears on the plot just like any adaptive run's curve.
+            if (
+                col == "bregman/global_lambda"
+                and col not in df.columns
+                and info.get("fixed_lambda") is not None
+            ):
+                df = df.copy()
+                df[col] = info["fixed_lambda"]
             if col not in df.columns:
                 continue
             x = df[x_col].copy()
@@ -947,8 +1015,8 @@ def plot_training_curves(
             labels.append(l)
 
     if handles:
-        # ncol = min(4, len(labels))
-        ncol = min(10 , len(labels))
+        # ncol = min(5, len(labels))
+        ncol = min(6 , len(labels))
         if legend_mode == "inline":
             fig.legend(
                 handles,

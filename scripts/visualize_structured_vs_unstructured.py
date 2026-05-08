@@ -42,7 +42,6 @@ Usage:
 """
 
 import argparse
-import glob
 import json
 import logging
 import os
@@ -50,31 +49,38 @@ import re
 import sys
 import time
 from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 
-# Reuse styling and discovery from the sibling visualize.py
+# Reuse styling and discovery from the sibling visualize.py + shared constants
+# from visualize_common.py.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from visualize import (  # noqa: E402
-    METHOD_CLASS_COLORS,
-    METHOD_DISPLAY_NAMES,
-    SPARSITY_MARKERS,
     discover_experiments,
+    experiment_sort_key,
+    export_standalone_legend,
     get_style,
     make_label,
     setup_matplotlib,
+)
+from visualize_common import (  # noqa: E402
+    PARAM_BAR_ALPHA,
+    PARAM_BAR_COLOR,
+    PERFECT_LINE_KW,
+    RATE_LINESTYLES,
+    layerwise_figsize,
+    panel_models,
+    ylim_for_rate,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("struct_vs_unstruct")
 
 ZERO_TOL = 1e-12  # treat |w| < tol as pruned for already-baked checkpoints
-PERFECT_LINE_KW = dict(color="#444444", linestyle="--", linewidth=0.8, alpha=0.6, zorder=0)
-ANNOTATE_LAYER_WISE_SPARSITY = False
 
 _TEST_CKPT_LOG_RE = re.compile(r"Test ckpt path:\s*(\S+\.ckpt)")
 
@@ -339,7 +345,10 @@ def _short_layer_name(name: str, max_len: int = 36) -> str:
     return s
 
 
-def plot_layerwise_sparsity(layers: List[Dict], out_path: str, title: str) -> None:
+def plot_layerwise_sparsity(
+    layers: List[Dict], out_path: str, title: str, *,
+    annotate: bool = False,
+) -> None:
     setup_matplotlib(font_size=9)
 
     n = len(layers)
@@ -366,11 +375,11 @@ def plot_layerwise_sparsity(layers: List[Dict], out_path: str, title: str) -> No
     ax.set_yticklabels(names, fontsize=7)
     ax.invert_yaxis()
     ax.set_xlim(0, 100)
-    s_metric = r"$s(\theta)$" if plt.rcParams.get("text.usetex") else "Sparsity (%)"
+    s_metric = r"$\mathsf{{s}}^*={rate}\%$" if plt.rcParams.get("text.usetex") else "Sparsity (%)"
     ax.set_xlabel(f"{s_metric}")
     ax.set_title(title, fontsize=9)
 
-    if ANNOTATE_LAYER_WISE_SPARSITY:
+    if annotate:
         # Annotation = fraction of *entirely zero* rows / columns. This is
         # different from nominal sparsity (which counts individual zero
         # elements): a layer can be 90% sparse with 0% zero rows (unstructured)
@@ -426,7 +435,7 @@ def plot_layerwise_sparsity_nparams(layers: List[Dict], out_path: str, title: st
     ax.set_yticklabels(names, fontsize=7)
     ax.invert_yaxis()
     ax.set_xlim(0, 100)
-    s_metric = r"$s(\theta)$" if plt.rcParams.get("text.usetex") else "Sparsity (%)"
+    s_metric = r"$\mathsf{{s}}^*={rate}\%$" if plt.rcParams.get("text.usetex") else "Sparsity (%)"
     ax.set_xlabel(f"{s_metric}")
     ax.set_title(title, fontsize=9)
 
@@ -817,22 +826,228 @@ def plot_eer_vs_effective_flops(summaries: List[Dict], out_path: str) -> None:
     plt.close(fig)
 
 
-def plot_layerwise_sparsity_curves(summaries: List[Dict], out_dir: str) -> None:
-    """One figure per *target* sparsity rate; each curve = one experiment's
-    achieved per-layer sparsity profile.
+# ---------------------------------------------------------------------------
+# Shared layerwise helper
+# ---------------------------------------------------------------------------
+# All cross-experiment per-layer sparsity plots (overlay-rates, per-rate
+# cross-model, no-bucket cross-model) call ``_plot_layerwise_panel`` for the
+# inner panel work, then assemble a single legend via
+# ``_assemble_layerwise_legend`` and emit it with ``_emit_layerwise_legend``.
+# This guarantees consistent figure size, panel size, axis labels, twin-axis
+# parameter bars, and legend ordering across every layerwise PDF.
 
-    Use case: compare how different methods at the *same* nominal target
-    distribute their sparsity across the network's depth. A method that
-    aggressively prunes early layers and spares the classifier looks very
-    different from one that prunes uniformly — both can hit the same
-    aggregate sparsity but with very different inductive biases (see e.g.
-    Liu et al., ICLR 2019, Fig. 1; Renda et al., ICML 2020, Fig. 4).
 
-    Colors / markers / linestyles follow ``get_style`` (the same scheme as
-    the rest of the visualization stack).
+def _plot_layerwise_panel(
+    ax: "plt.Axes",
+    members: List[Dict],
+    *,
+    rate_linestyles: Optional[Dict[int, Any]] = None,
+    target_rates: Optional[List[int]] = None,
+    show_param_bars: bool = True,
+    show_target_lines: bool = True,
+) -> Dict[str, Any]:
+    """Render one layerwise-sparsity panel.
+
+    ``members``   summaries to draw on this axis.
+    ``rate_linestyles`` if set, override each curve's linestyle by its
+                  integer sparsity rate (overlay-rates mode); else use the
+                  linestyle returned by ``get_style``.
+    ``target_rates`` rates to draw as horizontal reference lines; if None,
+                  derive from ``members``.
+    Returns dict with: legend_handles, bar_handle, target_handle, twin_ax,
+    canon_names.
+    """
+    canon = max(members, key=lambda s: len(s["layers"]))
+    canon_names = [l["name"] for l in canon["layers"]]
+    canon_nparams = [max(int(l.get("n_params", 0)), 1) for l in canon["layers"]]
+    x = np.arange(len(canon_names))
+
+    twin_ax = None
+    bar_handle = None
+    if show_param_bars:
+        twin_ax = ax.twinx()
+        twin_ax.set_yscale("log")
+        bars = twin_ax.bar(
+            x, canon_nparams,
+            color=PARAM_BAR_COLOR, alpha=PARAM_BAR_ALPHA,
+            width=0.85, zorder=0, edgecolor="none",
+        )
+        if len(bars) > 0:
+            bar_handle = bars[0]
+        ax.set_zorder(twin_ax.get_zorder() + 1)
+        ax.patch.set_visible(False)
+
+    legend_handles: "OrderedDict[str, Tuple[Any, Dict]]" = OrderedDict()
+    for s in members:
+        info_local = {k: v for k, v in s["info"].items() if k != "_gradient_color"}
+        color, marker, ls = get_style(info_local)
+        if rate_linestyles is not None:
+            ls = rate_linestyles.get(info_local.get("sparsity"), ls)
+        label = make_label(info_local)
+        lookup = {l["name"]: l["nominal_sparsity"] * 100 for l in s["layers"]}
+        ys = [lookup.get(name, np.nan) for name in canon_names]
+        line, = ax.plot(
+            x, ys, color=color, marker=marker, linestyle=ls,
+            markersize=4, linewidth=1.0, alpha=0.9, zorder=3,
+        )
+        if label not in legend_handles:
+            legend_handles[label] = (line, info_local)
+
+    target_handle = None
+    if show_target_lines:
+        rates = (
+            target_rates
+            if target_rates is not None
+            else sorted({s["info"].get("sparsity") for s in members
+                         if s["info"].get("sparsity") is not None})
+        )
+        for r in rates:
+            ax.axhline(r, **PERFECT_LINE_KW)
+        if rates:
+            target_handle = plt.Line2D(
+                [0], [0],
+                color=PERFECT_LINE_KW["color"],
+                linestyle=PERFECT_LINE_KW["linestyle"],
+                linewidth=PERFECT_LINE_KW["linewidth"],
+                alpha=PERFECT_LINE_KW["alpha"],
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [_short_layer_name(n, max_len=24) for n in canon_names],
+        rotation=60, ha="right", fontsize=6,
+    )
+    ax.set_xlabel("Layer (input → output)", fontsize=9)
+
+    return dict(
+        legend_handles=legend_handles,
+        bar_handle=bar_handle,
+        target_handle=target_handle,
+        twin_ax=twin_ax,
+        canon_names=canon_names,
+    )
+
+
+def _assemble_layerwise_legend(
+    legend_handles: "OrderedDict[str, Tuple[Any, Dict]]",
+    *,
+    target_handle: Optional[Any] = None,
+    target_label: Optional[str] = None,
+    bar_handle: Optional[Any] = None,
+    bar_label: Optional[str] = None,
+) -> Tuple[List[Any], List[str]]:
+    """Sort method handles by ``experiment_sort_key``, then append target/bar entries."""
+    sorted_items = sorted(
+        legend_handles.items(),
+        key=lambda kv: experiment_sort_key(kv[1][1]),
+    )
+    ordered_labels = [label for label, _ in sorted_items]
+    ordered_handles = [h for _, (h, _) in sorted_items]
+    if target_handle is not None and target_label is not None:
+        ordered_labels.append(target_label)
+        ordered_handles.append(target_handle)
+    if bar_handle is not None and bar_label is not None:
+        ordered_labels.append(bar_label)
+        ordered_handles.append(bar_handle)
+    return ordered_handles, ordered_labels
+
+
+def _emit_layerwise_legend(
+    fig: "plt.Figure",
+    out_path: str,
+    handles: List[Any],
+    labels: List[str],
+    *,
+    legend_mode: str,
+) -> None:
+    """Either embed the legend at the bottom of fig (inline) or write a sidecar PDF (split)."""
+    ncol = min(6, max(2, len(labels)))
+    if legend_mode == "inline":
+        fig.legend(
+            handles, labels,
+            loc="lower center", ncol=ncol, fontsize=7,
+            frameon=True, framealpha=0.8, bbox_to_anchor=(0.5, -0.02),
+        )
+        fig.tight_layout(rect=(0, 0.08, 1, 1))
+    elif legend_mode == "split":
+        legend_path = os.path.splitext(out_path)[0] + "_legend.pdf"
+        export_standalone_legend(
+            handles, labels, legend_path, ncol, font_size=8,
+        )
+        fig.tight_layout()
+    else:
+        raise ValueError(
+            f"legend_mode must be 'inline' or 'split', got {legend_mode!r}"
+        )
+
+
+def plot_layerwise_overlay_rates(
+    summaries: List[Dict], out_path: str, *,
+    legend_mode: str = "inline",
+    show_param_bars: bool = True,
+    show_target_lines: bool = True,
+    ylim: Optional[Tuple[float, float]] = None,
+) -> None:
+    """Single-panel overlay: every sparsity-rate group on one axes.
+
+    Curves at different rates are distinguished by ``RATE_LINESTYLES``;
+    color/marker still encode method/variant. Comparing one backbone's
+    behaviour across multiple rates without separate per-rate figures.
     """
     setup_matplotlib(font_size=10)
+    members = [s for s in summaries
+               if s.get("layers") and s["info"].get("sparsity") is not None]
+    if not members:
+        return
+
+    fig, ax = plt.subplots(figsize=layerwise_figsize(1))
+    panel = _plot_layerwise_panel(
+        ax, members,
+        rate_linestyles=RATE_LINESTYLES,
+        target_rates=sorted({s["info"]["sparsity"] for s in members}),
+        show_param_bars=show_param_bars,
+        show_target_lines=show_target_lines,
+    )
+
+    usetex = plt.rcParams.get("text.usetex")
+    ax.set_ylabel(
+        r"$\mathsf{s}(\theta)$" if usetex else "Per-layer sparsity (%)"
+    )
+    ax.set_ylim(*(ylim or (0, 101)))
+    if panel["twin_ax"] is not None:
+        panel["twin_ax"].set_ylabel(
+            r"\# Parameters" if usetex else "# Parameters", fontsize=8,
+        )
+        panel["twin_ax"].tick_params(axis="y", labelsize=7)
+
+    target_label = r"$\mathsf{s}^*$" if usetex else "target s*"
+    bar_label = (r"\# parameters" if usetex else "# parameters") if panel["bar_handle"] else None
+    handles, labels = _assemble_layerwise_legend(
+        panel["legend_handles"],
+        target_handle=panel["target_handle"], target_label=target_label,
+        bar_handle=panel["bar_handle"], bar_label=bar_label,
+    )
+    _emit_layerwise_legend(fig, out_path, handles, labels, legend_mode=legend_mode)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_layerwise_per_rate_cross_model(
+    summaries: List[Dict], out_dir: str, *,
+    legend_mode: str = "inline",
+    show_param_bars: bool = True,
+    show_target_lines: bool = True,
+    ylim: Optional[Tuple[float, float]] = None,
+) -> None:
+    """One PDF per sparsity target, with one panel per backbone.
+
+    For each integer rate present in ``summaries`` build an N-panel figure
+    (one per known model in ``MODEL_REGISTRY``, ordered by ``panel_order``).
+    Per-rate y-limits come from ``YLIM_PER_RATE`` unless ``ylim`` overrides.
+    """
+    setup_matplotlib(font_size=9)
     from collections import defaultdict
+
     groups: Dict[int, List[Dict]] = defaultdict(list)
     for s in summaries:
         rate = s["info"].get("sparsity")
@@ -841,44 +1056,154 @@ def plot_layerwise_sparsity_curves(summaries: List[Dict], out_dir: str) -> None:
         groups[rate].append(s)
 
     for rate, members in sorted(groups.items()):
-        if not members:
-            continue
-        # Canonical layer order: take the experiment with the most layers
-        # and use its layer-name sequence as the x-axis. Methods at the
-        # same target rate prune the same layer set in this codebase, so
-        # this aligns naturally; missing layers fall through as NaN.
-        canon = max(members, key=lambda s: len(s["layers"]))
-        canon_names = [l["name"] for l in canon["layers"]]
-        if not canon_names:
-            continue
-
-        fig, ax = plt.subplots(figsize=(7.0, 3.6))
-        x = np.arange(len(canon_names))
-
+        by_model: Dict[str, List[Dict]] = defaultdict(list)
         for s in members:
-            info = s["info"]
-            color, marker, ls = get_style(info)
-            label = make_label(info)
-            lookup = {l["name"]: l["nominal_sparsity"] * 100 for l in s["layers"]}
-            ys = [lookup.get(name, np.nan) for name in canon_names]
-            ax.plot(x, ys, color=color, marker=marker, linestyle=ls,
-                    markersize=4, linewidth=1.0, label=label, alpha=0.9)
+            model = s["info"].get("model")
+            if model:
+                by_model[model].append(s)
+        models = panel_models(by_model)
+        if not models:
+            continue
 
-        ax.axhline(rate, **{**PERFECT_LINE_KW, "label": f"target sr={rate}%"})
-        ax.set_xticks(x)
-        ax.set_xticklabels(
-            [_short_layer_name(n, max_len=24) for n in canon_names],
-            rotation=60, ha="right", fontsize=6,
+        n_models = len(models)
+        fig, axes = plt.subplots(
+            1, n_models, figsize=layerwise_figsize(n_models), sharey=True,
         )
-        ax.set_xlabel("Layer (input → output)", fontsize=9)
-        ax.set_ylabel("Per-layer sparsity (\%)" if plt.rcParams.get("text.usetex")
-                      else "Per-layer sparsity (%)")
-        ax.set_ylim(40, 101)
-        # ax.set_title(f"Per-layer sparsity profile @ target sr={rate}%", fontsize=10)
-        ax.legend(fontsize=7, loc="best", frameon=True, framealpha=0.7)
-        fig.tight_layout()
-        fig.savefig(os.path.join(out_dir, f"layerwise_sparsity_sr{rate}.pdf"))
+        if n_models == 1:
+            axes = [axes]
+
+        usetex = plt.rcParams.get("text.usetex", False)
+        legend_handles: "OrderedDict[str, Tuple[Any, Dict]]" = OrderedDict()
+        bar_handle = None
+        target_handle = None
+        twins: List[Any] = []
+
+        for ax, model in zip(axes, models):
+            panel = _plot_layerwise_panel(
+                ax, by_model[model],
+                target_rates=[rate],
+                show_param_bars=show_param_bars,
+                show_target_lines=show_target_lines,
+            )
+            for label, entry in panel["legend_handles"].items():
+                if label not in legend_handles:
+                    legend_handles[label] = entry
+            if bar_handle is None:
+                bar_handle = panel["bar_handle"]
+            if target_handle is None:
+                target_handle = panel["target_handle"]
+            if panel["twin_ax"] is not None:
+                twins.append(panel["twin_ax"])
+
+        ylim_lo, ylim_hi = ylim if ylim is not None else ylim_for_rate(rate, scale="percent")
+        axes[0].set_ylim(ylim_lo, ylim_hi)
+        axes[0].set_ylabel(
+            r"Per-layer sparsity (\%)" if usetex else "Per-layer sparsity (%)"
+        )
+
+        for i, ax2 in enumerate(twins):
+            if i < len(twins) - 1:
+                ax2.set_yticklabels([])
+                ax2.tick_params(right=False)
+            else:
+                ax2.set_ylabel(
+                    r"\# Parameters" if usetex else "# Parameters", fontsize=8,
+                )
+
+        target_label = (rf"$\mathsf{{s}}^*$={rate}\%" if usetex else f"s={rate}%")
+        bar_label = (r"\# parameters" if usetex else "# parameters") if bar_handle else None
+        handles, labels = _assemble_layerwise_legend(
+            legend_handles,
+            target_handle=target_handle, target_label=target_label,
+            bar_handle=bar_handle, bar_label=bar_label,
+        )
+        out_path = os.path.join(out_dir, f"cross_model_layerwise_sr{rate}.pdf")
+        _emit_layerwise_legend(fig, out_path, handles, labels, legend_mode=legend_mode)
+        fig.savefig(out_path, bbox_inches="tight")
         plt.close(fig)
+
+
+def plot_layerwise_no_bucket(
+    summaries: List[Dict], out_path: str, *,
+    legend_mode: str = "split",
+    show_param_bars: bool = True,
+    show_target_lines: bool = True,
+    ylim: Optional[Tuple[float, float]] = None,
+) -> None:
+    """One panel per backbone, all rates mixed (no rate bucketing).
+
+    Useful for paper figures comparing e.g. fixed-λ + sr75 + sr90 runs
+    side-by-side per backbone. Curve linestyle still comes from ``get_style``
+    (rate-driven), so different rates remain distinguishable within a panel.
+    """
+    setup_matplotlib(font_size=9)
+    from collections import defaultdict
+
+    by_model: Dict[str, List[Dict]] = defaultdict(list)
+    for s in summaries:
+        m = s["info"].get("model")
+        if not m or not s.get("layers"):
+            continue
+        by_model[m].append(s)
+
+    models = panel_models(by_model)
+    if not models:
+        return
+
+    n_models = len(models)
+    fig, axes = plt.subplots(
+        1, n_models, figsize=layerwise_figsize(n_models), sharey=True,
+    )
+    if n_models == 1:
+        axes = [axes]
+
+    usetex = plt.rcParams.get("text.usetex", False)
+    legend_handles: "OrderedDict[str, Tuple[Any, Dict]]" = OrderedDict()
+    bar_handle = None
+    target_handle = None
+    twins: List[Any] = []
+
+    for ax, model in zip(axes, models):
+        panel = _plot_layerwise_panel(
+            ax, by_model[model],
+            show_param_bars=show_param_bars,
+            show_target_lines=show_target_lines,
+        )
+        for label, entry in panel["legend_handles"].items():
+            if label not in legend_handles:
+                legend_handles[label] = entry
+        if bar_handle is None:
+            bar_handle = panel["bar_handle"]
+        if target_handle is None:
+            target_handle = panel["target_handle"]
+        if panel["twin_ax"] is not None:
+            twins.append(panel["twin_ax"])
+
+    if ylim is not None:
+        axes[0].set_ylim(*ylim)
+    axes[0].set_ylabel(
+        r"Per-layer sparsity (\%)" if usetex else "Per-layer sparsity (%)"
+    )
+
+    for i, ax2 in enumerate(twins):
+        if i < len(twins) - 1:
+            ax2.set_yticklabels([])
+            ax2.tick_params(right=False)
+        else:
+            ax2.set_ylabel(
+                r"\# Parameters" if usetex else "# Parameters", fontsize=8,
+            )
+
+    target_label = "target sparsity"
+    bar_label = (r"\# parameters" if usetex else "# parameters") if bar_handle else None
+    handles, labels = _assemble_layerwise_legend(
+        legend_handles,
+        target_handle=target_handle, target_label=target_label,
+        bar_handle=bar_handle, bar_label=bar_label,
+    )
+    _emit_layerwise_legend(fig, out_path, handles, labels, legend_mode=legend_mode)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_rtf_vs_sparsity(summaries: List[Dict], out_path: str) -> None:
@@ -912,7 +1237,8 @@ def plot_rtf_vs_sparsity(summaries: List[Dict], out_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def process_experiment(exp_dir: str, info: Dict, out_root: str,
-                       rtf_args: Optional[Dict]) -> Optional[Dict]:
+                       rtf_args: Optional[Dict],
+                       *, annotate_layerwise: bool = False) -> Optional[Dict]:
     ckpt = find_best_ckpt(exp_dir, info=info)
     if ckpt is None:
         log.warning("No checkpoint found in %s — skipping", exp_dir)
@@ -945,7 +1271,8 @@ def process_experiment(exp_dir: str, info: Dict, out_root: str,
 
     title = f"{make_label(info)}"
     if enriched:
-        plot_layerwise_sparsity(enriched, os.path.join(out_dir, "layerwise_sparsity.pdf"), title)
+        plot_layerwise_sparsity(enriched, os.path.join(out_dir, "layerwise_sparsity.pdf"), title,
+                                annotate=annotate_layerwise)
         plot_layerwise_sparsity_nparams(enriched, os.path.join(out_dir, "layerwise_sparsity_nparams.pdf"), title)
         plot_per_filter_histograms(enriched, os.path.join(out_dir, "per_filter_sparsity_hist.pdf"), title)
         plot_mask_heatmaps(enriched, os.path.join(out_dir, "mask_heatmap.pdf"), title)
@@ -986,7 +1313,8 @@ def process_experiment(exp_dir: str, info: Dict, out_root: str,
         # Lean per-layer slice for cross-experiment plots (no big arrays).
         layers=[
             dict(name=l["name"], kind=l["kind"],
-                 nominal_sparsity=l["stats"]["nominal_sparsity"])
+                 nominal_sparsity=l["stats"]["nominal_sparsity"],
+                 n_params=l["stats"]["n_params"])
             for l in enriched
         ],
     )
@@ -1015,6 +1343,53 @@ def main():
                     help="Test set name to read EER from (e.g. cnceleb_concatenated)."
                          " Defaults to the first one available in the leaderboard CSV.")
     ap.add_argument("--max_heatmap_layers", type=int, default=10)
+    ap.add_argument(
+        "--legend-mode", dest="legend_mode",
+        choices=["inline", "split"], default="split",
+        help=(
+            "Legend handling for the cross-model layerwise plot. "
+            "inline: embed legend at the bottom (default). "
+            "split: omit inline legend and save a shared "
+            "<plot>_legend.pdf for LaTeX side-by-side use."
+        ),
+    )
+    ap.add_argument(
+        "--layerwise-mode", dest="layerwise_mode",
+        choices=["overlay-rates", "per-rate-cross-model", "no-bucket", "all"],
+        default="all",
+        help=(
+            "Which layerwise PDF(s) to emit under cross_exp/. "
+            "overlay-rates: one figure with every rate overlaid on a single panel "
+            "(layerwise_sparsity_all_rates.pdf). "
+            "per-rate-cross-model: one figure per rate with one panel per backbone "
+            "(cross_model_layerwise_sr{rate}.pdf). "
+            "no-bucket: one figure with one panel per backbone, all rates mixed "
+            "(overlay_layerwise.pdf). "
+            "all: emit all three (default; reproduces the previous behaviour)."
+        ),
+    )
+    ap.add_argument(
+        "--annotate-layerwise", dest="annotate_layerwise",
+        action="store_true",
+        help="Annotate per-experiment layerwise sparsity bars with fully-zero "
+             "row/column fractions.",
+    )
+    ap.add_argument(
+        "--layerwise-ylim", dest="layerwise_ylim",
+        nargs=2, type=float, default=None, metavar=("LO", "HI"),
+        help="Override y-axis limits for layerwise plots in percent. "
+             "Default: per-rate from visualize_common.YLIM_PER_RATE.",
+    )
+    ap.add_argument(
+        "--no-param-bars", dest="show_param_bars",
+        action="store_false",
+        help="Disable the n_params twin-axis bars on layerwise plots.",
+    )
+    ap.add_argument(
+        "--no-target-lines", dest="show_target_lines",
+        action="store_false",
+        help="Disable target-rate horizontal reference lines.",
+    )
     # RTF
     ap.add_argument("--rtf", action="store_true",
                     help="Measure forward-pass RTF on the trained encoder")
@@ -1048,7 +1423,10 @@ def main():
     summaries: List[Dict] = []
     for exp_dir, info in experiments:
         try:
-            s = process_experiment(exp_dir, info, args.output, rtf_args)
+            s = process_experiment(
+                exp_dir, info, args.output, rtf_args,
+                annotate_layerwise=args.annotate_layerwise,
+            )
         except Exception as e:
             log.exception("Failed on %s: %s", info["dirname"], e)
             continue
@@ -1077,7 +1455,32 @@ def main():
     plot_flops_vs_sparsity(summaries, os.path.join(cross_dir, "flops_vs_sparsity.pdf"))
     plot_structural_density_vs_sparsity(summaries, os.path.join(cross_dir, "structural_density_vs_sparsity.pdf"))
     plot_eer_vs_effective_flops(summaries, os.path.join(cross_dir, "eer_vs_effective_flops.pdf"))
-    plot_layerwise_sparsity_curves(summaries, cross_dir)
+
+    layerwise_ylim = tuple(args.layerwise_ylim) if args.layerwise_ylim else None
+    common_kw = dict(
+        legend_mode=args.legend_mode,
+        show_param_bars=args.show_param_bars,
+        show_target_lines=args.show_target_lines,
+        ylim=layerwise_ylim,
+    )
+    modes = (
+        ["overlay-rates", "per-rate-cross-model", "no-bucket"]
+        if args.layerwise_mode == "all" else [args.layerwise_mode]
+    )
+    if "overlay-rates" in modes:
+        plot_layerwise_overlay_rates(
+            summaries,
+            os.path.join(cross_dir, "layerwise_sparsity_all_rates.pdf"),
+            **common_kw,
+        )
+    if "per-rate-cross-model" in modes:
+        plot_layerwise_per_rate_cross_model(summaries, cross_dir, **common_kw)
+    if "no-bucket" in modes:
+        plot_layerwise_no_bucket(
+            summaries,
+            os.path.join(cross_dir, "overlay_layerwise.pdf"),
+            **common_kw,
+        )
     if rtf_args is not None:
         plot_rtf_vs_sparsity(summaries, os.path.join(cross_dir, "rtf_vs_sparsity.pdf"))
 
