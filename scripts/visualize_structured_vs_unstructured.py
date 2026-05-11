@@ -1011,7 +1011,7 @@ def plot_layerwise_overlay_rates(
 
     usetex = plt.rcParams.get("text.usetex")
     ax.set_ylabel(
-        r"$\mathsf{s}(\theta)$" if usetex else "Per-layer sparsity (%)"
+        r"$\mathsf{s}(\theta)$ [\%]" if usetex else "Per-layer sparsity (%)"
     )
     ax.set_ylim(*(ylim or (0, 101)))
     if panel["twin_ax"] is not None:
@@ -1098,7 +1098,7 @@ def plot_layerwise_per_rate_cross_model(
         ylim_lo, ylim_hi = ylim if ylim is not None else ylim_for_rate(rate, scale="percent")
         axes[0].set_ylim(ylim_lo, ylim_hi)
         axes[0].set_ylabel(
-            r"Per-layer sparsity (\%)" if usetex else "Per-layer sparsity (%)"
+            r"$\mathsf{s}(\theta)$ [\%]" if usetex else "Per-layer sparsity (%)"
         )
 
         for i, ax2 in enumerate(twins):

@@ -20,7 +20,7 @@ experiment_fixed='sv_bregman_*breg_fixed-wespeaker'
 # for eval_data in 'cnceleb' 'multi_sv'; do
 #     for eval_model in 'resnet34' 'ecapa_tdnn'; do
 for eval_data in 'multi_sv'; do
-    for eval_model in ecapa_tdnn; do
+    for eval_model in resnet34; do
 
         sparsity_rate_test='sr[7-9][0-9]' #  'sr75' 'sr90', 'sr95', 'sr99'
         sparsity_rate='sr[7-9][0-9]' #  'sr75' 'sr90', 'sr95', 'sr99'
@@ -75,8 +75,8 @@ for eval_data in 'multi_sv'; do
         experiments_weight_norms=(
             "sv_bregman_*adabreg-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_adabreg}"
             "sv_bregman_*linbreg-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_linbreg}"
-            "sv_bregman_*adabreg-wespeaker*${eval_model}*${eval_data}*sr75*${suffix_adabreg}"
-            "sv_bregman_*linbreg-wespeaker*${eval_model}*${eval_data}*sr75*${suffix_linbreg}"
+            # "sv_bregman_*adabreg-wespeaker*${eval_model}*${eval_data}*sr75*${suffix_adabreg}"
+            # "sv_bregman_*linbreg-wespeaker*${eval_model}*${eval_data}*sr75*${suffix_linbreg}"
             "${experiment_fixed}*${eval_model}*${eval_data}*sr90*${suffix_fixed}"
             "sv_vanilla-*${eval_model}*${eval_data}*"
             "sv_wespeaker-*${eval_model}*${eval_data}*"
@@ -97,6 +97,11 @@ for eval_data in 'multi_sv'; do
             "sv_bregman_adabreg_fixed*${eval_model}*${eval_data}*sr90*${suffix_fixed}"
             "sv_bregman_adabreg_fixed*${eval_model}*${eval_data}*sr99*${suffix_fixed}"
             "sv_pruning_mag_unstruct*${eval_model}*${eval_data}*sr90*"
+            )
+        experiments_struct_vs_unstruct_mixed=(
+            "sv_bregman_linbreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_linbreg}"
+            "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_adabreg}"
+            "sv_pruning_mag_unstruct*${eval_model}*${eval_data}*sr99*"
             )
 
         # Build list of dataset subdirs across all base_dirs
@@ -193,8 +198,8 @@ for eval_data in 'multi_sv'; do
 
             python scripts/visualize_structured_vs_unstructured.py \
                 --base_dirs "${exp_dirs[@]}" \
-                --experiments ${experiments_struct_vs_unstruct_linbreg[@]} \
-                --output results/struct_vs_unstruct/${eval_data}/${eval_model}/linbreg \
+                --experiments ${experiments_struct_vs_unstruct_mixed[@]} \
+                --output results/struct_vs_unstruct/${eval_data}/${eval_model}/mixed \
                 --legend-mode split
 
         fi

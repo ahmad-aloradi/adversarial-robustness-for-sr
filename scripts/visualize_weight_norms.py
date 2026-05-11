@@ -203,6 +203,8 @@ def plot_sparsity_comparison(all_data, output_path, legend_mode="inline"):
     ``ylim_lo = ((min_target - 19) // 5) * 5 / 100`` (e.g., 99 → 0.80,
     95 → 0.75, 90 → 0.70, 75 → 0.55).
     """
+    FSIZE = 16
+    
     sparse_data = [
         item for item in all_data if item[3].get("sparsity") is not None
     ]
@@ -216,6 +218,7 @@ def plot_sparsity_comparison(all_data, output_path, legend_mode="inline"):
     fig, axes = plt.subplots(
         1, n_groups, figsize=(4 * n_groups, 4), sharey=True
     )
+
     for i, (ax, (prefix, group_name, _)) in enumerate(zip(axes, LAYER_GROUPS)):
         sparsity_col = f"{prefix}/sparsity"
         for label, style, df, _ in sparse_data:
@@ -232,14 +235,15 @@ def plot_sparsity_comparison(all_data, output_path, legend_mode="inline"):
                 markevery=max(1, len(df) // 10),
             )
         ax.axvline(8, color="red", linewidth=1.0, zorder=1)
-        ax.set_xlabel("Epoch")
+        ax.set_xlabel("Epoch", fontsize=FSIZE)
         if i == 0:
-            ax.set_ylabel(r"$\mathsf{s}(\theta)$")
-        ax.set_title(group_name)
+            ax.set_ylabel(r"$\mathsf{s}(\theta)$", fontsize=FSIZE)
+        ax.set_title(group_name, fontsize=FSIZE)
         ax.set_ylim(ylim_lo, ylim_hi)
         ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        ax.tick_params(axis="both", labelsize=FSIZE - 2)
         if legend_mode == "inline":
-            ax.legend(loc="best", fontsize=16, ncols=1)
+            ax.legend(loc="best", fontsize=FSIZE - 2, ncols=1)
 
     if legend_mode == "split":
         handles, labels = [], []
