@@ -360,7 +360,7 @@ def plot_sparsity_trends(
 
         # --- Axis formatting ---
         pct_str = r"\%" if use_latex else "%"
-        s_star = r"$s^{\ast}$" if use_latex else "s*"
+        s_star = r"$\mathsf{s}^{\ast}$" if use_latex else "s*"
         title = protocol if dataset_name == "VoxCeleb" else "CNCeleb-E"
         ax.set_title(title)
         ax.set_xlabel(f"{s_star} [{pct_str}]")

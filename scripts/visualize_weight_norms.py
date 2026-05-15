@@ -204,6 +204,7 @@ def plot_sparsity_comparison(all_data, output_path, legend_mode="inline"):
     95 → 0.75, 90 → 0.70, 75 → 0.55).
     """
     FSIZE = 16
+    in_percent = True
     
     sparse_data = [
         item for item in all_data if item[3].get("sparsity") is not None
@@ -226,7 +227,7 @@ def plot_sparsity_comparison(all_data, output_path, legend_mode="inline"):
                 continue
             ax.plot(
                 df["epoch"],
-                df[sparsity_col],
+                df[sparsity_col] * 100 if in_percent else df[sparsity_col],
                 label=label,
                 color=style[0],
                 marker=style[1],
@@ -237,9 +238,13 @@ def plot_sparsity_comparison(all_data, output_path, legend_mode="inline"):
         ax.axvline(8, color="red", linewidth=1.0, zorder=1)
         ax.set_xlabel("Epoch", fontsize=FSIZE)
         if i == 0:
-            ax.set_ylabel(r"$\mathsf{s}(\theta)$", fontsize=FSIZE)
+            prct_str = r"$\mathsf{s}(\theta)$ $[\%]$" if in_percent else r"$\mathsf{s}(\theta)$"
+            ax.set_ylabel(prct_str, fontsize=FSIZE)
         ax.set_title(group_name, fontsize=FSIZE)
-        ax.set_ylim(ylim_lo, ylim_hi)
+        if in_percent:
+            ax.set_ylim(ylim_lo * 100, ylim_hi * 100)
+        else:
+            ax.set_ylim(ylim_lo, ylim_hi)
         ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
         ax.tick_params(axis="both", labelsize=FSIZE - 2)
         if legend_mode == "inline":

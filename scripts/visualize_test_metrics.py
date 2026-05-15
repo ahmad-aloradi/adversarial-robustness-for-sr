@@ -25,6 +25,7 @@ import pandas as pd
 # Import shared utilities from visualize.py (same directory)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FixedLocator
 from visualize import (
     METHOD_CLASS_COLORS,
     VARIANT_COLOR_ADJUSTMENTS,
@@ -386,26 +387,20 @@ def plot_metric_for_dataset(
     has_dense = df["sparsity"].isna().any()
     sparsity_buckets = ([None] if has_dense else []) + sparsity_levels
 
-    # Determine y-axis limit: use IQR to detect outliers, cap y to show
-    # the non-outlier range clearly while still reporting outlier values.
-    # Work in percent throughout so axis ticks line up with bar annotations.
+    # Fixed y-axis: always 0–20% with ticks at 0/5/10/15/20 so figures
+    # are visually comparable across datasets/metrics. Work in percent
+    # throughout so axis ticks line up with bar annotations.
     all_vals = df[metric].dropna().values * 100.0
     if len(all_vals) == 0:
         plt.close(fig)
         return
-    q1, q3 = np.percentile(all_vals, [25, 75])
-    iqr = q3 - q1
-    non_outliers = all_vals[all_vals <= q3 + 12.0 * iqr]
-    non_outlier_max = (
-        non_outliers.max() if len(non_outliers) > 0 else all_vals.max()
-    )
-    y_cap = non_outlier_max * 1.35  # headroom for annotations
-    # Outlier bars get clipped near the top of the chart so the broken-bar
-    # break + small cap + value annotation render right next to y_cap and
-    # clearly read as "this bar exceeds the chart" rather than appearing
-    # mid-figure. The outlier criterion is v > y_cap, so the indicator only
-    # fires when the bar would actually exceed the visible range.
-    clip_height = y_cap * 0.93
+    y_cap = 20.0
+    # Outlier bars (v > y_cap) get the broken-bar treatment: the primary
+    # bar is drawn slightly past ylim and clipped at y_cap, then a white
+    # break band + a small cap + the value annotation are rendered with
+    # clip_on=False so they sit just above y_cap. That reads as "this bar
+    # exceeds the chart" instead of silently topping out at y_cap.
+    clip_height = y_cap * 1.05
 
     for ax_idx, (protocol, sub, units, sweep_param) in enumerate(
         protocol_data
@@ -425,6 +420,7 @@ def plot_metric_for_dataset(
         ax.set_axisbelow(True)
         ax.yaxis.grid(True, alpha=0.3, linewidth=0.4)
         ax.xaxis.grid(False)
+        ax.yaxis.set_major_locator(FixedLocator([0.0, 5.0, 10.0, 15.0, 20.0]))
 
         # Show the protocol name above each subplot only when there are
         # multiple side-by-side protocols (e.g. Vox1-O / Vox1-E / Vox1-H).
@@ -525,18 +521,24 @@ def plot_metric_for_dataset(
             if is_outlier:
                 bx = bar.get_x()
                 bw = bar.get_width()
-                top = bar.get_height()
-                band_h = y_cap * 0.015
-                ax.fill_between(
+                # Place the break right at y_cap and the "head" cap above
+                # it, sticking out beyond the y-axis limit. clip_on=False
+                # lets the cap + band + annotation render above ylim so
+                # the bar visibly exceeds the chart range instead of
+                # silently topping out at y_cap.
+                top = y_cap
+                band_h = y_cap * 0.020
+                band = ax.fill_between(
                     [bx, bx + bw],
                     top - band_h,
                     top + band_h,
                     color="white",
                     zorder=4,
                 )
-                cap_h = y_cap * 0.025
+                band.set_clip_on(False)
+                cap_h = y_cap * 0.05
                 cap_bot = top + band_h + y_cap * 0.005
-                ax.bar(
+                cap_bars = ax.bar(
                     bar.get_x() + bw / 2,
                     cap_h,
                     bw,
@@ -547,6 +549,8 @@ def plot_metric_for_dataset(
                     hatch=h,
                     zorder=3,
                 )
+                for cb in cap_bars:
+                    cb.set_clip_on(False)
                 ax.text(
                     bx + bw / 2,
                     cap_bot + cap_h,
@@ -555,6 +559,7 @@ def plot_metric_for_dataset(
                     va="bottom",
                     fontsize=font_size + 1,
                     rotation=60,
+                    clip_on=False,
                 )
             else:
                 text = _bold(raw_text) if is_best else raw_text
@@ -738,8 +743,8 @@ def plot_metric_for_dataset(
     # if legend_handles:
     #     fig.legend(handles=legend_handles, loc="upper right", framealpha=0.9, ncols=len(legend_handles)//2)
 
-    metric_clean = metric.replace("_raw", "").replace("_norm", "")
     # if 'vox' in dataset_name.lower():
+    #     metric_clean = metric.replace("_raw", "").replace("_norm", "")
     #     fig.suptitle(f"{dataset_name} — {metric_clean}", y=1.02, fontweight="bold")
     fig.tight_layout()
 
@@ -769,7 +774,7 @@ def main():
         default=None,
         help="Output directory for figures (default: <input_dir>/figures)",
     )
-    parser.add_argument("--font_size", type=int, default=14)
+    parser.add_argument("--font_size", type=int, default=16)
     parser.add_argument(
         "--base_dirs",
         nargs="+",

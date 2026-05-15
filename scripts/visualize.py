@@ -25,6 +25,7 @@ import pandas as pd
 
 SHOW_ALPHA = False
 SHOW_f = False
+AUTO_RESCALE_METRICS =  ("sparsity", "bregman/sparsity")
 
 # ---------------------------------------------------------------------------
 # 1. LaTeX-style rendering setup
@@ -209,8 +210,8 @@ VARIANT_LINESTYLES = {
 METRIC_LABELS = {
     "train_loss": "Train Loss",
     "valid_loss": "Valid. Loss",
-    "train/MulticlassAccuracy": "Train Acc.",
-    "valid/MulticlassAccuracy": "Valid. Acc.",
+    "train/MulticlassAccuracy": "Train Accuracy",
+    "valid/MulticlassAccuracy": "Valid. Accuracy",
     "sparsity": r"$\mathsf{s}(\theta)$",
     "bregman/sparsity": r"$\mathsf{s}(\theta)$",
     "bregman/global_lambda": r"$\lambda$",
@@ -876,7 +877,7 @@ def _auto_ylim(ax, metric, margin=0.05):
     span = ymax - ymin if ymax > ymin else 1.0
     pad = span * margin
 
-    if metric in ("sparsity", "valid/MulticlassAccuracy", "bregman/sparsity"):
+    if metric in AUTO_RESCALE_METRICS:
         # If the spread is large (e.g. 0 to 0.9), check if there's a cluster
         # of values far from the outliers — use IQR-based zoom
         if span > 0.3:
