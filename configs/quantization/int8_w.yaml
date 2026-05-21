@@ -1,0 +1,11 @@
+# INT8, weight-only. No activation calibration needed.
+spec: int8_w
+quantize_classifier: false
+# Common skip patterns: leave the first conv (frontend) and last linear
+# (classifier projection) at full precision. Override per-experiment as needed.
+skip_patterns: []
+target_layers: [Conv1d, Conv2d, Linear]
+# Inert for weight-only specs (calibration is skipped at runtime),
+# but kept for CLI-override uniformity across bit widths.
+calibration:
+  num_batches: 32

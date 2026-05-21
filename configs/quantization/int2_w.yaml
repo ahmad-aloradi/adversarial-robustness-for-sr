@@ -1,0 +1,9 @@
+spec: int2_w
+quantize_classifier: false
+# At INT2 it pays to protect the first/last layer. Tune per-model.
+skip_patterns: []
+target_layers: [Conv1d, Conv2d, Linear]
+# Inert for weight-only specs (calibration is skipped at runtime),
+# but kept for CLI-override uniformity across bit widths.
+calibration:
+  num_batches: 32

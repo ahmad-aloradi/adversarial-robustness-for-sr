@@ -1,0 +1,15 @@
+qat:
+  _target_: src.callbacks.quantization.qat.QATCallback
+  # Required — set via the experiment config (e.g. configs/experiment/quant/*).
+  # Wiring `+callbacks=[qat]` without overriding this will crash at compose
+  # time, which is the intent: silent defaults here were a footgun.
+  spec: ???
+  skip_patterns: []
+  target_layers: [Conv1d, Conv2d, Linear]
+  quantize_classifier: false
+  pretrained_ckpt_path: null
+  verbose: true
+
+quant_checkpoint_handler:
+  _target_: src.quantization.checkpoint_handler.QuantizedCheckpointHandler
+  verbose: false

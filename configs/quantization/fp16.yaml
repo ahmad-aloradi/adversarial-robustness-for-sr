@@ -1,0 +1,5 @@
+# FP16 (half precision).
+# For inference: ``quantize_model`` casts the encoder via ``.half()``.
+# For training: also set ``trainer.precision: 16-mixed``.
+spec: fp16
+quantize_classifier: false

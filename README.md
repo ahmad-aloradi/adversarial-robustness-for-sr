@@ -4,7 +4,8 @@
 <a href="https://pytorchlightning.ai/"><img alt="Lightning" src="https://img.shields.io/badge/-Lightning-792ee5?logo=pytorchlightning&logoColor=white"></a>
 <a href="https://hydra.cc/"><img alt="Config: Hydra" src="https://img.shields.io/badge/Config-Hydra-89b8cd"></a>
 <a href="https://github.com/gorodnitskiy/yet-another-lightning-hydra-template"><img alt="Template" src="https://img.shields.io/badge/-Lightning--Hydra--Template-017F2F?style=flat&logo=github&labelColor=gray"></a>
-[![arXiv](https://img.shields.io/badge/arXiv-2507.12081-orange)](https://arxiv.org/pdf/2507.12081)<br>
+[![IEEE](https://img.shields.io/badge/IEEE-VoxATack-blue)](https://ieeexplore.ieee.org/document/11230920)<br>
+[![arXiv](https://img.shields.io/badge/arXiv-Adaptive_Regularization_for_Sparsity_Control-orange)](https://arxiv.org/pdf/2605.07892)<br>
 
 ## Description
 
@@ -14,11 +15,12 @@ This repository bundles our research effort on **robust and efficient speaker re
 
 The framework builds on [PyTorch Lightning](https://github.com/Lightning-AI/lightning) and [Hydra](https://github.com/facebookresearch/hydra) via [this template](https://github.com/gorodnitskiy/yet-another-lightning-hydra-template), which lets us compose experiments with declarative configs. Datasets live under `configs/datamodule/datasets` and include ready-made recipes for `voxceleb`, `cnceleb`, `librispeech`, and `vpc` (VoicePrivacy).
  
-In addition, we also ship two compression techniques:
+In addition, we also ship three compression techniques:
 1. **Bregman Learning Framework** – adaptive regularization that induces sparsity during training (based on [Bungert et al. 2022](https://www.jmlr.org/papers/volume23/21-0545/21-0545.pdf) and the [TimRoith/BregmanLearning](https://github.com/TimRoith/BregmanLearning/tree/main/notebooks) reference implementation).
 2. **Magnitude-Based Pruning** – structured or unstructured pruning with schedulers, checkpoint-safe masks, and deployment tooling.
+3. **Quantization** – Brevitas-backed post-training quantization (PTQ), quantization-aware training (QAT), and FP16 inference cast, with bit-width specs from INT8 down to INT1.
 
-📖 The compression was designed to experiment with the speaker recogntion models. However, they are implemented as Lightning callbacks, rendering their use flexible to other tasks. Learn how to enable these methods in **[docs/pruning.md](docs/pruning.md)**.
+📖 The compression was designed to experiment with the speaker recogntion models. However, they are implemented as Lightning callbacks, rendering their use flexible to other tasks. Learn how to enable these methods in **[docs/pruning.md](docs/pruning.md)** and **[docs/quantization.md](docs/quantization.md)**.
 
 
 ## Quick start

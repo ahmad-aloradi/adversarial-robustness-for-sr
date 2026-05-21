@@ -152,6 +152,24 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
 
     utils.log_gpu_memory_metadata()
 
+    cb_cfg = cfg.get("callbacks") or {}
+
+    def _is_live(node):
+        return isinstance(node, DictConfig) and "_target_" in node
+
+    qat_cfg = cb_cfg.get("qat") if hasattr(cb_cfg, "get") else None
+    swa_cfg = (
+        cb_cfg.get("checkpoint_averaging") if hasattr(cb_cfg, "get") else None
+    )
+    if _is_live(qat_cfg) and _is_live(swa_cfg):
+        raise ValueError(
+            "callbacks.qat and callbacks.checkpoint_averaging cannot be "
+            "enabled together: averaging QAT iterates miscalibrates the "
+            "quantizer scales. Set callbacks.checkpoint_averaging=null, or "
+            "run SWA on an FP32 baseline and quantize the average via "
+            "scripts/quantize_ptq.py."
+        )
+
     # set seed for random number generators in pytorch, numpy and python.random
     if cfg.get("seed"):
         log.info(f"Seed everything with <{cfg.seed}>")

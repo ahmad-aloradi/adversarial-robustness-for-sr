@@ -10,6 +10,7 @@ defaults:
   - paths: default.yaml
   - extras: default.yaml
   - hydra: default.yaml
+  - quantization: none
 
 task_name: "eval"
 predict: False
@@ -28,3 +29,7 @@ tags: ["dev"]
 #   - If ckpt_path is set: use it directly; exp_dir is derived automatically.
 #   - If only exp_dir is set: use averaged checkpoint (use_avg_ckpt forced True).
 ckpt_path: null
+
+# Optional pre-quantized state dict (produced by scripts/quantize_ptq.py).
+# When set, it is overlaid on top of the FP32 weights after layer substitution.
+quantized_ckpt_path: null

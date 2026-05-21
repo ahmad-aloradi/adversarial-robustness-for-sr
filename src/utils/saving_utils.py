@@ -118,7 +118,7 @@ def save_state_dicts(
     trainer: Trainer,
     model: LightningModule,
     dirname: str,
-    symbols: int = 6,
+    symbols: int = 0,
     exceptions: Optional[Union[str, List[str]]] = None,
 ) -> None:
     """Save model state dicts for last and best checkpoints.
@@ -127,9 +127,13 @@ def save_state_dicts(
         trainer (Trainer): Lightning trainer.
         model (LightningModule): Lightning model.
         dirname (str): Saving directory.
-        symbols (int): Determines how many symbols should be cut in the
-            beginning of state dict keys. Default to 6 for cutting
-            Lightning name prefix.
+        symbols (int): Number of characters to cut from the beginning of every
+            state-dict key. Default 0 (keys are saved unmodified). A non-zero
+            value indiscriminately slices the first ``symbols`` chars off
+            every key — so it mangles real prefixes (e.g. ``audio_encoder.*``
+            with ``symbols=6`` becomes ``encoder.*``). Only set this when you
+            are certain every top-level key shares a common prefix you want
+            removed.
         exceptions (Union[str, List[str]], optional): Determines exceptions,
             i.e. substrings, which keys should not contain.  Default to [loss].
     """

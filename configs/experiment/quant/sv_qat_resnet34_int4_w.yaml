@@ -1,0 +1,36 @@
+# @package _global_
+#
+# QAT example: ResNet34 speaker verification at INT4 weight-only.
+# Start from the vanilla SV recipe, swap the encoder to wespeaker_resnet34,
+# and enable the QAT callback.
+#
+# Run:
+#   python src/train.py experiment=quant/sv_qat_resnet34_int4_w \
+#     callbacks.qat.pretrained_ckpt_path=<path/to/fp32/best_ckpt.pth>
+
+defaults:
+  - /experiment/sv/sv_vanilla
+  - override /quantization: int4_w
+  - override /callbacks: [default.yaml, qat.yaml]
+  - override /module/sv_model: wespeaker_resnet34.yaml
+
+callbacks:
+  qat:
+    spec: int4_w
+    # First conv and final embedding linear stay FP32 — standard low-precision
+    # protection (Choi et al., 2018). Qualnames are relative to the encoder
+    # `nn.Sequential`, where the wespeaker model sits at index 0.
+    skip_patterns:
+      - "^0\\.conv1$"   # ResNet34 first conv
+      - "^0\\.seg_1$"   # ResNet34 embedding projection
+    quantize_classifier: false
+    pretrained_ckpt_path: null  # set on the CLI when seeding from FP32
+  # SWA over QAT iterates miscalibrates quantizer scales (averaged weights vs.
+  # per-ckpt-calibrated scales). Disable here; recover SWA via FP32-then-PTQ.
+  checkpoint_averaging: null
+
+trainer:
+  # QAT typically needs only a short fine-tune from the pretrained baseline.
+  max_epochs: 10
+
+tags: ["quant", "qat", "resnet34", "int4_w"]

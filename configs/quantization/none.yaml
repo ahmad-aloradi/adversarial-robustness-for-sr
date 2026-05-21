@@ -1,0 +1,3 @@
+# Sentinel: quantization disabled. The eval/train flow checks
+# `quantization.spec in (None, "none")` and skips the substitution branch.
+spec: none

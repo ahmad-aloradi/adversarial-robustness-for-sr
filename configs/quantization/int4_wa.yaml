@@ -1,0 +1,6 @@
+spec: int4_wa
+quantize_classifier: false
+skip_patterns: []
+target_layers: [Conv1d, Conv2d, Linear]
+calibration:
+  num_batches: 32
