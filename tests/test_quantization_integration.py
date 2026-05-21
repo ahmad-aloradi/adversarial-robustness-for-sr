@@ -248,3 +248,150 @@ def test_load_quantized_state_dict_requires_sidecar(tmp_path: Path) -> None:
     fresh = _TinyQATModule()
     with pytest.raises(FileNotFoundError, match="quantization.yaml"):
         load_quantized_state_dict(fresh, state_path, cfg={"spec": "int4_w"})
+
+
+# ---------------------------------------------------------------------------
+# QATCallback: pretrained_ckpt_path seeds FP32 weights, strict on mismatch
+# ---------------------------------------------------------------------------
+
+
+def test_qat_pretrained_ckpt_seeds_fp32_weights(tmp_path: Path) -> None:
+    """`pretrained_ckpt_path` loads FP32 weights into the module before
+    substitution. After setup, the quantized layers' raw weight Parameters
+    must equal the saved FP32 weights (Brevitas's fake-quant happens during
+    forward, not at parameter assignment, so the raw weight is preserved).
+    """
+    pytest.importorskip("brevitas")
+    from src.callbacks.quantization.qat import QATCallback
+    from src.quantization import is_quantized
+
+    # FP32 baseline with deterministic weights.
+    torch.manual_seed(42)
+    fp32 = _TinyQATModule()
+    expected_conv1 = fp32.audio_encoder.encoder.conv1.weight.detach().clone()
+    expected_proj = fp32.audio_encoder.encoder.proj.weight.detach().clone()
+
+    ckpt_path = tmp_path / "fp32.ckpt"
+    torch.save({"state_dict": fp32.state_dict()}, ckpt_path)
+
+    # Fresh module with a different init, then seed it via QATCallback.
+    torch.manual_seed(999)
+    fresh = _TinyQATModule()
+    callback = QATCallback(
+        spec="int8_w",
+        pretrained_ckpt_path=str(ckpt_path),
+        verbose=False,
+    )
+    callback.setup(trainer=None, pl_module=fresh, stage="fit")
+
+    assert is_quantized(fresh), "setup did not substitute"
+    actual_conv1 = fresh.audio_encoder.encoder.conv1.weight.detach()
+    actual_proj = fresh.audio_encoder.encoder.proj.weight.detach()
+    assert torch.allclose(actual_conv1, expected_conv1), (
+        "pretrained_ckpt_path did not seed conv1.weight from the FP32 ckpt."
+    )
+    assert torch.allclose(actual_proj, expected_proj), (
+        "pretrained_ckpt_path did not seed proj.weight from the FP32 ckpt."
+    )
+
+
+def test_qat_pretrained_ckpt_strict_raises_on_key_mismatch(
+    tmp_path: Path,
+) -> None:
+    """A pretrained ckpt that doesn't match the module's key set must raise
+    under the new strict=True contract — not silently drop the missing keys.
+    """
+    pytest.importorskip("brevitas")
+    from src.callbacks.quantization.qat import QATCallback
+
+    # Save a state dict with only one key — missing everything else.
+    bad_state = {
+        "audio_encoder.encoder.conv1.weight": torch.randn(4, 1, 3),
+    }
+    ckpt_path = tmp_path / "bad.ckpt"
+    torch.save({"state_dict": bad_state}, ckpt_path)
+
+    fresh = _TinyQATModule()
+    callback = QATCallback(
+        spec="int8_w",
+        pretrained_ckpt_path=str(ckpt_path),
+        verbose=False,
+    )
+    with pytest.raises(RuntimeError, match="Missing key"):
+        callback.setup(trainer=None, pl_module=fresh, stage="fit")
+
+
+# ---------------------------------------------------------------------------
+# QATCallback: on_load_checkpoint refuses incoherent resumes
+# ---------------------------------------------------------------------------
+
+
+def test_qat_on_load_checkpoint_spec_mismatch_raises(tmp_path: Path) -> None:
+    """Resuming a QAT checkpoint trained at one spec under a callback
+    configured for a different spec must raise — silently substituting the
+    callback's spec while loading the ckpt's spec would corrupt training.
+    """
+    pytest.importorskip("brevitas")
+    from src.callbacks.quantization.qat import QATCallback
+
+    ckpt = {
+        "qat_callback_state": {
+            "spec": "int4_w",
+            "skip_patterns": [],
+            "target_layers": None,
+            "quantize_classifier": False,
+            "substituted": [],
+        },
+        "state_dict": {},
+    }
+
+    fresh = _TinyQATModule()
+    callback = QATCallback(spec="int8_w", verbose=False)
+    callback.setup(trainer=None, pl_module=fresh, stage="fit")
+
+    with pytest.raises(ValueError, match="spec mismatch"):
+        callback.on_load_checkpoint(
+            trainer=None, pl_module=fresh, checkpoint=ckpt
+        )
+
+
+def test_qat_on_load_checkpoint_missing_state_after_setup_raises(
+    tmp_path: Path,
+) -> None:
+    """Resuming an FP32-only ckpt after QAT setup already ran is a config
+    error — silently loading FP32 weights into substituted layers would
+    leave the module half-quantized.
+    """
+    pytest.importorskip("brevitas")
+    from src.callbacks.quantization.qat import QATCallback
+
+    fresh = _TinyQATModule()
+    callback = QATCallback(spec="int8_w", verbose=False)
+    callback.setup(trainer=None, pl_module=fresh, stage="fit")
+
+    ckpt = {"state_dict": {}}  # no qat_callback_state
+
+    with pytest.raises(RuntimeError, match="qat_callback_state"):
+        callback.on_load_checkpoint(
+            trainer=None, pl_module=fresh, checkpoint=ckpt
+        )
+
+
+def test_qat_on_load_checkpoint_no_state_no_setup_is_noop(
+    tmp_path: Path,
+) -> None:
+    """Before any setup has run, a checkpoint without qat_callback_state is
+    benign (the callback simply has nothing to restore) — must not raise.
+    Protects e.g. inference-only flows that hand a ckpt to the callback.
+    """
+    pytest.importorskip("brevitas")
+    from src.callbacks.quantization.qat import QATCallback
+
+    fresh = _TinyQATModule()
+    callback = QATCallback(spec="int8_w", verbose=False)
+    # No setup() call → callback._applied is False.
+
+    callback.on_load_checkpoint(
+        trainer=None, pl_module=fresh, checkpoint={"state_dict": {}}
+    )
+    # Reached without raising.

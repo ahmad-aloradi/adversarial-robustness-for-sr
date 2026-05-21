@@ -134,17 +134,54 @@ class QATCallback(Callback):
         pl_module: LightningModule,
         checkpoint: Dict[str, Any],
     ) -> None:
-        # Apply substitution before Lightning loads the state dict so the
-        # quantizer-internal buffers in the checkpoint have matching targets.
+        """Restore QAT substitution before Lightning loads the state dict.
+
+        Fail-loud contract:
+
+        * If the checkpoint has no ``qat_callback_state`` but ``setup`` has
+          already substituted, refuse — resuming a non-QAT ckpt onto a
+          substituted module would silently train a half-quantized model.
+        * If the saved spec differs from this callback's ``spec_name``,
+          raise. The user must reconfigure the callback rather than have
+          the spec silently flip.
+        * If the module is already quantized when we get here (the standard
+          resume path where ``setup`` substituted with the matching spec),
+          fall through with no further work — Lightning will overlay the
+          saved weights right after this hook returns.
+        """
         state = checkpoint.get("qat_callback_state")
         if state is None:
+            if self._applied:
+                raise RuntimeError(
+                    f"QATCallback[{self.spec_name}]: resumed checkpoint "
+                    "lacks `qat_callback_state`. The callback already "
+                    "substituted layers at setup-time, so reloading FP32 "
+                    "weights here would produce a half-quantized model. "
+                    "Either resume from a QAT-trained ckpt, or seed from "
+                    "FP32 via `pretrained_ckpt_path=` and start a fresh run."
+                )
             return
+
+        saved_spec = state["spec"]
+        if saved_spec != self.spec_name:
+            raise ValueError(
+                f"QATCallback spec mismatch: this callback is configured "
+                f"with spec={self.spec_name!r}, but the resumed checkpoint "
+                f"was trained with spec={saved_spec!r}. Reconfigure the "
+                "callback to match the checkpoint (or retrain from scratch)."
+            )
+
         if is_quantized(pl_module):
+            # `setup` already substituted with the matching spec — nothing
+            # more to do; the upcoming state-dict load will overlay weights.
             return
+
+        # Fresh module (no setup): substitute using the saved cfg so the
+        # state dict's quant-buffer keys have matching targets.
         quantize_model(
             pl_module,
             cfg={
-                "spec": state["spec"],
+                "spec": saved_spec,
                 "skip_patterns": state["skip_patterns"],
                 "target_layers": state["target_layers"],
                 "quantize_classifier": state["quantize_classifier"],
