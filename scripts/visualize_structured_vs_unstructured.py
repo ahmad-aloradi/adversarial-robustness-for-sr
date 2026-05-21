@@ -133,7 +133,7 @@ def find_best_ckpt(exp_dir: str, info: Optional[Dict] = None) -> Optional[str]:
     return os.path.join(ckpt_dir, files[0])
 
 
-def extract_pruned_layers(ckpt_path: str) -> List[Dict]:
+def extract_pruned_layers(ckpt_path: str, *, include_all: bool = False) -> List[Dict]:
     """Walk a Lightning checkpoint and return one record per pruned layer.
 
     Handles both representations:
@@ -150,67 +150,98 @@ def extract_pruned_layers(ckpt_path: str) -> List[Dict]:
         "mask":   Tensor,      # bool — True where retained, shape == weight.shape
       }
 
-    Tensors with ndim < 2 (BN gains, biases) are skipped — sparsity stats
-    only make sense for matrix / kernel tensors.
+    Tensors with ndim < 2 (BN gains, biases) are skipped unless
+    ``include_all=True``, in which case 1-D weight tensors (BN scale) are
+    also included so layerwise plots show every backbone layer. This applies
+    to both baked-in weights and pruning-hooked params; a 1-D pruning hook
+    being skipped is always logged at WARNING.
+
+    If ``include_all=True``, dense weight tensors (no pruning hook and no
+    baked-in zeros) are also returned with an all-True mask.
     """
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     sd = ckpt.get("state_dict", ckpt)
 
-    # Pair up _orig / _mask first so plain weight keys don't double-count.
+    # Pair up _orig / _mask so we can identify pruning-hooked parameters.
     orig_keys = {k[: -len("_orig")] for k in sd if k.endswith("_orig")}
     mask_keys = {k[: -len("_mask")] for k in sd if k.endswith("_mask")}
     paired = orig_keys & mask_keys
+    # Keys that belong to paired layers — skip in the plain-weight branch.
+    skip_keys = paired | {b + "_orig" for b in paired} | {b + "_mask" for b in paired}
 
     layers: List[Dict] = []
 
-    for base in sorted(paired):
-        w = sd[base + "_orig"].detach().to(torch.float32)
-        m = sd[base + "_mask"].detach().to(torch.float32)
-        if w.ndim < 2:
+    # Single pass in state_dict order (= model topology order).
+    # Two cases per key:
+    #   A) ends with _orig and has a matching _mask  → pruning-hooked weight
+    #   B) ends with .weight and is not a hooked key → baked-in / dense weight
+    for k, v in sd.items():
+        if not isinstance(v, torch.Tensor):
             continue
-        layers.append(
-            dict(
+
+        # ── A: pruning-hooked parameter ───────────────────────────────────
+        if k.endswith("_orig"):
+            base = k[: -len("_orig")]
+            if base not in paired:
+                continue
+            w = v.detach().to(torch.float32)
+            m = sd[base + "_mask"].detach().to(torch.float32)
+            # 1-D pruning hooks (e.g. BN gains) are unusual. Skipping them
+            # silently would understate reported sparsity, so be loud: drop
+            # them only when the user hasn't asked for --all-layers, and
+            # always log that it happened.
+            if w.ndim < 2:
+                if not include_all:
+                    log.warning(
+                        "Skipping 1-D pruning-hooked param %s (shape=%s); "
+                        "pass --all-layers to include it.",
+                        base, tuple(w.shape),
+                    )
+                    continue
+                log.info("Including 1-D pruning-hooked param %s (shape=%s)",
+                         base, tuple(w.shape))
+            layers.append(dict(
                 name=base,
                 kind=_kind_of(w),
                 shape=tuple(w.shape),
                 weight=(w * m),
                 mask=(m != 0),
-            )
-        )
+            ))
+            continue
 
-    # Also accept already-baked weights as pruned if a substantial fraction
-    # is exactly zero. This covers checkpoints that ran make_pruning_permanent.
-    handled = paired | {b + "_orig" for b in paired} | {b + "_mask" for b in paired}
-    for k, v in sd.items():
-        if k in handled or not isinstance(v, torch.Tensor) or v.ndim < 2:
+        # ── B: baked-in or dense weight ───────────────────────────────────
+        if k in skip_keys or k.endswith("_mask"):
             continue
         if not k.endswith(".weight"):
             continue
-        sparsity = (v.abs() < ZERO_TOL).float().mean().item()
-        if sparsity < 0.01:  # treat as dense
+        # BN (ndim == 1) is included only when include_all=True; always skip
+        # scalars (ndim == 0).
+        if v.ndim == 0 or (v.ndim < 2 and not include_all):
             continue
-        layers.append(
-            dict(
-                name=k,
-                kind=_kind_of(v),
-                shape=tuple(v.shape),
-                weight=v.to(torch.float32),
-                mask=(v.abs() >= ZERO_TOL),
-            )
-        )
+        v = v.detach().to(torch.float32)
+        sparsity = (v.abs() < ZERO_TOL).float().mean().item()
+        if sparsity < 0.01 and not include_all:  # treat as dense
+            continue
+        layers.append(dict(
+            name=k,
+            kind=_kind_of(v),
+            shape=tuple(v.shape),
+            weight=v,
+            mask=(v.abs() >= ZERO_TOL),
+        ))
 
     return layers
 
 
 def _kind_of(t: torch.Tensor) -> str:
-    return {2: "linear", 3: "conv1d", 4: "conv2d", 5: "conv3d"}.get(t.ndim, "other")
+    return {1: "bn", 2: "linear", 3: "conv1d", 4: "conv2d", 5: "conv3d"}.get(t.ndim, "other")
 
 
 # ---------------------------------------------------------------------------
 # Layer-level sparsity statistics
 # ---------------------------------------------------------------------------
 
-def layer_stats(weight: torch.Tensor, mask: torch.Tensor) -> Dict:
+def layer_stats(mask: torch.Tensor) -> Dict:
     """Compute the per-layer numbers used by every plot.
 
     Conventions
@@ -226,6 +257,10 @@ def layer_stats(weight: torch.Tensor, mask: torch.Tensor) -> Dict:
     variances near zero.
     """
     z = (~mask).float()  # 1 where zero, 0 where retained
+    # BN weight vectors are 1-D; treat as a single-column matrix so the
+    # row/col logic below works uniformly (col_dim=1 → no column structure).
+    if z.ndim == 1:
+        z = z.unsqueeze(1)
     row_dim = z.shape[0]
     col_dim = z.shape[1]
 
@@ -375,7 +410,7 @@ def plot_layerwise_sparsity(
     ax.set_yticklabels(names, fontsize=7)
     ax.invert_yaxis()
     ax.set_xlim(0, 100)
-    s_metric = r"$\mathsf{{s}}^*={rate}\%$" if plt.rcParams.get("text.usetex") else "Sparsity (%)"
+    s_metric = r"$\mathsf{{s}}^*[\%]$" if plt.rcParams.get("text.usetex") else "Sparsity (%)"
     ax.set_xlabel(f"{s_metric}")
     ax.set_title(title, fontsize=9)
 
@@ -435,7 +470,7 @@ def plot_layerwise_sparsity_nparams(layers: List[Dict], out_path: str, title: st
     ax.set_yticklabels(names, fontsize=7)
     ax.invert_yaxis()
     ax.set_xlim(0, 100)
-    s_metric = r"$\mathsf{{s}}^*={rate}\%$" if plt.rcParams.get("text.usetex") else "Sparsity (%)"
+    s_metric = r"$\mathsf{{s}}^*[\%]$" if plt.rcParams.get("text.usetex") else "Sparsity (%)"
     ax.set_xlabel(f"{s_metric}")
     ax.set_title(title, fontsize=9)
 
@@ -641,7 +676,7 @@ def measure_rtf(exp_dir: str, ckpt_path: str, layers: List[Dict],
             continue
         enc_state[full[len("audio_encoder."):]] = layer["weight"]
 
-    missing, unexpected = encoder.load_state_dict(enc_state, strict=False)
+    missing, _ = encoder.load_state_dict(enc_state, strict=False)
     if missing:
         log.debug("RTF: %d missing keys when loading encoder for %s",
                   len(missing), exp_dir)
@@ -1238,7 +1273,8 @@ def plot_rtf_vs_sparsity(summaries: List[Dict], out_path: str) -> None:
 
 def process_experiment(exp_dir: str, info: Dict, out_root: str,
                        rtf_args: Optional[Dict],
-                       *, annotate_layerwise: bool = False) -> Optional[Dict]:
+                       *, annotate_layerwise: bool = False,
+                       include_all_layers: bool = False) -> Optional[Dict]:
     ckpt = find_best_ckpt(exp_dir, info=info)
     if ckpt is None:
         log.warning("No checkpoint found in %s — skipping", exp_dir)
@@ -1246,7 +1282,7 @@ def process_experiment(exp_dir: str, info: Dict, out_root: str,
     log.info("→ %s", info["dirname"])
     log.info("   ckpt: %s", os.path.relpath(ckpt, exp_dir))
 
-    layers = extract_pruned_layers(ckpt)
+    layers = extract_pruned_layers(ckpt, include_all=include_all_layers)
     if not layers:
         log.warning("No prunable layers found in %s — recording as dense baseline",
                     info["dirname"])
@@ -1254,7 +1290,7 @@ def process_experiment(exp_dir: str, info: Dict, out_root: str,
     enriched = []
     for l in layers:
         l = dict(l)
-        l["stats"] = layer_stats(l["weight"], l["mask"])
+        l["stats"] = layer_stats(l["mask"])
         enriched.append(l)
 
     agg = aggregate_stats(enriched)
@@ -1375,6 +1411,14 @@ def main():
              "row/column fractions.",
     )
     ap.add_argument(
+        "--all-layers", dest="all_layers",
+        action="store_true",
+        default=False,
+        help="Include dense weight layers (no pruning hook, no baked-in zeros) "
+             "alongside the pruned ones, so layerwise plots show every "
+             "backbone layer.",
+    )
+    ap.add_argument(
         "--layerwise-ylim", dest="layerwise_ylim",
         nargs=2, type=float, default=None, metavar=("LO", "HI"),
         help="Override y-axis limits for layerwise plots in percent. "
@@ -1422,14 +1466,11 @@ def main():
 
     summaries: List[Dict] = []
     for exp_dir, info in experiments:
-        try:
-            s = process_experiment(
-                exp_dir, info, args.output, rtf_args,
-                annotate_layerwise=args.annotate_layerwise,
-            )
-        except Exception as e:
-            log.exception("Failed on %s: %s", info["dirname"], e)
-            continue
+        s = process_experiment(
+            exp_dir, info, args.output, rtf_args,
+            annotate_layerwise=args.annotate_layerwise,
+            include_all_layers=args.all_layers,
+        )
         if s is not None:
             summaries.append(s)
 

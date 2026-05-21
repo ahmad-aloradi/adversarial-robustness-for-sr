@@ -19,7 +19,7 @@ experiment_fixed='sv_bregman_*breg_fixed-wespeaker'
 
 # for eval_data in 'cnceleb' 'multi_sv'; do
 #     for eval_model in 'resnet34' 'ecapa_tdnn'; do
-for eval_data in 'multi_sv'; do
+for eval_data in multi_sv; do
     for eval_model in resnet34; do
 
         sparsity_rate_test='sr[7-9][0-9]' #  'sr75' 'sr90', 'sr95', 'sr99'
@@ -93,9 +93,7 @@ for eval_data in 'multi_sv'; do
             "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr75*${suffix_adabreg}"
             "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_adabreg}"
             "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_adabreg}"
-            "sv_bregman_adabreg_fixed*${eval_model}*${eval_data}*sr75*${suffix_fixed}"
-            "sv_bregman_adabreg_fixed*${eval_model}*${eval_data}*sr90*${suffix_fixed}"
-            "sv_bregman_adabreg_fixed*${eval_model}*${eval_data}*sr99*${suffix_fixed}"
+            "sv_bregman_adabreg_fixed-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_fixed}"
             "sv_pruning_mag_unstruct*${eval_model}*${eval_data}*sr90*"
             )
         experiments_struct_vs_unstruct_mixed=(
@@ -189,18 +187,12 @@ for eval_data in 'multi_sv'; do
         # Structured vs Unstructured Sparsity Visualization
         ############################
         if [ "$stage_struct_vs_unstruct" = true ]; then
-            # python scripts/visualize_structured_vs_unstructured.py \
-            #     --base_dirs "${exp_dirs[@]}" \
-            #     --experiments ${experiments_struct_vs_unstruct_adabreg[@]} \
-            #     --output results/struct_vs_unstruct/${eval_data}/${eval_model}/adabreg \
-            #     --legend-mode split
-            #     # --rtf
-
             python scripts/visualize_structured_vs_unstructured.py \
                 --base_dirs "${exp_dirs[@]}" \
-                --experiments ${experiments_struct_vs_unstruct_mixed[@]} \
-                --output results/struct_vs_unstruct/${eval_data}/${eval_model}/mixed \
-                --legend-mode split
+                --experiments ${experiments_struct_vs_unstruct_linbreg[@]} \
+                --output results/struct_vs_unstruct/${eval_data}/${eval_model}/linbreg \
+                --legend-mode split \
+                # --all-layers
 
         fi
     done
@@ -230,14 +222,22 @@ for eval_data in 'multi_sv'; do
         #     "sv_wespeaker-*ecapa_tdnn*${eval_data}*"
         #     )
         experiments_cross_model=(
-            "sv_bregman_*adabreg-wespeaker*resnet34*${eval_data}*${cross_model_sparsity}*regl1_conv-alpha0.25-f50"
-            "sv_bregman_*linbreg-wespeaker*resnet34*${eval_data}*${cross_model_sparsity}*regl1_conv"
-            "${experiment_fixed}*resnet34*${eval_data}*${cross_model_sparsity}*regl1_conv"
-            # "sv_bregman_*adabreg-wespeaker*ecapa_tdnn*${eval_data}*${cross_model_sparsity}*"
-            # "sv_bregman_*linbreg-wespeaker*ecapa_tdnn*${eval_data}*${cross_model_sparsity}*"
-            # "${experiment_fixed}*ecapa_tdnn*${eval_data}*${cross_model_sparsity}*"
-            "sv_vanilla-*resnet34*${eval_data}*"
-            "sv_wespeaker-*resnet34*${eval_data}*"
+            #   # ECAPA-TDNN experiments
+            "sv_bregman_*adabreg-wespeaker*ecapa_tdnn*${eval_data}*${cross_model_sparsity}*"
+            "sv_bregman_*linbreg-wespeaker*ecapa_tdnn*${eval_data}*${cross_model_sparsity}*"
+            # "sv_bregman_*adabreg-wespeaker*ecapa_tdnn*${eval_data}*sr75*"
+            # "sv_bregman_*linbreg-wespeaker*ecapa_tdnn*${eval_data}*sr75*"
+            "${experiment_fixed}*ecapa_tdnn*${eval_data}*${cross_model_sparsity}*"
+            #   # ResNet34 experiments
+            # "sv_bregman_adabreg-wespeaker*resnet34*${eval_data}*${cross_model_sparsity}*${suffix_adabreg}"
+            # "sv_bregman_linbreg-wespeaker*resnet34*${eval_data}*${cross_model_sparsity}*${suffix_linbreg}"
+            # "sv_bregman_adabreg-wespeaker*resnet34*${eval_data}*sr75*${suffix_adabreg}"
+            # "sv_bregman_linbreg-wespeaker*resnet34*${eval_data}*sr75*${suffix_linbreg}"
+            # "sv_bregman_adabreg_fixed-wespeaker*resnet34*${eval_data}*${cross_model_sparsity}*${suffix_linbreg}"
+            # "sv_bregman_linbreg_fixed-wespeaker*resnet34*${eval_data}*${cross_model_sparsity}*${suffix_linbreg}"
+            # # Baselines
+            # "sv_vanilla-*resnet34*${eval_data}*"
+            # "sv_wespeaker-*resnet34*${eval_data}*"
             # "sv_vanilla-*ecapa_tdnn*${eval_data}*"
             # "sv_wespeaker-*ecapa_tdnn*${eval_data}*"
             )
