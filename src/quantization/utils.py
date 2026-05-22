@@ -2,21 +2,40 @@
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    # Make `src.*` imports below resolve when running this file directly
+    # (`python src/quantization/utils.py`) for the smoke block at EOF.
+    import pyrootutils
+
+    pyrootutils.setup_root(__file__, indicator="pyproject.toml", pythonpath=True)
+
 from typing import Optional
 
 from torch import nn
 
 from src.quantization.bit_specs import BitSpec, QuantMode
 
+# Extend this table when adding a new dtype path; we fail loudly on an 
+# unknown key, e.g., a bfloat16 buffer counted as FP32).
+_DTYPE_BITS: dict[str, int] = {
+    "torch.float32": 32,
+    "torch.float16": 16,
+    "torch.bfloat16": 16,
+    "torch.int8": 8,
+    "torch.int32": 32,
+    "torch.int64": 64,  # BatchNorm's `num_batches_tracked` buffer
+    "torch.bool": 1,
+    "torch.uint8": 8,
+}
+
 
 def _dtype_bits(dtype_str: str) -> int:
-    return {
-        "torch.float32": 32,
-        "torch.float16": 16,
-        "torch.bfloat16": 16,
-        "torch.int8": 8,
-        "torch.int32": 32,
-    }.get(dtype_str, 32)
+    if dtype_str not in _DTYPE_BITS:
+        raise KeyError(
+            f"Unknown dtype for bit-budget accounting: {dtype_str!r}. "
+            f"Add it to _DTYPE_BITS in src/quantization/utils.py."
+        )
+    return _DTYPE_BITS[dtype_str]
 
 
 def compute_model_bits(
@@ -116,3 +135,18 @@ def describe_spec(spec: BitSpec) -> str:
         return "FP16 (half precision)"
     mode = "weight+activation" if spec.mode is QuantMode.WEIGHT_ACT else "weight-only"
     return f"INT{spec.bit_width} ({mode})"
+
+
+if __name__ == "__main__":
+    # Smoke: bit-budget on a tiny FP32 model, then again as INT4.
+    from src.quantization.bit_specs import resolve_spec
+    from src.quantization.manager import QuantizationManager
+
+    fp32 = nn.Sequential(nn.Conv1d(4, 8, 3), nn.Linear(8, 2))
+    quant = nn.Sequential(nn.Conv1d(4, 8, 3), nn.Linear(8, 2))
+    spec = resolve_spec("int4_w")
+    QuantizationManager(spec).substitute(quant)
+
+    print(f"fp32: {compute_model_bits(fp32)}")
+    print(f"int4_w: {compute_model_bits(quant, spec=spec)}")
+    print(f"compression_ratio={compression_ratio(fp32, quant, spec):.2f}x")

@@ -7,6 +7,13 @@ layers with their Brevitas counterparts, while respecting ``skip_patterns``
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    # Make `src.*` imports below resolve when running this file directly
+    # (`python src/quantization/manager.py`) for the smoke block at EOF.
+    import pyrootutils
+
+    pyrootutils.setup_root(__file__, indicator="pyproject.toml", pythonpath=True)
+
 import re
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -20,7 +27,9 @@ from src.utils import get_pylogger
 log = get_pylogger(__name__)
 
 
-# Layer classes that the manager knows how to substitute.
+# The three leaf op types Brevitas ships drop-in quant counterparts for
+# (QuantConv1d / QuantConv2d / QuantLinear). Adding a new entry here without
+# also extending `_build_quant_layer` below will hit the TypeError fallback.
 _SUPPORTED_LAYERS: tuple[type[nn.Module], ...] = (
     nn.Conv1d,
     nn.Conv2d,
@@ -206,13 +215,7 @@ class QuantizationManager:
     # ---- Convenience -----------------------------------------------------
 
     def count_quant_layers(self, module: nn.Module) -> int:
-        """Count Brevitas quant layers currently in ``module`` (post-sub).
-
-        Brevitas is required by every code path that constructs a
-        ``QuantizationManager``; we re-import here only to access the layer
-        types. Missing-brevitas should never be silently absorbed into a
-        zero count — that hides "quantization didn't actually happen" bugs.
-        """
+        """Count Brevitas quant layers currently in ``module`` (post-sub)."""
         import brevitas.nn as qnn
 
         quant_types = (qnn.QuantConv1d, qnn.QuantConv2d, qnn.QuantLinear)
@@ -226,3 +229,18 @@ def iter_supported_layers(
     for name, child in module.named_modules():
         if isinstance(child, _SUPPORTED_LAYERS):
             yield name, child
+
+
+if __name__ == "__main__":
+    # Smoke: substitute a tiny Conv1d+Linear stack and report counts.
+    from src.quantization.bit_specs import resolve_spec
+
+    model = nn.Sequential(nn.Conv1d(4, 8, 3, padding=1), nn.Linear(8, 2))
+    mgr = QuantizationManager(resolve_spec("int8_w"))
+    report = mgr.substitute(model)
+    n_quant = mgr.count_quant_layers(model)
+    assert n_quant == 2, f"expected 2 quant layers, got {n_quant}"
+    print(
+        f"smoke ok: substituted={len(report.substituted)}, "
+        f"skipped={len(report.skipped)}, count_quant_layers={n_quant}"
+    )

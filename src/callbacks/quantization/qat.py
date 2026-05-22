@@ -10,6 +10,13 @@ so the two compression stacks feel symmetric.
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    # Make `src.*` imports below resolve when running this file directly
+    # (`python src/callbacks/quantization/qat.py`) for the smoke block at EOF.
+    import pyrootutils
+
+    pyrootutils.setup_root(__file__, indicator="pyproject.toml", pythonpath=True)
+
 from typing import Any, Dict, List, Optional, Sequence
 
 import torch
@@ -73,7 +80,21 @@ class QATCallback(Callback):
     def setup(
         self, trainer: Trainer, pl_module: LightningModule, stage: str
     ) -> None:
+        log.info(
+            f"QATCallback init: spec={self.spec_name}, "
+            f"target_layers="
+            f"{self.target_layers or 'all (Conv1d/Conv2d/Linear)'}, "
+            f"skip_patterns={self.skip_patterns}, "
+            f"quantize_classifier={self.quantize_classifier}, "
+            f"pretrained_ckpt={self.pretrained_ckpt_path or 'none'}, "
+            f"stage={stage}"
+        )
+
         if self._applied:
+            log.info(
+                f"QATCallback[{self.spec_name}]: already applied "
+                "(setup() re-entered, e.g. fit→validate); skipping."
+            )
             return
         if is_quantized(pl_module):
             log.info(
@@ -134,21 +155,7 @@ class QATCallback(Callback):
         pl_module: LightningModule,
         checkpoint: Dict[str, Any],
     ) -> None:
-        """Restore QAT substitution before Lightning loads the state dict.
-
-        Fail-loud contract:
-
-        * If the checkpoint has no ``qat_callback_state`` but ``setup`` has
-          already substituted, refuse — resuming a non-QAT ckpt onto a
-          substituted module would silently train a half-quantized model.
-        * If the saved spec differs from this callback's ``spec_name``,
-          raise. The user must reconfigure the callback rather than have
-          the spec silently flip.
-        * If the module is already quantized when we get here (the standard
-          resume path where ``setup`` substituted with the matching spec),
-          fall through with no further work — Lightning will overlay the
-          saved weights right after this hook returns.
-        """
+        """Restore QAT substitution before Lightning loads the state dict."""
         state = checkpoint.get("qat_callback_state")
         if state is None:
             if self._applied:
@@ -160,6 +167,11 @@ class QATCallback(Callback):
                     "Either resume from a QAT-trained ckpt, or seed from "
                     "FP32 via `pretrained_ckpt_path=` and start a fresh run."
                 )
+            log.info(
+                f"QATCallback[{self.spec_name}] resume: checkpoint has no "
+                "`qat_callback_state` and setup() hasn't run — treating as "
+                "fresh FP32 load."
+            )
             return
 
         saved_spec = state["spec"]
@@ -174,10 +186,21 @@ class QATCallback(Callback):
         if is_quantized(pl_module):
             # `setup` already substituted with the matching spec — nothing
             # more to do; the upcoming state-dict load will overlay weights.
+            log.info(
+                f"QATCallback[{self.spec_name}] resume: module already "
+                "quantized with matching spec; Lightning will overlay "
+                f"weights ({len(state.get('substituted', []))} layers in "
+                "saved state)."
+            )
             return
 
         # Fresh module (no setup): substitute using the saved cfg so the
         # state dict's quant-buffer keys have matching targets.
+        log.info(
+            f"QATCallback[{self.spec_name}] resume: re-substituting from "
+            f"saved cfg (substituted={len(state.get('substituted', []))} "
+            "layers in saved state)."
+        )
         quantize_model(
             pl_module,
             cfg={
@@ -189,3 +212,24 @@ class QATCallback(Callback):
         )
         self._applied = True
         self._substituted = list(state.get("substituted", []))
+
+
+if __name__ == "__main__":
+    # Smoke: instantiate QATCallback and run setup() on a tiny module that
+    # exposes the `audio_encoder.encoder` path quantize_model expects.
+    from torch import nn as _nn
+
+    class _AE(_nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = _nn.Sequential(_nn.Conv1d(4, 8, 3, padding=1))
+
+    class _LM(_nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.audio_encoder = _AE()
+
+    cb = QATCallback("int8_w")
+    cb.setup(trainer=None, pl_module=_LM(), stage="fit")
+    assert cb._applied and cb._substituted, "setup did not apply substitution"
+    print(f"smoke ok: _applied={cb._applied}, substituted={cb._substituted}")

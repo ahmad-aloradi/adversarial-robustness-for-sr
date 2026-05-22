@@ -56,6 +56,9 @@ class BitSpec:
 def _make_int_specs() -> dict[str, BitSpec]:
     """Pre-register all integer bit-width × mode combinations."""
     specs: dict[str, BitSpec] = {}
+    # Standard INT bit widths supported by Brevitas. 8/4 use scale-learnable
+    # quantizers; 2/1 use const-scale (ternary/binary) — that asymmetry is
+    # handled in `weight_quantizer` / `act_quantizer` below and in calibrate.
     for bits in (8, 4, 2, 1):
         specs[f"int{bits}_w"] = BitSpec(
             name=f"int{bits}_w",
@@ -173,3 +176,16 @@ def act_quantizer(spec: BitSpec) -> Optional[Type[Any]]:
         return SignedBinaryActPerTensorConst
 
     raise ValueError(f"Unsupported bit_width: {spec.bit_width}")
+
+
+if __name__ == "__main__":
+    # Smoke: print every registered spec without needing Brevitas (the
+    # quantizer factories are lazy — only `resolve_spec` is exercised here).
+    for spec_name in sorted(BIT_SPECS):
+        spec = resolve_spec(spec_name)
+        print(
+            f"{spec.name:>8s}  bit_width={spec.bit_width:>2d}  "
+            f"mode={spec.mode.value:<11s}  is_fp16={spec.is_fp16}"
+        )
+    # This module has no `src.*` imports, so the file is runnable as
+    # `python src/quantization/bit_specs.py` with no path setup.

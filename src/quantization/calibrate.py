@@ -8,6 +8,13 @@ calibration context manager.
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    # Make `src.*` imports below resolve when running this file directly
+    # (`python src/quantization/calibrate.py`) for the smoke block at EOF.
+    import pyrootutils
+
+    pyrootutils.setup_root(__file__, indicator="pyproject.toml", pythonpath=True)
+
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -29,15 +36,25 @@ def _default_forward(model: nn.Module, batch: Any) -> torch.Tensor:
     if hasattr(model, "forward") and hasattr(batch, "audio"):
         out = model(batch)
         if isinstance(out, dict):
-            return out.get("embeds", next(iter(out.values())))
-        return out
-    return model(batch)
+            result = out.get("embeds", next(iter(out.values())))
+        else:
+            result = out
+    else:
+        result = model(batch)
+    # The activation observers only update when fed a Tensor — anything else
+    # (e.g. a python int from a loss-only return) silently no-ops the forward.
+    assert isinstance(result, torch.Tensor), (
+        f"_default_forward must return a Tensor for calibration observers "
+        f"to fit; got {type(result).__name__}. Pass a custom `forward_fn=` "
+        f"to calibrate() if your model returns a non-tensor."
+    )
+    return result
 
 
 def calibrate(
     model: nn.Module,
     dataloader: DataLoader,
-    num_batches: int = 32,
+    num_batches: int = 32,  # Brevitas-recommended PTQ default; overridable
     forward_fn: Optional[Callable[[nn.Module, Any], torch.Tensor]] = None,
     device: Optional[Union[str, torch.device]] = None,
     cfg: Optional[Union[DictConfig, dict]] = None,
@@ -69,6 +86,11 @@ def calibrate(
     """
     if cfg is not None and "num_batches" in cfg:
         num_batches = int(cfg["num_batches"])
+
+    assert num_batches > 0, (
+        f"PTQ calibration needs at least 1 batch, got num_batches="
+        f"{num_batches}. Set quantization.calibration.num_batches in config."
+    )
 
     try:
         from brevitas.graph.calibrate import calibration_mode
@@ -127,6 +149,10 @@ def calibrate(
             if ctx is not None:
                 ctx.__exit__(None, None, None)
 
+    assert consumed > 0, (
+        "Dataloader yielded no batches; activation observers were not fit. "
+        "Check that the calibration dataset is non-empty."
+    )
     log.info(f"PTQ calibration done after {consumed} batches.")
     return consumed
 
@@ -146,3 +172,19 @@ def _move_batch(batch: Any, device: Union[str, torch.device]) -> Any:
             if isinstance(val, torch.Tensor):
                 setattr(batch, attr, val.to(device))
     return batch
+
+
+if __name__ == "__main__":
+    # Smoke: substitute a tiny model and run a 1-batch calibration loop.
+    from src.quantization.manager import QuantizationManager
+
+    model = nn.Conv1d(4, 8, 3, padding=1)
+    QuantizationManager(resolve_spec("int8_wa")).substitute(model)
+    model._quantization_spec = "int8_wa"  # tag the calibrate() check expects
+
+    batch = {"audio": torch.randn(2, 4, 16)}
+    fwd = lambda m, b: m(b["audio"])  # noqa: E731
+
+    consumed = calibrate(model, [batch], num_batches=1, forward_fn=fwd)
+    assert consumed == 1, f"expected consumed=1, got {consumed}"
+    print(f"smoke ok: consumed={consumed} batch on int8_wa Conv1d")

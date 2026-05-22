@@ -731,3 +731,78 @@ def test_quantize_classifier_default_leaves_head_fp32() -> None:
     quantize_model(model, {"spec": "int8_w"})
     assert isinstance(model.classifier.fc, nn.Linear)
     assert type(model.classifier.fc).__name__ == "Linear"
+
+
+# ---------------------------------------------------------------------------
+# Boundary contract tests: each test pins one assert.
+# ---------------------------------------------------------------------------
+
+
+def test_calibrate_raises_on_zero_num_batches() -> None:
+    """num_batches=0 would leave activation observers uninitialised."""
+    pytest.importorskip("brevitas")
+
+    from src.quantization.calibrate import calibrate
+
+    model = TinyEncoderWrapper()
+    quantize_model(model, {"spec": "int8_wa"})
+    loader = DataLoader(TensorDataset(_random_input(2)), batch_size=2)
+    fwd = lambda m, b: m(b[0])  # noqa: E731
+
+    with pytest.raises(AssertionError, match="at least 1 batch"):
+        calibrate(model, loader, num_batches=0, forward_fn=fwd)
+
+
+def test_calibrate_raises_on_empty_dataloader() -> None:
+    """Empty dataloader yields zero batches → observers never fit."""
+    pytest.importorskip("brevitas")
+
+    from src.quantization.calibrate import calibrate
+
+    model = TinyEncoderWrapper()
+    quantize_model(model, {"spec": "int8_wa"})
+    empty_loader: list = []  # iterable that yields nothing
+    fwd = lambda m, b: m(b[0])  # noqa: E731
+
+    with pytest.raises(AssertionError, match="yielded no batches"):
+        calibrate(model, empty_loader, num_batches=4, forward_fn=fwd)
+
+
+def test_dtype_bits_raises_on_unknown_dtype() -> None:
+    """Unknown dtype must fail loud, not silently default to 32."""
+    from src.quantization.utils import _dtype_bits
+
+    with pytest.raises(KeyError, match="Unknown dtype"):
+        _dtype_bits("torch.complex64")
+
+
+def test_resolve_encoder_rejects_non_module() -> None:
+    """`audio_encoder.encoder` must be an nn.Module, not a config shim."""
+    pytest.importorskip("brevitas")
+
+    from src.quantization.wrap import _resolve_encoder
+
+    class _Stub:
+        pass
+
+    stub = _Stub()
+    stub.audio_encoder = _Stub()
+    stub.audio_encoder.encoder = {"not": "a module"}
+
+    with pytest.raises(AssertionError, match="must be nn.Module"):
+        _resolve_encoder(stub)  # type: ignore[arg-type]
+
+
+def test_default_forward_raises_on_non_tensor() -> None:
+    """`_default_forward` must reject non-tensor returns (e.g. python int)."""
+    from src.quantization.calibrate import _default_forward
+
+    class _IntReturningModel(nn.Module):
+        def forward(self, batch) -> int:  # type: ignore[override]
+            return 7
+
+    class _Batch:
+        audio = torch.zeros(1)
+
+    with pytest.raises(AssertionError, match="must return a Tensor"):
+        _default_forward(_IntReturningModel(), _Batch())

@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    # Make `src.*` imports below resolve when running this file directly
+    # (`python src/quantization/wrap.py`) for the smoke block at EOF.
+    import pyrootutils
+
+    pyrootutils.setup_root(__file__, indicator="pyproject.toml", pythonpath=True)
+
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
@@ -24,19 +31,19 @@ def _resolve_encoder(model: nn.Module) -> nn.Module:
     The framework wraps the encoder in ``EncoderWrapper`` so the front-end
     Fbank / normalizer can be applied uniformly. Quantization only targets
     the inner ``encoder`` submodule.
-
-    Raises
-    ------
-    AttributeError
-        When the model layout has neither an ``audio_encoder.encoder`` path
-        nor explicit confirmation that the bare model *is* the encoder.
-        Silent fallback would otherwise quantize the front-end Fbank /
-        normalizer alongside the encoder — a real correctness hazard.
     """
     if hasattr(model, "audio_encoder") and hasattr(
         model.audio_encoder, "encoder"
     ):
-        return model.audio_encoder.encoder
+        encoder = model.audio_encoder.encoder
+        # Guard against a non-nn.Module slipped in under that name (e.g. a
+        # config shim) — `QuantizationManager.substitute` would otherwise
+        # silently no-op since `named_modules()` skips non-modules.
+        assert isinstance(encoder, nn.Module), (
+            f"_resolve_encoder: model.audio_encoder.encoder must be "
+            f"nn.Module, got {type(encoder).__name__}."
+        )
+        return encoder
     raise AttributeError(
         "quantize_model: model has no `audio_encoder.encoder` path. "
         "The quantization stack only targets that submodule by design "
@@ -99,6 +106,10 @@ def quantize_model(
 
     # Tag the model so downstream tooling can detect quantization.
     model._quantization_spec = spec.name  # type: ignore[attr-defined]
+    assert is_quantized(model), (
+        "quantize_model finished but `_quantization_spec` tag is missing — "
+        "`is_quantized` and `load_quantized_state_dict` would both lie."
+    )
     return report
 
 
@@ -159,17 +170,9 @@ def load_quantized_state_dict(
 
     If the model has not already been quantized (no ``_quantization_spec``
     attribute) and ``cfg`` is provided, applies quantization first so the
-    state dict's quant-parameter keys can be matched.
-
-    Spec parity check
-    -----------------
-    Brevitas uses the same state-dict key layout for every bit width within
-    the same quantizer family, so a `strict=True` load *cannot* detect a
-    spec mismatch on its own (e.g. int4_w into an int8_w model). We
-    therefore require a sibling ``quantization.yaml`` next to ``path`` —
-    that file is written by ``scripts/quantize_ptq.py`` — and compare its
-    ``spec`` against the requested ``cfg`` (and the model's runtime tag).
-    Any disagreement raises ``ValueError``.
+    state dict's quant-parameter keys can be matched. A sibling
+    ``quantization.yaml`` next to ``path`` is required to verify spec
+    parity (Brevitas reuses the same key layout across bit widths).
     """
     path = Path(path)
 
@@ -267,3 +270,24 @@ def _validate_spec_parity(
             "Brevitas's identical key layout across bit widths makes this "
             "undetectable by strict-load; refusing to proceed."
         )
+
+
+if __name__ == "__main__":
+    # Smoke: build an EncoderWrapper-shaped stub and quantize int8_w.
+    class _AudioEncoderStub(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = nn.Sequential(nn.Conv1d(4, 8, 3, padding=1))
+
+    class _ModelStub(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.audio_encoder = _AudioEncoderStub()
+
+    model = _ModelStub()
+    report = quantize_model(model, cfg={"spec": "int8_w"})
+    assert is_quantized(model), "post-quantize is_quantized() returned False"
+    print(
+        f"smoke ok: substituted={len(report.substituted)}, "
+        f"_quantization_spec={model._quantization_spec}"
+    )
