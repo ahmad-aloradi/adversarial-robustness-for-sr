@@ -17,10 +17,8 @@ cross_model_sparsity='sr90'
 # Experiment selection criteria
 experiment_fixed='sv_bregman_*breg_fixed-wespeaker'
 
-# for eval_data in 'cnceleb' 'multi_sv'; do
-#     for eval_model in 'resnet34' 'ecapa_tdnn'; do
-for eval_data in multi_sv; do
-    for eval_model in resnet34; do
+for eval_data in 'cnceleb' 'multi_sv'; do
+    for eval_model in 'resnet34' 'ecapa_tdnn'; do
 
         sparsity_rate_test='sr[7-9][0-9]' #  'sr75' 'sr90', 'sr95', 'sr99'
         sparsity_rate='sr[7-9][0-9]' #  'sr75' 'sr90', 'sr95', 'sr99'
@@ -81,24 +79,37 @@ for eval_data in multi_sv; do
             "sv_vanilla-*${eval_model}*${eval_data}*"
             "sv_wespeaker-*${eval_model}*${eval_data}*"
             )
-        # For struct/unstruct comparison — Bregman at sr75/sr90/sr99; unstruct pinned to sr90 only
+        # For struct/unstruct comparison
+        # Swap-in config: edit the --experiments arg below (~line 197) to plot
+        # this set instead of _adabreg. Intentionally unused until then.
+        # shellcheck disable=SC2034
         experiments_struct_vs_unstruct_linbreg=(
-            "sv_bregman_linbreg-wespeaker*${eval_model}*${eval_data}*sr75*${suffix_linbreg}"
-            "sv_bregman_linbreg-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_linbreg}"
-            "sv_bregman_linbreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_linbreg}"
-            "sv_bregman_linbreg_fixed-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_fixed}"
-            "sv_pruning_mag_unstruct*${eval_model}*${eval_data}*sr90*"
+            # "sv_bregman_linbreg-wespeaker*${eval_model}*${eval_data}*sr75*${suffix_linbreg}"
+            # "sv_bregman_linbreg-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_linbreg}"
+            # "sv_bregman_linbreg-wespeaker*${eval_model}*${eval_data}*sr95*${suffix_linbreg}"
+            # "sv_bregman_linbreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_linbreg}"
+            "sv_bregman_linbreg-wespeaker*${eval_model}*${eval_data}*sr99*cls_scale2*"
+            # "sv_bregman_linbreg_fixed-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_fixed}"
             )
         experiments_struct_vs_unstruct_adabreg=(
-            "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr75*${suffix_adabreg}"
-            "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_adabreg}"
-            "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_adabreg}"
-            "sv_bregman_adabreg_fixed-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_fixed}"
-            "sv_pruning_mag_unstruct*${eval_model}*${eval_data}*sr90*"
+            # "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr75*${suffix_adabreg}"
+            # "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_adabreg}"
+            # "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr95*${suffix_adabreg}"
+            # "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_adabreg}"
+            "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr99*cls_scale2*"
+            # "sv_bregman_adabreg_fixed-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_fixed}"
             )
-        experiments_struct_vs_unstruct_mixed=(
-            "sv_bregman_linbreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_linbreg}"
-            "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_adabreg}"
+        # Swap-in config: edit the --experiments arg below (~line 197) to plot
+        # this set instead of _adabreg. Intentionally unused until then.
+        # shellcheck disable=SC2034
+        experiments_struct_vs_unstruct_pruning=(
+            "sv_pruning_mag_struct*${eval_model}*${eval_data}*sr75*"
+            "sv_pruning_mag_struct*${eval_model}*${eval_data}*sr90*"
+            "sv_pruning_mag_struct*${eval_model}*${eval_data}*sr95*"
+            "sv_pruning_mag_struct*${eval_model}*${eval_data}*sr99*"
+            "sv_pruning_mag_unstruct*${eval_model}*${eval_data}*sr75*"
+            "sv_pruning_mag_unstruct*${eval_model}*${eval_data}*sr90*"
+            "sv_pruning_mag_unstruct*${eval_model}*${eval_data}*sr95*"
             "sv_pruning_mag_unstruct*${eval_model}*${eval_data}*sr99*"
             )
 
@@ -117,7 +128,7 @@ for eval_data in multi_sv; do
         if [ "$stage_visualize" = true ]; then
             metrics=(
                 "EER" \
-                # "train_loss" 
+                # "train_loss"
                 "train/MulticlassAccuracy" "valid/MulticlassAccuracy" \
                 "bregman/global_lambda" "bregman/sparsity" #"sparsity"
                 # "lr" "train/margin"
@@ -189,8 +200,8 @@ for eval_data in multi_sv; do
         if [ "$stage_struct_vs_unstruct" = true ]; then
             python scripts/visualize_structured_vs_unstructured.py \
                 --base_dirs "${exp_dirs[@]}" \
-                --experiments ${experiments_struct_vs_unstruct_linbreg[@]} \
-                --output results/struct_vs_unstruct/${eval_data}/${eval_model}/linbreg \
+                --experiments ${experiments_struct_vs_unstruct_adabreg[@]} \
+                --output results/struct_vs_unstruct/${eval_data}/${eval_model}/adabreg \
                 --legend-mode split \
                 # --all-layers
 
