@@ -118,39 +118,35 @@ def test_lambda_stable_at_target():
     assert scheduler.get_lambda() == initial_lambda
 
 
-def test_lambda_respects_bounds():
-    """Lambda never exceeds min_lambda or max_lambda bounds."""
-    # Test max_lambda bound
-    scheduler_max = LambdaScheduler(
+def test_lambda_stays_positive():
+    """The asymmetric update keeps lambda > 0 and finite for any accel.
+
+    There is no min_lambda floor anymore: positivity comes from multiplying
+    when below target and dividing when above (never <= 0).
+    """
+    # Far below target: lambda grows but stays finite over a bounded run.
+    up = LambdaScheduler(
         target_sparsity=0.9,
         initial_lambda=1e-3,
-        min_lambda=1e-4,
-        max_lambda=10.0,
-        acceleration_factor=5.0,  # Aggressive to force hitting bounds
+        acceleration_factor=2.0,  # aggressive, would overflow a naive 1+a*gap
+        damping_zone=0.0,
+        max_relative_change=None,
     )
+    for _ in range(50):
+        up.step(0.1)
+    assert up.get_lambda() > 0.0 and math.isfinite(up.get_lambda())
 
-    # Call step many times with sparsity far below target
-    for _ in range(100):
-        scheduler_max.step(0.1)
-
-    # Assert: lambda never exceeds max_lambda
-    assert scheduler_max.get_lambda() <= 10.0
-
-    # Test min_lambda bound
-    scheduler_min = LambdaScheduler(
+    # Far above target: lambda shrinks geometrically but never reaches 0.
+    down = LambdaScheduler(
         target_sparsity=0.1,
         initial_lambda=1e-3,
-        min_lambda=1e-4,
-        max_lambda=10.0,
-        acceleration_factor=5.0,
+        acceleration_factor=2.0,
+        damping_zone=0.0,
+        max_relative_change=None,
     )
-
-    # Call step many times with sparsity far above target
-    for _ in range(100):
-        scheduler_min.step(0.99)
-
-    # Assert: lambda never goes below min_lambda
-    assert scheduler_min.get_lambda() >= 1e-4
+    for _ in range(50):
+        down.step(0.99)
+    assert down.get_lambda() > 0.0 and math.isfinite(down.get_lambda())
 
 
 def test_validation_rejects_invalid_sparsity():
@@ -597,9 +593,10 @@ def test_ramp_holds_final_after_ramp():
 def test_ramp_reaches_final_when_update_frequency_exceeds_ramp():
     """Degenerate ramp (update_frequency >= ramp_steps) still hits final.
 
-    The snap-to-update-frequency rounds interior positions down to 0, so the
-    target sits at the initial value across the whole ramp; the endpoint must
-    still land on the final target once the raw position reaches ramp_steps.
+    Aligning to the update_frequency interval rounds interior positions down to
+    0, so the target sits at the initial value across the whole ramp; the
+    endpoint must still land on the final target once raw position reaches
+    ramp_steps.
     """
     sched = LambdaScheduler(
         target_sparsity=0.9,
@@ -608,13 +605,13 @@ def test_ramp_reaches_final_when_update_frequency_exceeds_ramp():
         schedule_type="linear",
         ramp_granularity="step",
         initial_lambda=1.0,
-        update_frequency=50,  # >= ramp_steps (20): interior snaps round to 0
+        update_frequency=50,  # >= ramp_steps (20): interior positions round to 0
     )
     steps_per_epoch = 10
     sched.resolve_warmup_steps(steps_per_epoch)
     ramp_steps = 2 * steps_per_epoch  # 20
 
-    # Interior step: snapped position rounds to 0, target stays at initial.
+    # Interior step: aligned position rounds to 0, target stays at initial.
     sched.step(0.0, current_step=ramp_steps - 1)
     assert sched.target_sparsity == pytest.approx(0.0)
 
@@ -670,7 +667,7 @@ def test_ramp_state_roundtrip():
         initial_lambda=0.5,
     )
     fresh.load_state(state)
-    assert fresh._is_ramp is True
+    assert fresh._target_initial is not None
     assert fresh.final_target == 0.99
     assert fresh.target_sparsity == pytest.approx(sched.target_sparsity)
     assert fresh.lambda_value == sched.lambda_value
@@ -729,7 +726,7 @@ def test_scheduler_state_backcompat_scalar():
     }
     sched.load_state(legacy_state)
 
-    assert sched._is_ramp is False
+    assert sched._target_initial is None
     assert sched.target_sparsity == 0.9
     assert sched.final_target == 0.9
     assert sched.lambda_value == 0.42
@@ -752,7 +749,7 @@ def test_legacy_list_checkpoint_loads_as_fixed():
     }
     sched.load_state(legacy_state)
 
-    assert sched._is_ramp is False
+    assert sched._target_initial is None
     assert sched.final_target == 0.9
     assert sched.target_sparsity == 0.9
 
@@ -791,7 +788,7 @@ def test_ramp_rejects_invalid_config():
 
 def test_ramp_feasibility_accounts_for_warmup():
     """Feasibility guard counts warmup epochs before the ramp can start."""
-    # warmup_epochs (5) + epochs_to_ramp (10) = 15 > max_epochs (10) -> raise.
+    # warmup_epochs (5) + epochs_to_ramp (10) = 15 >= max_epochs (10) -> raise.
     sched = LambdaScheduler(
         target_sparsity=0.9,
         target_initial_sparsity=0.0,
@@ -801,10 +798,11 @@ def test_ramp_feasibility_accounts_for_warmup():
         initial_lambda=1.0,
         warmup_epochs=5,
     )
-    with pytest.raises(ValueError, match="the ramp cannot complete"):
+    with pytest.raises(ValueError, match="ramp can complete"):
         sched.verify_ramp_feasibility(max_epochs=10)
 
-    # No-warmup boundary: epochs_to_ramp == max_epochs is still feasible.
+    # No-warmup boundary: epochs_to_ramp == max_epochs now RAISES — the ramp
+    # only hits progress 1.0 at the first step of the (non-existent) epoch 10.
     no_warmup = LambdaScheduler(
         target_sparsity=0.9,
         target_initial_sparsity=0.0,
@@ -814,7 +812,11 @@ def test_ramp_feasibility_accounts_for_warmup():
         initial_lambda=1.0,
         warmup_epochs=0,
     )
-    no_warmup.verify_ramp_feasibility(max_epochs=10)
+    with pytest.raises(ValueError, match="ramp can complete"):
+        no_warmup.verify_ramp_feasibility(max_epochs=10)
+
+    # One extra epoch makes it feasible.
+    no_warmup.verify_ramp_feasibility(max_epochs=11)
 
 
 def test_step_requires_current_step_during_warmup():
@@ -840,111 +842,118 @@ def test_step_requires_current_step_during_warmup():
 
 
 # =============================================================================
-# Post-epoch relative-change clamp tests
+# Convergence-gated relative-change clamp tests
 # =============================================================================
+#
+# damping_zone doubles as the convergence band: the clamp activates only once
+# sparsity first reaches within damping_zone of the FINAL target. These tests
+# set damping_frequency_multiplier=1 / damping_acceleration_divisor=1 so the
+# damping zone affects ONLY the convergence latch, isolating the clamp.
 
 
-def test_max_relative_change_defaults_to_off():
-    """Without the kwarg, scheduler behaves identically to baseline."""
-    # Baseline scheduler — no clamp.
-    baseline = LambdaScheduler(
-        target_sparsity=0.9,
-        initial_lambda=1.0,
-        acceleration_factor=1.0,
-    )
-    # Put the baseline past epoch 1 so a clamp (if it existed) would fire.
-    baseline.resolve_warmup_steps(10)
+def test_max_relative_change_default_value():
+    """Default is 0.1 and does nothing before convergence."""
+    sched = LambdaScheduler(target_sparsity=0.9, initial_lambda=1.0)
+    assert sched.max_relative_change == 0.1
 
-    # Force a large update by reading sparsity far below target.
-    for step in range(20):
-        baseline.step(0.1, current_step=step)
-
+    sched.resolve_warmup_steps(10)
+    lambda_prev = sched.get_lambda()
+    # Sparsity far below target: not converged, so the clamp is inactive and a
+    # large (>10%) jump is allowed.
+    sched.step(0.1, current_step=1)
+    assert sched._converged is False
+    rel_change = (sched.get_lambda() - lambda_prev) / lambda_prev
     assert (
-        baseline.max_relative_change is None
-    ), "max_relative_change should default to None"
-    # Baseline should reach the max_lambda ceiling (confirming no clamp).
-    assert baseline.get_lambda() == pytest.approx(1e3), (
-        "default behavior must match pre-change implementation "
-        f"(expected max_lambda=1000, got {baseline.get_lambda()})"
-    )
+        rel_change > 0.1
+    ), f"pre-convergence clamp must not fire; got {rel_change:.3f}"
 
 
-def test_max_relative_change_inactive_during_first_epoch():
-    """Clamp does not fire while _last_step < _steps_per_epoch."""
-    scheduler = LambdaScheduler(
+def test_max_relative_change_inactive_before_convergence():
+    """Clamp does not fire while sparsity is outside the final-target band."""
+    sched = LambdaScheduler(
         target_sparsity=0.9,
         initial_lambda=1.0,
         acceleration_factor=1.0,
-        max_relative_change=0.05,  # 5% cap
+        damping_zone=0.05,
+        damping_frequency_multiplier=1,
+        damping_acceleration_divisor=1,
+        max_relative_change=0.05,
     )
-    steps_per_epoch = 10
-    scheduler.resolve_warmup_steps(steps_per_epoch)
+    sched.resolve_warmup_steps(10)
 
-    lambda_prev = scheduler.get_lambda()
-    # First update, during epoch 0: sparsity_diff=0.8, factor=1.8 -> +80%
-    scheduler.step(0.1, current_step=0)
-    lambda_new = scheduler.get_lambda()
+    lambda_prev = sched.get_lambda()
+    # |0.1 - 0.9| = 0.8 > 0.05 -> not converged.
+    sched.step(0.1, current_step=1)
+    lambda_new = sched.get_lambda()
 
-    # Without the clamp we expect ≈ 1.8; definitely well above the 5% cap.
+    assert sched._converged is False
     rel_change = (lambda_new - lambda_prev) / lambda_prev
     assert (
         rel_change > 0.05
-    ), f"epoch-0 clamp must not fire; got rel_change={rel_change:.3f}"
+    ), f"clamp must be inactive pre-convergence; got {rel_change:.3f}"
 
 
-def test_max_relative_change_active_after_first_epoch():
-    """Clamp caps |Δλ|/λ_prev at max_relative_change once past epoch 0."""
-    scheduler = LambdaScheduler(
+def test_max_relative_change_active_after_convergence():
+    """Once converged, |Δλ|/λ_prev is capped at max_relative_change."""
+    sched = LambdaScheduler(
         target_sparsity=0.9,
         initial_lambda=1.0,
         acceleration_factor=1.0,
-        max_relative_change=0.05,  # 5% cap
+        damping_zone=0.05,
+        damping_frequency_multiplier=1,
+        damping_acceleration_divisor=1,
+        max_relative_change=0.05,
     )
-    steps_per_epoch = 10
-    scheduler.resolve_warmup_steps(steps_per_epoch)
+    sched.resolve_warmup_steps(10)
 
-    # Advance _last_step past the first-epoch boundary.
-    scheduler._last_step = steps_per_epoch
+    # Reach the final-target band to latch convergence.
+    sched.step(0.88, current_step=1)  # |0.88 - 0.9| = 0.02 <= 0.05
+    assert sched._converged is True
 
     eps = 1e-12
-    for step in range(steps_per_epoch, steps_per_epoch + 20):
-        lambda_prev = scheduler.get_lambda()
-        # Push hard with sparsity far below target, each call is a new step.
-        scheduler.step(0.1, current_step=step)
-        lambda_new = scheduler.get_lambda()
-
-        rel_change = abs(lambda_new - lambda_prev) / lambda_prev
+    for step in range(2, 22):
+        lambda_prev = sched.get_lambda()
+        # Push hard with sparsity far below target; the raw update is large but
+        # the clamp caps it. Convergence latches, so the clamp stays active.
+        sched.step(0.1, current_step=step)
+        rel_change = abs(sched.get_lambda() - lambda_prev) / lambda_prev
         assert (
             rel_change <= 0.05 + eps
         ), f"step {step}: |Δλ|/λ_prev={rel_change:.6f} exceeds 0.05 cap"
 
 
-def test_max_relative_change_symmetric():
-    """Clamp applies to both increasing and decreasing updates."""
-    # Increasing direction: sparsity below target.
+def test_max_relative_change_symmetric_after_convergence():
+    """Clamp applies to increasing and decreasing updates once converged."""
+    # Increasing: at target (converged), then pushed below.
     up = LambdaScheduler(
         target_sparsity=0.9,
         initial_lambda=1.0,
         acceleration_factor=1.0,
+        damping_zone=0.05,
+        damping_frequency_multiplier=1,
+        damping_acceleration_divisor=1,
         max_relative_change=0.05,
     )
     up.resolve_warmup_steps(10)
-    up._last_step = 10  # past epoch 0
-    up.step(0.1, current_step=10)
-    # Exactly at the upper bound: lambda_prev * 1.05 = 1.05
+    up.step(0.9, current_step=1)  # at target -> converged, lambda unchanged
+    assert up._converged is True
+    up.step(0.1, current_step=2)  # below target -> capped at +5%
     assert up.get_lambda() == pytest.approx(1.05, rel=1e-9)
 
-    # Decreasing direction: sparsity above target.
+    # Decreasing: at target (converged), then pushed above.
     down = LambdaScheduler(
         target_sparsity=0.5,
         initial_lambda=1.0,
         acceleration_factor=1.0,
+        damping_zone=0.05,
+        damping_frequency_multiplier=1,
+        damping_acceleration_divisor=1,
         max_relative_change=0.05,
     )
     down.resolve_warmup_steps(10)
-    down._last_step = 10
-    down.step(0.99, current_step=10)
-    # Exactly at the lower bound: lambda_prev * 0.95 = 0.95
+    down.step(0.5, current_step=1)  # at target -> converged
+    assert down._converged is True
+    down.step(0.99, current_step=2)  # above target -> capped at -5%
     assert down.get_lambda() == pytest.approx(0.95, rel=1e-9)
 
 
@@ -982,3 +991,138 @@ def test_max_relative_change_rejects_invalid():
             initial_lambda=1.0,
             max_relative_change=0.0,
         )
+
+
+# =============================================================================
+# Refactor-specific regression tests
+# =============================================================================
+
+
+def test_verify_ramp_feasibility_exact_budget_raises():
+    """max_epochs == warmup + epochs_to_ramp is infeasible (off-by-one)."""
+    sched = LambdaScheduler(
+        target_sparsity=0.9,
+        target_initial_sparsity=0.0,
+        epochs_to_ramp=8,
+        schedule_type="linear",
+        ramp_granularity="step",
+        initial_lambda=1.0,
+        warmup_epochs=2,
+    )
+    # warmup (2) + ramp (8) = 10 == max_epochs -> raise.
+    with pytest.raises(ValueError, match="ramp can complete"):
+        sched.verify_ramp_feasibility(max_epochs=10)
+    # One more epoch is feasible.
+    sched.verify_ramp_feasibility(max_epochs=11)
+
+
+def test_get_epoch_targets_reaches_final():
+    """The per-epoch schedule ends at the final target and is monotonic."""
+    sched = LambdaScheduler(
+        target_sparsity=0.9,
+        target_initial_sparsity=0.0,
+        epochs_to_ramp=5,
+        schedule_type="linear",
+        ramp_granularity="epoch",
+        initial_lambda=1.0,
+    )
+    targets = sched.get_epoch_targets(max_epochs=8, steps_per_epoch=10)
+    assert len(targets) == 8
+    assert targets[0][0] == 0
+    assert targets[-1][1] == pytest.approx(0.9)
+    values = [t for _, t in targets]
+    assert all(
+        values[i] >= values[i - 1] - 1e-12 for i in range(1, len(values))
+    )
+
+    # Fixed mode: every epoch holds the constant final target.
+    fixed = LambdaScheduler(target_sparsity=0.7, initial_lambda=1.0)
+    fixed_targets = fixed.get_epoch_targets(max_epochs=3, steps_per_epoch=10)
+    assert [t for _, t in fixed_targets] == [0.7, 0.7, 0.7]
+
+
+def test_load_state_inverted_targets_raises():
+    """A corrupted checkpoint with target_initial > target_final is
+    rejected."""
+    sched = LambdaScheduler(target_sparsity=0.9, initial_lambda=1.0)
+    bad_state = {
+        "lambda_value": 1.0,
+        "target_initial_sparsity": 0.9,
+        "target_final_sparsity": 0.1,  # inverted
+    }
+    with pytest.raises(ValueError, match="target_initial"):
+        sched.load_state(bad_state)
+
+
+def test_step_ramp_no_current_step_raises():
+    """Ramp mode requires current_step so the moving target can advance."""
+    sched = LambdaScheduler(
+        target_sparsity=0.9,
+        target_initial_sparsity=0.0,
+        epochs_to_ramp=5,
+        schedule_type="linear",
+        initial_lambda=1.0,
+    )
+    sched.resolve_warmup_steps(10)
+    with pytest.raises(
+        AssertionError, match="current_step must be provided in ramp mode"
+    ):
+        sched.step(0.0)
+
+
+def test_checkpoint_key_backward_compat():
+    """Pruner reads the new namespaced key, falling back to the old one."""
+    pruner, scheduler = _make_bregman_pruner_and_mocks(
+        target_sparsity=0.9, initial_lambda=1.0
+    )
+
+    old_state = scheduler.get_state()
+    old_state["lambda_value"] = 0.5
+    pruner.on_load_checkpoint(
+        Mock(), Mock(), {"lambda_scheduler_state": old_state}
+    )
+    assert pruner._ckpt_scheduler_state is old_state
+
+    new_state = scheduler.get_state()
+    new_state["lambda_value"] = 0.7
+    pruner.on_load_checkpoint(
+        Mock(),
+        Mock(),
+        {
+            "bregman_lambda_scheduler_state": new_state,
+            "lambda_scheduler_state": old_state,  # superseded by the new key
+        },
+    )
+    assert pruner._ckpt_scheduler_state is new_state
+
+
+def test_warmup_resolved_on_resume():
+    """Resuming marks warmup resolved and keeps the restored
+    steps_per_epoch."""
+    source = LambdaScheduler(target_sparsity=0.9, initial_lambda=1.0)
+    source.resolve_warmup_steps(20)
+    state = source.get_state()
+
+    pruner = BregmanPruner(
+        verbose=0,
+        lambda_scheduler=LambdaScheduler(
+            target_sparsity=0.9, initial_lambda=1.0
+        ),
+    )
+    pruner._ckpt_scheduler_state = state
+
+    optimizer = Mock()
+    optimizer.param_groups = []
+    trainer = Mock()
+    pruner._setup_lambda_scheduler(optimizer, trainer, is_resuming=True)
+
+    assert pruner._warmup_resolved is True
+    assert pruner.lambda_scheduler._steps_per_epoch == 20
+
+    # A simulated on_train_epoch_start must NOT re-resolve warmup (no target
+    # gate is active because target_sparsity was not passed to the pruner).
+    pruner._initialized = True
+    pruner.manager = MagicMock()
+    trainer.num_training_batches = 999
+    pruner.on_train_epoch_start(trainer, Mock())
+    assert pruner.lambda_scheduler._steps_per_epoch == 20

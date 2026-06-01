@@ -61,8 +61,8 @@ lambda_scheduler:
   initial_lambda: 1e-2
   target_sparsity: 0.9
   acceleration_factor: 0.25
-  min_lambda: 1e-6
-  max_lambda: 1e1
+  damping_zone: 0.01         # near-target band + convergence gate (1%)
+  max_relative_change: null   # |Δλ|/λ cap once converged
 ```
 
 **Progressive (ramp) target** — the target ramps `target_initial_sparsity → target_sparsity` over `epochs_to_ramp`, so $\lambda$ rises smoothly with no jump at epoch boundaries:
@@ -87,7 +87,10 @@ In ramp mode the model should start at the ramp's initial sparsity; the progress
 - `schedule_type`: `linear` or `constant` (log-space) ramp interpolation
 - `epochs_to_ramp` / `ramp_granularity`: ramp length, and whether the target advances per step or per epoch
 - `acceleration_factor`: Controls how aggressively λ adapts (0.0-1.0)
-- `min_lambda`/`max_lambda`: Bounds on regularization strength
+- `damping_zone`: Near-target band where updates become gentler and less frequent; it also acts as the convergence band that arms `max_relative_change` (0.0 disables both)
+- `max_relative_change`: Caps the per-update relative change in λ once the controller has converged; `null` disables the clamp
+
+The update is asymmetric (`λ *= 1+a·gap` below target, `λ /= 1+a·|gap|` above), so λ stays strictly positive without an explicit floor. There is **no absolute `max_lambda` cap** — λ is bounded only by `max_relative_change` after convergence, so an infeasible target shows up as λ climbing rather than a silent cap.
 
 Note: Depending on many factors (Bregman optimizer type, `lr` value, `lr_scheduler`, etc.), the target sparsity is not guaranteed to be reached. There is a balancing act between the contribution of the optimzier and regularizer terms in the weights updates.
 
@@ -126,8 +129,8 @@ callbacks:
       initial_lambda: 1e-2
       target_sparsity: 0.9
       acceleration_factor: 0.25
-      min_lambda: 1e-6
-      max_lambda: 1e1
+      damping_zone: 0.01
+      max_relative_change: null
 
 module:
   optimizer:
@@ -358,7 +361,7 @@ Ensures weights are never "un-pruned" during training.
 ### Bregman Learning
 
 **Issue**: Sparsity not reaching target
-- **Solution**: Increase `max_lambda` or `acceleration_factor`
+- **Solution**: Increase `acceleration_factor` (or `max_relative_change`, which caps the per-update change after convergence)
 
 **Issue**: Training unstable
 - **Solution**: Decrease `initial_lambda` or try using a different regularizer (e.g., `RegL1L2` instead of `RegL1`)

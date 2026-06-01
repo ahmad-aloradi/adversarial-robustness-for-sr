@@ -20,13 +20,4 @@ _bregman_ramp_epochs: 10
 _bregman_schedule_type: constant # log-space ("exponential") ramp
 _bregman_ramp_granularity: step # smooth per-step target
 _bregman_initial_sparsity: ${_bregman_target_initial} # auto-matches sparsity_rate
-
-# Seed the lambda controller (feeds lambda_scheduler.initial_lambda AND every
-# group's reg.lamda). The resolver default ${bregman_lambda:LinBreg,..,
-# initial_lambda}=0.01 still prunes on step 0, defeating the "begin dense"
-# intent. lambda=0 is impossible too — the update is multiplicative
-# (lambda *= 1 + accel*|gap|), so 0 (and the 1e-12 floor) is a fixed point that
-# can't grow. Use a small POSITIVE seed. LinBreg needs ~2 orders of magnitude
-# smaller lambda than AdaBreg for the same sparsity, so this is the AdaBreg
-# seed (0.1) / 100.
 _bregman_lambda: 1e-5

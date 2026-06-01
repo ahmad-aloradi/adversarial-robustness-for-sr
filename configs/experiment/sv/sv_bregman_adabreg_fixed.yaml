@@ -9,7 +9,6 @@ defaults:
 
 _bregman_fixed_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},fixed_lambda}
 _bregman_lambda: ${_bregman_fixed_lambda}
-_bregman_min_lambda: ${_bregman_fixed_lambda}
 
 callbacks:
   model_pruning:

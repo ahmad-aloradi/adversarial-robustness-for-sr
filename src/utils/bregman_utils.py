@@ -1,6 +1,5 @@
 import math
 
-MIN_LAMBDA = 1e-12
 INIT_LAMBDA_ADABREG = 1.0
 INIT_LAMBDA_LINBERG = 0.01
 INIT_LAMBDA_PROXSGD = 0.01
@@ -9,81 +8,66 @@ BREGMAN_LAMBDA_CONFIGS = {
     "AdaBreg": {
         0.5: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 2.0,
         },
         0.7: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 4.0,
         },
         0.9: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 10.0,
         },
         0.95: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 15.0,
         },
         0.99: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 18.0,
         },
     },
     "LinBreg": {
         0.5: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.001,
         },
         0.7: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.005,
         },
         0.9: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.025,
         },
         0.95: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.05,
         },
         0.99: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.2,
         },
     },
     "ProxSGD": {
         0.5: {
             "initial_lambda": INIT_LAMBDA_PROXSGD,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.001,
         },
         0.7: {
             "initial_lambda": INIT_LAMBDA_PROXSGD,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.005,
         },
         0.9: {
             "initial_lambda": INIT_LAMBDA_PROXSGD,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.01,
         },
         0.95: {
             "initial_lambda": INIT_LAMBDA_PROXSGD,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.05,
         },
         0.99: {
             "initial_lambda": INIT_LAMBDA_PROXSGD,
-            "min_lambda": MIN_LAMBDA,
             "fixed_lambda": 0.1,
         },
     },
@@ -96,14 +80,14 @@ BREGMAN_LAMBDA_CONFIGS["AdaBregL2"] = BREGMAN_LAMBDA_CONFIGS["AdaBreg"]
 def get_bregman_lambda(
     optimizer_type: str, target_sparsity: float, param_type: str
 ) -> float:
-    """Interpolates initial_lambda or min_lambda based on target_sparsity.
+    """Interpolates initial_lambda or fixed_lambda based on target_sparsity.
 
     Uses logarithmic interpolation between defined sparsity anchor points.
     """
     if optimizer_type not in BREGMAN_LAMBDA_CONFIGS:
         raise ValueError(f"Unknown optimizer {optimizer_type}")
 
-    if param_type not in ["initial_lambda", "min_lambda", "fixed_lambda"]:
+    if param_type not in ["initial_lambda", "fixed_lambda"]:
         raise ValueError(f"Unknown param_type {param_type}")
 
     configs = BREGMAN_LAMBDA_CONFIGS[optimizer_type]

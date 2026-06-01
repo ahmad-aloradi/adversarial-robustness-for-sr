@@ -46,7 +46,6 @@ class BregmanPruner(Callback):
         target_sparsity: Optional[Union[float, List[float]]] = None,
         tolerance: float = 0.01,
         rescale_mode: str = "none",
-        lr_reduction_factor: float = 0.25,
     ):
         """
         Args:
@@ -60,15 +59,8 @@ class BregmanPruner(Callback):
                 "none": no rescaling (default).
                 "subgradient_correction": adjust subgradient v to remain in ∂φ_new(θ).
                 "nestrovs_adaptive_update": use ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv).
-            lr_reduction_factor: Multiplier applied to optimizer LR when the
-                scheduler detects uncontrolled sparsity oscillation. Must be
-                in (0.0, 1.0).
         """
         super().__init__()
-        if not (0.0 < lr_reduction_factor < 1.0):
-            raise ValueError(
-                f"lr_reduction_factor must be in (0.0, 1.0), got {lr_reduction_factor}"
-            )
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
@@ -77,17 +69,17 @@ class BregmanPruner(Callback):
         if target_sparsity is None:
             self._target_final: Optional[float] = None
         elif isinstance(target_sparsity, (list, tuple)):
+            if len(target_sparsity) == 0:
+                raise ValueError("target_sparsity list must not be empty")
             self._target_final = float(target_sparsity[-1])
         else:
             self._target_final = float(target_sparsity)
         self.rescale_mode = rescale_mode
-        self.lr_reduction_factor = float(lr_reduction_factor)
 
         self.manager: Optional[PruningManager] = None
         self._initialized = False
         self._warmup_resolved = False
         self._ckpt_scheduler_state: Optional[dict] = None
-        self._ckpt_last_sparsity: Optional[float] = None
         self._suppressor = ValidationSuppressor(tolerance=tolerance)
 
     # -------------------------------------------------------------------------
@@ -154,12 +146,47 @@ class BregmanPruner(Callback):
     def on_train_start(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
-        """Fail loud if a target ramp can't finish within the epoch budget."""
+        """Fail loud if a ramp can't finish; enforce min_epochs; log
+        schedule."""
         if self.lambda_scheduler is None:
             return
         max_epochs = trainer.max_epochs
-        if isinstance(max_epochs, int) and max_epochs > 0:
-            self.lambda_scheduler.verify_ramp_feasibility(max_epochs)
+        if not (isinstance(max_epochs, int) and max_epochs > 0):
+            return
+        self.lambda_scheduler.verify_ramp_feasibility(max_epochs)
+
+        # Fixed-target runs have nothing to ramp; the schedule is the constant.
+        if self.lambda_scheduler._target_initial is None:
+            return
+
+        # Ensure min_epochs leaves room for the ramp to actually reach progress
+        # 1.0 (one epoch past warmup+epochs_to_ramp, see verify_ramp_feasibility).
+        ramp_end = (
+            self.lambda_scheduler.warmup_epochs
+            + self.lambda_scheduler._epochs_to_ramp
+        )
+        min_needed = ramp_end + 1
+        current_min = trainer.fit_loop.min_epochs
+        if current_min is None or current_min < min_needed:
+            trainer.fit_loop.min_epochs = min_needed
+            log.info(
+                f"BregmanPruner: trainer.min_epochs {current_min} -> "
+                f"{min_needed} to ensure the sparsity ramp completes."
+            )
+
+        n_batches = trainer.num_training_batches
+        if isinstance(n_batches, int) and n_batches > 0:
+            targets = self.lambda_scheduler.get_epoch_targets(
+                max_epochs, n_batches
+            )
+            lines = [
+                f"  epoch {epoch:3d}: {target:.4f}"
+                for epoch, target in targets
+            ]
+            log.info(
+                f"Bregman sparsity target schedule ({max_epochs} epochs):\n"
+                + "\n".join(lines)
+            )
 
     def on_train_epoch_start(
         self, trainer: Trainer, pl_module: LightningModule
@@ -243,8 +270,7 @@ class BregmanPruner(Callback):
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         """Re-gate right before validation runs, in case sparsity drifted
-        between ``on_train_epoch_start`` and the end of the training epoch.
-        """
+        between ``on_train_epoch_start`` and the end of the training epoch."""
         if (
             not self._initialized
             or self.lambda_scheduler is None
@@ -263,21 +289,18 @@ class BregmanPruner(Callback):
     ) -> None:
         """Save scheduler state to checkpoint."""
         if self.lambda_scheduler is not None:
-            checkpoint["lambda_scheduler_state"] = (
-                self.lambda_scheduler.get_state()
-            )
-            checkpoint["bregman_last_sparsity"] = (
-                self._overall_sparsity()
-                if WHICH_SPARSITY_PERCENTAGE == "overall"
-                else self._pruned_sparsity()
-            )
+            checkpoint[
+                "bregman_lambda_scheduler_state"
+            ] = self.lambda_scheduler.get_state()
 
     def on_load_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
     ) -> None:
         """Load scheduler state from checkpoint."""
-        self._ckpt_scheduler_state = checkpoint.get("lambda_scheduler_state")
-        self._ckpt_last_sparsity = checkpoint.get("bregman_last_sparsity")
+        self._ckpt_scheduler_state = checkpoint.get(
+            "bregman_lambda_scheduler_state",
+            checkpoint.get("lambda_scheduler_state"),  # pre-rename compat
+        )
 
     # -------------------------------------------------------------------------
     # Scheduler management
@@ -302,6 +325,9 @@ class BregmanPruner(Callback):
         # Restore state from checkpoint
         if is_resuming and self._ckpt_scheduler_state:
             self.lambda_scheduler.load_state(self._ckpt_scheduler_state)
+            # _steps_per_epoch is restored with the state; skip re-resolution in
+            # on_train_epoch_start so ramp_steps stays stable across the resume.
+            self._warmup_resolved = True
 
         log.info(
             f"Lambda scheduler active: target_sparsity={self.lambda_scheduler.target_sparsity}, "
@@ -319,41 +345,14 @@ class BregmanPruner(Callback):
             else self._pruned_sparsity()
         )
 
-        # On first step after resume, pass the cached sparsity
-        last_sparsity = self._ckpt_last_sparsity
-        if last_sparsity is not None:
-            self._ckpt_last_sparsity = None  # Use only once
-
         new_lambda = self.lambda_scheduler.step(
-            current_sparsity, last_sparsity, trainer.global_step
-        )
-
-        # Sparsity-oscillation detection is meaningless during lambda warmup
-        # (lambda is frozen, so any drift isn't the scheduler's doing).
-        warmup_steps = getattr(self.lambda_scheduler, "warmup_steps", 0)
-        in_warmup = warmup_steps > 0 and trainer.global_step <= warmup_steps
-        detected_oscillation = (
-            not in_warmup
-            and self.lambda_scheduler.detect_uncontrolled_oscillation(
-                current_sparsity,
-                tolerance=0.01,
-                window_steps=1000,
-                min_crossings=50,
-            )
+            current_sparsity, trainer.global_step
         )
 
         for group in trainer.optimizers[0].param_groups:
             if self._group_has_regularizer(group):
                 scale = group.get("lambda_scale", 1.0)
                 group["reg"].lamda = new_lambda * scale
-
-            if detected_oscillation:
-                old_lr = group["lr"]
-                group["lr"] = old_lr * self.lr_reduction_factor
-                log.warning(
-                    f"LR: {old_lr:.2e} -> {group['lr']:.2e} in group "
-                    f"{group.get('name', 'Unknown')} due to sparsity oscillation."
-                )
 
     def _apply_lambda_to_groups(self, trainer: Trainer) -> None:
         """Apply current scheduler lambda to all regularized groups."""

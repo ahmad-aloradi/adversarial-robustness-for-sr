@@ -36,7 +36,6 @@ _bregman_schedule_type: constant # linear | constant (log-space ramp)
 _bregman_ramp_granularity: step # step | epoch (ramp mode only)
 _bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
-_bregman_min_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},min_lambda}
 
 trainer:
   max_epochs: 50
@@ -85,10 +84,11 @@ callbacks:
       ramp_granularity: ${_bregman_ramp_granularity}
       initial_lambda: ${_bregman_lambda}
       acceleration_factor: 0.2
-      min_lambda: ${_bregman_min_lambda}
-      max_lambda: 1000
       warmup_epochs: 0 #${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
       update_frequency: 50
+      max_relative_change: null
+      # Near-target band: gentler/less-frequent updates AND the convergence
+      # gate (1%, matching the validation `tolerance` above).
       damping_zone: 0.01
       damping_acceleration_divisor: 5 # alpha will be x-times smaller in the damping zone
       damping_frequency_multiplier: 5 # f will be x-times less frequent in the damping zone

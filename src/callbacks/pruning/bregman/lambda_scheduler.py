@@ -1,5 +1,4 @@
 import math
-from collections import deque
 from numbers import Real
 from typing import Optional
 
@@ -60,26 +59,35 @@ def _interpolate_target_sparsity(
 class LambdaScheduler:
     """Lambda controller for Bregman target-sparsity tracking.
 
-    A feedback controller that updates ``lambda`` once per call to
-    :meth:`step` (per-batch when driven from a batch-end hook): lambda is
-    increased when measured sparsity is below the current target and decreased
-    when it is above. The target the controller chases has two modes:
+    A feedback controller that updates ``lambda`` once per call to 
+    :meth:`step` (per-batch when driven from a batch-end hook):
+    lambda is increased when measured sparsity is below the current target and
+    decreased when it is above.
+
+    The target the controller chases has two modes:
 
     - **fixed** (``target_initial_sparsity=None``): ``target_sparsity`` is the
       constant ``target_sparsity`` scalar.
     - **ramp** (``target_initial_sparsity`` set): ``target_sparsity``
       interpolates ``target_initial_sparsity -> target_sparsity`` over
       ``epochs_to_ramp`` epochs and is held at the final value afterward.
-      ``ramp_granularity="step"`` updates the target every batch (smooth);
-      ``"epoch"`` updates it once per epoch.
+      ``ramp_granularity="step"`` advances the target every batch (smooth);
+      ``"epoch"`` advances it once per epoch.
 
-    When sparsity enters within ``damping_zone`` of the target, updates become
-    less frequent and gentler to reduce oscillation.
+
+    Near the target (within ``damping_zone``) updates become less frequent and
+    gentler to reduce oscillation. ``damping_zone`` also doubles as the
+    convergence band: the first time sparsity reaches within ``damping_zone`` of
+    the *final* target the controller latches ``_converged``, after which
+    ``max_relative_change`` caps the per-update relative change in lambda. So
+    the initial climb and the whole ramp run unthrottled, and lambda is
+    stabilised only once the operating point is reached. ``damping_zone=0``
+    disables both the damping and the clamp.
 
     Parameters
     ----------
     initial_lambda : float
-        Initial regularization weight.
+        Initial regularization weight (must be > 0).
     target_sparsity : float
         Final / steady target sparsity. Held constant in fixed mode; the ramp
         endpoint in ramp mode.
@@ -93,23 +101,20 @@ class LambdaScheduler:
         Whether the ramp target advances per batch or per epoch.
     acceleration_factor : float, default=0.25
         Multiplies the sparsity gap to control update aggressiveness.
-    min_lambda : float, default=1e-6
-        Minimum lambda value.
-    max_lambda : float, default=1e3
-        Maximum lambda value.
     warmup_epochs : int, default=0
         Epochs to hold lambda at ``initial_lambda`` before scheduling begins.
     update_frequency : int, default=1
         Update lambda every this many steps.
-    damping_zone : float, default=0.0
-        Sparsity distance from target that activates damping. 0.0 disables it.
+    damping_zone : float, default=0.1
+        Sparsity distance from the target that activates damping, and the band
+        around the final target that latches convergence. 0.0 disables both.
     damping_frequency_multiplier : int, default=10
         Multiplies ``update_frequency`` inside the damping zone.
     damping_acceleration_divisor : float, default=5.0
         Divides ``acceleration_factor`` inside the damping zone.
     max_relative_change : float, optional
-        Bounds the per-update relative change in lambda once the first epoch
-        has completed. ``None`` (default) disables the clamp.
+        Bounds the per-update relative change in lambda once the controller has
+        converged. ``None`` disables the clamp (pure feedback).
 
     Examples
     --------
@@ -145,23 +150,20 @@ class LambdaScheduler:
         epochs_to_ramp: Optional[int] = None,
         ramp_granularity: str = "step",
         acceleration_factor: float = 0.25,
-        min_lambda: float = 1e-6,
-        max_lambda: float = 1e3,
         warmup_epochs: int = 0,
         update_frequency: int = 1,
-        damping_zone: float = 0.0,
+        damping_zone: float = 0.1,
         damping_frequency_multiplier: int = 10,
         damping_acceleration_divisor: float = 5.0,
-        max_relative_change: Optional[float] = None,
+        max_relative_change: Optional[float] = 0.1,
     ):
         self._target_final = self._validated_sparsity(
             target_sparsity, "target_sparsity"
         )
-        self._is_ramp = target_initial_sparsity is not None
         self._schedule_type = schedule_type
         self._epochs_to_ramp = epochs_to_ramp
         self._ramp_granularity = ramp_granularity
-        if self._is_ramp:
+        if target_initial_sparsity is not None:
             self._target_initial = self._validated_sparsity(
                 target_initial_sparsity, "target_initial_sparsity"
             )
@@ -193,24 +195,13 @@ class LambdaScheduler:
             raise ValueError(
                 f"acceleration_factor must be >= 0.0, got {acceleration_factor}"
             )
-        if min_lambda <= 0.0:
-            raise ValueError(f"min_lambda must be > 0.0, got {min_lambda}")
-        if max_lambda < min_lambda:
+        if initial_lambda <= 0.0:
             raise ValueError(
-                f"max_lambda must be >= min_lambda, got max_lambda={max_lambda}, "
-                f"min_lambda={min_lambda}"
-            )
-        if not (min_lambda <= initial_lambda <= max_lambda):
-            raise ValueError(
-                "initial_lambda must be between min_lambda and max_lambda, "
-                f"got {initial_lambda}"
+                f"initial_lambda must be > 0.0, got {initial_lambda}"
             )
 
         self.lambda_value = initial_lambda
         self.acceleration_factor = acceleration_factor
-        self.min_lambda = min_lambda
-        self.max_lambda = max_lambda
-        self._last_sparsity = None
         self.warmup_epochs = warmup_epochs
         # Resolved to actual steps by BregmanPruner via resolve_warmup_steps().
         self.warmup_steps = 0
@@ -218,10 +209,27 @@ class LambdaScheduler:
         # the per-epoch batch count.
         self._steps_per_epoch: Optional[int] = None
         self._last_step: int = 0
+        # Latched the first time sparsity reaches the final-target band; gates
+        # the max_relative_change clamp.
+        self._converged: bool = False
         assert (
             update_frequency >= 1
         ), f"update_frequency must be >= 1, got {update_frequency}"
         self.update_frequency = update_frequency
+        if damping_zone < 0.0:
+            raise ValueError(
+                f"damping_zone must be >= 0.0, got {damping_zone}"
+            )
+        if damping_frequency_multiplier < 1:
+            raise ValueError(
+                "damping_frequency_multiplier must be >= 1, "
+                f"got {damping_frequency_multiplier}"
+            )
+        if damping_acceleration_divisor <= 0.0:
+            raise ValueError(
+                "damping_acceleration_divisor must be > 0.0, "
+                f"got {damping_acceleration_divisor}"
+            )
         self.damping_zone = damping_zone
         self.damping_frequency_multiplier = damping_frequency_multiplier
         self.damping_acceleration_divisor = damping_acceleration_divisor
@@ -231,8 +239,6 @@ class LambdaScheduler:
                 f"got {max_relative_change}"
             )
         self.max_relative_change = max_relative_change
-        # Lazily sized by detect_uncontrolled_oscillation() on first call.
-        self._oscillation_history: Optional[deque] = None
 
     @staticmethod
     def _validated_sparsity(value: float, name: str) -> float:
@@ -254,17 +260,7 @@ class LambdaScheduler:
         interpolated value; before the batch count is known
         (``_steps_per_epoch`` unset) it returns the ramp start.
         """
-        if not self._is_ramp:
-            return self._target_final
-        if self._steps_per_epoch is None or self._steps_per_epoch == 0:
-            return self._target_initial
-        progress = self._ramp_progress()
-        return _interpolate_target_sparsity(
-            self._schedule_type,
-            self._target_initial,
-            self._target_final,
-            progress,
-        )
+        return self._compute_target(self._target_advance_interval())
 
     @property
     def final_target(self) -> float:
@@ -272,53 +268,67 @@ class LambdaScheduler:
         modes)."""
         return self._target_final
 
-    def _ramp_progress(self) -> float:
-        """Fraction in [0.0, 1.0] through the ramp, measured after warmup."""
-        if self._ramp_granularity == "step":
-            ramp_steps = self._epochs_to_ramp * self._steps_per_epoch
-            raw_position = max(0, self._last_step - self.warmup_steps)
-            # Once the raw position reaches the ramp length the endpoint is
-            # final, even if ramp_steps is not divisible by update_frequency
-            # (the snap below would otherwise round it back short of 1.0).
-            if raw_position >= ramp_steps:
-                return 1.0
-            # Advance the target only on lambda-update steps (one increment per
-            # update_frequency). Otherwise the per-step target races ahead of
-            # the slower lambda updates and each lambda correction lands a
-            # non-smooth multi-step jump.
-            snapped_position = (
-                raw_position - raw_position % self.update_frequency
-            )
-            return min(1.0, snapped_position / ramp_steps)
+    def _target_advance_interval(self) -> int:
+        """Number of steps between successive ramp-target advances.
+
+        Epoch granularity advances at epoch boundaries; step granularity
+        advances every ``update_frequency`` steps, in lockstep with the lambda
+        updates.
+        """
         if self._ramp_granularity == "epoch":
-            current_epoch = self._last_step // self._steps_per_epoch
-            epoch_position = max(0, current_epoch - self.warmup_epochs)
-            return min(1.0, epoch_position / self._epochs_to_ramp)
-        raise ValueError(
-            f"Unknown ramp_granularity: {self._ramp_granularity!r}. "
-            "Expected one of ['step', 'epoch']."
+            return self._steps_per_epoch
+        return self.update_frequency
+
+    def _ramp_progress(self, advance_interval: int) -> float:
+        """Fraction in [0.0, 1.0] through the ramp, measured after warmup."""
+        ramp_steps = self._epochs_to_ramp * self._steps_per_epoch
+        raw_position = max(0, self._last_step - self.warmup_steps)
+        # The endpoint is final once raw_position reaches the ramp length, even
+        # when ramp_steps is not a whole multiple of advance_interval — the
+        # rounding below would otherwise pull it back short of 1.0.
+        if raw_position >= ramp_steps:
+            return 1.0
+        aligned_position = raw_position - raw_position % advance_interval
+        return min(1.0, aligned_position / ramp_steps)
+
+    def _compute_target(self, advance_interval: int) -> float:
+        """Target sparsity for a given ramp advance interval."""
+        if self._target_initial is None:
+            return self._target_final
+        if not self._steps_per_epoch:
+            return self._target_initial
+        progress = self._ramp_progress(advance_interval)
+        return _interpolate_target_sparsity(
+            self._schedule_type,
+            self._target_initial,
+            self._target_final,
+            progress,
         )
 
     def step(
         self,
         current_sparsity: float,
-        last_sparsity: Optional[float] = None,
         current_step: Optional[int] = None,
     ) -> float:
         """Process a sparsity reading and update lambda.
 
         Inputs:
             current_sparsity: current model sparsity.
-            last_sparsity: if provided, cached as the last known sparsity
-                (used once when resuming from a checkpoint).
             current_step: global training step; drives warmup, update
                 frequency, and the ramp target.
 
         Output:
             Current lambda value.
         """
-        # Track current step before any early return so the target_sparsity
-        # property reflects the correct ramp position even during warmup.
+        # Ramp mode needs current_step so the moving target can advance.
+        if self._target_initial is not None:
+            assert current_step is not None, (
+                "current_step must be provided in ramp mode; without it the "
+                "ramp target never advances"
+            )
+
+        # Track the step before any early return so target_sparsity reflects the
+        # correct ramp position even during warmup.
         if current_step is not None:
             self._last_step = int(current_step)
 
@@ -329,23 +339,28 @@ class LambdaScheduler:
             if current_step <= self.warmup_steps:
                 if current_step == 0:
                     log.info(
-                        f"Warmup phase: Holding lambda at "
+                        f"Warmup phase: holding lambda at "
                         f"{self.lambda_value:.4f} for {self.warmup_steps} "
                         f"steps ({self.warmup_epochs} epochs)."
                     )
-                # At this point, self.lambda_value = initial_lambda
                 return self.lambda_value
             if current_step == self.warmup_steps + 1:
                 log.info(
-                    f"Warmup complete. Starting lambda updates with "
-                    f"target sparsity {self.target_sparsity:.4f}."
+                    f"Warmup complete. Starting lambda updates with target "
+                    f"sparsity {self.target_sparsity:.4f}."
                 )
 
-        # Determine effective parameters based on proximity to target
+        self._validate_sparsity(current_sparsity)
+        sparsity = float(current_sparsity)
+        # One consistent target for both the proximity check and the gap;
+        # damping never feeds back into the target computation.
+        target = self.target_sparsity
+
+        # Damping keys off the undamped target, so it behaves identically for
+        # constant and ramped schedules.
         in_damping_zone = (
             self.damping_zone > 0.0
-            and abs(current_sparsity - self.target_sparsity)
-            < self.damping_zone
+            and abs(sparsity - target) < self.damping_zone
         )
         effective_frequency = (
             self.update_frequency * self.damping_frequency_multiplier
@@ -358,144 +373,42 @@ class LambdaScheduler:
             else self.acceleration_factor
         )
 
-        # Only update lambda every effective_frequency steps
         if (
             current_step is not None
             and current_step % effective_frequency != 0
         ):
             return self.lambda_value
 
-        # If resuming from a checkpoint, use provided last_sparsity
-        if last_sparsity is not None:
-            self._validate_sparsity(last_sparsity)
-            self._last_sparsity = float(last_sparsity)
-
-        self._validate_sparsity(current_sparsity)
-
-        sparsity_signal = float(current_sparsity)
-        self._last_sparsity = sparsity_signal
-        sparsity_difference = sparsity_signal - self.target_sparsity
-
-        lambda_prev = self.lambda_value
-
-        if sparsity_signal < self.target_sparsity:
-            # Increase lambda to encourage more sparsity
-            self.lambda_value *= 1 + effective_acceleration * abs(
-                sparsity_difference
-            )
-        elif sparsity_signal > self.target_sparsity:
-            # Decrease lambda since we're above target
-            self.lambda_value /= 1 + effective_acceleration * abs(
-                sparsity_difference
-            )
-
-        # Relative-change clamp — only active once the first epoch has
-        # completed so the initial sparsity settle isn't penalised.
+        # Convergence: within damping_zone of the FINAL target. The
+        # relative clamp activates only afterward, so the initial climb and the
+        # whole ramp run unthrottled.
         if (
-            self.max_relative_change is not None
-            and self._steps_per_epoch is not None
-            and self._steps_per_epoch > 0
-            and self._last_step >= self._steps_per_epoch
+            self.damping_zone > 0.0
+            and abs(sparsity - self._target_final) <= self.damping_zone
         ):
+            self._converged = True
+
+        # Asymmetric update — multiply below target, divide above — keeps lambda
+        # strictly positive for any acceleration, so no floor is needed.
+        gap = target - sparsity
+        lambda_prev = self.lambda_value
+        if gap > 0:
+            self.lambda_value *= 1.0 + effective_acceleration * gap
+        elif gap < 0:
+            self.lambda_value /= 1.0 + effective_acceleration * (-gap)
+
+        if self._converged and self.max_relative_change is not None:
             upper = lambda_prev * (1.0 + self.max_relative_change)
             lower = lambda_prev * (1.0 - self.max_relative_change)
-            if self.lambda_value > upper:
-                self.lambda_value = upper
-            elif self.lambda_value < lower:
-                self.lambda_value = lower
+            self.lambda_value = max(lower, min(upper, self.lambda_value))
 
-        # Clamp lambda to valid range
-        self.lambda_value = max(
-            self.min_lambda, min(self.max_lambda, self.lambda_value)
+        # Fail loud rather than silently capping: a non-finite lambda means the
+        # target is infeasible or acceleration_factor is far too large.
+        assert math.isfinite(self.lambda_value), (
+            f"lambda became non-finite ({self.lambda_value}); target may be "
+            f"infeasible or acceleration_factor too large"
         )
-
         return self.lambda_value
-
-    def detect_uncontrolled_oscillation(
-        self,
-        current_sparsity: float,
-        tolerance: float = 0.01,
-        window_steps: int = 500,
-        min_crossings: int = 50,
-    ) -> bool:
-        """Detect sustained overshoot/undershoot around the target.
-
-        Pure detection: reports whether sparsity has been oscillating around
-        the target outside the tolerance band for a sustained window of steps.
-        Minor oscillations are expected by construction of the multiplicative
-        lambda update, so readings within ``tolerance`` of the target are
-        treated as "converged" and are not counted as target crossings
-
-        Intended to be invoked once per step alongside :meth:`step`.
-
-        Parameters
-        ----------
-        current_sparsity : float
-            Current sparsity reading; appended to the oscillation window.
-        tolerance : float, default=0.01
-            Distance from target within which readings are treated as
-            in-band and ignored for crossing counts.
-        window_steps : int, default=500
-            Size of the rolling detection window, measured in calls to this
-            method.
-        min_crossings : int, default=50
-            Minimum number of out-of-tolerance target crossings within the
-            window required to flag the dynamics as uncontrolled.
-
-        Returns
-        -------
-        bool
-            True iff the window was full and the crossing threshold was
-            exceeded on this call.
-        """
-        if window_steps < 2:
-            raise ValueError(f"window_steps must be >= 2, got {window_steps}")
-        if min_crossings < 1:
-            raise ValueError(
-                f"min_crossings must be >= 1, got {min_crossings}"
-            )
-        if tolerance < 0.0:
-            raise ValueError(f"tolerance must be >= 0.0, got {tolerance}")
-        self._validate_sparsity(current_sparsity)
-
-        if (
-            self._oscillation_history is None
-            or self._oscillation_history.maxlen != window_steps
-        ):
-            self._oscillation_history = deque(maxlen=window_steps)
-
-        diff = float(current_sparsity) - self.target_sparsity
-        if abs(diff) <= tolerance:
-            sign = 0
-        else:
-            sign = 1 if diff > 0 else -1
-        self._oscillation_history.append(sign)
-
-        if len(self._oscillation_history) < window_steps:
-            return False
-
-        # Count transitions between opposite non-zero signs; zeros
-        # (in-tolerance readings) are skipped so a brief return to target
-        # doesn't reset a run of overshoot/undershoot flips.
-        crossings = 0
-        last_nonzero = 0
-        for s in self._oscillation_history:
-            if s == 0:
-                continue
-            if last_nonzero != 0 and s != last_nonzero:
-                crossings += 1
-            last_nonzero = s
-
-        if crossings < min_crossings:
-            return False
-
-        log.warning(
-            f"Uncontrolled sparsity oscillation detected: {crossings} target "
-            f"crossings over a {window_steps}-step window outside tolerance "
-            f"±{tolerance}."
-        )
-        self._oscillation_history.clear()
-        return True
 
     def _validate_sparsity(self, current_sparsity: float) -> None:
         """Validate a sparsity reading.
@@ -531,7 +444,10 @@ class LambdaScheduler:
             )
         # The step-granularity target advances one increment per
         # update_frequency steps; too few increments makes the ramp coarse.
-        if self._is_ramp and self._ramp_granularity == "step":
+        if (
+            self._target_initial is not None
+            and self._ramp_granularity == "step"
+        ):
             ramp_steps = self._epochs_to_ramp * self._steps_per_epoch
             n_increments = ramp_steps // self.update_frequency
             if n_increments < 2:
@@ -545,17 +461,59 @@ class LambdaScheduler:
 
     def verify_ramp_feasibility(self, max_epochs: int) -> None:
         """Raise if a ramp cannot complete within the training budget."""
-        if not self._is_ramp:
+        if self._target_initial is None:
             return
         # The ramp only starts counting after warmup (_ramp_progress subtracts
-        # warmup_steps), so it finishes at warmup_epochs + epochs_to_ramp.
+        # warmup_steps) and reaches progress=1.0 at the first step of epoch
+        # ramp_end_epoch — which exists only when max_epochs is strictly larger.
         ramp_end_epoch = self.warmup_epochs + self._epochs_to_ramp
-        if max_epochs < ramp_end_epoch:
+        if max_epochs <= ramp_end_epoch:
             raise ValueError(
                 f"warmup_epochs ({self.warmup_epochs}) + epochs_to_ramp "
-                f"({self._epochs_to_ramp}) > trainer.max_epochs "
-                f"({max_epochs}); the ramp cannot complete."
+                f"({self._epochs_to_ramp}) = {ramp_end_epoch} >= "
+                f"trainer.max_epochs ({max_epochs}); set max_epochs > "
+                f"{ramp_end_epoch} so the ramp can complete."
             )
+
+    def get_epoch_targets(self, max_epochs: int, steps_per_epoch: int) -> list:
+        """Target sparsity at the end of each epoch, epochs 0..max_epochs-1.
+
+        Inputs:
+            max_epochs: number of training epochs.
+            steps_per_epoch: batches per epoch (resolved before this call).
+
+        Output:
+            List of ``(epoch_index, target_sparsity)`` pairs.
+        """
+        if self._target_initial is None:
+            return [(epoch, self._target_final) for epoch in range(max_epochs)]
+        warmup_steps = self.warmup_epochs * steps_per_epoch
+        ramp_steps = self._epochs_to_ramp * steps_per_epoch
+        # Derived from the passed steps_per_epoch (not self._steps_per_epoch) so
+        # this can run at on_train_start before resolve_warmup_steps.
+        if self._ramp_granularity == "epoch":
+            advance_interval = steps_per_epoch
+        else:
+            advance_interval = self.update_frequency
+        targets = []
+        for epoch in range(max_epochs):
+            last_step = (epoch + 1) * steps_per_epoch - 1
+            raw_position = max(0, last_step - warmup_steps)
+            if raw_position >= ramp_steps:
+                progress = 1.0
+            else:
+                aligned_position = (
+                    raw_position - raw_position % advance_interval
+                )
+                progress = min(1.0, aligned_position / ramp_steps)
+            target = _interpolate_target_sparsity(
+                self._schedule_type,
+                self._target_initial,
+                self._target_final,
+                progress,
+            )
+            targets.append((epoch, target))
+        return targets
 
     def get_lambda(self) -> float:
         """Get current lambda value."""
@@ -574,10 +532,8 @@ class LambdaScheduler:
             "warmup_steps": self.warmup_steps,
             "_steps_per_epoch": self._steps_per_epoch,
             "_last_step": self._last_step,
-            "_last_sparsity": self._last_sparsity,
+            "_converged": self._converged,
             "acceleration_factor": self.acceleration_factor,
-            "min_lambda": self.min_lambda,
-            "max_lambda": self.max_lambda,
             "damping_zone": self.damping_zone,
             "max_relative_change": self.max_relative_change,
         }
@@ -587,7 +543,9 @@ class LambdaScheduler:
 
         Supports new-style ramp checkpoints and collapses legacy schedules
         (a ``_target_schedule`` list or a scalar ``target_sparsity``) to fixed
-        mode at the final value.
+        mode at the final value. Keys removed in the refactor
+        (``min_lambda``/``max_lambda``/``_last_sparsity``) are ignored if a
+        pre-refactor checkpoint still carries them.
         """
         self.lambda_value = state["lambda_value"]
 
@@ -603,7 +561,15 @@ class LambdaScheduler:
                     initial, "target_initial_sparsity"
                 )
             )
-            self._is_ramp = self._target_initial is not None
+            if (
+                self._target_initial is not None
+                and self._target_initial > self._target_final
+            ):
+                raise ValueError(
+                    f"Checkpoint has target_initial ({self._target_initial}) > "
+                    f"target_final ({self._target_final}); checkpoint may be "
+                    f"corrupted."
+                )
             self._schedule_type = state.get(
                 "schedule_type", self._schedule_type
             )
@@ -619,25 +585,21 @@ class LambdaScheduler:
                 state["_target_schedule"][-1], "target_final_sparsity"
             )
             self._target_initial = None
-            self._is_ramp = False
         elif "target_sparsity" in state:
             # Legacy scalar checkpoint.
             self._target_final = self._validated_sparsity(
                 state["target_sparsity"], "target_final_sparsity"
             )
             self._target_initial = None
-            self._is_ramp = False
 
         self._steps_per_epoch = state.get(
             "_steps_per_epoch", self._steps_per_epoch
         )
         self._last_step = int(state.get("_last_step", self._last_step))
-        self._last_sparsity = state.get("_last_sparsity")
-        if self._last_sparsity is not None:
-            self._validate_sparsity(self._last_sparsity)
-        self.acceleration_factor = state["acceleration_factor"]
-        self.min_lambda = state["min_lambda"]
-        self.max_lambda = state["max_lambda"]
+        self._converged = bool(state.get("_converged", self._converged))
+        self.acceleration_factor = state.get(
+            "acceleration_factor", self.acceleration_factor
+        )
         self.warmup_epochs = state.get("warmup_epochs", self.warmup_epochs)
         self.warmup_steps = state.get("warmup_steps", self.warmup_steps)
         self.damping_zone = state.get("damping_zone", self.damping_zone)
@@ -651,7 +613,7 @@ class LambdaScheduler:
 
 
 if __name__ == "__main__":
-    # Smoke: log-space ramp 0.0 -> 0.99 over 4 epochs at step granularity.
+    # Smoke: log-space ramp 0.0 -> 0.99 over 10 epochs at epoch granularity.
     sched = LambdaScheduler(
         initial_lambda=1.0,
         target_sparsity=0.99,
@@ -667,7 +629,6 @@ if __name__ == "__main__":
     for current_step in range(steps_per_epoch * 30):
         target = sched.target_sparsity
         assert target >= prev_target - 1e-9, "target must be monotonic"
-        # assert target - prev_target < 0.1, "no per-step target jumps"
         prev_target = target
         measured_sparsity = max(0.0, target - 0.02)  # model lags the target
         lam = sched.step(measured_sparsity, current_step=current_step)
@@ -677,5 +638,5 @@ if __name__ == "__main__":
             )
     print(
         f"final target={sched.target_sparsity:.4f} "
-        f"(final_target={sched.final_target})"
+        f"(final_target={sched.final_target}) converged={sched._converged}"
     )
