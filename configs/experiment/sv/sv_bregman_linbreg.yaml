@@ -25,8 +25,16 @@ tags:
   ]
 seed: 42
 
-# Single source of truth for Bregman lambda values
-_bregman_target_sparsity: 0.9
+# Single source of truth for Bregman sparsity targets and lambda values.
+# Fixed-target mode by default; the progressive variants flip on the ramp by
+# setting _bregman_target_initial / _bregman_ramp_epochs and pointing
+# _bregman_initial_sparsity at _bregman_target_initial.
+_bregman_target_sparsity: 0.9 # final / steady target sparsity
+_bregman_target_initial: null # ramp start; null => fixed-target mode (no ramp)
+_bregman_ramp_epochs: null # ramp length in epochs (ramp mode only)
+_bregman_schedule_type: constant # linear | constant (log-space ramp)
+_bregman_ramp_granularity: step # step | epoch (ramp mode only)
+_bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
 _bregman_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},initial_lambda}
 _bregman_min_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},min_lambda}
 
@@ -65,21 +73,25 @@ callbacks:
     verbose: 2
     target_sparsity: ${_bregman_target_sparsity}
     tolerance: 0.01 # Tolerance of 1% means accept 89% if target is 90%
-    rescale_mode: "none"
+    rescale_mode: "none" # "none", "subgradient_correction", "nestrovs_adaptive_update"
     # Global lambda scheduler configuration.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
-      target_sparsity: ${_bregman_target_sparsity}
+      target_sparsity: ${_bregman_target_sparsity} # final / steady target
+      target_initial_sparsity: ${_bregman_target_initial} # null => fixed mode
+      schedule_type: ${_bregman_schedule_type}
+      epochs_to_ramp: ${_bregman_ramp_epochs}
+      ramp_granularity: ${_bregman_ramp_granularity}
       initial_lambda: ${_bregman_lambda}
-      acceleration_factor: 1.0
+      acceleration_factor: 0.2
       min_lambda: ${_bregman_min_lambda}
       max_lambda: 1000
       warmup_epochs: 0 #${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
       update_frequency: 50
-      damping_zone: 0.005
-      damping_acceleration_divisor: 10 # This means the acceleration will be 10x slower in the damping zone
-      damping_frequency_multiplier: 2 # This means updates will be 10x less frequent in the damping zone
+      damping_zone: 0.01
+      damping_acceleration_divisor: 5 # This means the acceleration will be 10x slower in the damping zone
+      damping_frequency_multiplier: 5 # This means updates will be 10x less frequent in the damping zone
 
 datamodule:
   dataset:
@@ -190,7 +202,7 @@ module:
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99 # Initial sparsity
+          sparsity_rate: ${_bregman_initial_sparsity} # initial weight sparsity
 
       # Group 2a: Prunable Linear Layers
       - name: linear_layers
@@ -204,7 +216,7 @@ module:
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99 # Initial sparsity
+          sparsity_rate: ${_bregman_initial_sparsity} # initial weight sparsity
 
       # Group 2b: Classifier
       - name: classifier
@@ -217,7 +229,7 @@ module:
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99 # Initial sparsity
+          sparsity_rate: ${_bregman_initial_sparsity} # initial weight sparsity
 
       # Group 3: Pruning-sensitive Layers (Not Pruned!)
       - name: norm_params
@@ -258,7 +270,7 @@ module:
 
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99 # Initial sparsity
+          sparsity_rate: ${_bregman_initial_sparsity} # initial weight sparsity
 
 logger:
   wandb:

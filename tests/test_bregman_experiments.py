@@ -8,6 +8,7 @@ works correctly together in abbreviated training loops:
 - Lambda evolves correctly during training
 - Scheduled target mode works end-to-end
 """
+
 from unittest.mock import Mock
 
 import pytest
@@ -152,9 +153,10 @@ def _run_mini_bregman_training(
     if schedule_type is not None:
         scheduler = LambdaScheduler(
             schedule_type=schedule_type,
-            initial_target_sparsity=initial_target,
-            final_target_sparsity=final_target,
+            target_initial_sparsity=initial_target,
+            target_sparsity=final_target,
             epochs_to_ramp=epochs_to_ramp,
+            ramp_granularity="step",
             initial_lambda=0.1,
         )
     else:
@@ -181,6 +183,7 @@ def _run_mini_bregman_training(
     trainer.lr_scheduler_configs = []
     trainer.limit_val_batches = 1.0
     trainer.num_training_batches = num_batches_per_epoch
+    trainer.callback_metrics = {}  # on_train_epoch_end writes sparsity here
 
     # Initialize pruner
     pruner.on_fit_start(trainer, pl_module)
@@ -317,16 +320,22 @@ def test_bregman_lambda_evolves_during_training():
 
 
 @pytest.mark.slow
-def test_bregman_scheduled_mode_unsupported():
-    """Scheduled target mode is no longer supported for Bregman; constructing a
-    scheduler/requesting a scheduled run should raise a TypeError."""
-    with pytest.raises(TypeError):
-        _run_mini_bregman_training(
-            schedule_type="linear",
-            initial_target=0.5,
-            final_target=0.9,
-            epochs_to_ramp=5,
-            initial_sparsity=0.6,
-            num_epochs=2,
-            num_batches_per_epoch=2,
-        )
+def test_bregman_scheduled_ramp_mode():
+    """Ramp mode runs end-to-end and drives sparsity up toward the final target.
+
+    The model starts dense (matching the ramp's initial sparsity); the rising
+    target pushes lambda up via the feedback loop, which sparsifies the weights.
+    """
+    sparsity_per_epoch, lambda_per_step, _, _ = _run_mini_bregman_training(
+        schedule_type="linear",
+        initial_target=0.0,
+        final_target=0.8,
+        epochs_to_ramp=5,
+        initial_sparsity=0.0,  # start dense, matching the ramp start
+        num_epochs=8,
+        num_batches_per_epoch=20,
+    )
+    assert lambda_per_step[-1] > lambda_per_step[0], "lambda should rise"
+    assert (
+        sparsity_per_epoch[-1] > sparsity_per_epoch[0]
+    ), "sparsity should rise as the target ramps up"

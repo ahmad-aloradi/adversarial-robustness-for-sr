@@ -6,7 +6,7 @@ and allows it to become denser during training. The lambda scheduler adjusts
 regularization strength to drive sparsity toward a target level.
 """
 
-from typing import Any, List, Optional, Literal, Union
+from typing import Any, List, Literal, Optional, Union
 
 import torch
 from pytorch_lightning import Callback, LightningModule, Trainer
@@ -19,13 +19,13 @@ from src.callbacks.pruning.shared_prune_utils import (
 )
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
-from .lambda_scheduler import LambdaScheduler, _normalize_target_schedule
+from .lambda_scheduler import LambdaScheduler
 
 log = utils.get_pylogger(__name__)
 
 # This determines how to steer lambda: based on all parameters sparsity or just pruned groups.
 # Overall is more intuitive, but pruned is more prinicpled (feedback loop)
-WHICH_SPARSITY_PERCENTAGE: Literal['overall', 'pruned'] = 'overall'
+WHICH_SPARSITY_PERCENTAGE: Literal["overall", "pruned"] = "overall"
 
 
 class BregmanPruner(Callback):
@@ -53,9 +53,9 @@ class BregmanPruner(Callback):
             sparsity_threshold: Threshold below which a weight is considered zero.
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
             lambda_scheduler: Optional scheduler for dynamic lambda updates.
-            target_sparsity: Target sparsity for validation suppression. A list
-                specifies a per-epoch schedule; the last value is held for all
-                epochs beyond ``len(list) - 1``.
+            target_sparsity: Final target sparsity for validation suppression.
+                Validation stays suppressed until the model reaches it. A list
+                collapses to its last entry.
             rescale_mode: How to handle λ changes in the proximal step.
                 "none": no rescaling (default).
                 "subgradient_correction": adjust subgradient v to remain in ∂φ_new(θ).
@@ -72,13 +72,14 @@ class BregmanPruner(Callback):
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
+        # Validation gates on the FINAL target only (suppressed until the model
+        # reaches it). A list collapses to its last entry for back-compat.
         if target_sparsity is None:
-            self._target_schedule: Optional[List[float]] = None
+            self._target_final: Optional[float] = None
+        elif isinstance(target_sparsity, (list, tuple)):
+            self._target_final = float(target_sparsity[-1])
         else:
-            self._target_schedule = _normalize_target_schedule(target_sparsity)
-        # Public attribute kept for logging/back-compat: scalar when single
-        # target, list when a schedule was provided.
-        self.target_sparsity = target_sparsity
+            self._target_final = float(target_sparsity)
         self.rescale_mode = rescale_mode
         self.lr_reduction_factor = float(lr_reduction_factor)
 
@@ -88,17 +89,6 @@ class BregmanPruner(Callback):
         self._ckpt_scheduler_state: Optional[dict] = None
         self._ckpt_last_sparsity: Optional[float] = None
         self._suppressor = ValidationSuppressor(tolerance=tolerance)
-
-    def _current_target(self, epoch: int) -> Optional[float]:
-        """Return the suppressor target for a given epoch, or None.
-
-        For a per-epoch schedule, returns ``schedule[min(epoch, len-1)]``.
-        For the legacy scalar, returns that scalar.
-        """
-        if self._target_schedule is None:
-            return None
-        idx = min(max(epoch, 0), len(self._target_schedule) - 1)
-        return self._target_schedule[idx]
 
     # -------------------------------------------------------------------------
     # Lightning hooks
@@ -149,12 +139,27 @@ class BregmanPruner(Callback):
         # Only activate validation suppression when a lambda scheduler is
         # actively driving sparsity toward a target. Fixed-lambda experiments
         # (lambda_scheduler=None) run validation unconditionally.
-        if self.lambda_scheduler is not None and self._target_schedule is not None:
+        if (
+            self.lambda_scheduler is not None
+            and self._target_final is not None
+        ):
             ValidationSuppressor.prepare(trainer)
             trainer.limit_val_batches = 0  # start suppressed; gate() flips it
-            log.info("Validation suppression ENABLED for adaptive lambda scheduling.")
+            log.info(
+                "Validation suppression ENABLED for adaptive lambda scheduling."
+            )
         else:
-            log.info("Validation suppression DISABLED (no target schedule provided).")
+            log.info("Validation suppression DISABLED (no target provided).")
+
+    def on_train_start(
+        self, trainer: Trainer, pl_module: LightningModule
+    ) -> None:
+        """Fail loud if a target ramp can't finish within the epoch budget."""
+        if self.lambda_scheduler is None:
+            return
+        max_epochs = trainer.max_epochs
+        if isinstance(max_epochs, int) and max_epochs > 0:
+            self.lambda_scheduler.verify_ramp_feasibility(max_epochs)
 
     def on_train_epoch_start(
         self, trainer: Trainer, pl_module: LightningModule
@@ -175,14 +180,21 @@ class BregmanPruner(Callback):
                 )
             self._warmup_resolved = True
 
-        # Track the per-epoch ramp target rather than the final-epoch value so
-        # early-epoch validation isn't wrongly suppressed while sparsity sits
-        # far above the ramp's first target.
-        if self.lambda_scheduler is not None:
-            active_target = self._current_target(trainer.current_epoch)
-            if active_target is not None:
-                current_sparsity = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
-                self._suppressor.gate(trainer, current_sparsity, active_target)
+        # Gate on the FINAL target: validation stays suppressed across the
+        # whole ramp and only opens once sparsity reaches the final target,
+        # like the gradual magnitude pruner.
+        if (
+            self.lambda_scheduler is not None
+            and self._target_final is not None
+        ):
+            current_sparsity = (
+                self._overall_sparsity()
+                if WHICH_SPARSITY_PERCENTAGE == "overall"
+                else self._pruned_sparsity()
+            )
+            self._suppressor.gate(
+                trainer, current_sparsity, self._target_final
+            )
 
     def on_train_batch_end(
         self,
@@ -233,24 +245,32 @@ class BregmanPruner(Callback):
         """Re-gate right before validation runs, in case sparsity drifted
         between ``on_train_epoch_start`` and the end of the training epoch.
         """
-        if not self._initialized or self.lambda_scheduler is None:
+        if (
+            not self._initialized
+            or self.lambda_scheduler is None
+            or self._target_final is None
+        ):
             return
-        active_target = self._current_target(trainer.current_epoch)
-        if active_target is None:
-            return
-        current_sparsity = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
-        self._suppressor.gate(trainer, current_sparsity, active_target)
+        current_sparsity = (
+            self._overall_sparsity()
+            if WHICH_SPARSITY_PERCENTAGE == "overall"
+            else self._pruned_sparsity()
+        )
+        self._suppressor.gate(trainer, current_sparsity, self._target_final)
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
     ) -> None:
         """Save scheduler state to checkpoint."""
         if self.lambda_scheduler is not None:
-            checkpoint[
-                "lambda_scheduler_state"
-            ] = self.lambda_scheduler.get_state()
-            checkpoint["bregman_last_sparsity"
-                       ] = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
+            checkpoint["lambda_scheduler_state"] = (
+                self.lambda_scheduler.get_state()
+            )
+            checkpoint["bregman_last_sparsity"] = (
+                self._overall_sparsity()
+                if WHICH_SPARSITY_PERCENTAGE == "overall"
+                else self._pruned_sparsity()
+            )
 
     def on_load_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
@@ -293,7 +313,11 @@ class BregmanPruner(Callback):
 
         w_t+1 = max(w_t + δ(λ_old − λ_new) − δ·lr·grad_step, 0)
         """
-        current_sparsity = self._overall_sparsity() if WHICH_SPARSITY_PERCENTAGE == 'overall' else self._pruned_sparsity()
+        current_sparsity = (
+            self._overall_sparsity()
+            if WHICH_SPARSITY_PERCENTAGE == "overall"
+            else self._pruned_sparsity()
+        )
 
         # On first step after resume, pass the cached sparsity
         last_sparsity = self._ckpt_last_sparsity
@@ -303,11 +327,6 @@ class BregmanPruner(Callback):
         new_lambda = self.lambda_scheduler.step(
             current_sparsity, last_sparsity, trainer.global_step
         )
-
-        # for group in trainer.optimizers[0].param_groups:
-        #     if self._group_has_regularizer(group):
-        #         scale = group.get("lambda_scale", 1.0)
-        #         group["reg"].lamda = new_lambda * scale
 
         # Sparsity-oscillation detection is meaningless during lambda warmup
         # (lambda is frozen, so any drift isn't the scheduler's doing).

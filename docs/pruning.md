@@ -51,7 +51,9 @@ Each regularizer implements:
 
 Located in `src/callbacks/pruning/bregman/lambda_scheduler.py`:
 
-Dynamically adjusts the regularization strength $\lambda$ during training to reach a target sparsity level:
+A feedback controller that adjusts the regularization strength $\lambda$ during training to track a target sparsity level. The target has two modes.
+
+**Fixed target** (default) — $\lambda$ is driven toward a constant `target_sparsity`:
 
 ```python
 lambda_scheduler:
@@ -63,10 +65,28 @@ lambda_scheduler:
   max_lambda: 1e1
 ```
 
+**Progressive (ramp) target** — the target ramps `target_initial_sparsity → target_sparsity` over `epochs_to_ramp`, so $\lambda$ rises smoothly with no jump at epoch boundaries:
+
+```python
+lambda_scheduler:
+  _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
+  initial_lambda: 1.0
+  target_sparsity: 0.99        # ramp endpoint (held afterward)
+  target_initial_sparsity: 0.0 # ramp start
+  epochs_to_ramp: 10
+  schedule_type: constant      # linear | constant (log-space)
+  ramp_granularity: step       # step (smooth per-batch) | epoch (stepwise)
+```
+
+In ramp mode the model should start at the ramp's initial sparsity; the progressive experiments wire `sparsity_rate` to `target_initial_sparsity` automatically (see `sv_bregman_adabreg_progressive.yaml`). Validation is suppressed until the model reaches the final target.
+
 **Key Parameters:**
 - `initial_lambda`: Starting regularization strength
-- `target_sparsity`: Desired fraction of zero weights (0.0-1.0)
-- `acceleration_factor`: Controls how aggressively λ increases (0.0-1.0)
+- `target_sparsity`: Final / steady target fraction of zero weights (0.0-1.0)
+- `target_initial_sparsity`: Ramp start; `null` selects fixed-target mode
+- `schedule_type`: `linear` or `constant` (log-space) ramp interpolation
+- `epochs_to_ramp` / `ramp_granularity`: ramp length, and whether the target advances per step or per epoch
+- `acceleration_factor`: Controls how aggressively λ adapts (0.0-1.0)
 - `min_lambda`/`max_lambda`: Bounds on regularization strength
 
 Note: Depending on many factors (Bregman optimizer type, `lr` value, `lr_scheduler`, etc.), the target sparsity is not guaranteed to be reached. There is a balancing act between the contribution of the optimzier and regularizer terms in the weights updates.

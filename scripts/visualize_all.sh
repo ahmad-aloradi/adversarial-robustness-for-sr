@@ -17,8 +17,11 @@ cross_model_sparsity='sr90'
 # Experiment selection criteria
 experiment_fixed='sv_bregman_*breg_fixed-wespeaker'
 
-for eval_data in 'cnceleb' 'multi_sv'; do
-    for eval_model in 'resnet34' 'ecapa_tdnn'; do
+# for eval_data in 'cnceleb' 'multi_sv'; do
+#     for eval_model in 'resnet34' 'ecapa_tdnn'; do
+for eval_data in 'multi_sv'; do
+    for eval_model in 'ecapa_tdnn'; do
+
 
         sparsity_rate_test='sr[7-9][0-9]' #  'sr75' 'sr90', 'sr95', 'sr99'
         sparsity_rate='sr[7-9][0-9]' #  'sr75' 'sr90', 'sr95', 'sr99'
@@ -95,8 +98,8 @@ for eval_data in 'cnceleb' 'multi_sv'; do
             # "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr75*${suffix_adabreg}"
             # "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_adabreg}"
             # "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr95*${suffix_adabreg}"
-            # "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_adabreg}"
-            "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr99*cls_scale2*"
+            "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr99*${suffix_adabreg}"
+            # "sv_bregman_adabreg-wespeaker*${eval_model}*${eval_data}*sr99*cls_scale2*"
             # "sv_bregman_adabreg_fixed-wespeaker*${eval_model}*${eval_data}*sr90*${suffix_fixed}"
             )
         # Swap-in config: edit the --experiments arg below (~line 197) to plot
