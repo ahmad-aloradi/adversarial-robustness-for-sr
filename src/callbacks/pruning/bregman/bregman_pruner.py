@@ -23,8 +23,9 @@ from .lambda_scheduler import LambdaScheduler
 
 log = utils.get_pylogger(__name__)
 
-# This determines how to steer lambda: based on all parameters sparsity or just pruned groups.
-# Overall is more intuitive, but pruned is more prinicpled (feedback loop)
+# How to steer lambda: over all model parameters, or only the regularized
+# ("pruned") groups. Overall is more intuitive; pruned is more principled
+# (the feedback loop sees exactly the params the regularizer acts on).
 WHICH_SPARSITY_PERCENTAGE: Literal["overall", "pruned"] = "overall"
 
 
@@ -77,6 +78,7 @@ class BregmanPruner(Callback):
         self.rescale_mode = rescale_mode
 
         self.manager: Optional[PruningManager] = None
+        self._optimizer: Optional[torch.optim.Optimizer] = None
         self._initialized = False
         self._warmup_resolved = False
         self._ckpt_scheduler_state: Optional[dict] = None
@@ -102,6 +104,7 @@ class BregmanPruner(Callback):
             raise ValueError("BregmanPruner supports only a single optimizer.")
 
         optimizer = trainer.optimizers[0]
+        self._optimizer = optimizer
         is_resuming = trainer.ckpt_path is not None
 
         if is_resuming:
@@ -373,9 +376,17 @@ class BregmanPruner(Callback):
         params = list(self.manager.pl_module.parameters())
         return compute_sparsity(params, threshold=self.sparsity_threshold)
 
+    def _regularized_parameters(self) -> List[torch.Tensor]:
+        """Parameters in optimizer groups that carry an active regularizer."""
+        params: List[torch.Tensor] = []
+        for group in self._optimizer.param_groups:
+            if self._group_has_regularizer(group):
+                params.extend(group["params"])
+        return params
+
     def _pruned_sparsity(self) -> float:
-        """Sparsity over pruned parameter groups only."""
-        params = self.manager.get_pruned_parameters()
+        """Sparsity over the regularized (Bregman-pruned) groups only."""
+        params = self._regularized_parameters()
         return compute_sparsity(params, threshold=self.sparsity_threshold)
 
     # -------------------------------------------------------------------------
