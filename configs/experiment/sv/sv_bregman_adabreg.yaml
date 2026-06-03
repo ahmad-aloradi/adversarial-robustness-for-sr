@@ -90,7 +90,7 @@ callbacks:
       # Near-target band: gentler/less-frequent updates AND the convergence
       # gate (1%, matching the validation `tolerance` above).
       damping_zone: 0.01
-      damping_acceleration_divisor: 5 # alpha will be x-times smaller in the damping zone
+      damping_acceleration_divisor: 2 # alpha will be x-times smaller in the damping zone
       damping_frequency_multiplier: 5 # f will be x-times less frequent in the damping zone
 
 datamodule:

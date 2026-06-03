@@ -23,7 +23,7 @@ CLUSTER_NAME = "alex"  # Options: 'tinygpu', 'alex'
 env.hosts = (
     ["alex.nhr.fau.de"] if CLUSTER_NAME == "alex" else ["tinyx.nhr.fau.de"]
 )
-GPU = "a100"  # Options: 'rtx2080ti', 'rtx3080', 'a100'
+GPU = "a40"  # Options: 'rtx2080ti', 'rtx3080', 'a100'
 
 # Path configuration
 PATH_PROJECT = (
@@ -949,7 +949,7 @@ def run_vpc():
 _GPU_MAP = {
     "datasets/cnceleb": {"alex": "a40", "tinygpu": "v100"},
     "datasets/voxceleb": {"alex": "a100", "tinygpu": "v100"},
-    "multi_sv": {"alex": "a100", "tinygpu": "a100"},
+    "multi_sv": {"alex": "a40", "tinygpu": "a100"},
     "multi_sv_cnc_train": {"alex": "a100", "tinygpu": "a100"},
 }
 
@@ -972,10 +972,6 @@ def _get_job_routing(experiment, dataset_name, sparsity=None):
     elif "subgrad_corr_v3" in experiment:
         cluster = "tinygpu"
     elif "fixed" in experiment:
-        cluster = "tinygpu"
-    elif (
-        "linbreg" in experiment
-    ):  # TODO: temporary — offload linbreg to tinygpu
         cluster = "tinygpu"
     else:
         cluster = "alex"
@@ -1300,14 +1296,13 @@ def run_sv(transfer_data="false", force="false"):
     # Master switch per group of experiments
     RUN_BASELINE_EXPS = False
     RUN_PRUNING_EXPS = False
-    RUN_Bregman_EXPS = False
+    RUN_Bregman_EXPS = True
     RUN_AUX_BREGMAN_EXPS = False
-    RUN_PROGRESSIVE_Bregman_EXPS = True
+    RUN_PROGRESSIVE_Bregman_EXPS = False
     # Adaptation experiments
     RUN_POOR_INIT_Bregman_EXPS = False
     RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS = False
     RUN_NESTROV_RESCALE_PROX_Bregman_EXPS = False
-    RUN_SUBGRADIENT_CORR_V4_Bregman_EXPS = False
 
     ########################
     # Pruning experiments
@@ -1362,20 +1357,20 @@ def run_sv(transfer_data="false", force="false"):
             "extra_overrides": {
                 "module.model.pruning_groups.0.optimizer_settings.reg._target_": "src.callbacks.pruning.bregman.bregman_regularizers.RegL1",
             },
-            "suffix": "-regl1_conv",
+            "suffix": "-regl1_conv-stepwise_target",
         }
         main_bregman_experiments = {
             "sv_bregman_linbreg": {
                 "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
-                "sparsity_rates": [0.75, 0.90, 0.95, 0.99],
-                "dataset_names": dataset_names,
-                "per_model": {"wespeaker_resnet34": _resnet34_regl1},
+                "sparsity_rates": [0.95, 0.99],
+                "dataset_names": ["multi_sv"],
+                "per_model": {"wespeaker_resnet34": _resnet34_regl1, "wespeaker_ecapa_tdnn": {"suffix": "-stepwise_target"}},
             },
             "sv_bregman_adabreg": {
                 "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
-                "sparsity_rates": [0.75, 0.90, 0.95, 0.99],
-                "dataset_names": dataset_names,
-                "per_model": {"wespeaker_resnet34": _resnet34_regl1},
+                "sparsity_rates": [0.95, 0.99],
+                "dataset_names": ["multi_sv"],
+                "per_model": {"wespeaker_resnet34": _resnet34_regl1, "wespeaker_ecapa_tdnn": {"suffix": "-stepwise_target"}},
             },
         }
 
@@ -1497,44 +1492,9 @@ def run_sv(transfer_data="false", force="false"):
             },
         }
 
-    ########################
-    # Subgradient correction (v4) experiments
-    ########################
-    if not RUN_SUBGRADIENT_CORR_V4_Bregman_EXPS:
-        subgrad_corr_rescale_prox_v4_configs = {}
-    else:
-        subgrad_corr_rescale_prox_v4_configs = {
-            "sv_bregman_adabreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
-                "sparsity_rates": [0.90, 0.99],
-                "dataset_names": [
-                    "datasets/cnceleb"
-                ],  # run a smaller sweep for adabreg to keep total job count manageable
-                "extra_overrides": {
-                    "callbacks.model_pruning.rescale_mode": "predictive_correction",
-                },
-                "suffix": "-subgrad_corr_v4",
-            },
-            "sv_bregman_linbreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
-                "sparsity_rates": [
-                    0.90,
-                    0.99,
-                ],  # run a smaller sweep for linbreg to keep total job count manageable
-                "dataset_names": [
-                    "datasets/cnceleb"
-                ],  # run a smaller sweep for linbreg to keep total job count manageable
-                "extra_overrides": {
-                    "callbacks.model_pruning.rescale_mode": "predictive_correction",
-                },
-                "suffix": "-subgrad_corr_v4",
-            },
-        }
-
     rescale_prox_configs = [
         *nestrovs_rescale_prox_configs.items(),
         *subgrad_corr_rescale_prox_configs.items(),
-        *subgrad_corr_rescale_prox_v4_configs.items(),
     ]
 
     ########################

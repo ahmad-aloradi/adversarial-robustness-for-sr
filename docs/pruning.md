@@ -147,7 +147,7 @@ module:
         module_name_patterns: ['.*conv.*']
         optimizer_settings:
           reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1L2Conv
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
             lamda: 1e-2
           lambda_scale: 1.0
         pruning_config:
