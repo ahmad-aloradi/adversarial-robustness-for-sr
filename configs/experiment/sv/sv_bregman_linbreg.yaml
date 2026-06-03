@@ -196,7 +196,7 @@ module:
         param_names: ["weight"]
         optimizer_settings:
           reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1L2Conv
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
             lamda: ${_bregman_lambda}
           lambda_scale: 1.0
 
