@@ -8,6 +8,56 @@ from typing import Optional
 from .bregman_regularizers import BregmanRegularizer, RegNone
 
 
+def weight_masked_prox_arg(
+    sub_grad: torch.Tensor,
+    weight: torch.Tensor,
+    delta: float,
+    w_p: float,
+    wp_mode: str = "blend",
+) -> torch.Tensor:
+    """Geometric-mean readout for the "weight_masking" primal step.
+
+    Reads out a magnitude between the standard candidate c = delta·sub_grad and
+    the latched geometric mean sqrt(|weight|·|c|), with the per-element gate
+    g ∈ [0, 1] plugged into:
+
+        arg = sign(c) · sqrt( ((1 - g)·|weight| + g·|c|) · |c| )
+
+        g = 1 -> arg = c                           (standard Bregman readout)
+        g = 0 -> arg = sign(c)·sqrt(|weight|·|c|)   (latch; weight=0 stays 0)
+
+    w_p ∈ [0, 1] sets g in one of two ways:
+
+    "blend" (default): g = w_p, a deterministic geometric blend. Every weight
+        gets a single readout that lags the candidate toward |weight|, i.e.
+        graded damping applied to all live weights at once.
+
+    "probabilistic": g ~ Bernoulli(w_p) per element, drawn fresh each step.
+        Each weight then takes one of the two *exact* endpoints — the true
+        Bregman readout with probability w_p, the latch otherwise. w_p is thus
+        the fraction of the support still allowed its reversible step; annealing
+        w_p 1 -> 0 commits the support stochastically, element by element. The
+        draw consumes from the global torch RNG, so seed the run to reproduce.
+
+    Both modes share the endpoints exactly (w_p ∈ {0, 1} is identical) and the
+    nonzero fixed point |c|: feeding |weight| = |c| back returns |c| for any
+    gate. delta sits inside the root (sqrt(delta) on the cross term) so the
+    g=0 fixed point stays delta·sub_grad rather than delta^2·sub_grad. The
+    radicand is non-negative by construction, so sqrt is NaN-safe for any sign
+    of sub_grad; the result takes the candidate's sign.
+    """
+    delta_sub_grad = delta * sub_grad
+    if wp_mode == "blend":
+        g = w_p
+    elif wp_mode == "probabilistic":
+        g = torch.bernoulli(torch.full_like(weight, float(w_p)))
+    else:
+        raise ValueError(
+            f"wp_mode must be 'blend' or 'probabilistic', got {wp_mode!r}"
+        )
+    weighted_mag = (1.0 - g) * weight.abs() + g * delta_sub_grad.abs()
+    return torch.sign(sub_grad) * torch.sqrt(weighted_mag * delta_sub_grad.abs())
+
 
 class LinBreg(torch.optim.Optimizer):
     """Linearized Bregman optimizer.
@@ -49,9 +99,8 @@ class LinBreg(torch.optim.Optimizer):
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
             use_subgrad_correction = rescale_mode == "subgradient_correction"
-            use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
-            use_predictive_correction = rescale_mode == "predictive_correction"
+            use_weight_gradient_masking = rescale_mode == "weight_masking"
 
             for p in group['params']:
                 if p.grad is None:
@@ -74,8 +123,6 @@ class LinBreg(torch.optim.Optimizer):
                 # Subgradient correction (before dual update)
                 if use_subgrad_correction:
                     reg.apply_subgradient_correction(sub_grad, p.data)
-                if use_predictive_correction:
-                    reg.apply_predictive_correction(sub_grad, p.data, delta)
 
                 # Dual update: p̃^(k+1) = p^(k) − τ∇L(θ^(k))
                 if momentum > 0.0:
@@ -90,16 +137,19 @@ class LinBreg(torch.optim.Optimizer):
                 else:
                     sub_grad.add_(-step_size * grad)
 
-                if use_subgrad_correction_wo_clip:
-                    reg.apply_subgradient_correction_wo_clip(sub_grad, p.data)
-
                 # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
-                prox_result = reg.prox(delta * sub_grad, delta)
+                if use_weight_gradient_masking:
+                    prox_arg = weight_masked_prox_arg(
+                        sub_grad, p.data, delta, reg.w_p, reg.wp_mode
+                    )
+                    prox_result = reg.prox(prox_arg, delta)
+                else:
+                    prox_result = reg.prox(delta * sub_grad, delta)
                 if use_nestrov_update:
                     prox_result *= (1 / (reg.lamda + 1e-12))
                 p.copy_(prox_result)
 
-            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update or use_predictive_correction:
+            if use_subgrad_correction or use_nestrov_update:
                 reg.step_lamda_state()
 
         return loss
@@ -166,9 +216,8 @@ class AdaBreg(torch.optim.Optimizer):
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
             use_subgrad_correction = rescale_mode == "subgradient_correction"
-            use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
-            use_predictive_correction = rescale_mode == "predictive_correction"
+            use_weight_gradient_masking = rescale_mode == "weight_masking"
 
             for p in group['params']:
                 if p.grad is None:
@@ -195,8 +244,6 @@ class AdaBreg(torch.optim.Optimizer):
                 # Subgradient correction (before dual update)
                 if use_subgrad_correction:
                     reg.apply_subgradient_correction(sub_grad, p.data)
-                if use_predictive_correction:
-                    reg.apply_predictive_correction(sub_grad, p.data, delta)
 
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
@@ -215,16 +262,20 @@ class AdaBreg(torch.optim.Optimizer):
                 # Dual update: p̃^(k+1) = p^(k) − τ·adam_step
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                if use_subgrad_correction_wo_clip:
-                    reg.apply_subgradient_correction_wo_clip(sub_grad, p.data)
-
                 # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
-                prox_result = reg.prox(delta * sub_grad, delta)
+                if use_weight_gradient_masking:
+                    prox_arg = weight_masked_prox_arg(
+                        sub_grad, p.data, delta, reg.w_p, reg.wp_mode
+                    )
+                    prox_result = reg.prox(prox_arg, delta)
+                else:
+                    prox_result = reg.prox(delta * sub_grad, delta)
+
                 if use_nestrov_update:
                     prox_result *= (1 / (reg.lamda + 1e-12))
                 p.copy_(prox_result)
 
-            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update or use_predictive_correction:
+            if use_subgrad_correction or use_nestrov_update:
                 reg.step_lamda_state()
 
         return loss
@@ -296,9 +347,8 @@ class AdaBregW(AdaBreg):
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
             use_subgrad_correction = rescale_mode == "subgradient_correction"
-            use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
-            use_predictive_correction = rescale_mode == "predictive_correction"
+            use_weight_gradient_masking = rescale_mode == "weight_masking"
 
             for p in group['params']:
                 if p.grad is None:
@@ -323,8 +373,6 @@ class AdaBregW(AdaBreg):
                 # Subgradient correction (before dual update)
                 if use_subgrad_correction:
                     reg.apply_subgradient_correction(sub_grad, p.data)
-                if use_predictive_correction:
-                    reg.apply_predictive_correction(sub_grad, p.data, delta)
 
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
@@ -343,11 +391,14 @@ class AdaBregW(AdaBreg):
                 # Dual update: p̃^(k+1) = p^(k) − τ·adam_step
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                if use_subgrad_correction_wo_clip:
-                    reg.apply_subgradient_correction_wo_clip(sub_grad, p.data)
-
                 # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
-                prox_result = reg.prox(delta * sub_grad, delta)
+                if use_weight_gradient_masking:
+                    prox_arg = weight_masked_prox_arg(
+                        sub_grad, p.data, delta, reg.w_p, reg.wp_mode
+                    )
+                    prox_result = reg.prox(prox_arg, delta)
+                else:
+                    prox_result = reg.prox(delta * sub_grad, delta)
                 if use_nestrov_update:
                     prox_result *= (1 / (reg.lamda + 1e-12))
                 p.copy_(prox_result)
@@ -356,7 +407,7 @@ class AdaBregW(AdaBreg):
                 assert wd > 0, "Weight decay must be positive for AdaBregW"
                 p.mul_(1 - lr * wd)
 
-            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update or use_predictive_correction:
+            if use_subgrad_correction or use_nestrov_update:
                 reg.step_lamda_state()
 
         return loss
@@ -412,9 +463,8 @@ class AdaBregL2(AdaBreg):
             # rescaling mode when λ changes between steps
             rescale_mode = getattr(reg, 'rescale_mode', 'none')
             use_subgrad_correction = rescale_mode == "subgradient_correction"
-            use_subgrad_correction_wo_clip = rescale_mode == "subgradient_correction_wo_clip"
             use_nestrov_update = rescale_mode == "nestrovs_adaptive_update"
-            use_predictive_correction = rescale_mode == "predictive_correction"
+            use_weight_gradient_masking = rescale_mode == "weight_masking"
 
             for p in group['params']:
                 if p.grad is None:
@@ -444,8 +494,6 @@ class AdaBregL2(AdaBreg):
                 # Subgradient correction (before dual update)
                 if use_subgrad_correction:
                     reg.apply_subgradient_correction(sub_grad, p.data)
-                if use_predictive_correction:
-                    reg.apply_predictive_correction(sub_grad, p.data, delta)
 
                 # Bias correction
                 bias_correction1 = 1 - beta1 ** step
@@ -464,16 +512,19 @@ class AdaBregL2(AdaBreg):
                 # Dual update: p̃^(k+1) = p^(k) − τ·adam_step (L2-augmented gradient)
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
-                if use_subgrad_correction_wo_clip:
-                    reg.apply_subgradient_correction_wo_clip(sub_grad, p.data)
-
                 # Primal update (Proximal step): θ^(k+1) = ∇(φ^(k))*(p̃^(k+1))
-                prox_result = reg.prox(delta * sub_grad, delta)
+                if use_weight_gradient_masking:
+                    prox_arg = weight_masked_prox_arg(
+                        sub_grad, p.data, delta, reg.w_p, reg.wp_mode
+                    )
+                    prox_result = reg.prox(prox_arg, delta)
+                else:
+                    prox_result = reg.prox(delta * sub_grad, delta)
                 if use_nestrov_update:
                     prox_result *= (1 / (reg.lamda + 1e-12))
                 p.copy_(prox_result)
 
-            if use_subgrad_correction or use_subgrad_correction_wo_clip or use_nestrov_update or use_predictive_correction:
+            if use_subgrad_correction or use_nestrov_update:
                 reg.step_lamda_state()
 
         return loss

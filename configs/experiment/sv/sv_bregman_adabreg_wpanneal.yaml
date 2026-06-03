@@ -1,0 +1,42 @@
+# @package _global_
+# AdaBreg with the weight_masking primal readout + a global explore->commit
+# w_p anneal. Fixed-target mode (inherited from sv_bregman_adabreg): the lambda
+# scheduler holds the final 99% target and the base's _bregman_initial_sparsity
+# (0.99) applies a random 99% mask at setup, so the model begins SPARSE, not
+# dense. Validation stays suppressed until measured sparsity reaches target.
+#
+# What keeps weight_masking safe here is the reversible explore window, NOT a
+# dense start. While w_p is held at w_p_init=1.0 (the first start_fraction=15%
+# of the run) the readout is exact standard Bregman, so the initial random
+# support migrates freely and overshoots self-heal. As w_p anneals 1->0 the
+# support commits; once it reaches w_p_final=0 (held over the final 15%) the
+# mask is latched and non-oscillating. Shrinking start_fraction toward 0 would
+# freeze the initial random mask early -- keep it > 0 while starting sparse.
+#
+# `_bregman_target_sparsity` is the scalar final target (feeds the
+# `bregman_lambda` resolver and the scheduler).
+
+defaults:
+  - sv/sv_bregman_adabreg
+  - _self_
+
+_bregman_target_sparsity: 0.99 # final target (feeds resolver + scheduler)
+
+# Weight-masking primal readout + global explore->commit w_p anneal. The
+# reversible window (start_fraction, w_p_init=1.0) is what makes the 99%-sparse
+# start safe; see the header note above.
+callbacks:
+  model_pruning:
+    rescale_mode: "weight_masking"
+    # How w_p drives the gate. "blend": deterministic geometric blend (every
+    # weight damped toward its current magnitude). "probabilistic": per-element
+    # Bernoulli(w_p), so each weight takes either its exact reversible step or
+    # the latch, and w_p is the fraction of the support still exploring.
+    wp_mode: "probabilistic"
+    wp_annealer:
+      _target_: src.callbacks.pruning.bregman.wp_scheduler.WpAnnealer
+      w_p_init: 1.0
+      w_p_final: 0.0
+      start_fraction: 0.0
+      end_fraction: 0.85
+      schedule: cosine

@@ -19,9 +19,22 @@ from src.callbacks.pruning.shared_prune_utils import (
 )
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
+from .bregman_regularizers import RegL1L2, RegL1L2Conv
 from .lambda_scheduler import LambdaScheduler
+from .wp_scheduler import WpAnnealer
 
 log = utils.get_pylogger(__name__)
+
+# rescale_mode values that correct for λ *changes* between steps; these are
+# meaningless without a scheduler actively moving λ. "weight_masking" is a
+# primal-readout change that is independent of λ, so it is excluded here and
+# activates with or without a lambda_scheduler.
+_LAMBDA_CHANGE_MODES = frozenset(
+    {
+        "subgradient_correction",
+        "nestrovs_adaptive_update",
+    }
+)
 
 # How to steer lambda: over all model parameters, or only the regularized
 # ("pruned") groups. Overall is more intuitive; pruned is more principled
@@ -47,6 +60,8 @@ class BregmanPruner(Callback):
         target_sparsity: Optional[Union[float, List[float]]] = None,
         tolerance: float = 0.01,
         rescale_mode: str = "none",
+        wp_annealer: Optional[WpAnnealer] = None,
+        wp_mode: str = "blend",
     ):
         """
         Args:
@@ -56,10 +71,19 @@ class BregmanPruner(Callback):
             target_sparsity: Final target sparsity for validation suppression.
                 Validation stays suppressed until the model reaches it. A list
                 collapses to its last entry.
-            rescale_mode: How to handle λ changes in the proximal step.
+            rescale_mode: How to handle the proximal step.
                 "none": no rescaling (default).
                 "subgradient_correction": adjust subgradient v to remain in ∂φ_new(θ).
                 "nestrovs_adaptive_update": use ∇(λφ)*(v) = (1/λ)·prox_{λψ}(δv).
+                "weight_masking": geometric-mean readout that gates the
+                    candidate δv toward the current weight magnitude via w_p
+                    (see WpAnnealer); independent of the lambda_scheduler.
+            wp_annealer: Optional explore->commit annealer for w_p, used only
+                when rescale_mode == "weight_masking".
+            wp_mode: How w_p drives the weight_masking gate. "blend" is the
+                deterministic geometric blend; "probabilistic" is a per-element
+                Bernoulli(w_p) gate, so w_p is the fraction of the support still
+                taking its exact reversible step. See weight_masked_prox_arg.
         """
         super().__init__()
         self.sparsity_threshold = sparsity_threshold
@@ -76,6 +100,12 @@ class BregmanPruner(Callback):
         else:
             self._target_final = float(target_sparsity)
         self.rescale_mode = rescale_mode
+        self.wp_annealer = wp_annealer
+        if wp_mode not in ("blend", "probabilistic"):
+            raise ValueError(
+                f"wp_mode must be 'blend' or 'probabilistic', got {wp_mode!r}"
+            )
+        self.wp_mode = wp_mode
 
         self.manager: Optional[PruningManager] = None
         self._optimizer: Optional[torch.optim.Optimizer] = None
@@ -83,6 +113,9 @@ class BregmanPruner(Callback):
         self._warmup_resolved = False
         self._ckpt_scheduler_state: Optional[dict] = None
         self._suppressor = ValidationSuppressor(tolerance=tolerance)
+        # Resolved lazily from the trainer; w_p anneals over the full horizon.
+        self._total_steps: Optional[int] = None
+        self._last_wp: float = 1.0
 
     # -------------------------------------------------------------------------
     # Lightning hooks
@@ -119,27 +152,70 @@ class BregmanPruner(Callback):
         if is_resuming and self._ckpt_scheduler_state:
             log.info("Restored lambda values to optimizer parameter groups.")
 
-        if self.lambda_scheduler is not None and self.rescale_mode != "none":
+        needs_scheduler = self.rescale_mode in _LAMBDA_CHANGE_MODES
+        if self.rescale_mode != "none" and (
+            not needs_scheduler or self.lambda_scheduler is not None
+        ):
+            group_structured: List[str] = []
             for group in optimizer.param_groups:
-                if "reg" in group:
+                if self._group_has_regularizer(group):
                     group["reg"].rescale_mode = self.rescale_mode
+                    if self.rescale_mode == "weight_masking":
+                        group["reg"].wp_mode = self.wp_mode
+                        # weight_masking gates per element; a group-lasso prox thresholds
+                        # by row norm, so an element-wise latch can zero entries inside
+                        # an otherwise-live row and break the group structure.
+                        if isinstance(group["reg"], (RegL1L2Conv, RegL1L2)):
+                            group_structured.append(group["name"])
             log.info(
                 f"BregmanPruner: rescale_mode='{self.rescale_mode}' enabled."
+            )
+            if group_structured:
+                log.warning(
+                    f"BregmanPruner: weight_masking is a per-element readout "
+                    f"but group(s) {group_structured} use a group-structured regularizer "
+                    "(RegL1L2Conv) whose prox thresholds by row norm. "
+                    "The element-wise latch can zero entries inside a live "
+                    "row, breaking the group structure. Use an element-wise "
+                    "regularizer (e.g. RegL1) for these groups, or a "
+                    "non-masking rescale_mode.")
+        elif needs_scheduler and self.lambda_scheduler is None:
+            log.warning(
+                f"BregmanPruner: rescale_mode='{self.rescale_mode}' ignored "
+                "because it corrects for lambda changes but no "
+                "lambda_scheduler is configured."
+            )
+
+        # w_p anneal is independent of the lambda scheduler.
+        if self._wp_anneal_active():
+            if not hasattr(self.wp_annealer, "value_at"):
+                self.wp_annealer = self.wp_annealer()  # Hydra partial
+            self._apply_wp_to_groups(
+                optimizer, self.wp_annealer.value_at(0.0)
+            )
+            log.info(
+                f"BregmanPruner: w_p anneal enabled "
+                f"({self.wp_annealer.w_p_init} -> {self.wp_annealer.w_p_final}, "
+                f"{self.wp_annealer.schedule}, mode={self.wp_mode})."
+            )
+        elif self.wp_annealer is not None:
+            log.warning(
+                "BregmanPruner: wp_annealer provided but rescale_mode != "
+                "'weight_masking'; w_p has no effect and is ignored."
             )
 
         self._initialized = True
         self._log_configuration(optimizer)
         self._log_group_assignments(pl_module)
 
-        # Only activate validation suppression when a lambda scheduler is
-        # actively driving sparsity toward a target. Fixed-lambda experiments
-        # (lambda_scheduler=None) run validation unconditionally.
+        # Fixed-lambda experiments run validation unconditionally.
         if (
             self.lambda_scheduler is not None
             and self._target_final is not None
         ):
             ValidationSuppressor.prepare(trainer)
-            trainer.limit_val_batches = 0  # start suppressed; gate() flips it
+            # Start suppressed; _gate_validation reopens it at each epoch end.
+            trainer.limit_val_batches = 0
             log.info(
                 "Validation suppression ENABLED for adaptive lambda scheduling."
             )
@@ -194,12 +270,7 @@ class BregmanPruner(Callback):
     def on_train_epoch_start(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
-        """Resolve warmup steps and gate validation based on current sparsity.
-
-        Sets ``limit_val_batches`` before Lightning decides whether to run the
-        end-of-epoch validation loop. Runs on epoch 0 too — validation begins
-        suppressed (see on_fit_start) and only opens once sparsity hits target.
-        """
+        """Resolve warmup steps and re-seed the annealed w_p (resume-safe)."""
         if not self._initialized:
             return
 
@@ -210,21 +281,9 @@ class BregmanPruner(Callback):
                 )
             self._warmup_resolved = True
 
-        # Gate on the FINAL target: validation stays suppressed across the
-        # whole ramp and only opens once sparsity reaches the final target,
-        # like the gradual magnitude pruner.
-        if (
-            self.lambda_scheduler is not None
-            and self._target_final is not None
-        ):
-            current_sparsity = (
-                self._overall_sparsity()
-                if WHICH_SPARSITY_PERCENTAGE == "overall"
-                else self._pruned_sparsity()
-            )
-            self._suppressor.gate(
-                trainer, current_sparsity, self._target_final
-            )
+         # start with the right w_p value
+        if self._wp_anneal_active():
+            self._step_wp_annealer(trainer)
 
     def on_train_batch_end(
         self,
@@ -241,8 +300,17 @@ class BregmanPruner(Callback):
         if self.lambda_scheduler is not None:
             self._step_lambda_scheduler(trainer)
 
+        if self._wp_anneal_active():
+            self._step_wp_annealer(trainer)
+
         # Log metrics via Lightning's logging system (respects logging_params)
         self._log_metrics(pl_module, trainer)
+
+        # On the last batch, measured sparsity is the end-of-epoch value
+        # Lightning is about to validate; this is the latest hook before it
+        # reads limit_val_batches (via Trainer.enable_validation).
+        if trainer.is_last_batch:
+            self._gate_validation(trainer)
 
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule
@@ -269,16 +337,15 @@ class BregmanPruner(Callback):
                 f"Sparsity = {sparsity:.3%} (pruned = {pruned_sparsity:.3%})"
             )
 
-    def on_validation_start(
-        self, trainer: Trainer, pl_module: LightningModule
-    ) -> None:
-        """Re-gate right before validation runs, in case sparsity drifted
-        between ``on_train_epoch_start`` and the end of the training epoch."""
-        if (
-            not self._initialized
-            or self.lambda_scheduler is None
-            or self._target_final is None
-        ):
+    def _gate_validation(self, trainer: Trainer) -> None:
+        """Open or suppress the upcoming validation epoch.
+
+        Gates on the FINAL target with the current (end-of-epoch) sparsity, so
+        validation stays suppressed across the whole ramp and only opens once
+        the model sits within tolerance of the final target — matching the
+        gradual magnitude pruner's contract.
+        """
+        if self.lambda_scheduler is None or self._target_final is None:
             return
         current_sparsity = (
             self._overall_sparsity()
@@ -368,6 +435,42 @@ class BregmanPruner(Callback):
                 group["reg"].lamda = current_lambda * scale
 
     # -------------------------------------------------------------------------
+    # Weight-activation probability (w_p) anneal
+    # -------------------------------------------------------------------------
+
+    def _wp_anneal_active(self) -> bool:
+        """w_p is annealed only for the weight_masking readout; no scheduler
+        dependency."""
+        return (
+            self.wp_annealer is not None
+            and self.rescale_mode == "weight_masking"
+        )
+
+    def _step_wp_annealer(self, trainer: Trainer) -> None:
+        """Push the annealed w_p onto every regularized group once per batch.
+
+        Progress is global_step / total optimizer steps, so the anneal spans
+        the whole run and survives resume (global_step is restored by
+        Lightning; the horizon is recomputed).
+        """
+        if self._total_steps is None:
+            total = trainer.estimated_stepping_batches
+            assert isinstance(total, int) and total > 0, (
+                "w_p anneal needs a finite training horizon; "
+                f"trainer.estimated_stepping_batches={total}"
+            )
+            self._total_steps = total
+        progress = min(1.0, trainer.global_step / self._total_steps)
+        self._last_wp = self.wp_annealer.value_at(progress)
+        self._apply_wp_to_groups(trainer.optimizers[0], self._last_wp)
+
+    def _apply_wp_to_groups(self, optimizer, w_p: float) -> None:
+        """Set w_p on every group whose regularizer is active."""
+        for group in optimizer.param_groups:
+            if self._group_has_regularizer(group):
+                group["reg"].w_p = w_p
+
+    # -------------------------------------------------------------------------
     # Sparsity
     # -------------------------------------------------------------------------
 
@@ -378,6 +481,7 @@ class BregmanPruner(Callback):
 
     def _regularized_parameters(self) -> List[torch.Tensor]:
         """Parameters in optimizer groups that carry an active regularizer."""
+        assert self._optimizer is not None, "Optimizer must be set to compute pruned sparsity."
         params: List[torch.Tensor] = []
         for group in self._optimizer.param_groups:
             if self._group_has_regularizer(group):
@@ -434,6 +538,10 @@ class BregmanPruner(Callback):
                 self.lambda_scheduler.get_lambda(),
                 **lambda_params,
             )
+
+        if self._wp_anneal_active():
+            wp_params = {**logging_params, "on_epoch": False, "on_step": True}
+            pl_module.log("bregman/w_p", float(self._last_wp), **wp_params)
 
     @rank_zero_only
     def _log_configuration(self, optimizer) -> None:

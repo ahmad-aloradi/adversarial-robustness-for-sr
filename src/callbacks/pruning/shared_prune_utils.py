@@ -1,7 +1,7 @@
 """Shared validation-gating and sparsity utilities for pruners.
 
-ValidationSuppressor: stateless gate that toggles `trainer.limit_val_batches`
-based on whether current sparsity matches the target.
+ValidationSuppressor: gate that toggles `trainer.limit_val_batches` based on
+whether current sparsity matches the target.
 
 compute_sparsity: Unified sparsity computation for both magnitude and Bregman
 pruning (handles raw Parameter lists and (Module, name) pairs).
@@ -67,7 +67,7 @@ def compute_sparsity(
 
 
 class ValidationSuppressor:
-    """Stateless validation gate driven by sparsity.
+    """Validation gate driven by sparsity.
 
     Usage (from a pruner callback):
 
@@ -75,14 +75,27 @@ class ValidationSuppressor:
       # val-monitoring callbacks tolerant of skipped validations:
       ValidationSuppressor.prepare(trainer)
 
-      # Each time you want to gate validation (e.g. on_validation_epoch_start
-      # or on_train_epoch_start, whichever fires first for your pruner):
+      # When you want to gate the upcoming validation epoch:
       suppressor.gate(trainer, current_sparsity, target_sparsity)
 
-    ``gate`` sets ``trainer.limit_val_batches`` to 0 if sparsity is outside
-    tolerance of target, otherwise to ``restore_limit``. No save/restore, no
-    transitions, no state — the truth lives on the trainer. Safe to call on
-    every hook without special-casing epoch 0, resume, or oscillation.
+    Lightning decides whether to run the end-of-epoch validation loop in
+    ``on_advance_end`` (after the last training batch), reading
+    ``trainer.limit_val_batches`` via ``Trainer.enable_validation``. So
+    ``gate`` must run from a TRAINING hook before that point:
+      - sparsity fixed for the whole epoch (magnitude pruning): gate in
+        ``on_train_epoch_start``.
+      - sparsity drifts during the epoch (Bregman): gate in
+        ``on_train_batch_end`` on the last batch (``trainer.is_last_batch``),
+        so the decision uses the value Lightning is about to validate.
+    Validation hooks (``on_validation_start``/``on_validation_epoch_start``)
+    are too late: they fire only when validation already runs, after the skip
+    decision.
+
+    ``gate`` sets ``trainer.limit_val_batches`` to 0 when sparsity is outside
+    tolerance of target, else to ``restore_limit``; the only retained state is
+    a flag that throttles logging to transitions. Re-suppression works every
+    epoch — ``limit_val_batches`` is honored at the training-loop level, not
+    frozen by the eval loop's dataloader cache.
     """
 
     def __init__(self, tolerance: float = 1e-2, restore_limit: float = 1.0):

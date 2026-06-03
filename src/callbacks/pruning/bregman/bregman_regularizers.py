@@ -15,17 +15,23 @@ class BregmanRegularizer:
     """Base class for Bregman regularizers."""
     def __init__(self, lamda: float = 1.0, delta: float = 1.0):
         self.lamda = lamda
-        self.rescale_mode = "none"  # "none", "subgradient_correction", or "nestrovs_adaptive_update"
+        self.rescale_mode = "none"  # "none", "subgradient_correction", "nestrovs_adaptive_update", "weight_masking"
         self._prev_lamda = lamda
+        # Weight-activation probability for the "weight_masking" readout, set
+        # per-step by the BregmanPruner's WpAnnealer. 1.0 => exact standard
+        # Bregman readout; 0.0 => latched geometric mean (zero is a fixed point).
+        self.w_p = 1.0
+        # How w_p drives the readout gate: "blend" (deterministic geometric
+        # blend) or "probabilistic" (per-element Bernoulli(w_p)). Set by the
+        # BregmanPruner; see weight_masked_prox_arg.
+        self.wp_mode = "blend"
 
     def __call__(self, x: torch.Tensor) -> float:
         raise NotImplementedError
 
     def prox(self, x: torch.Tensor, delta: float = 1.0, lamda: float = None) -> torch.Tensor:
         """Proximal operator. When lamda is None, uses self.lamda (set by the
-        scheduler). An explicit lamda is needed for subgradient correction,
-        where the prox must use β^(k) (old lambda) while self.lamda already
-        holds β^(k+1) (new lambda)."""
+        scheduler). An explicit lamda is needed for subgradient correction."""
         raise NotImplementedError
 
     def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
@@ -47,34 +53,6 @@ class BregmanRegularizer:
         nonzero = torch.abs(p) > 0.
         sub_grad[nonzero] = ratio * sub_grad[nonzero] + (1 - ratio) * p[nonzero]
         sub_grad[~nonzero] = torch.clamp(sub_grad[~nonzero], -self.lamda, self.lamda)
-
-    def apply_subgradient_correction_wo_clip(
-        self, sub_grad: torch.Tensor, p: torch.Tensor
-        ) -> None:
-        if self.lamda == self._prev_lamda:
-            return
-        dlam = self.lamda - self._prev_lamda
-        nonzero = torch.abs(p) > 0.
-        sub_grad[nonzero] += dlam * torch.sign(p[nonzero])
-
-    def apply_predictive_correction(
-        self, sub_grad: torch.Tensor, p: torch.Tensor, delta: float
-        ) -> None:
-        """Predictive subgradient correction (Method 4) when λ changes.
-
-        Applied BEFORE the dual update step. Computes what the weights would
-        be under λ_new via the prox, then adjusts v so its fixed-point
-        condition (v = θ/δ + λ·sign(θ)) is consistent with the new λ and
-        the predicted weights. The prox nonlinearity correctly handles
-        zero/nonzero boundary transitions, unlike the additive patch which
-        can resurrect dying weights and cause divergence at small λ.
-        """
-        if self.lamda == self._prev_lamda:
-            return
-        w_pred = self.prox(delta * sub_grad, delta)
-        sub_grad += (w_pred - p) / delta \
-            + self.lamda * torch.sign(w_pred) - self._prev_lamda * torch.sign(p)
-
 
     def step_lamda_state(self):
             """Updates the state AFTER the whole parameter group is processed."""
