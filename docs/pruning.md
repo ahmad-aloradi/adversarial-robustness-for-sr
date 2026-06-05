@@ -112,6 +112,31 @@ Orchestrates the entire Bregman learning process:
 - Synchronizes optimizer parameter groups
 - Handles checkpoint save/load
 
+#### 1.6 Movement reweighting (reweighted-l1)
+
+A uniform L1 threshold spends a fixed sparsity budget by magnitude, not by task importance. Movement reweighting (Candès–Wakin–Boyd reweighted ℓ1 driven by a Sanh et al. movement importance) gives each weight its own soft-threshold $\lambda \cdot a_i$: $a_i$ is large for unimportant weights (cut first) and small for important ones (protected). The multiplier is normalized to mean 1 over the live support, so the global ρ controller's per-layer average threshold — and thus the target rate — is unchanged; $a_i$ only redistributes *where* the cuts fall. Dead weights ($p=0$) get $a_i=1$ so Bregman revival keeps the baseline threshold.
+
+It lives entirely inside the optimizer step (`movement_reweight=true`) and works for `AdaBreg`, `AdaBregW`, `AdaBregL2`, and `LinBreg`. `RegL1` is unchanged — its prox already broadcasts a tensor `lamda`. Off (the default) the prox call is byte-identical to uniform L1.
+
+Two importance metrics (`move_importance`), objectively:
+
+| | `movement_signed` (default) | `taylor_abs` |
+|---|---|---|
+| Accumulated quantity | EMA of $-\nabla_i \cdot p_i$, then $\mathrm{relu}$ | EMA of $\lvert\nabla_i \cdot p_i\rvert$ |
+| Reads a weight as important when | it is *growing* under data pressure (moving away from zero) | zeroing it would raise the loss (first-order saliency) |
+| Effect | de-protects weights already being pushed to zero | always-positive saliency; ignores direction |
+
+**Memory**: one extra weight-sized buffer per regularized param (`move_ema`), lazily allocated only when the flag is on (≈ +33% optimizer state, ~+34 MB for the ResNet34 run). `move_dtype: bf16` halves it within a run (PyTorch's `load_state_dict` re-expands it to the param dtype on resume). It round-trips through `optimizer.state_dict()` for free; turning the flag on for an existing run is safe (the EMA starts uniform and fills during `move_warmup_steps`).
+
+**A/B recipe** — `sv_bregman_adabreg_movement.yaml` is `sv_bregman_adabreg.yaml` with only the optimizer changed, so a matched comparison at a fixed rate is:
+
+```bash
+python src/train.py +experiment=sv/sv_bregman_adabreg          _bregman_target_sparsity=0.99  # baseline
+python src/train.py +experiment=sv/sv_bregman_adabreg_movement _bregman_target_sparsity=0.99  # reweighted
+```
+
+Win condition: lower `veri_test2` EER at the same global sparsity. Key knobs: `move_clip` (multiplier bounds, default `[0.1, 10.0]`), `move_beta` (EMA, `0.9`), `move_warmup_steps` (≈ one epoch so the EMA populates first).
+
 ### Usage Example
 
 See `configs/experiment/sv/sv_bregman_adabreg.yaml` for a complete configuration:
