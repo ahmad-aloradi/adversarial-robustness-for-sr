@@ -321,6 +321,11 @@ class BregmanPruner(Callback):
 
         sparsity = self._overall_sparsity()
         pruned_sparsity = self._pruned_sparsity()
+        target = (
+            self.lambda_scheduler.target_sparsity
+            if self.lambda_scheduler is not None
+            else self._target_final
+        )
 
         # Inject end-of-epoch sparsity directly into callback_metrics so that
         # ModelCheckpoint filenames and train_log.txt get the true final value
@@ -330,11 +335,19 @@ class BregmanPruner(Callback):
         trainer.callback_metrics["bregman/pruned_sparsity"] = torch.tensor(
             pruned_sparsity
         )
+        if target is not None:
+            trainer.callback_metrics[
+                "bregman/target_sparsity"
+            ] = torch.tensor(target)
 
         if self.verbose > 0:
+            target_str = (
+                f", target = {target:.3%}" if target is not None else ""
+            )
             log.info(
                 f"Epoch {trainer.current_epoch}: "
                 f"Sparsity = {sparsity:.3%} (pruned = {pruned_sparsity:.3%})"
+                f"{target_str}"
             )
 
     def _gate_validation(self, trainer: Trainer) -> None:

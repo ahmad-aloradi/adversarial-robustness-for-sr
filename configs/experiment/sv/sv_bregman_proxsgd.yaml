@@ -64,15 +64,15 @@ callbacks:
       _partial_: true
       target_sparsity: ${_bregman_target_sparsity}
       initial_lambda: ${_bregman_lambda}
-      acceleration_factor: 0.2
+      acceleration_factor: 1.0
       warmup_epochs: 0
       update_frequency: 50
       max_relative_change: null
       # Near-target band: gentler/less-frequent updates AND the convergence
       # gate (1%, matching the validation `tolerance` above).
       damping_zone: 0.01
-      damping_acceleration_divisor: 5
-      damping_frequency_multiplier: 5
+      damping_acceleration_divisor: 2
+      damping_frequency_multiplier: 4
 
 datamodule:
   dataset:

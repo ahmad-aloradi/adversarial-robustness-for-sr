@@ -60,7 +60,7 @@ lambda_scheduler:
   _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
   initial_lambda: 1e-2
   target_sparsity: 0.9
-  acceleration_factor: 0.25
+  acceleration_factor: 1.0
   damping_zone: 0.01         # near-target band + convergence gate (1%)
   max_relative_change: null   # |Δλ|/λ cap once converged
 ```
@@ -128,7 +128,7 @@ callbacks:
       _partial_: true
       initial_lambda: 1e-2
       target_sparsity: 0.9
-      acceleration_factor: 0.25
+      acceleration_factor: 1.0
       damping_zone: 0.01
       max_relative_change: null
 

@@ -36,7 +36,15 @@ callbacks:
     wp_annealer:
       _target_: src.callbacks.pruning.bregman.wp_scheduler.WpAnnealer
       w_p_init: 1.0
-      w_p_final: 0.0
-      start_fraction: 0.0
-      end_fraction: 0.85
+      w_p_final: 0.1
+      start_fraction: 0.25
+      end_fraction: 0.75
       schedule: cosine
+
+  # Hold the AAM margin at 0 until the support commits. w_p reaches 0 (the latch)
+  # at end_fraction of training, so the first fully-committed epoch is
+  # ceil(end_fraction * max_epochs); train one more epoch at the latched support,
+  # then start raising the margin at ceil(end_fraction * max_epochs) + 1.
+  # int(-(-x // 1)) is an integer ceil (no math module inside oc.eval).
+  margin_scheduler:
+    start_epoch: ${oc.eval:'int(-(-${callbacks.model_pruning.wp_annealer.end_fraction} * ${trainer.max_epochs} // 1)) + 1'}
