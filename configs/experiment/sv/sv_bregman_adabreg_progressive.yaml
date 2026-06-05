@@ -18,7 +18,7 @@ _bregman_target_sparsity: 0.99 # final target (feeds resolver + scheduler)
 _bregman_target_initial: 0.0 # ramp start AND initial weight sparsity
 _bregman_ramp_epochs: 10
 _bregman_schedule_type: constant # log-space ("exponential") ramp
-_bregman_ramp_granularity: step # smooth per-step target
+_bregman_ramp_granularity: epoch # smooth per-step target
 _bregman_initial_sparsity: ${_bregman_target_initial} # auto-matches sparsity_rate
 _bregman_lambda: 1e-3
 

@@ -33,7 +33,7 @@ _bregman_target_sparsity: 0.9 # final / steady target sparsity
 _bregman_target_initial: null # ramp start; null => fixed-target mode (no ramp)
 _bregman_ramp_epochs: null # ramp length in epochs (ramp mode only)
 _bregman_schedule_type: constant # linear | constant (log-space ramp)
-_bregman_ramp_granularity: step # step | epoch (ramp mode only)
+_bregman_ramp_granularity: epoch # step | epoch (ramp mode only)
 _bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
 
