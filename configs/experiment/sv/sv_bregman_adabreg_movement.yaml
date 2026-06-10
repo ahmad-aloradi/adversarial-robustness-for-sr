@@ -19,8 +19,8 @@ module:
     movement_reweight: true
     # movement_signed: de-protects weights already being pushed to zero.
     # taylor_abs: always-positive |grad*p| saliency alternative.
-    move_importance: taylor_abs
-    move_clip: [0.01, 100.0] # per-weight threshold multiplier bounds
+    move_importance: movement_signed
+    move_clip: [0.0, 10.0] # per-weight threshold multiplier bounds
     # ~one epoch so the importance EMA populates before reweighting begins
     # (steps_per_epoch = train_segments / train.batch_size; ~10000 here).
     move_warmup_steps: 10000
