@@ -6,7 +6,7 @@ and allows it to become denser during training. The lambda scheduler adjusts
 regularization strength to drive sparsity toward a target level.
 """
 
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
 from pytorch_lightning import Callback, LightningModule, Trainer
@@ -19,7 +19,7 @@ from src.callbacks.pruning.shared_prune_utils import (
 )
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
-from .bregman_regularizers import RegL1L2, RegL1L2Conv
+from .bregman_regularizers import RegL1L2, RegL1L2Conv, RegNone
 from .lambda_scheduler import LambdaScheduler
 from .wp_scheduler import WpAnnealer
 
@@ -116,6 +116,13 @@ class BregmanPruner(Callback):
         # Resolved lazily from the trainer; w_p anneals over the full horizon.
         self._total_steps: Optional[int] = None
         self._last_wp: float = 1.0
+        # ERK per-layer mode: one scheduler per prunable layer, each holding
+        # that layer's own target. Detected at on_fit_start from the optimizer
+        # groups (those carrying an erk_target_sparsity). When on, lambda_scheduler
+        # stays a template that is cloned per layer.
+        self._erk_mode = False
+        self._layer_schedulers: Dict[str, LambdaScheduler] = {}
+        self._ckpt_layer_states: Optional[dict] = None
 
     # -------------------------------------------------------------------------
     # Lightning hooks
@@ -139,6 +146,9 @@ class BregmanPruner(Callback):
         optimizer = trainer.optimizers[0]
         self._optimizer = optimizer
         is_resuming = trainer.ckpt_path is not None
+        self._erk_mode = any(
+            self._group_is_erk(group) for group in optimizer.param_groups
+        )
 
         if is_resuming:
             log.info("BregmanPruner: Resuming from checkpoint.")
@@ -146,7 +156,10 @@ class BregmanPruner(Callback):
             log.info("BregmanPruner: Applying initial sparsity...")
             self.manager.apply_initial_sparsity()
 
-        self._setup_lambda_scheduler(optimizer, trainer, is_resuming)
+        if self._erk_mode:
+            self._setup_layer_schedulers(optimizer, is_resuming)
+        else:
+            self._setup_lambda_scheduler(optimizer, trainer, is_resuming)
 
         self._apply_lambda_to_groups(trainer)
         if is_resuming and self._ckpt_scheduler_state:
@@ -178,7 +191,8 @@ class BregmanPruner(Callback):
                     "The element-wise latch can zero entries inside a live "
                     "row, breaking the group structure. Use an element-wise "
                     "regularizer (e.g. RegL1) for these groups, or a "
-                    "non-masking rescale_mode.")
+                    "non-masking rescale_mode."
+                )
         elif needs_scheduler and self.lambda_scheduler is None:
             log.warning(
                 f"BregmanPruner: rescale_mode='{self.rescale_mode}' ignored "
@@ -190,9 +204,7 @@ class BregmanPruner(Callback):
         if self._wp_anneal_active():
             if not hasattr(self.wp_annealer, "value_at"):
                 self.wp_annealer = self.wp_annealer()  # Hydra partial
-            self._apply_wp_to_groups(
-                optimizer, self.wp_annealer.value_at(0.0)
-            )
+            self._apply_wp_to_groups(optimizer, self.wp_annealer.value_at(0.0))
             log.info(
                 f"BregmanPruner: w_p anneal enabled "
                 f"({self.wp_annealer.w_p_init} -> {self.wp_annealer.w_p_final}, "
@@ -227,6 +239,17 @@ class BregmanPruner(Callback):
     ) -> None:
         """Fail loud if a ramp can't finish; enforce min_epochs; log
         schedule."""
+        if self._erk_mode:
+            # Fixed-mode ERK has nothing to ramp; verify_ramp_feasibility is a
+            # no-op there but guards a ramped template.
+            max_epochs = trainer.max_epochs
+            if isinstance(max_epochs, int) and max_epochs > 0:
+                for sched in self._layer_schedulers.values():
+                    sched.verify_ramp_feasibility(max_epochs)
+            # All clones share warmup/ramp settings; any one stands in.
+            any_sched = next(iter(self._layer_schedulers.values()))
+            self._ensure_min_epochs_for_ramp(trainer, any_sched)
+            return
         if self.lambda_scheduler is None:
             return
         max_epochs = trainer.max_epochs
@@ -238,20 +261,7 @@ class BregmanPruner(Callback):
         if self.lambda_scheduler._target_initial is None:
             return
 
-        # Ensure min_epochs leaves room for the ramp to actually reach progress
-        # 1.0 (one epoch past warmup+epochs_to_ramp, see verify_ramp_feasibility).
-        ramp_end = (
-            self.lambda_scheduler.warmup_epochs
-            + self.lambda_scheduler._epochs_to_ramp
-        )
-        min_needed = ramp_end + 1
-        current_min = trainer.fit_loop.min_epochs
-        if current_min is None or current_min < min_needed:
-            trainer.fit_loop.min_epochs = min_needed
-            log.info(
-                f"BregmanPruner: trainer.min_epochs {current_min} -> "
-                f"{min_needed} to ensure the sparsity ramp completes."
-            )
+        self._ensure_min_epochs_for_ramp(trainer, self.lambda_scheduler)
 
         n_batches = trainer.num_training_batches
         if isinstance(n_batches, int) and n_batches > 0:
@@ -267,6 +277,23 @@ class BregmanPruner(Callback):
                 + "\n".join(lines)
             )
 
+    def _ensure_min_epochs_for_ramp(self, trainer: Trainer, scheduler) -> None:
+        """Bump trainer.min_epochs so a ramped target reaches progress 1.0
+        (one epoch past warmup+epochs_to_ramp, see verify_ramp_feasibility).
+
+        No-op for a fixed-target scheduler (_target_initial is None).
+        """
+        if scheduler._target_initial is None:
+            return
+        min_needed = scheduler.warmup_epochs + scheduler._epochs_to_ramp + 1
+        current_min = trainer.fit_loop.min_epochs
+        if current_min is None or current_min < min_needed:
+            trainer.fit_loop.min_epochs = min_needed
+            log.info(
+                f"BregmanPruner: trainer.min_epochs {current_min} -> "
+                f"{min_needed} to ensure the sparsity ramp completes."
+            )
+
     def on_train_epoch_start(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
@@ -274,14 +301,19 @@ class BregmanPruner(Callback):
         if not self._initialized:
             return
 
-        if self.lambda_scheduler is not None and not self._warmup_resolved:
-            if hasattr(self.lambda_scheduler, "resolve_warmup_steps"):
-                self.lambda_scheduler.resolve_warmup_steps(
-                    trainer.num_training_batches
-                )
-            self._warmup_resolved = True
+        if not self._warmup_resolved:
+            if self._erk_mode:
+                for sched in self._layer_schedulers.values():
+                    sched.resolve_warmup_steps(trainer.num_training_batches)
+                self._warmup_resolved = True
+            elif self.lambda_scheduler is not None:
+                if hasattr(self.lambda_scheduler, "resolve_warmup_steps"):
+                    self.lambda_scheduler.resolve_warmup_steps(
+                        trainer.num_training_batches
+                    )
+                self._warmup_resolved = True
 
-         # start with the right w_p value
+        # start with the right w_p value
         if self._wp_anneal_active():
             self._step_wp_annealer(trainer)
 
@@ -297,7 +329,7 @@ class BregmanPruner(Callback):
         if not self._initialized:
             return
 
-        if self.lambda_scheduler is not None:
+        if self._erk_mode or self.lambda_scheduler is not None:
             self._step_lambda_scheduler(trainer)
 
         if self._wp_anneal_active():
@@ -322,9 +354,9 @@ class BregmanPruner(Callback):
         sparsity = self._overall_sparsity()
         pruned_sparsity = self._pruned_sparsity()
         target = (
-            self.lambda_scheduler.target_sparsity
-            if self.lambda_scheduler is not None
-            else self._target_final
+            self._target_final
+            if self._erk_mode or self.lambda_scheduler is None
+            else self.lambda_scheduler.target_sparsity
         )
 
         # Inject end-of-epoch sparsity directly into callback_metrics so that
@@ -336,9 +368,9 @@ class BregmanPruner(Callback):
             pruned_sparsity
         )
         if target is not None:
-            trainer.callback_metrics[
-                "bregman/target_sparsity"
-            ] = torch.tensor(target)
+            trainer.callback_metrics["bregman/target_sparsity"] = torch.tensor(
+                target
+            )
 
         if self.verbose > 0:
             target_str = (
@@ -360,18 +392,28 @@ class BregmanPruner(Callback):
         """
         if self.lambda_scheduler is None or self._target_final is None:
             return
-        current_sparsity = (
-            self._overall_sparsity()
-            if WHICH_SPARSITY_PERCENTAGE == "overall"
-            else self._pruned_sparsity()
-        )
+        # ERK targets are defined over the prunable set, so gate on pruned
+        # sparsity -- overall (diluted by dense BN/bias) never reaches it.
+        if self._erk_mode:
+            current_sparsity = self._pruned_sparsity()
+        else:
+            current_sparsity = (
+                self._overall_sparsity()
+                if WHICH_SPARSITY_PERCENTAGE == "overall"
+                else self._pruned_sparsity()
+            )
         self._suppressor.gate(trainer, current_sparsity, self._target_final)
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
     ) -> None:
         """Save scheduler state to checkpoint."""
-        if self.lambda_scheduler is not None:
+        if self._erk_mode:
+            checkpoint["bregman_erk_layer_scheduler_states"] = {
+                name: sched.get_state()
+                for name, sched in self._layer_schedulers.items()
+            }
+        elif self.lambda_scheduler is not None:
             checkpoint[
                 "bregman_lambda_scheduler_state"
             ] = self.lambda_scheduler.get_state()
@@ -383,6 +425,9 @@ class BregmanPruner(Callback):
         self._ckpt_scheduler_state = checkpoint.get(
             "bregman_lambda_scheduler_state",
             checkpoint.get("lambda_scheduler_state"),  # pre-rename compat
+        )
+        self._ckpt_layer_states = checkpoint.get(
+            "bregman_erk_layer_scheduler_states"
         )
 
     # -------------------------------------------------------------------------
@@ -417,11 +462,93 @@ class BregmanPruner(Callback):
             f"initial_lambda={self.lambda_scheduler.get_lambda():.4f}"
         )
 
+    def _setup_layer_schedulers(self, optimizer, is_resuming: bool) -> None:
+        """Build one LambdaScheduler per ERK group from the template.
+
+        The configured lambda_scheduler stays a Hydra partial; each clone
+        overrides target_sparsity with that layer's ERK target. All clones
+        warm-start from the same template initial_lambda (the controller is
+        closed-loop, so per-layer warm starts are unnecessary).
+        """
+        template = self.lambda_scheduler
+        if template is None or hasattr(template, "step"):
+            raise TypeError(
+                "ERK mode needs lambda_scheduler as a Hydra partial "
+                "(_partial_: true) to clone per layer."
+            )
+
+        for group in optimizer.param_groups:
+            if not self._group_is_erk(group):
+                continue
+            # Every ERK group gets a scheduler, so the build set equals the
+            # consume set in _step_layer_schedulers/_apply_lambda_to_groups.
+            if not self._group_has_regularizer(group):
+                raise ValueError(
+                    f"ERK group '{group.get('name')}' has no active "
+                    "regularizer (reg with lambda_scale > 0); its per-layer "
+                    "scheduler would have no lambda to drive."
+                )
+            self._layer_schedulers[group["name"]] = template(
+                target_sparsity=group["erk_target_sparsity"]
+            )
+        if not self._layer_schedulers:
+            raise ValueError(
+                "ERK mode detected but no per-layer schedulers built"
+            )
+
+        # Any regularized group without an ERK target would never get its lambda
+        # updated in ERK mode -- fail loud rather than silently freeze it.
+        for group in optimizer.param_groups:
+            if self._group_has_regularizer(group) and not self._group_is_erk(
+                group
+            ):
+                raise ValueError(
+                    f"ERK mode: regularized group '{group.get('name')}' has no "
+                    "erk_target_sparsity; its lambda would never update. Use "
+                    "RegNone for it or include it in the auto_per_layer_erk group."
+                )
+
+        if is_resuming:
+            if self._ckpt_layer_states is None:
+                raise ValueError(
+                    "ERK resume: checkpoint lacks "
+                    "'bregman_erk_layer_scheduler_states'; refusing to "
+                    "restart every per-layer controller from defaults."
+                )
+            self._restore_layer_schedulers()
+            self._warmup_resolved = True
+
+        log.info(
+            f"BregmanPruner: ERK mode with {len(self._layer_schedulers)} "
+            f"per-layer schedulers (prunable target {self._target_final})."
+        )
+
+    def _restore_layer_schedulers(self) -> None:
+        """Restore per-layer scheduler states, asserting the layer set
+        matches."""
+        saved = self._ckpt_layer_states
+        built = set(self._layer_schedulers)
+        if set(saved) != built:
+            raise ValueError(
+                "ERK resume layer-set mismatch: checkpoint has "
+                f"{sorted(set(saved) - built)} not in the model, missing "
+                f"{sorted(built - set(saved))}."
+            )
+        for name, sched in self._layer_schedulers.items():
+            sched.load_state(saved[name])
+        log.info(
+            f"BregmanPruner: restored {len(saved)} per-layer ERK schedulers."
+        )
+
     def _step_lambda_scheduler(self, trainer: Trainer) -> None:
         """Step the scheduler and update regularizer lambdas.
 
         w_t+1 = max(w_t + δ(λ_old − λ_new) − δ·lr·grad_step, 0)
         """
+        if self._erk_mode:
+            self._step_layer_schedulers(trainer)
+            return
+
         current_sparsity = (
             self._overall_sparsity()
             if WHICH_SPARSITY_PERCENTAGE == "overall"
@@ -434,17 +561,41 @@ class BregmanPruner(Callback):
 
         for group in trainer.optimizers[0].param_groups:
             if self._group_has_regularizer(group):
-                scale = group.get("lambda_scale", 1.0)
+                scale = self._lambda_scale(group)
                 group["reg"].lamda = new_lambda * scale
+
+    def _step_layer_schedulers(self, trainer: Trainer) -> None:
+        """Drive each ERK group's lambda from its own measured sparsity."""
+        for group in trainer.optimizers[0].param_groups:
+            if not self._group_is_erk(group):
+                continue
+            layer_sparsity = compute_sparsity(
+                group["params"], threshold=self.sparsity_threshold
+            )
+            new_lambda = self._layer_schedulers[group["name"]].step(
+                layer_sparsity, trainer.global_step
+            )
+            scale = self._lambda_scale(group)
+            group["reg"].lamda = new_lambda * scale
 
     def _apply_lambda_to_groups(self, trainer: Trainer) -> None:
         """Apply current scheduler lambda to all regularized groups."""
+        if self._erk_mode:
+            for group in trainer.optimizers[0].param_groups:
+                if not self._group_is_erk(group):
+                    continue
+                scale = self._lambda_scale(group)
+                current_lambda = self._layer_schedulers[
+                    group["name"]
+                ].get_lambda()
+                group["reg"].lamda = current_lambda * scale
+            return
         if self.lambda_scheduler is None:
             return
         current_lambda = self.lambda_scheduler.get_lambda()
         for group in trainer.optimizers[0].param_groups:
             if self._group_has_regularizer(group):
-                scale = group.get("lambda_scale", 1.0)
+                scale = self._lambda_scale(group)
                 group["reg"].lamda = current_lambda * scale
 
     # -------------------------------------------------------------------------
@@ -494,7 +645,9 @@ class BregmanPruner(Callback):
 
     def _regularized_parameters(self) -> List[torch.Tensor]:
         """Parameters in optimizer groups that carry an active regularizer."""
-        assert self._optimizer is not None, "Optimizer must be set to compute pruned sparsity."
+        assert (
+            self._optimizer is not None
+        ), "Optimizer must be set to compute pruned sparsity."
         params: List[torch.Tensor] = []
         for group in self._optimizer.param_groups:
             if self._group_has_regularizer(group):
@@ -539,13 +692,16 @@ class BregmanPruner(Callback):
             "bregman/pruned_sparsity", pruned_sparsity, **step_params
         )
 
-        if self.lambda_scheduler:
-            # Lambda changes per step, so always log on_step; override on_epoch to avoid noise
-            lambda_params = {
-                **logging_params,
-                "on_epoch": False,
-                "on_step": True,
-            }
+        # Lambda changes per step, so always log on_step; override on_epoch.
+        lambda_params = {**logging_params, "on_epoch": False, "on_step": True}
+        if self._erk_mode:
+            mean_lambda = sum(
+                s.get_lambda() for s in self._layer_schedulers.values()
+            ) / len(self._layer_schedulers)
+            pl_module.log(
+                "bregman/mean_layer_lambda", mean_lambda, **lambda_params
+            )
+        elif self.lambda_scheduler:
             pl_module.log(
                 "bregman/global_lambda",
                 self.lambda_scheduler.get_lambda(),
@@ -566,7 +722,20 @@ class BregmanPruner(Callback):
 
         log.info(f"Optimizer: {type(optimizer).__name__}")
 
-        if self.lambda_scheduler:
+        if self._erk_mode:
+            log.info(
+                f"Lambda Scheduler: ERK per-layer "
+                f"({len(self._layer_schedulers)} schedulers, prunable "
+                f"target={self._target_final})"
+            )
+            if self.verbose >= 2:
+                for name, sched in self._layer_schedulers.items():
+                    log.info(
+                        f"  {name}: target={sched.target_sparsity:.4f}, "
+                        f"lambda={sched.get_lambda():.4f}, "
+                        f"converged={sched._converged}"
+                    )
+        elif self.lambda_scheduler:
             sched_info = (
                 f"Lambda Scheduler: target_sparsity={self.lambda_scheduler.target_sparsity}, "
                 f"lambda={self.lambda_scheduler.get_lambda():.4f}, "
@@ -578,15 +747,18 @@ class BregmanPruner(Callback):
 
         for group in optimizer.param_groups:
             name = group.get("name", "unnamed")
-            scale = group.get("lambda_scale", 1.0)
             lamda = group["reg"].lamda
             reg_type = type(group["reg"]).__name__
+            if not self._group_has_regularizer(group):
+                log.info(f"  Group '{name}': {reg_type} (inactive)")
+                continue
+            scale = self._lambda_scale(group)
             log.info(
                 f"  Group '{name}': {reg_type}, lambda={lamda:.4f}, scale={scale}"
             )
 
             # Safety check for non-uniform scaling
-            if self._group_has_regularizer(group) and scale != 1.0:
+            if scale != 1.0:
                 log.warning(
                     f"Group '{name}' has lambda_scale={scale} != 1.0. "
                     "Non-uniform regularization is generally not recommended."
@@ -649,13 +821,33 @@ class BregmanPruner(Callback):
     # -------------------------------------------------------------------------
 
     @staticmethod
+    def _lambda_scale(group: dict) -> float:
+        """lambda_scale of a param group; a missing key is a config bug."""
+        if "lambda_scale" not in group:
+            raise KeyError(
+                f"Group '{group.get('name')}' has no lambda_scale; every "
+                "Bregman group must set optimizer_settings.lambda_scale."
+            )
+        return group["lambda_scale"]
+
+    @staticmethod
     def _group_has_regularizer(group: dict) -> bool:
-        """Check if a param group has an active regularizer."""
+        """Check if a param group has an active regularizer.
+
+        RegNone (also the optimizer-default reg) is a no-op regardless of
+        lambda_scale; a real regularizer must declare its lambda_scale.
+        """
         return (
             "reg" in group
             and hasattr(group["reg"], "lamda")
-            and group.get("lambda_scale", 0.0) > 0.0
+            and not isinstance(group["reg"], RegNone)
+            and BregmanPruner._lambda_scale(group) > 0.0
         )
+
+    @staticmethod
+    def _group_is_erk(group: dict) -> bool:
+        """Check if a param group carries a per-layer ERK target."""
+        return "erk_target_sparsity" in group
 
     @staticmethod
     def _validate_module(pl_module: LightningModule) -> None:

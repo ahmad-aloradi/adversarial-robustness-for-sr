@@ -168,7 +168,7 @@ module:
           [
             "torch.nn.BatchNorm1d",
             "torch.nn.BatchNorm2d",
-            "torch.nn.layernorm.LayerNorm",
+            "torch.nn.LayerNorm",
             "torch.nn.GroupNorm",
           ]
         optimizer_settings:

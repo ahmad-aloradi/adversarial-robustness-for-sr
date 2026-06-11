@@ -237,7 +237,7 @@ module:
           [
             "torch.nn.BatchNorm1d",
             "torch.nn.BatchNorm2d",
-            "torch.nn.layernorm.LayerNorm",
+            "torch.nn.LayerNorm",
             "torch.nn.GroupNorm",
           ]
         # layer_types is sufficient — isinstance() catches all norm layers
