@@ -770,7 +770,7 @@ def _find_latest_last_ckpt(ckpt_dir):
             f"_find_latest_last_ckpt probe produced no marker "
             f"for {ckpt_dir}: {text!r}"
         )
-    exit_code = text[marker_idx + len("__FL__"):].strip()
+    exit_code = text[marker_idx + len("__FL__") :].strip()
     body = text[:marker_idx].strip()
     if exit_code != "0":
         raise RuntimeError(
@@ -1158,35 +1158,7 @@ def _submit_sv_job(
 
     if target_sparsity is not None:
         if "bregman" in experiment:
-            if progressive:
-                assert (
-                    initial_target_sparsity is not None and ramp_epochs is not None
-                ), "progressive=True requires initial_target_sparsity and ramp_epochs"
-                assert (
-                    ramp_epochs >= 2
-                ), f"ramp_epochs must be >= 2 to interpolate, got {ramp_epochs}"
-                # Linear ramp: initial_target_sparsity -> target_sparsity over
-                # ramp_epochs entries; the final value is held beyond the list.
-                schedule = [
-                    initial_target_sparsity
-                    + (target_sparsity - initial_target_sparsity)
-                    * i
-                    / (ramp_epochs - 1)
-                    for i in range(ramp_epochs)
-                ]
-                # Format as a Hydra CLI list literal; wrap in single quotes so
-                # the shell preserves the brackets.
-                schedule_literal = (
-                    "[" + ",".join(f"{v:.6f}" for v in schedule) + "]"
-                )
-                script_arguments[
-                    "_bregman_target_sparsity"
-                ] = f"'{schedule_literal}'"
-                script_arguments[
-                    "_bregman_target_sparsity_final"
-                ] = target_sparsity
-            else:
-                script_arguments["_bregman_target_sparsity"] = target_sparsity
+            script_arguments["_bregman_target_sparsity"] = target_sparsity
         elif "pruning" in experiment:
             script_arguments[
                 "callbacks.model_pruning.amount"
@@ -1276,10 +1248,9 @@ def run_sv(transfer_data="false", force="false"):
     }
 
     # Default hparams shared across experiments
-    default_sv_models = [
-        "wespeaker_ecapa_tdnn",
-        "wespeaker_resnet34",
-    ]
+    ecapa = "wespeaker_ecapa_tdnn"
+    resnet34 = "wespeaker_resnet34"
+    default_sv_models = [ecapa, resnet34]
     default_sparsity_rates = [0.90, 0.95, 0.99]
     dataset_names = ["datasets/cnceleb", "multi_sv"]
 
@@ -1291,267 +1262,137 @@ def run_sv(transfer_data="false", force="false"):
     }
 
     ########################
-    # Switch controls
+    # Switch controls (master switch per group of experiments)
     ########################
-    # Master switch per group of experiments
     RUN_BASELINE_EXPS = False
     RUN_PRUNING_EXPS = False
-    RUN_Bregman_EXPS = True
+    RUN_Bregman_EXPS = False
     RUN_AUX_BREGMAN_EXPS = False
-    RUN_PROGRESSIVE_Bregman_EXPS = False
-    # Adaptation experiments
-    RUN_POOR_INIT_Bregman_EXPS = False
-    RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS = False
-    RUN_NESTROV_RESCALE_PROX_Bregman_EXPS = False
+    RUN_PROGRESSIVE_Bregman_EXPS = True
+    RUN_PROGRESSIVE_STEP_Bregman_EXPS = True
+    RUN_MOVEMENT_Bregman_EXPS = True
+    RUN_TRAINABLE_SCALES_Bregman_EXPS = False
 
     ########################
-    # Pruning experiments
+    # Experiment registry: one schema for every group.
+    #   required: sv_models, dataset_names, sparsity_rates ([None]=baseline)
+    #   optional: extra_overrides, suffix, per_model,
+    #             initial_target_sparsity + ramp_epochs (=> progressive ramp)
     ########################
-    if not RUN_BASELINE_EXPS:
-        baselines_exps = []
-    else:
-        baselines_exps = [
-            "sv_wespeaker",
-            "sv_vanilla",
-        ]
+    EXPERIMENTS = {}
 
-    ########################
-    # Pruning experiments
-    ########################
-    if not RUN_PRUNING_EXPS:
-        pruning_experiments = {}
-    else:
-        pruning_experiments = {
-            # "sv_pruning_mag_struct": {
-            #     "sv_models": default_sv_models,
-            #     "sparsity_rates": default_sparsity_rates,
-            #     "dataset_names": dataset_names,
-            # },
-            "sv_pruning_mag_unstruct": {
+    # Baselines: no sparsity target, swept over default models/datasets.
+    if RUN_BASELINE_EXPS:
+        for _exp in ("sv_wespeaker", "sv_vanilla"):
+            EXPERIMENTS[_exp] = {
                 "sv_models": default_sv_models,
-                "sparsity_rates": default_sparsity_rates,
                 "dataset_names": dataset_names,
-            },
-            # "sv_pruning_mag_struct_onetime": {
-            #     "sv_models": default_sv_models,
-            #     "sparsity_rates": [0.9],
-            #     "dataset_names": dataset_names,
-            # },
-            # "sv_pruning_mag_unstruct_onetime": {
-            #     "sv_models": default_sv_models,
-            #     "sparsity_rates": [0.9],
-            #     "dataset_names": dataset_names,
-            # },
-        }
+                "sparsity_rates": [None],
+            }
 
-    ########################
-    # Bregman experiments
-    ########################
-    # Group Norm for conv layers in ECAPA
-    if not RUN_Bregman_EXPS:
-        main_bregman_experiments = {}
-    else:
-        # ECAPA uses the default GroupNorm regularizer on conv layers.
-        # ResNet34 uses L1 norm on Conv and Linear layers (per-model override).
-        _resnet34_regl1 = {
-            "extra_overrides": {
-                "module.model.pruning_groups.0.optimizer_settings.reg._target_": "src.callbacks.pruning.bregman.bregman_regularizers.RegL1",
-            },
-            "suffix": "-regl1_conv-stepwise_target",
-        }
-        main_bregman_experiments = {
-            "sv_bregman_linbreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
+    # Magnitude pruning (struct/onetime variants kept for re-enabling).
+    if RUN_PRUNING_EXPS:
+        EXPERIMENTS.update(
+            {
+                # "sv_pruning_mag_struct": {
+                #     "sv_models": default_sv_models,
+                #     "sparsity_rates": default_sparsity_rates,
+                #     "dataset_names": dataset_names,
+                # },
+                "sv_pruning_mag_unstruct": {
+                    "sv_models": default_sv_models,
+                    "sparsity_rates": default_sparsity_rates,
+                    "dataset_names": dataset_names,
+                },
+            }
+        )
+
+    # Bregman: both models use RegL1 on conv (set in the experiment configs).
+    if RUN_Bregman_EXPS:
+        for _exp in ("sv_bregman_linbreg", "sv_bregman_adabreg"):
+            EXPERIMENTS[_exp] = {
+                "sv_models": [ecapa, resnet34],
                 "sparsity_rates": [0.95, 0.99],
                 "dataset_names": ["multi_sv"],
-                "per_model": {"wespeaker_resnet34": _resnet34_regl1, "wespeaker_ecapa_tdnn": {"suffix": "-stepwise_target"}},
-            },
-            "sv_bregman_adabreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
-                "sparsity_rates": [0.95, 0.99],
+                "suffix": "-regl1_conv",
+            }
+
+    # Auxiliary fixed-target Bregman (proxsgd kept for re-enabling).
+    if RUN_AUX_BREGMAN_EXPS:
+        EXPERIMENTS.update(
+            {
+                "sv_bregman_adabreg_fixed": {
+                    "sv_models": [ecapa, resnet34],
+                    "sparsity_rates": [0.90],
+                    "dataset_names": ["datasets/cnceleb"],
+                },
+                "sv_bregman_linbreg_fixed": {
+                    "sv_models": [ecapa, resnet34],
+                    "sparsity_rates": [0.90],
+                    "dataset_names": ["datasets/cnceleb"],
+                },
+            }
+        )
+
+    # Movement reweighting (AdaBreg + LinBreg).
+    if RUN_MOVEMENT_Bregman_EXPS:
+        for _exp in (
+            "sv_bregman_adabreg_movement",
+            "sv_bregman_linbreg_movement",
+        ):
+            EXPERIMENTS[_exp] = {
+                "sv_models": [ecapa],
+                "sparsity_rates": [0.99],
                 "dataset_names": ["multi_sv"],
-                "per_model": {"wespeaker_resnet34": _resnet34_regl1, "wespeaker_ecapa_tdnn": {"suffix": "-stepwise_target"}},
-            },
-        }
+            }
 
-    ########################
-    # Bregman's "auxiliary" experiments
-    ########################
-    if not RUN_AUX_BREGMAN_EXPS:
-        aux_bregman_experiments = {}
-    else:
-        aux_bregman_experiments = {
-            # "sv_bregman_proxsgd_fixed": {
-            #     "sv_models": ["wespeaker_ecapa_tdnn"],
-            #     "sparsity_rates": [0.90],
-            #     "dataset_names": ["datasets/cnceleb"],
-            # },
-            "sv_bregman_adabreg_fixed": {
-                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
-                "sparsity_rates": [0.90],
-                "dataset_names": ["datasets/cnceleb"],
-                "extra_overrides": {"trainer.max_epochs": 50},
-            },
-            "sv_bregman_linbreg_fixed": {
-                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
-                "sparsity_rates": [0.90],
-                "dataset_names": ["datasets/cnceleb"],
-                "extra_overrides": {"trainer.max_epochs": 50},
-            },
-        }
-
-    ########################
-    # Merge all sparsity experiments
-    ########################
-    bregman_experiments = {
-        **main_bregman_experiments,
-        **aux_bregman_experiments,
-    }
-    sparsity_experiments = {**bregman_experiments, **pruning_experiments}
-
-    ########################
-    # Poor-init experiments: swapped initial_lambda + fast update frequency
-    ########################
-    if not RUN_POOR_INIT_Bregman_EXPS:
-        poor_init_configs = {}
-    else:
-        poor_init_configs = {
-            "sv_bregman_adabreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn"],
-                "sparsity_rates": [0.75, 0.9],
+    # Trainable per-layer lambda scales (AdaBreg + LinBreg).
+    if RUN_TRAINABLE_SCALES_Bregman_EXPS:
+        for _exp in (
+            "sv_bregman_adabreg_trainable_scales",
+            "sv_bregman_linbreg_trainable_scales",
+        ):
+            EXPERIMENTS[_exp] = {
+                "sv_models": [ecapa],
+                "sparsity_rates": [0.99],
                 "dataset_names": ["multi_sv"],
-                "extra_overrides": {
-                    "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.1,
-                    "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
-                },
-                "suffix": "-poor_init",
-            },
-            "sv_bregman_linbreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn"],
-                "sparsity_rates": [0.75, 0.9],
+            }
+
+    # Progressive ramp (epoch granularity): linear ramp from
+    # initial_target_sparsity up to sparsity_rate over ramp_epochs epochs.
+    if RUN_PROGRESSIVE_Bregman_EXPS:
+        for _exp in (
+            "sv_bregman_adabreg_progressive",
+            "sv_bregman_linbreg_progressive",
+        ):
+            EXPERIMENTS[_exp] = {
+                "sv_models": [ecapa],
+                "sparsity_rates": [0.99],
                 "dataset_names": ["multi_sv"],
-                "extra_overrides": {
-                    "callbacks.model_pruning.lambda_scheduler.initial_lambda": 0.5,
-                    "callbacks.model_pruning.lambda_scheduler.update_frequency": 5,
-                },
-                "suffix": "-poor_init",
-            },
-        }
-
-    ########################
-    # Rescale-prox experiments: divide prox output by lambda (dual averaging)
-    ########################
-    if not RUN_NESTROV_RESCALE_PROX_Bregman_EXPS:
-        nestrovs_rescale_prox_configs = {}
-    else:
-        nestrovs_rescale_prox_configs = {
-            "sv_bregman_adabreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet50"],
-                "sparsity_rates": [0.90, 0.99],
-                "dataset_names": ["datasets/cnceleb"],
-                "extra_overrides": {
-                    "callbacks.model_pruning.rescale_mode": "nestrovs_adaptive_update",
-                },
-                "suffix": "-rescale_prox_v2",
-            },
-            "sv_bregman_linbreg": {
-                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet50"],
-                "sparsity_rates": [0.90, 0.99],
-                "dataset_names": ["datasets/cnceleb"],
-                "extra_overrides": {
-                    "callbacks.model_pruning.rescale_mode": "nestrovs_adaptive_update",
-                },
-                "suffix": "-rescale_prox_v2",
-            },
-        }
-
-    ########################
-    # Subgradient correction (v1) experiments
-    ########################
-    if not RUN_SUBGRADIENT_RESCALE_PROX_Bregman_EXPS:
-        subgrad_corr_rescale_prox_configs = {}
-    else:
-        subgrad_corr_rescale_prox_configs = {
-            "sv_bregman_adabreg": {
-                "sv_models": default_sv_models,
-                "sparsity_rates": default_sparsity_rates,
-                "dataset_names": dataset_names,
-                "extra_overrides": {
-                    "callbacks.model_pruning.rescale_mode": "subgradient_correction",
-                },
-                "suffix": "-subgrad_corr_v2",
-            },
-            "sv_bregman_linbreg": {
-                "sv_models": default_sv_models,
-                "sparsity_rates": default_sparsity_rates,
-                "dataset_names": dataset_names,
-                "extra_overrides": {
-                    "callbacks.model_pruning.rescale_mode": "subgradient_correction",
-                },
-                "suffix": "-subgrad_corr_v2",
-            },
-        }
-
-    rescale_prox_configs = [
-        *nestrovs_rescale_prox_configs.items(),
-        *subgrad_corr_rescale_prox_configs.items(),
-    ]
-
-    ########################
-    # Progressive-target experiments: linear ramp from initial_target_sparsity
-    # up to sparsity_rate over ramp_epochs epochs, then held.
-    ########################
-    if not RUN_PROGRESSIVE_Bregman_EXPS:
-        progressive_bregman_experiments = {}
-    else:
-        progressive_bregman_experiments = {
-            "sv_bregman_adabreg_progressive": {
-                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
-                "sparsity_rates": [0.90],  # final targets
-                "initial_target_sparsity": 0.5,
+                "initial_target_sparsity": 0.0,
                 "ramp_epochs": 10,
+            }
+
+    # Progressive ramp (step granularity): same schedule, one entry per step.
+    if RUN_PROGRESSIVE_STEP_Bregman_EXPS:
+        for _exp in (
+            "sv_bregman_adabreg_progressive_step",
+            "sv_bregman_linbreg_progressive_step",
+        ):
+            EXPERIMENTS[_exp] = {
+                "sv_models": [ecapa],
+                "sparsity_rates": [0.99],
                 "dataset_names": ["multi_sv"],
-            },
-            "sv_bregman_linbreg_progressive": {
-                "sv_models": ["wespeaker_ecapa_tdnn", "wespeaker_resnet34"],
-                "sparsity_rates": [0.90],
-                "initial_target_sparsity": 0.5,
+                "initial_target_sparsity": 0.0,
                 "ramp_epochs": 10,
-                "dataset_names": ["multi_sv"],
-            },
-        }
+            }
 
     # --- Volume estimation across clusters ---
     job_counts = {
         "alex": {"a40": 0, "a100": 0},
         "tinygpu": {"v100": 0, "a100": 0},
     }
-
-    for experiment, exp_cfg in sparsity_experiments.items():
-        for dataset_name in exp_cfg["dataset_names"]:
-            for sparsity in exp_cfg["sparsity_rates"]:
-                cluster, gpu = _get_job_routing(
-                    experiment, dataset_name, sparsity
-                )
-                job_counts[cluster][gpu] += len(exp_cfg["sv_models"])
-
-    for experiment, cfg in poor_init_configs.items():
-        for dataset_name in cfg["dataset_names"]:
-            for sparsity in cfg["sparsity_rates"]:
-                cluster, gpu = _get_job_routing(
-                    experiment, dataset_name, sparsity
-                )
-                job_counts[cluster][gpu] += len(cfg["sv_models"])
-
-    for experiment, cfg in rescale_prox_configs:
-        for dataset_name in cfg["dataset_names"]:
-            for sparsity in cfg["sparsity_rates"]:
-                cluster, gpu = _get_job_routing(
-                    experiment + cfg.get("suffix", ""), dataset_name, sparsity
-                )
-                job_counts[cluster][gpu] += len(cfg["sv_models"])
-
-    for experiment, cfg in progressive_bregman_experiments.items():
+    for experiment, cfg in EXPERIMENTS.items():
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
                 cluster, gpu = _get_job_routing(
@@ -1576,90 +1417,20 @@ def run_sv(transfer_data="false", force="false"):
         )
     print(f"{'='*50}\n")
 
-    # --- Submit baseline experiments (only for current cluster) ---
-    for experiment in baselines_exps:
-        for sv_model in default_sv_models:
-            for dataset_name in dataset_names:
-                cluster, gpu = _get_job_routing(experiment, dataset_name)
-                if cluster != CLUSTER_NAME:
-                    print(
-                        f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
-                    )
-                    continue
-                _submit_sv_job(
-                    experiment=experiment,
-                    sv_model=sv_model,
-                    dataset_name=dataset_name,
-                    batch_size_base=batch_sizes[sv_model],
-                    transfer_data_bool=transfer_data_bool,
-                    max_epochs=base_max_epochs[dataset_name],
-                    gpu_device=gpu,
-                    force_retest=force_retest,
-                )
+    # --- Submit all experiments (only for current cluster) ---
+    for experiment, cfg in EXPERIMENTS.items():
+        base_overrides = cfg.get("extra_overrides") or {}
+        base_suffix = cfg.get("suffix", "")
+        per_model_cfg = cfg.get("per_model", {})
+        prog = {}
+        if "ramp_epochs" in cfg:
+            prog = {
+                "progressive": True,
+                "initial_target_sparsity": cfg["initial_target_sparsity"],
+                "ramp_epochs": cfg["ramp_epochs"],
+            }
 
-    # --- Submit poor-init experiments (only for current cluster) ---
-    for experiment, cfg in poor_init_configs.items():
         for sv_model in cfg["sv_models"]:
-            for dataset_name in cfg["dataset_names"]:
-                for sparsity in cfg["sparsity_rates"]:
-                    cluster, gpu = _get_job_routing(
-                        experiment, dataset_name, sparsity
-                    )
-                    if cluster != CLUSTER_NAME:
-                        print(
-                            f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
-                        )
-                        continue
-                    _submit_sv_job(
-                        experiment=experiment,
-                        sv_model=sv_model,
-                        dataset_name=dataset_name,
-                        batch_size_base=batch_sizes[sv_model],
-                        transfer_data_bool=transfer_data_bool,
-                        max_epochs=base_max_epochs[dataset_name],
-                        target_sparsity=sparsity,
-                        gpu_device=gpu,
-                        force_retest=force_retest,
-                        extra_overrides=cfg["extra_overrides"],
-                        job_name_suffix=cfg["suffix"],
-                    )
-
-    # --- Submit rescale-prox experiments (only for current cluster) ---
-    for experiment, cfg in rescale_prox_configs:
-        for sv_model in cfg["sv_models"]:
-            for dataset_name in cfg["dataset_names"]:
-                for sparsity in cfg["sparsity_rates"]:
-                    cluster, gpu = _get_job_routing(
-                        experiment + cfg.get("suffix", ""),
-                        dataset_name,
-                        sparsity,
-                    )
-                    if cluster != CLUSTER_NAME:
-                        print(
-                            f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
-                        )
-                        continue
-                    _submit_sv_job(
-                        experiment=experiment,
-                        sv_model=sv_model,
-                        dataset_name=dataset_name,
-                        batch_size_base=batch_sizes[sv_model],
-                        transfer_data_bool=transfer_data_bool,
-                        max_epochs=base_max_epochs[dataset_name],
-                        target_sparsity=sparsity,
-                        gpu_device=gpu,
-                        force_retest=force_retest,
-                        extra_overrides=cfg["extra_overrides"],
-                        job_name_suffix=cfg["suffix"],
-                    )
-
-    # --- Submit sparsity experiments (only for current cluster) ---
-    for experiment, exp_cfg in sparsity_experiments.items():
-        base_overrides = exp_cfg.get("extra_overrides") or {}
-        base_suffix = exp_cfg.get("suffix", "")
-        per_model_cfg = exp_cfg.get("per_model", {})
-
-        for sv_model in exp_cfg["sv_models"]:
             pm = per_model_cfg.get(sv_model, {})
             extra_overrides = {
                 **base_overrides,
@@ -1667,8 +1438,8 @@ def run_sv(transfer_data="false", force="false"):
             }
             suffix = pm.get("suffix", base_suffix)
 
-            for dataset_name in exp_cfg["dataset_names"]:
-                for sparsity in exp_cfg["sparsity_rates"]:
+            for dataset_name in cfg["dataset_names"]:
+                for sparsity in cfg["sparsity_rates"]:
                     cluster, gpu = _get_job_routing(
                         experiment, dataset_name, sparsity
                     )
@@ -1689,41 +1460,7 @@ def run_sv(transfer_data="false", force="false"):
                         force_retest=force_retest,
                         extra_overrides=extra_overrides or None,
                         job_name_suffix=suffix,
-                    )
-
-    # --- Submit progressive-target Bregman experiments (only for current cluster) ---
-    for experiment, cfg in progressive_bregman_experiments.items():
-        initial_ts = cfg["initial_target_sparsity"]
-        ramp_eps = cfg["ramp_epochs"]
-        base_overrides = cfg.get("extra_overrides") or {}
-        base_suffix = cfg.get("suffix", "")
-
-        for sv_model in cfg["sv_models"]:
-            for dataset_name in cfg["dataset_names"]:
-                for sparsity in cfg["sparsity_rates"]:
-                    cluster, gpu = _get_job_routing(
-                        experiment, dataset_name, sparsity
-                    )
-                    if cluster != CLUSTER_NAME:
-                        print(
-                            f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
-                        )
-                        continue
-                    _submit_sv_job(
-                        experiment=experiment,
-                        sv_model=sv_model,
-                        dataset_name=dataset_name,
-                        batch_size_base=batch_sizes[sv_model],
-                        transfer_data_bool=transfer_data_bool,
-                        max_epochs=base_max_epochs[dataset_name],
-                        target_sparsity=sparsity,
-                        progressive=True,
-                        initial_target_sparsity=initial_ts,
-                        ramp_epochs=ramp_eps,
-                        gpu_device=gpu,
-                        force_retest=force_retest,
-                        extra_overrides=base_overrides or None,
-                        job_name_suffix=base_suffix,
+                        **prog,
                     )
 
 
