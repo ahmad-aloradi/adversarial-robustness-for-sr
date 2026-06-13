@@ -14,7 +14,10 @@ from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from src import utils
-from src.callbacks.pruning.utils.pruning_manager import PruningManager
+from src.callbacks.pruning.utils.pruning_manager import (
+    PruningManager,
+    create_log_scale_params,
+)
 from src.datamodules.components.utils import (
     BaseDataset,
     FullUtteranceCohortDataset,
@@ -495,6 +498,18 @@ class SpeakerVerification(pl.LightningModule):
             del self.last_batch_indices
         if hasattr(self, "test_dataloaders_dict"):
             del self.test_dataloaders_dict
+
+    def setup(self, stage: str) -> None:
+        """Register trainable per-layer Bregman log-scales, if configured.
+
+        Runs before Lightning restores model state on resume, so the
+        ``bregman_log_scales.*`` keys exist for the strict ``load_state_dict``;
+        ``configure_optimizers`` is too late. A no-op unless a pruning group
+        sets ``auto_per_layer_erk.allocation: trainable``.
+        """
+        pruning_groups = self.hparams.model.get("pruning_groups")
+        if pruning_groups is not None:
+            create_log_scale_params(self, pruning_groups)
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """Configures optimizers and learning rate schedulers.

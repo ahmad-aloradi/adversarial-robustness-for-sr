@@ -1,17 +1,16 @@
-"""Fabric helpers for launching HPC jobs with clear, human-readable steps.
+"""Fabric helpers for launching speaker-verification jobs on the HPC cluster.
 
 The tasks in this file perform two high-level chores:
 
-1. Prepare data on the remote cluster so each training job reads from the fast
-    local SSD instead of the congested shared filesystem.
-2. Generate the SLURM bash scripts that actually start the training runs for
-    the VPC (voice privacy challenge) and speaker-verification experiments.
+1. Stage the SV datasets onto each node's fast local SSD so a training job
+    reads from local disk instead of the congested shared filesystem.
+2. Generate and submit the SLURM bash scripts that start the training and
+    evaluation runs.
 """
 
 import datetime
 import os
 import time
-from pathlib import Path
 
 from fabric.api import cd, env, local, run, task
 from fabric.contrib.project import rsync_project
@@ -31,25 +30,33 @@ PATH_PROJECT = (
 )
 CONDA_ENV = "comfort"
 
+HPC_HOME_DIR = f"/home/hpc/{env.user[: 4]}/{env.user}"
 WOODY_DIR = f"/home/woody/{env.user[: 4]}/{env.user}"
 VAULT_DIR = f"/home/vault/{env.user[: 4]}/{env.user}"
 RESULTS_DIR = os.path.join(VAULT_DIR, "results")
 DATA_DIR = os.path.join(WOODY_DIR, "datasets")
 
-# Speaker-verification datasets packaged as fast-to-extract .tar.zst files.
-# Paths are relative to DATA_DIR on the cluster.
-SV_DATA_ARCHIVES = [
-    "cnceleb/CN-Celeb_wav.tar.zst",
-    "cnceleb/CN-Celeb2_wav.tar.zst",
-    "cnceleb/concatenated.tar.zst",
-    "voxceleb/voxceleb1_2.tar.zst",
-]
+# Speaker-verification datasets, shipped as .tar.gz archives under DATA_DIR.
+# Each dataset names its wav archives plus the metadata folder that ships
+# alongside them (not inside the archives). Paths are relative to DATA_DIR.
+SV_DATASETS = {
+    "voxceleb": {
+        "archives": ["voxceleb/voxceleb1_2.tar.gz"],
+        "metadata": "voxceleb/voxceleb_metadata",
+    },
+    "cnceleb": {
+        "archives": [
+            "cnceleb/CN-Celeb_wav.tar.gz",
+            "cnceleb/CN-Celeb2_wav.tar.gz",
+            "cnceleb/concatenated.tar.gz",
+        ],
+        "metadata": "cnceleb/metadata",
+    },
+}
 
-# sync_results paths - Update these for your specific use case
-# SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, "train/runs/multi_sv/*")
+# sync_results paths - Update these for your specific use case.
 dataset = "cnceleb"  # "cnceleb" or "multi_sv"
 SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, f"train/runs/{dataset}/*")
-# SYNC_DIR_LOCAL = f"/Users/ahmad_aloradi/Desktop/phd/comfort_project/adversarial-robustness-for-sr/results/exps/{dataset}"
 SYNC_DIR_LOCAL = f"/dataHDD/ahmad/comfort26_sem/{dataset}"
 
 
@@ -119,392 +126,113 @@ def sync_results_for_test():
     )
 
 
-def generate_vpc_data_transfer_section(settings):
-    """Generate bash code for transferring VPC datasets to local SSD with
-    locking.
-
-    Args:
-        settings (dict): Dictionary containing data_path, vpc_dirname, and datamodule_dir.
-
-    Returns:
-        str: Bash script section for data transfer with race condition protection.
-    """
-    is_available_models = "available_models" in settings["datamodule_dir"]
-    is_libri_included = "LibriSpeech" in settings["datamodule_dir"]
-
-    return f"""
-VPC_PATH="{settings['data_path']}/{settings['vpc_dirname']}"
-DEST_DIR="$TMPDIR/{settings['vpc_dirname']}"
-
-# Track failed transfers
-FAILED_TRANSFERS=()
-
-# Function to transfer and extract model data
-transfer_model() {{
-    local model=$1
-
-    local tar_file="$VPC_PATH/$model.tar.gz"
-    if [[ ! -f "$tar_file" ]]; then
-        echo "Error: $tar_file not found" >&2
-        FAILED_TRANSFERS+=("$model")
-        return 1
-    fi
-
-    echo "Transferring $model"
-    if ! rsync -ah "$tar_file" "$DEST_DIR/"; then
-        echo "Error: Failed to transfer $model" >&2
-        FAILED_TRANSFERS+=("$model")
-        return 1
-    fi
-
-    if ! tar -xzf "$DEST_DIR/$(basename "$tar_file")" -C "$DEST_DIR/"; then
-        echo "Error: Failed to extract $model" >&2
-        FAILED_TRANSFERS+=("$model")
-        return 1
-    fi
-
-    # Transfer metadata if needed
-    if [[ "$model" != "librispeech" && -d "$VPC_PATH/$model/data/metadata" && ! -d "$DEST_DIR/$model/data/metadata" ]]; then
-        if ! rsync -ah "$VPC_PATH/$model/data/metadata" "$DEST_DIR/$model/data/"; then
-            echo "Warning: Failed to transfer metadata for $model" >&2
-        fi
-    fi
-
-    echo "Completed transfer of $model"
-    return 0
-}}
-
-# Main data transfer with locking mechanism
-LOCK_FILE="$TMPDIR/.vpc_data_transfer.lock"
-
-if mkdir "$LOCK_FILE" 2>/dev/null; then
-    # This job won the race, it will transfer data
-    echo "Starting data transfer (this job acquired the lock)"
-    mkdir -p "$DEST_DIR"
-
-    if [[ "{is_available_models}" == "True" ]]; then
-        echo "Transferring models in parallel"
-        # Process B* and T* models
-        for model_tar in "$VPC_PATH"/{{B*,T*}}.tar.gz; do
-            if [[ -f "$model_tar" ]]; then
-                transfer_model "$(basename "$model_tar" .tar.gz)" &
-            fi
-        done
-
-        # Transfer librispeech for multiple models
-        if [[ "{is_libri_included}" == "True" ]]; then
-            transfer_model "librispeech" &
-        fi
-    else
-        # Extract model names from directory
-        IFS='_' read -ra MODELS <<< "$(basename "{settings['datamodule_dir']}")"
-
-        for model in "${{MODELS[@]}}"; do
-            # Handle special case for LibriSpeech
-            if [[ "$model" == "LibriSpeech" ]]; then
-                transfer_model "librispeech" &
-            else
-                transfer_model "$model" &
-            fi
-        done
-    fi
-
-    # Wait for all transfers to complete
-    wait
-
-    # Check if any transfers failed
-    if [[ ${{#FAILED_TRANSFERS[@]}} -gt 0 ]]; then
-        echo "Error: The following transfers failed: ${{FAILED_TRANSFERS[*]}}" >&2
-        rmdir "$LOCK_FILE"
-        exit 1
-    fi
-
-    echo "All data transfers complete successfully"
-
-    # Create a marker file to indicate successful completion
-    touch "$DEST_DIR/.transfer_complete"
-    rmdir "$LOCK_FILE"
-else
-    # Another job is transferring or has transferred data
-    echo "Another job is handling data transfer, waiting for completion"
-
-    # Wait for the lock to be released and data to be ready
-    WAIT_COUNT=0
-    MAX_WAIT=180  # 30 minutes (180 * 10 seconds)
-
-    while [[ ! -f "$DEST_DIR/.transfer_complete" && $WAIT_COUNT -lt $MAX_WAIT ]]; do
-        sleep 10
-        WAIT_COUNT=$((WAIT_COUNT + 1))
-
-        if [[ $((WAIT_COUNT % 6)) -eq 0 ]]; then  # Print every minute
-            echo "Still waiting for data transfer... ($((WAIT_COUNT / 6)) minutes)"
-        fi
-    done
-
-    if [[ ! -f "$DEST_DIR/.transfer_complete" ]]; then
-        echo "Error: Timeout waiting for data transfer to complete" >&2
-        exit 1
-    fi
-
-    echo "Data transfer complete, proceeding with training"
-fi
-
-# Verify critical directories exist before proceeding
-if [[ ! -d "$DEST_DIR" ]]; then
-    echo "Error: Data directory $DEST_DIR does not exist" >&2
-    exit 1
-fi
-"""
-
-
-def create_vpc_bash_script(settings, script_arguments):
-    """Creates a SLURM bash script for VPC training jobs.
-
-    Args:
-        settings (dict): Dictionary containing job configuration settings.
-        script_arguments (dict): Dictionary of arguments to pass to the training script.
-
-    Returns:
-        str: A bash script as a string, ready to be submitted to SLURM.
-    """
-    script_arguments_str = " ".join(
-        [f"{k}={v}" for k, v in script_arguments.items()]
-    )
-    data_setup_section = generate_vpc_data_transfer_section(settings)
-
-    job_string = f"""#!/bin/bash -l
-#SBATCH --job-name={settings['job_name']}
-#SBATCH --clusters={settings['cluster']}
-#SBATCH --partition={settings['gpu']}
-#SBATCH --nodes={settings['num_nodes']}
-#SBATCH --gres=gpu:{settings['gpu']}:{settings['num_gpus']}
-#SBATCH --time={settings['walltime']}
-#SBATCH --export=NONE
-
-# Load required modules and activate environment
-module load cuda/{settings['cuda']}
-source ~/miniconda3/bin/activate {settings['env_name']}
-cd {settings['path_project']}
-
-{data_setup_section}
-
-# Start training
-export http_proxy=http://proxy.nhr.fau.de:80
-export https_proxy=http://proxy.nhr.fau.de:80
-export HTTP_PROXY=http://proxy.nhr.fau.de:80
-export HTTPS_PROXY=http://proxy.nhr.fau.de:80
-
-echo 'Starting training'
-python {settings['script_name']} {script_arguments_str} paths.data_dir=$TMPDIR
-"""
-    return job_string
-
-
 def generate_sv_data_transfer_section(settings):
-    """Generate bash code for transferring SV datasets to local SSD.
+    """Generate the bash that stages SV datasets onto the node-local SSD.
+
+    Datasets ship as ``.tar.gz`` archives under ``DATA_DIR`` on the cluster.
+    The datamodule selects which datasets to stage; their wav archives, the
+    matching metadata folder, and the shared RIRS/Noise corpus are copied to
+    ``$TMPDIR/datasets`` and extracted there. Staging runs one item at a time
+    and aborts the job on the first failure, so a half-populated SSD never
+    reaches the training step.
 
     Args:
-        settings (dict): Dictionary containing data_path and sv_archives configuration.
+        settings (dict): Must contain ``data_path`` (the cluster ``DATA_DIR``)
+            and ``datamodule`` (the Hydra datamodule name, e.g. ``multi_sv``).
 
     Returns:
-        str: Bash script section for data transfer with error handling.
+        str: Bash to drop into the SLURM script before the training command.
     """
-    archives = settings.get("sv_archives", SV_DATA_ARCHIVES)
-    datamodule = str(settings.get("datamodule", "")).lower()
-
+    datamodule = str(settings["datamodule"]).lower()
     if "multi_sv" in datamodule:
-        selected_prefixes = ("voxceleb/", "cnceleb/")
+        datasets = ["voxceleb", "cnceleb"]
     elif "voxceleb" in datamodule:
-        selected_prefixes = ("voxceleb/",)
+        datasets = ["voxceleb"]
     elif "cnceleb" in datamodule:
-        selected_prefixes = ("cnceleb/",)
+        datasets = ["cnceleb"]
     else:
-        selected_prefixes = ("voxceleb/", "cnceleb/")
-
-    selected_archives = [
-        archive
-        for archive in archives
-        if archive.startswith(selected_prefixes)
-    ]
-    if not selected_archives:
         raise ValueError(
-            f"No SV archives matched datamodule='{settings.get('datamodule')}'. "
-            f"Available archives: {archives}"
+            f"Cannot map datamodule '{settings['datamodule']}' to SV datasets; "
+            f"known datasets: {sorted(SV_DATASETS)}"
         )
 
-    selected_datasets = []
-    if any(archive.startswith("voxceleb/") for archive in selected_archives):
-        selected_datasets.append("voxceleb")
-    if any(archive.startswith("cnceleb/") for archive in selected_archives):
-        selected_datasets.append("cnceleb")
+    archives = [
+        archive
+        for name in datasets
+        for archive in SV_DATASETS[name]["archives"]
+    ]
+    metadata_dirs = [SV_DATASETS[name]["metadata"] for name in datasets]
 
-    archives_literal = " ".join([f'"{a}"' for a in selected_archives])
-    datasets_literal = " ".join([f'"{d}"' for d in selected_datasets])
+    archives_literal = " ".join(f'"{a}"' for a in archives)
+    metadata_literal = " ".join(f'"{m}"' for m in metadata_dirs)
 
     return f"""
 DATA_ROOT="{settings['data_path']}"
 DEST_DATA_ROOT="$TMPDIR/datasets"
-DATA_ARCHIVES=({archives_literal})
-DATASET_TYPES=({datasets_literal})
-RIRS_NOISES_SRC="$DATA_ROOT/RIRS_NOISES"
-RIRS_NOISES_DEST="$DEST_DATA_ROOT/RIRS_NOISES"
+ARCHIVES=({archives_literal})
+METADATA_DIRS=({metadata_literal})
 
-# Track failed transfers
-declare -a FAILED_TRANSFERS
-
-# Helper: copy compressed datasets to the node-local SSD (automatically deleted
-# after the job ends).
+# Copy a .tar.gz archive to the node-local SSD and extract it in place.
 stage_archive() {{
     local relative="$1"
-    local archive_path="$DATA_ROOT/$relative"
-    local archive_name=$(basename "$relative")
-    local extract_dir="$archive_name"
-    extract_dir="${{extract_dir%.tar.gz}}"
-    extract_dir="${{extract_dir%.tar.zst}}"
-    local target_dir="$DEST_DATA_ROOT/$(dirname "$relative")"
+    local src="$DATA_ROOT/$relative"
+    local dest_dir="$DEST_DATA_ROOT/$(dirname "$relative")"
 
-    if [[ ! -f "$archive_path" ]]; then
-        echo "Error: Archive $archive_path not found" >&2
-        FAILED_TRANSFERS+=("$relative")
-        return 1
+    if [[ ! -f "$src" ]]; then
+        echo "Error: archive $src not found" >&2
+        exit 1
     fi
 
-    mkdir -p "$target_dir"
+    mkdir -p "$dest_dir"
+    echo "Transferring $relative -> $dest_dir"
+    rsync -ah "$src" "$dest_dir/" || {{
+        echo "Error: failed to copy $relative" >&2
+        exit 1
+    }}
 
-    if [[ -d "$target_dir/$extract_dir" ]]; then
-        echo "$relative already extracted"
-        return 0
-    fi
-
-    echo "Transferring $relative -> $target_dir"
-    if ! rsync -ah "$archive_path" "$target_dir/"; then
-        echo "Error: Failed to transfer $relative" >&2
-        FAILED_TRANSFERS+=("$relative")
-        return 1
-    fi
-
-    local tar_file="$target_dir/$archive_name"
-    local tar_cmd=(tar)
-
-    if [[ "$archive_name" == *.tar.zst ]]; then
-        local zstd_prog=""
-        if command -v zstdmt >/dev/null 2>&1; then
-            zstd_prog=$(command -v zstdmt)
-        elif command -v zstd >/dev/null 2>&1; then
-            zstd_prog=$(command -v zstd)
-        fi
-
-        if [[ -z "$zstd_prog" ]]; then
-            echo "Error: zstd/zstdmt not found for $archive_name" >&2
-            FAILED_TRANSFERS+=("$relative")
-            return 1
-        fi
-
-        tar_cmd+=(--use-compress-program "$zstd_prog" -xf)
-    elif [[ "$archive_name" == *.tar.gz ]]; then
-        if command -v pigz >/dev/null 2>&1; then
-            tar_cmd+=(--use-compress-program "$(command -v pigz)" -xf)
-        else
-            tar_cmd+=(-xzf)
-        fi
-    else
-        echo "Error: Unsupported archive format $archive_name" >&2
-        FAILED_TRANSFERS+=("$relative")
-        return 1
-    fi
-
-    echo "Extracting $archive_name"
-    if ! "${{tar_cmd[@]}}" "$tar_file" -C "$target_dir"; then
-        echo "Error: Failed to extract $archive_name" >&2
-        FAILED_TRANSFERS+=("$relative")
-        return 1
-    fi
-
-    return 0
+    echo "Extracting $(basename "$relative")"
+    tar -xzf "$dest_dir/$(basename "$relative")" -C "$dest_dir" || {{
+        echo "Error: failed to extract $relative" >&2
+        exit 1
+    }}
 }}
 
-# Transfer metadata folders
-transfer_metadata() {{
-    local dataset_type="$1"  # "voxceleb" or "cnceleb"
-    local metadata_src=""
-    local metadata_dest=""
+# Copy an auxiliary directory (metadata, RIRS/Noise) to the SSD verbatim.
+stage_dir() {{
+    local relative="$1"
+    local src="$DATA_ROOT/$relative"
+    local dest_dir="$DEST_DATA_ROOT/$(dirname "$relative")"
 
-    if [[ "$dataset_type" == "voxceleb" ]]; then
-        metadata_src="$DATA_ROOT/voxceleb/voxceleb_metadata"
-        metadata_dest="$DEST_DATA_ROOT/voxceleb/voxceleb_metadata"
-    elif [[ "$dataset_type" == "cnceleb" ]]; then
-        metadata_src="$DATA_ROOT/cnceleb/metadata"
-        metadata_dest="$DEST_DATA_ROOT/cnceleb/metadata"
+    if [[ ! -d "$src" ]]; then
+        echo "Error: directory $src not found" >&2
+        exit 1
     fi
 
-    if [[ -d "$metadata_src" && ! -e "$metadata_dest" ]]; then
-        echo "Transferring metadata for $dataset_type"
-        mkdir -p "$(dirname "$metadata_dest")"
-        if ! rsync -ah "$metadata_src" "$(dirname "$metadata_dest")/"; then
-            echo "Warning: Failed to transfer metadata for $dataset_type" >&2
-        fi
-    fi
-}}
-
-transfer_rirs_noises() {{
-    if [[ ! -d "$RIRS_NOISES_SRC" ]]; then
-        echo "Error: RIRS/Noise dataset directory $RIRS_NOISES_SRC not found" >&2
-        return 1
-    fi
-
-    if [[ -d "$RIRS_NOISES_DEST" ]]; then
-        echo "RIRS/Noise dataset already staged"
-        return 0
-    fi
-
-    echo "Transferring RIRS/Noise dataset -> $RIRS_NOISES_DEST"
-    mkdir -p "$DEST_DATA_ROOT"
-    if ! rsync -ah "$RIRS_NOISES_SRC" "$DEST_DATA_ROOT/"; then
-        echo "Error: Failed to transfer RIRS/Noise dataset" >&2
-        return 1
-    fi
+    mkdir -p "$dest_dir"
+    echo "Transferring $relative -> $dest_dir"
+    rsync -ah "$src" "$dest_dir/" || {{
+        echo "Error: failed to copy $relative" >&2
+        exit 1
+    }}
 }}
 
 echo "Staging speaker verification datasets to $DEST_DATA_ROOT"
 mkdir -p "$DEST_DATA_ROOT"
 stage_start=$(date +%s)
 
-MAX_PARALLEL=$(command -v nproc >/dev/null 2>&1 && nproc || echo 4)
-if [[ $MAX_PARALLEL -lt 1 ]]; then
-    MAX_PARALLEL=1
-fi
-
-wait_for_slot() {{
-    while [[ $(jobs -rp | wc -l) -ge $MAX_PARALLEL ]]; do
-        sleep 0.2
-    done
-}}
-
-if ! transfer_rirs_noises; then
-    exit 1
-fi
-
-for archive in "${{DATA_ARCHIVES[@]}}"; do
-    wait_for_slot
-    stage_archive "$archive" &
+for archive in "${{ARCHIVES[@]}}"; do
+    stage_archive "$archive"
 done
-wait
 
-# Check for failed transfers
-if [[ ${{#FAILED_TRANSFERS[@]}} -gt 0 ]]; then
-    echo "Error: The following dataset transfers failed:" >&2
-    printf '%s\\n' "${{FAILED_TRANSFERS[@]}}" >&2
-    exit 1
-fi
-
-# Transfer metadata only for selected dataset types
-for dataset_type in "${{DATASET_TYPES[@]}}"; do
-    transfer_metadata "$dataset_type"
+for metadata in "${{METADATA_DIRS[@]}}"; do
+    stage_dir "$metadata"
 done
+
+stage_dir "RIRS_NOISES"
 
 stage_end=$(date +%s)
-stage_duration=$((stage_end - stage_start))
-echo "Dataset staging complete in $((stage_duration / 60)) minutes $((stage_duration % 60)) seconds"
+elapsed=$((stage_end - stage_start))
+echo "Dataset staging complete in $((elapsed / 60))m $((elapsed % 60))s"
 """
 
 
@@ -526,7 +254,7 @@ def create_sv_bash_script(settings, script_arguments, transfer_data=False):
     # Determine data directory and transfer section based on transfer_data flag
     if transfer_data:
         settings = settings.copy()
-        settings["datamodule"] = script_arguments.get("datamodule", "")
+        settings["datamodule"] = script_arguments["datamodule"]
         data_dir_path = "$DEST_DATA_ROOT"
 
         data_setup_section = generate_sv_data_transfer_section(settings)
@@ -848,103 +576,6 @@ fi
     run(cmd, quiet=True)
 
 
-@task
-def run_vpc():
-    """Generate and submit all VPC training jobs."""
-
-    BATCH_SIZE = 32
-    NUM_AUG = 1
-    max_epochs = 25
-    max_duration = 10
-    dataset_dirname = "vpc2025_official"
-
-    settings = {
-        "script_name": "src/train.py",
-        "cluster": CLUSTER_NAME,
-        "path_project": PATH_PROJECT,
-        "env_name": CONDA_ENV,
-        "data_path": DATA_DIR,
-        "vpc_dirname": dataset_dirname,
-        "gpu": GPU,
-        "num_nodes": 1,
-        "walltime": "24:00:00",
-        "num_gpus": 1,
-        "cuda": "11.8.0",
-    }
-
-    datasets = [
-        "{B3: ${datamodule.available_models.B3}}",
-        "{B4: ${datamodule.available_models.B4}}",
-        "{B5: ${datamodule.available_models.B5}}",
-        "{T8-5: ${datamodule.available_models.T8-5}}",
-        "{T10-2: ${datamodule.available_models.T10-2}}",
-        "{T12-5: ${datamodule.available_models.T12-5}}",
-        "{T25-1: ${datamodule.available_models.T25-1}}",
-    ]
-    experiments = ["vpc_amm_cyclic_audio_from_scratch"]
-
-    for experiment in experiments:
-        for dataset in datasets:
-
-            # Parse dataset string
-            if dataset.startswith("{") and ":" in dataset:
-                if "," in dataset:
-                    dataset_name = "_".join(
-                        item.split(":")[0].strip("{").strip()
-                        for item in dataset.split(",")
-                    )
-                else:
-                    dataset_name = dataset.split(":")[0].strip("{").strip()
-            else:
-                dataset_name = "available_models"
-
-            job_name = f"{experiment}-{dataset_name}-max_dur{max_duration}-bs{BATCH_SIZE}"
-
-            settings["job_name"] = job_name
-            settings["datamodule_dir"] = (
-                dataset_dirname + os.sep + dataset_name
-            )
-            name = dataset_name + os.sep + job_name
-
-            script_arguments = {
-                "datamodule": "datasets/vpc",
-                "experiment": f"vpc/{experiment}",
-                "module": "vpc",
-                "trainer": "gpu",
-                "name": name,
-                "datamodule.models": f"'{dataset}'",
-                "datamodule.loaders.train.batch_size": BATCH_SIZE
-                if "aug" not in experiment
-                else BATCH_SIZE // NUM_AUG,
-                "datamodule.loaders.valid.batch_size": BATCH_SIZE
-                if "aug" not in experiment
-                else BATCH_SIZE // NUM_AUG,
-                "datamodule.dataset.max_duration": max_duration,
-                "trainer.max_epochs": max_epochs,
-                "paths.log_dir": f"{RESULTS_DIR}",
-                "hydra.run.dir": f"{RESULTS_DIR}/train/runs/{name}",
-                "trainer.num_sanity_val_steps": 0,
-            }
-
-            # Skip if job is already running or pending
-            if check_running_pending(job_name):
-                print(f"Skipping {job_name} - already running or pending")
-                continue
-
-            # Check for existing checkpoint
-            last_ckpt = os.path.join(
-                script_arguments["hydra.run.dir"], "checkpoints/last.ckpt"
-            )
-            if check_file_exists(last_ckpt):
-                script_arguments["ckpt_path"] = last_ckpt
-                print(f"Resuming {job_name} from checkpoint")
-
-            bash_script = create_vpc_bash_script(settings, script_arguments)
-            run_bash_script(bash_script)
-            print(f"Submitted job: {job_name}")
-            time.sleep(1.0)
-
-
 # Per-cluster GPU assignment: dataset -> {cluster -> gpu_partition}
 _GPU_MAP = {
     "datasets/cnceleb": {"alex": "a40", "tinygpu": "v100"},
@@ -1003,7 +634,8 @@ def _submit_sv_job(
 ):
     """Helper function to configure and submit a single SV training job."""
     if not apply_augmentation:
-        batch_size_base *= 2  # compensate for no augmentation (which effectively increases batch size by NUM_AUG)
+        # augmentation doubles the effective batch via paired views; match it
+        batch_size_base *= 2
     apply_vad = False
     schedule_type = "constant"  # Options: 'constant', 'linear'
     num_ckpt_avg = 0  # Number of checkpoints to average for final model (only applicable for certain experiments)
@@ -1269,7 +901,6 @@ def run_sv(transfer_data="false", force="false"):
     RUN_Bregman_EXPS = False
     RUN_AUX_BREGMAN_EXPS = False
     RUN_PROGRESSIVE_Bregman_EXPS = True
-    RUN_PROGRESSIVE_STEP_Bregman_EXPS = True
     RUN_MOVEMENT_Bregman_EXPS = True
     RUN_TRAINABLE_SCALES_Bregman_EXPS = False
 
@@ -1358,8 +989,9 @@ def run_sv(transfer_data="false", force="false"):
                 "dataset_names": ["multi_sv"],
             }
 
-    # Progressive ramp (epoch granularity): linear ramp from
-    # initial_target_sparsity up to sparsity_rate over ramp_epochs epochs.
+    # Progressive ramp from initial_target_sparsity up to sparsity_rate over
+    # ramp_epochs epochs, at both epoch and step granularity (suffix records
+    # which).
     if RUN_PROGRESSIVE_Bregman_EXPS:
         for _exp in (
             "sv_bregman_adabreg_progressive",
@@ -1371,20 +1003,7 @@ def run_sv(transfer_data="false", force="false"):
                 "dataset_names": ["multi_sv"],
                 "initial_target_sparsity": 0.0,
                 "ramp_epochs": 10,
-            }
-
-    # Progressive ramp (step granularity): same schedule, one entry per step.
-    if RUN_PROGRESSIVE_STEP_Bregman_EXPS:
-        for _exp in (
-            "sv_bregman_adabreg_progressive_step",
-            "sv_bregman_linbreg_progressive_step",
-        ):
-            EXPERIMENTS[_exp] = {
-                "sv_models": [ecapa],
-                "sparsity_rates": [0.99],
-                "dataset_names": ["multi_sv"],
-                "initial_target_sparsity": 0.0,
-                "ramp_epochs": 10,
+                "ramp_granularities": ["epoch", "step"],
             }
 
     # --- Volume estimation across clusters ---
@@ -1393,12 +1012,13 @@ def run_sv(transfer_data="false", force="false"):
         "tinygpu": {"v100": 0, "a100": 0},
     }
     for experiment, cfg in EXPERIMENTS.items():
+        n_variants = len(cfg.get("ramp_granularities", [None]))
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
                 cluster, gpu = _get_job_routing(
                     experiment, dataset_name, sparsity
                 )
-                job_counts[cluster][gpu] += len(cfg["sv_models"])
+                job_counts[cluster][gpu] += len(cfg["sv_models"]) * n_variants
 
     total_jobs = sum(sum(gpus.values()) for gpus in job_counts.values())
     print(f"\n{'='*50}")
@@ -1422,6 +1042,7 @@ def run_sv(transfer_data="false", force="false"):
         base_overrides = cfg.get("extra_overrides") or {}
         base_suffix = cfg.get("suffix", "")
         per_model_cfg = cfg.get("per_model", {})
+        granularities = cfg.get("ramp_granularities", [None])
         prog = {}
         if "ramp_epochs" in cfg:
             prog = {
@@ -1432,36 +1053,49 @@ def run_sv(transfer_data="false", force="false"):
 
         for sv_model in cfg["sv_models"]:
             pm = per_model_cfg.get(sv_model, {})
-            extra_overrides = {
+            model_overrides = {
                 **base_overrides,
                 **(pm.get("extra_overrides") or {}),
             }
-            suffix = pm.get("suffix", base_suffix)
+            model_suffix = pm.get("suffix", base_suffix)
 
-            for dataset_name in cfg["dataset_names"]:
-                for sparsity in cfg["sparsity_rates"]:
-                    cluster, gpu = _get_job_routing(
-                        experiment, dataset_name, sparsity
-                    )
-                    if cluster != CLUSTER_NAME:
-                        print(
-                            f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
+            for granularity in granularities:
+                # None => leave the experiment config's granularity untouched;
+                # otherwise override it and record the choice in the suffix.
+                if granularity is None:
+                    extra_overrides = model_overrides
+                    suffix = model_suffix
+                else:
+                    extra_overrides = {
+                        **model_overrides,
+                        "_bregman_ramp_granularity": granularity,
+                    }
+                    suffix = f"{model_suffix}-{granularity}wise"
+
+                for dataset_name in cfg["dataset_names"]:
+                    for sparsity in cfg["sparsity_rates"]:
+                        cluster, gpu = _get_job_routing(
+                            experiment, dataset_name, sparsity
                         )
-                        continue
-                    _submit_sv_job(
-                        experiment=experiment,
-                        sv_model=sv_model,
-                        dataset_name=dataset_name,
-                        batch_size_base=batch_sizes[sv_model],
-                        transfer_data_bool=transfer_data_bool,
-                        max_epochs=base_max_epochs[dataset_name],
-                        target_sparsity=sparsity,
-                        gpu_device=gpu,
-                        force_retest=force_retest,
-                        extra_overrides=extra_overrides or None,
-                        job_name_suffix=suffix,
-                        **prog,
-                    )
+                        if cluster != CLUSTER_NAME:
+                            print(
+                                f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
+                            )
+                            continue
+                        _submit_sv_job(
+                            experiment=experiment,
+                            sv_model=sv_model,
+                            dataset_name=dataset_name,
+                            batch_size_base=batch_sizes[sv_model],
+                            transfer_data_bool=transfer_data_bool,
+                            max_epochs=base_max_epochs[dataset_name],
+                            target_sparsity=sparsity,
+                            gpu_device=gpu,
+                            force_retest=force_retest,
+                            extra_overrides=extra_overrides or None,
+                            job_name_suffix=suffix,
+                            **prog,
+                        )
 
 
 def create_eval_bash_script(settings, script_arguments):
@@ -1512,10 +1146,10 @@ def eval_sv(force="true"):
     """
     force_retest = force.lower() in ("true", "1", "yes")
 
-    EVAL_OUTPUT_DIR = (
-        "/home/hpc/dsnf/dsnf101h/adversarial-robustness-for-sr/logs/eval/runs"
+    EVAL_OUTPUT_DIR = os.path.join(
+        HPC_HOME_DIR, "adversarial-robustness-for-sr/logs/eval/runs"
     )
-    TRAINED_MODELS_DIR = "/home/vault/dsnf/dsnf101h/results/train/runs"
+    TRAINED_MODELS_DIR = os.path.join(RESULTS_DIR, "train/runs")
 
     exp_paths = [
         ############
@@ -1549,7 +1183,7 @@ def eval_sv(force="true"):
         "cluster": CLUSTER_NAME,
         "path_project": PATH_PROJECT,
         "env_name": CONDA_ENV,
-        "gpu": "v100" if CLUSTER_NAME == "tinyx" else "a40",
+        "gpu": "v100" if CLUSTER_NAME == "tinygpu" else "a40",
         "num_nodes": 1,
         "walltime": "24:00:00",
         "num_gpus": 1,

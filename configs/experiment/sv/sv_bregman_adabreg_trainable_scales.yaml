@@ -1,0 +1,99 @@
+# @package _global_
+# AdaBreg with a trainable per-layer sparsity allocation.
+#
+# One global LambdaScheduler owns the sparsity LEVEL; each prunable layer's
+# lambda_scale = e^{s_g} is an ordinary nn.Parameter (s_g = ln scale) trained by
+# the SAME optimizer in a RegNone group, so it owns the cross-layer ALLOCATION.
+# The closed-form hypergradient is injected by the BregmanPruner; no new
+# optimizer/EMA/controller. cls_scale2 is meant to EMERGE on its own (classifier
+# scale climbing toward ~2), and SE/pool layers are free to die.
+#
+# `auto_per_layer_erk` is only the per-layer expansion mechanism here; ERK enters
+# solely via `init: erk` (a warm-start seed). `init: ones` starts neutral.
+#
+# Because no per-layer erk_target_sparsity is emitted, the pruner stays in GLOBAL
+# single-scheduler mode: the controller and the validation gate measure OVERALL
+# model sparsity, so `_bregman_target_sparsity` is an overall-model target (the
+# dense BN/bias floor caps it near ~0.996, so 0.99 is reachable).
+
+defaults:
+  - sv/sv_bregman_adabreg
+  - _self_
+
+_erk_mode: erk # er | erk -- only consulted when init: erk
+_bregman_target_sparsity: 0.99 # OVERALL-model target (global mode)
+_bregman_lambda: 1e-3
+_bregman_target_initial: 0.0 # ramp start; dense + ramp over _bregman_ramp_epochs
+_bregman_ramp_epochs: 10
+
+# Hold the AAM margin at 0 until the sparsity ramp completes, then start it one
+# epoch after the global target reaches its final value.
+callbacks:
+  margin_scheduler:
+    start_epoch: ${oc.eval:'int(${_bregman_ramp_epochs}) + 1'}
+
+module:
+  model:
+    # One auto-expanding trainable-allocation group over every prunable
+    # Conv/Linear weight AND the speechbrain Classifier (inside the trainable
+    # set: its scale is LEARNED upward, not pinned). norm/bias stay dense
+    # (RegNone); the fallback is RegNone too.
+    pruning_groups:
+      - name: trainable_prunable
+        layer_types:
+          [
+            "torch.nn.Conv1d",
+            "torch.nn.Conv2d",
+            "torch.nn.Linear",
+            "speechbrain.lobes.models.ECAPA_TDNN.Classifier",
+          ]
+        param_names: ["weight"]
+        auto_per_layer_erk:
+          mode: ${_erk_mode}
+          target_sparsity: ${_bregman_target_sparsity}
+          # Dense start (0.0) ramped in by the global controller; the per-layer
+          # initial mask follows this budget. Set to null to start AT target.
+          initial_target_sparsity: ${_bregman_target_initial}
+          allocation: trainable # hard_targets | trainable
+          init: ones # ones (s_g=0, neutral) | erk (s_g=ln erk warm-start)
+          scale_lr: 1e-3 # lr of the log-scale params (their own optimizer group)
+          scale_decay: 1e-4 # soft prior pulling s_g toward 0 (scale 1)
+          scale_clamp: [0.25, 4.0] # symmetric clamp on e^{s_g}
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            lamda: ${_bregman_lambda}
+          lambda_scale: 1.0 # synced to e^{s_g} every batch
+        pruning_config:
+          pruning_type: "unstructured"
+
+      - name: norm_params
+        layer_types:
+          [
+            "torch.nn.BatchNorm1d",
+            "torch.nn.BatchNorm2d",
+            "torch.nn.LayerNorm",
+            "torch.nn.GroupNorm",
+          ]
+        module_name_patterns:
+          [".*gn.*", ".*ln.*", ".*bn.*", ".*norm.*", ".*pos_enc.*", ".*head.*"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
+          lambda_scale: 0.0
+
+      - name: bias_params
+        param_names: ["bias"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
+          lambda_scale: 0.0
+
+      - name: fallback
+        is_fallback: True
+        module_name_patterns: [".*"]
+        param_names: ["weight"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
+          lambda_scale: 0.0

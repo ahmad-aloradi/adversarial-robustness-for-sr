@@ -187,6 +187,46 @@ def erk_initial_and_target_sparsity(
     return result
 
 
+def erk_lambda_scales(
+    shapes: List[LayerShape],
+    target_sparsity: float,
+    mode: str,
+) -> Dict[str, float]:
+    """Per-layer multiplicative λ-scale warm-start from the ERK shape.
+
+    The trainable per-layer scales live in log space (s_g = ln scale); this is
+    only the optional ``init: erk`` seed for them. A layer ERK wants sparser
+    (small density d) gets more L1 pressure, so the raw score is ``-ln(d)``
+    (>= 0, larger for sparser layers). Scores are normalized to a param-weighted
+    arithmetic mean of 1 so the seed carries shape but not level (the global
+    controller owns the level). Uniform densities therefore map to all ones.
+
+    Inputs:
+        shapes: the prunable layers (non-empty).
+        target_sparsity: the run's final target, in [0.0, 1.0).
+        mode: "er" or "erk".
+    Output:
+        {layer_name: positive scale}, param-weighted mean 1.
+
+    Example (two identical layers -> equal density -> unit scales):
+        >>> s = [
+        ...     LayerShape("a", 64, 64, (3,), 64 * 64 * 3),
+        ...     LayerShape("b", 64, 64, (3,), 64 * 64 * 3),
+        ... ]
+        >>> scales = erk_lambda_scales(s, target_sparsity=0.9, mode="erk")
+        >>> all(abs(v - 1.0) < 1e-9 for v in scales.values())
+        True
+    """
+    densities = solve_erk_densities(shapes, target_sparsity, mode)
+    # -ln(d): 0 only for a fully dense layer, which the high-sparsity targets
+    # this seed is used at never produce; eps keeps the scale strictly positive.
+    raw = {name: max(-math.log(d), 1e-6) for name, d in densities.items()}
+    n_params = {s.name: s.n_params for s in shapes}
+    total = sum(n_params.values())
+    weighted_mean = sum(raw[name] * n_params[name] for name in raw) / total
+    return {name: raw[name] / weighted_mean for name in raw}
+
+
 if __name__ == "__main__":
     demo_shapes = [
         LayerShape(
