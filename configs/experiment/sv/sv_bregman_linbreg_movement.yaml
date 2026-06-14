@@ -1,0 +1,20 @@
+# @package _global_
+# LinBreg + per-weight movement reweighting (reweighted-l1). Identical to
+# sv_bregman_linbreg except each weight gets its own soft-threshold lamda*a_i,
+# redistributing the sparsity budget toward task-useful weights.
+# Inherits _bregman_target_sparsity from the base for a clean A/B with
+# sv_bregman_adabreg_movement.
+
+defaults:
+  - sv/sv_bregman_linbreg
+  - _self_
+
+module:
+  optimizer:
+    _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
+    _partial_: true
+    lr: 1e-1
+    movement_reweight: true
+    move_importance: movement_signed
+    move_clip: [0.0, 10.0]
+    move_warmup_steps: 10000

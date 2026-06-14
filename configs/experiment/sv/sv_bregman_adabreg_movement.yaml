@@ -15,7 +15,7 @@ module:
   optimizer:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
     _partial_: true
-    lr: 1e-2 # matched to the baseline for a clean A/B
+    lr: 1e-2
     movement_reweight: true
     # movement_signed: de-protects weights already being pushed to zero.
     # taylor_abs: always-positive |grad*p| saliency alternative.

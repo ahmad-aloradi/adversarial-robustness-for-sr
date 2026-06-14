@@ -1,30 +1,31 @@
 # @package _global_
 # AdaBreg with a layerwise ERK/ER sparsity distribution (RigL arXiv:1911.11134).
 #
-# Each prunable Conv/Linear weight is expanded into its own optimizer param
-# group with its own RegL1, its own ERK-derived INITIAL sparsity, and its own
-# LambdaScheduler that holds that layer's ERK TARGET for the whole run (RigL
-# keeps per-layer sparsity fixed). PruningManager does the expansion at
-# optimizer-construction time; BregmanPruner clones the scheduler template
-# below once per layer.
+# Each prunable Conv/Linear weight becomes its own optimizer group with its own
+# RegL1 and LambdaScheduler. Training starts dense and each layer ramps its
+# target to its ERK sparsity over _bregman_ramp_epochs, then holds.
 #
-# IMPORTANT: `_bregman_target_sparsity` here is the target over the PRUNABLE
-# weight set (Conv/Linear/Classifier weights), NOT whole-model sparsity. BN,
-# norm, and bias params stay dense, so the reported overall-model sparsity is
-# slightly lower. The per-layer targets sum to the global target by
-# construction of the ERK budget-solve; reaching them still depends on each
-# per-layer controller. Validation is gated on the pruned (not overall)
-# sparsity.
+# `_bregman_target_sparsity` is over the PRUNABLE weight set (Conv/Linear/
+# Classifier weights), not whole-model; norm/bias stay dense. Validation is
+# gated on the pruned sparsity.
 #
-# `_erk_mode`: "erk" includes kernel size (larger-kernel layers get higher
-# sparsity); "er" ignores it (kernel-free, equivalent for Linear-only models).
+# `_erk_mode`: "erk" factors in kernel size, "er" ignores it.
 
 defaults:
   - sv/sv_bregman_adabreg
   - _self_
 
-_bregman_target_sparsity: 0.904 # PRUNABLE-weight target (not overall-model)
 _erk_mode: erk # er | erk
+_bregman_target_sparsity: 0.99 # PRUNABLE-weight target (not overall-model)
+_bregman_lambda: 1e-3
+_bregman_target_initial: 0.0  # set to null for the matching target
+_bregman_ramp_epochs: 10
+
+# Hold the AAM margin at 0 until the target ramp completes, then start it one
+# epoch after every layer has reached its ERK sparsity.
+callbacks:
+  margin_scheduler:
+    start_epoch: ${oc.eval:'int(${_bregman_ramp_epochs}) + 1'}
 
 module:
   model:
@@ -44,9 +45,11 @@ module:
         auto_per_layer_erk:
           mode: ${_erk_mode}
           target_sparsity: ${_bregman_target_sparsity}
-          # null => each layer starts AT its ERK target (RigL-faithful). Set a
-          # denser value (e.g. 0.99) to start sparser and let lambda ramp in.
-          initial_target_sparsity: null
+          # 0.0 => start dense (every weight non-zero) and let the per-layer
+          # target ramp the mask in. Tied to _bregman_target_initial so the
+          # initial mask and the ramp start agree at epoch 0; set both to null
+          # to start AT the ERK target instead (RigL-faithful, no ramp).
+          initial_target_sparsity: ${_bregman_target_initial}
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
