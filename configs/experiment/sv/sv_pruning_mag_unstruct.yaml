@@ -49,17 +49,6 @@ callbacks:
     monitor: ${replace:"valid/__metric__"}
     patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
 
-  margin_scheduler:
-    _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
-    initial_margin: 0.0
-    final_margin: 0.2
-    # Hold the margin at 0 through the sparsity ramp. Scheduled pruning reaches
-    # final_amount at epoch (epochs_to_ramp - 1); train at full sparsity through
-    # epoch epochs_to_ramp, then start raising the margin at epochs_to_ramp + 1.
-    start_epoch: ${oc.eval:'int(${callbacks.model_pruning.epochs_to_ramp}) + 1'}
-    warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.1)'}
-    increase_type: exp
-
   model_pruning:
     _target_: src.callbacks.pruning.prune.MagnitudePruner
     # pruning_fn: l1_unstructured # Pruning from torch.nn.utils.prunefunctions: ['ln_structured', 'l1_unstructured', 'random_structured', 'random_unstructured'] or a custom callable
@@ -106,7 +95,7 @@ module:
       _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
       loss_fn:
         _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-        margin: 0.0
+        margin: 0.2
         scale: 32.0
 
   lr_scheduler:

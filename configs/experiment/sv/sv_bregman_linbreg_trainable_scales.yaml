@@ -17,10 +17,6 @@ _bregman_lambda: 1e-5
 _bregman_target_initial: 0.0
 _bregman_ramp_epochs: 10
 
-callbacks:
-  margin_scheduler:
-    start_epoch: ${oc.eval:'int(${_bregman_ramp_epochs}) + 1'}
-
 module:
   model:
     pruning_groups:

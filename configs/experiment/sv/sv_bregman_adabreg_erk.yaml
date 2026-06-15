@@ -21,12 +21,6 @@ _bregman_lambda: 1e-3
 _bregman_target_initial: 0.0  # set to null for the matching target
 _bregman_ramp_epochs: 10
 
-# Hold the AAM margin at 0 until the target ramp completes, then start it one
-# epoch after every layer has reached its ERK sparsity.
-callbacks:
-  margin_scheduler:
-    start_epoch: ${oc.eval:'int(${_bregman_ramp_epochs}) + 1'}
-
 module:
   model:
     # Replaces the coarse conv_layers/linear_layers/classifier groups with one

@@ -26,12 +26,6 @@ _bregman_lambda: 1e-3
 _bregman_target_initial: 0.0 # ramp start; dense + ramp over _bregman_ramp_epochs
 _bregman_ramp_epochs: 10
 
-# Hold the AAM margin at 0 until the sparsity ramp completes, then start it one
-# epoch after the global target reaches its final value.
-callbacks:
-  margin_scheduler:
-    start_epoch: ${oc.eval:'int(${_bregman_ramp_epochs}) + 1'}
-
 module:
   model:
     # One auto-expanding trainable-allocation group over every prunable

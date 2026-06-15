@@ -38,16 +38,6 @@ callbacks:
     mode: max
     monitor: ${replace:"valid/__metric__"}
     patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'} # 50% of epochs
-  # Progressive margin scheduler (WeSpeaker-style, auto-scaled to max_epochs)
-  # WeSpeaker: margin starts at 13% (20/150), ends at 27% (40/150), exponential curve
-  margin_scheduler:
-    _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
-    initial_margin: 0.0
-    final_margin: 0.2
-    start_epoch: ${oc.eval:'int(${trainer.max_epochs} * 0.1)'} # 10.0% into training (WeSpeaker: 20/150)
-    warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.1)'} # 10.0% duration (WeSpeaker: 20 epochs)
-    increase_type: exp # WeSpeaker: increase_type='exp'
-
 datamodule:
   dataset:
     segment_duration: 3.0
@@ -67,13 +57,12 @@ datamodule:
       batch_size: 8
 
 module:
-  # Start with margin=0.0 (will be increased by margin_scheduler callback)
   criterion:
     aam:
       _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
       loss_fn:
         _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-        margin: 0.0
+        margin: 0.2
         scale: 32.0
 
   # lr_scheduler:

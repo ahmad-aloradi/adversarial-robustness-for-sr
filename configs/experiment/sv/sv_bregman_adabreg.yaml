@@ -58,14 +58,6 @@ callbacks:
     monitor: ${replace:"valid/__metric__"}
     patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
 
-  margin_scheduler:
-    _target_: src.callbacks.margin_scheduler.ProgressiveMarginScheduler
-    initial_margin: 0.0
-    final_margin: 0.2
-    start_epoch: ${oc.eval:'int(${trainer.max_epochs} * 0.1)'}
-    warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.1)'}
-    increase_type: exp
-
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-12
@@ -118,7 +110,7 @@ module:
       _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
       loss_fn:
         _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-        margin: 0.0
+        margin: 0.2
         scale: 32.0
 
   lr_scheduler:

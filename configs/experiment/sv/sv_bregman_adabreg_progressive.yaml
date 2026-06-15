@@ -22,10 +22,3 @@ _bregman_ramp_granularity: epoch # smooth per-step target
 _bregman_initial_sparsity: ${_bregman_target_initial} # auto-matches sparsity_rate
 _bregman_lambda: 1e-3
 
-# Hold the AAM margin at 0 until the target-sparsity ramp completes. The lambda
-# scheduler reaches the final target at epoch _bregman_ramp_epochs; train one
-# more epoch at full sparsity, then start raising the margin at
-# _bregman_ramp_epochs + 1.
-callbacks:
-  margin_scheduler:
-    start_epoch: ${oc.eval:'int(${_bregman_ramp_epochs}) + 1'}
