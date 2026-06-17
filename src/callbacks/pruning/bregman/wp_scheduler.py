@@ -1,12 +1,14 @@
 """
-Global explore->commit annealer for the weight-activation probability ``w_p``
-used by the LinBreg/AdaBreg "weight_masking" primal readout.
+Global explore->commit annealer for the per-element Bernoulli probability
+``w_p`` used by the LinBreg/AdaBreg primal readout.
 
-``w_p`` in [0, 1] tunes the geometric-mean readout from fully reversible
-standard Bregman (``w_p = 1``) to a latched geometric mean where a zero weight
-is a fixed point (``w_p = 0``). Annealing ``w_p`` from ~1 down to ~0 over
-training keeps the support reversible early (exploration; overshoots
-self-heal) and freezes it late (commitment; stable, non-oscillating mask).
+``w_p`` in [0, 1] is the keep-probability of the per-element Bernoulli gate:
+each step a weight takes its standard Bregman prox step with probability
+``w_p``, or is frozen at its current value (a zero stays zero) with probability
+``1 - w_p``. ``w_p = 1`` is fully reversible standard Bregman; ``w_p = 0``
+latches the support. Annealing ``w_p`` from ~1 down to ~0 over training keeps
+the support reversible early (exploration; overshoots self-heal) and freezes it
+late (commitment; stable, non-oscillating mask).
 
 The annealer is a pure function of training progress in [0, 1]. It is
 independent of the lambda scheduler: the BregmanPruner supplies progress from
@@ -108,7 +110,6 @@ if __name__ == "__main__":
             for p in (0.0, 0.25, 0.5, 0.75, 1.0)
         )
         print(f"{sched:6s}: {row}")
-
 
     for sched in ("linear", "cosine"):
         ann = WpAnnealer(schedule=sched, start_fraction=0.0, end_fraction=1.0)

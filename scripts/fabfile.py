@@ -621,6 +621,7 @@ def _submit_sv_job(
     apply_augmentation=False,
     batch_size_base=128,
     target_sparsity=None,
+    log_every_n_steps=1,
     # progressive ramp (Bregman only)
     progressive=False,
     initial_target_sparsity=None,
@@ -759,6 +760,7 @@ def _submit_sv_job(
         "paths.log_dir": RESULTS_DIR,
         "hydra.run.dir": f"{RESULTS_DIR}/train/runs/{name}",
         "trainer.num_sanity_val_steps": 0,
+        "trainer.log_every_n_steps": log_every_n_steps,
     }
 
     # Disable checkpoint averaging if num_ckpt_avg is 1 or less
@@ -901,8 +903,8 @@ def run_sv(transfer_data="false", force="false"):
     RUN_Bregman_EXPS = False
     RUN_AUX_BREGMAN_EXPS = False
     RUN_PROGRESSIVE_Bregman_EXPS = True
-    RUN_MOVEMENT_Bregman_EXPS = True
-    RUN_TRAINABLE_SCALES_Bregman_EXPS = False
+    RUN_TRAINABLE_SCALES_Bregman_EXPS = True
+    RUN_WPANNEAL_Bregman_EXPS = True
 
     ########################
     # Experiment registry: one schema for every group.
@@ -965,11 +967,11 @@ def run_sv(transfer_data="false", force="false"):
             }
         )
 
-    # Movement reweighting (AdaBreg + LinBreg).
-    if RUN_MOVEMENT_Bregman_EXPS:
+    # Bernoulli w_p anneal (AdaBreg + LinBreg).
+    if RUN_WPANNEAL_Bregman_EXPS:
         for _exp in (
-            "sv_bregman_adabreg_movement",
-            "sv_bregman_linbreg_movement",
+            "sv_bregman_adabreg_wpanneal",
+            "sv_bregman_linbreg_wpanneal",
         ):
             EXPERIMENTS[_exp] = {
                 "sv_models": [ecapa],

@@ -50,7 +50,6 @@ callbacks:
     verbose: 2
     target_sparsity: ${_bregman_target_sparsity}
     tolerance: 0.01
-    rescale_mode: "none" # "none", "subgradient_correction", "nestrovs_adaptive_update"
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true

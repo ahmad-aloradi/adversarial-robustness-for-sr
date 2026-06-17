@@ -505,7 +505,7 @@ class SpeakerVerification(pl.LightningModule):
         Runs before Lightning restores model state on resume, so the
         ``bregman_log_scales.*`` keys exist for the strict ``load_state_dict``;
         ``configure_optimizers`` is too late. A no-op unless a pruning group
-        sets ``auto_per_layer_erk.allocation: trainable``.
+        sets a ``trainable_scales`` block.
         """
         pruning_groups = self.hparams.model.get("pruning_groups")
         if pruning_groups is not None:

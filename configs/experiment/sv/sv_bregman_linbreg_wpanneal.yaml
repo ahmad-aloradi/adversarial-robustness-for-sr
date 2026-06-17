@@ -1,6 +1,7 @@
 # @package _global_
-# AdaBreg with a Bernoulli w_p explore->commit anneal. Fixed-target mode
-# (inherited from sv_bregman_adabreg): the lambda scheduler holds the final 99%
+# LinBreg with a Bernoulli w_p explore->commit anneal. Mirrors
+# sv_bregman_adabreg_wpanneal with the LinBreg optimizer. Fixed-target mode
+# (inherited from sv_bregman_linbreg): the lambda scheduler holds the final 99%
 # target and the base's _bregman_initial_sparsity (0.99) applies a random 99%
 # mask at setup, so the model begins SPARSE, not dense. Validation stays
 # suppressed until measured sparsity reaches target.
@@ -19,7 +20,7 @@
 # `bregman_lambda` resolver and the scheduler).
 
 defaults:
-  - sv/sv_bregman_adabreg
+  - sv/sv_bregman_linbreg
   - _self_
 
 _bregman_target_sparsity: 0.99 # final target (feeds resolver + scheduler)
@@ -31,7 +32,7 @@ callbacks:
     wp_annealer:
       _target_: src.callbacks.pruning.bregman.wp_scheduler.WpAnnealer
       w_p_init: 1.0
-      w_p_final: 0.0
-      start_fraction: 0.15
-      end_fraction: 0.85
+      w_p_final: 0.1
+      start_fraction: 0.25
+      end_fraction: 0.75
       schedule: cosine

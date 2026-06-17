@@ -3,18 +3,18 @@
 # sv_bregman_adabreg_trainable_scales with the LinBreg optimizer.
 #
 # One global LambdaScheduler owns the sparsity LEVEL; each prunable layer's
-# lambda_scale = e^{s_g} is an ordinary nn.Parameter trained by the same
-# optimizer in a RegNone group. The global controller and validation gate
-# measure OVERALL model sparsity.
+# lambda_scale = e^{s_g} is an ordinary nn.Parameter (one scalar per layer)
+# trained by the same optimizer in a RegNone group. Scales start neutral
+# (s_g = 0). The global controller and validation gate measure OVERALL model
+# sparsity.
 
 defaults:
   - sv/sv_bregman_linbreg
   - _self_
 
-_erk_mode: erk
-_bregman_target_sparsity: 0.99
+_bregman_target_sparsity: 0.99 # OVERALL-model target (global mode)
 _bregman_lambda: 1e-5
-_bregman_target_initial: 0.0
+_bregman_target_initial: 0.0 # ramp start; dense + ramp over _bregman_ramp_epochs
 _bregman_ramp_epochs: 10
 
 module:
@@ -29,20 +29,18 @@ module:
             "speechbrain.lobes.models.ECAPA_TDNN.Classifier",
           ]
         param_names: ["weight"]
-        auto_per_layer_erk:
-          mode: ${_erk_mode}
-          target_sparsity: ${_bregman_target_sparsity}
-          initial_target_sparsity: ${_bregman_target_initial}
-          allocation: trainable
-          init: ones
-          scale_lr: 1e-3
-          scale_decay: 1e-4
-          scale_clamp: [0.25, 4.0]
+        trainable_scales:
+          scale_lr: 1e-3 # lr of the log-scale params (their own optimizer group)
+          scale_decay: 1e-4 # soft prior pulling s_g toward 0 (scale 1)
+          scale_clamp: [0.25, 4.0] # symmetric clamp on e^{s_g}
+          # Uniform initial weight sparsity per layer; the global controller
+          # ramps the level in from this start over _bregman_ramp_epochs.
+          initial_sparsity: ${_bregman_target_initial}
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
             lamda: ${_bregman_lambda}
-          lambda_scale: 1.0
+          lambda_scale: 1.0 # synced to e^{s_g} every batch
         pruning_config:
           pruning_type: "unstructured"
 

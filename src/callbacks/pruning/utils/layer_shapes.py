@@ -1,14 +1,30 @@
-"""Bridge from a live torch module to ERK LayerShape records.
+"""Shape records for prunable weights, read off a live torch module.
 
-The only place that reads weight shapes off a model for the ERK solve; keeps
-``erk_sparsity.py`` free of Lightning/model imports.
+The only place that reads weight shapes off a model; used to enumerate the
+prunable layers when registering one trainable per-layer log-scale each.
 """
-from typing import Any, Dict, List
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
 
 from pytorch_lightning import LightningModule
 
-from src.callbacks.pruning.utils.erk_sparsity import LayerShape
 from src.callbacks.pruning.utils.pruning_manager import module_param_matches
+
+
+@dataclass
+class LayerShape:
+    """Shape record for one prunable weight tensor.
+
+    fan_in is weight.shape[1] (already in-channels-per-group for grouped
+    convs), fan_out is weight.shape[0], kernel_dims is weight.shape[2:] (empty
+    for Linear), n_params is weight.numel().
+    """
+
+    name: str
+    fan_in: int
+    fan_out: int
+    kernel_dims: Tuple[int, ...]
+    n_params: int
 
 
 def collect_prunable_layer_shapes(
@@ -18,8 +34,8 @@ def collect_prunable_layer_shapes(
 ) -> List[LayerShape]:
     """LayerShape for every weight matching a prunable group config.
 
-    Uses the same predicate as PruningManager so the ERK layer set is exactly
-    the regularized set.
+    Uses the same predicate as PruningManager so the collected layer set is
+    exactly the regularized set.
 
     Inputs:
         pl_module: the model.
@@ -39,11 +55,10 @@ def collect_prunable_layer_shapes(
             ):
                 continue
             assert p_obj.ndim >= 2, (
-                f"ERK needs a weight with fan_in/fan_out, got shape "
-                f"{tuple(p_obj.shape)} for {mod_name}.{p_name}"
+                f"a trainable per-layer scale needs a weight with "
+                f"fan_in/fan_out, got shape {tuple(p_obj.shape)} for "
+                f"{mod_name}.{p_name}"
             )
-            # fan_in = shape[1] is in-channels-per-group for grouped convs --
-            # the RigL reference convention; do NOT rescale by conv.groups.
             shapes.append(
                 LayerShape(
                     name=mod_name,

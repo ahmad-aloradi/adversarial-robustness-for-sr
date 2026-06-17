@@ -4,7 +4,6 @@ PruningManager: A unified handler for parameter grouping, sparsity, and regulari
 
 import importlib
 import logging
-import math
 import re
 from typing import Any, Dict, List, Optional
 
@@ -93,12 +92,11 @@ def create_log_scale_params(
 ) -> Optional[str]:
     """Register ``pl_module.bregman_log_scales`` for trainable allocation.
 
-    Scans ``group_configs`` for the single ``auto_per_layer_erk`` group with
-    ``allocation: trainable``, collects its prunable layer names (same predicate
-    as the optimizer assignment), and registers one scalar log-scale Parameter
-    per layer in an ``nn.ParameterDict`` keyed by the ``.``-sanitized module
-    name. ``init: ones`` seeds 0 (neutral scale 1); ``init: erk`` seeds
-    ``ln`` of the ERK warm-start scales.
+    Scans ``group_configs`` for the single ``trainable_scales`` group, collects
+    its prunable layer names (same predicate as the optimizer assignment), and
+    registers one scalar log-scale Parameter per layer in an
+    ``nn.ParameterDict`` keyed by the ``.``-sanitized module name. Each scale is
+    initialized to 0 (neutral, e^{s} = 1).
 
     Must run from ``LightningModule.setup`` (before Lightning restores model
     state on resume) so the keys exist for the strict ``load_state_dict``.
@@ -107,36 +105,23 @@ def create_log_scale_params(
 
     Returns the attribute name when created, else ``None`` (no trainable group).
     """
-    from .erk_sparsity import erk_lambda_scales
     from .layer_shapes import collect_prunable_layer_shapes
 
-    trainable = [
-        cfg
-        for cfg in group_configs
-        if cfg.get("auto_per_layer_erk")
-        and cfg["auto_per_layer_erk"].get("allocation") == "trainable"
-    ]
+    trainable = [cfg for cfg in group_configs if cfg.get("trainable_scales")]
     if not trainable:
         return None
     if len(trainable) > 1:
         raise ValueError(
-            "At most one auto_per_layer_erk group may set "
-            f"allocation: trainable, found {len(trainable)}."
+            f"At most one trainable_scales group is allowed, found "
+            f"{len(trainable)}."
         )
 
     config = trainable[0]
-    erk_cfg = config["auto_per_layer_erk"]
-    init = erk_cfg.get("init", "ones")
-    if init not in ("ones", "erk"):
-        raise ValueError(
-            f"auto_per_layer_erk.init must be 'ones' or 'erk', got {init!r}."
-        )
-
     resolved_types = _resolve_layer_types(config["layer_types"])
     shapes = collect_prunable_layer_shapes(pl_module, config, resolved_types)
     if not shapes:
         raise ValueError(
-            f"trainable-allocation group '{config.get('name')}' matched no "
+            f"trainable_scales group '{config.get('name')}' matched no "
             "prunable weights; check layer_types/module_name_patterns."
         )
 
@@ -156,25 +141,11 @@ def create_log_scale_params(
             )
         return LOG_SCALES_ATTR
 
-    # Solve the ERK warm-start only once we know we are creating the params.
-    if init == "erk":
-        scales = erk_lambda_scales(
-            shapes, erk_cfg["target_sparsity"], erk_cfg["mode"]
-        )
-        init_values = {s.name: math.log(scales[s.name]) for s in shapes}
-    else:
-        init_values = {s.name: 0.0 for s in shapes}
-
     setattr(
         pl_module,
         LOG_SCALES_ATTR,
         nn.ParameterDict(
-            {
-                keys[s.name]: nn.Parameter(
-                    torch.tensor(float(init_values[s.name]))
-                )
-                for s in shapes
-            }
+            {keys[s.name]: nn.Parameter(torch.zeros(())) for s in shapes}
         ),
     )
     return LOG_SCALES_ATTR
@@ -189,10 +160,10 @@ class PruningManager:
     2.  Provide these groups to an optimizer with group-specific settings (e.g., regularization).
     3.  Apply initial sparsity to each group according to its configuration.
 
-    A group config may carry ``auto_per_layer_erk: {mode, target_sparsity,
-    initial_target_sparsity}``; it is expanded at construction into one group
-    per matching weight, each with an ERK-derived initial sparsity and an
-    attached ``erk_target_sparsity`` (RigL arXiv:1911.11134).
+    A group config may carry ``trainable_scales: {scale_lr, scale_decay,
+    scale_clamp, initial_sparsity}``; it is expanded at construction into one
+    group per matching weight (each carrying a ``trainable_scale`` marker) plus
+    one group holding the per-layer log-scale Parameters.
 
     Args:
         pl_module (LightningModule): The model containing the parameters.
@@ -210,8 +181,10 @@ class PruningManager:
     def _process_configs(self) -> List[Dict[str, Any]]:
         expanded_configs: List[Dict[str, Any]] = []
         for config in self._raw_configs:
-            if config.get("auto_per_layer_erk"):
-                expanded_configs.extend(self._expand_erk_group(config))
+            if config.get("trainable_scales"):
+                expanded_configs.extend(
+                    self._expand_trainable_scale_group(config)
+                )
             else:
                 expanded_configs.append(config)
 
@@ -265,40 +238,29 @@ class PruningManager:
 
         return [g for g in processed_groups if g["params"]]
 
-    def _expand_erk_group(
+    def _expand_trainable_scale_group(
         self, config: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Expand one auto_per_layer_erk group into one config per weight.
+        """Expand one ``trainable_scales`` group into one config per weight.
 
-        Each emitted config targets a single module by its exact name, carries
-        the base group's optimizer_settings (reg + lambda_scale), and its own
-        ERK initial sparsity_rate. ``allocation`` decides what cross-layer
-        knob is attached:
-
-        - ``hard_targets`` (default): a top-level erk_target_sparsity that
-          get_optimizer_param_groups threads onto the optimizer group, giving
-          the pruner one fixed-target scheduler per layer.
-        - ``trainable``: no per-layer target (the pruner stays in global
-          single-scheduler mode); instead each group carries a
-          ``trainable_scale`` marker pointing at its log-scale Parameter, and
-          one extra ``bregman_log_scales`` group holds those params.
+        The global LambdaScheduler owns the sparsity level; each per-layer scalar
+        log-scale e^{s} owns its share of the allocation. Each emitted config
+        targets a single module by its exact name, carries the base group's
+        optimizer_settings (reg + lambda_scale), a uniform initial
+        ``sparsity_rate``, and a ``trainable_scale`` marker pointing at its
+        log-scale Parameter. One extra ``bregman_log_scales`` group holds those
+        params, trained by the same optimizer in a RegNone group at its own lr.
         """
-        from .erk_sparsity import erk_initial_and_target_sparsity
         from .layer_shapes import collect_prunable_layer_shapes
 
-        erk_cfg = config["auto_per_layer_erk"]
-        mode = erk_cfg["mode"]
-        target_sparsity = erk_cfg["target_sparsity"]
-        initial_target_sparsity = erk_cfg.get("initial_target_sparsity")
-        allocation = erk_cfg.get("allocation", "hard_targets")
-        if allocation not in ("hard_targets", "trainable"):
-            raise ValueError(
-                "auto_per_layer_erk.allocation must be 'hard_targets' or "
-                f"'trainable', got {allocation!r}."
-            )
+        ts_cfg = config["trainable_scales"]
+        scale_decay = ts_cfg.get("scale_decay", 1e-4)
+        scale_clamp = ts_cfg.get("scale_clamp", [0.25, 4.0])
+        scale_lr = ts_cfg.get("scale_lr", 1e-3)
+        initial_sparsity = ts_cfg.get("initial_sparsity", 0.0)
 
         assert config.get("layer_types"), (
-            f"auto_per_layer_erk group '{config.get('name')}' must declare "
+            f"trainable_scales group '{config.get('name')}' must declare "
             "layer_types to define the prunable weight set."
         )
         resolved_types = _resolve_layer_types(config["layer_types"])
@@ -307,21 +269,16 @@ class PruningManager:
         )
         if not shapes:
             raise ValueError(
-                f"auto_per_layer_erk group '{config.get('name')}' matched no "
+                f"trainable_scales group '{config.get('name')}' matched no "
                 "prunable weights; check layer_types/module_name_patterns."
             )
-        per_layer = erk_initial_and_target_sparsity(
-            shapes, target_sparsity, mode, initial_target_sparsity
-        )
 
-        base_name = config.get("name", "erk")
+        base_name = config.get("name", "trainable")
         base_opt_settings = config.get("optimizer_settings", {})
         base_layer_types = config.get("layer_types")
         base_pruning_type = config.get("pruning_config", {}).get(
             "pruning_type", "unstructured"
         )
-        scale_decay = erk_cfg.get("scale_decay", 1e-4)
-        scale_clamp = erk_cfg.get("scale_clamp", [0.25, 4.0])
 
         expanded: List[Dict[str, Any]] = []
         for shape in shapes:
@@ -336,40 +293,30 @@ class PruningManager:
                 "optimizer_settings": base_opt_settings,
                 "pruning_config": {
                     "pruning_type": base_pruning_type,
-                    "sparsity_rate": per_layer[mod_name]["initial_sparsity"],
+                    "sparsity_rate": initial_sparsity,
                 },
+                "trainable_scale": True,
+                "trainable_scale_key": _sanitize_scale_key(mod_name),
+                "scale_decay": scale_decay,
+                "scale_clamp": list(scale_clamp),
             }
             if base_layer_types is not None:
                 layer_config["layer_types"] = list(base_layer_types)
-            if allocation == "hard_targets":
-                layer_config["erk_target_sparsity"] = per_layer[mod_name][
-                    "target_sparsity"
-                ]
-            else:
-                # No per-layer target: the global controller owns the level,
-                # the learned scale owns the allocation.
-                layer_config["trainable_scale"] = True
-                layer_config["trainable_scale_key"] = _sanitize_scale_key(
-                    mod_name
-                )
-                layer_config["scale_decay"] = scale_decay
-                layer_config["scale_clamp"] = list(scale_clamp)
             expanded.append(layer_config)
 
-        if allocation == "trainable":
-            # One group holding the log-scale params, trained by the same
-            # optimizer in a RegNone (Adam-like) group at its own lr.
-            expanded.append(
-                {
-                    "name": LOG_SCALES_ATTR,
-                    "module_name_patterns": ["^" + LOG_SCALES_ATTR + "$"],
-                    "optimizer_settings": {
-                        "reg": {"_target_": _REGNONE_TARGET},
-                        "lambda_scale": 0.0,
-                        "lr": erk_cfg.get("scale_lr", 1e-3),
-                    },
-                }
-            )
+        # One group holding the log-scale params, trained by the same optimizer
+        # in a RegNone (Adam-like) group at its own lr.
+        expanded.append(
+            {
+                "name": LOG_SCALES_ATTR,
+                "module_name_patterns": ["^" + LOG_SCALES_ATTR + "$"],
+                "optimizer_settings": {
+                    "reg": {"_target_": _REGNONE_TARGET},
+                    "lambda_scale": 0.0,
+                    "lr": scale_lr,
+                },
+            }
+        )
         return expanded
 
     def get_optimizer_param_groups(self) -> List[Dict[str, Any]]:
@@ -382,14 +329,9 @@ class PruningManager:
                 "params": group["params"],
                 **opt_settings,
             }
-            # Per-layer ERK target rides onto the optimizer group so the
-            # BregmanPruner can build one scheduler per layer.
-            erk_target = group["config"].get("erk_target_sparsity")
-            if erk_target is not None:
-                optimizer_group["erk_target_sparsity"] = erk_target
-            # Trainable-allocation markers ride along the same way so the pruner
-            # can map a weight group to its log-scale Parameter and read its
-            # decay/clamp without re-parsing names.
+            # Trainable-allocation markers ride onto the optimizer group so the
+            # pruner can map a weight group to its log-scale Parameter and read
+            # its decay/clamp without re-parsing names.
             if group["config"].get("trainable_scale"):
                 for key in (
                     "trainable_scale",

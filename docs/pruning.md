@@ -107,51 +107,35 @@ Orchestrates the entire Bregman learning process:
 - Synchronizes optimizer parameter groups
 - Handles checkpoint save/load
 
-#### 1.6 Movement reweighting (reweighted-l1)
+#### 1.6 Bernoulli w_p anneal (explore → commit)
 
-A uniform L1 threshold spends a fixed sparsity budget by magnitude (e.g. $\max[p - \lambda, 0]$). We wanted to control sparsity on a finer-level to improve sparsity distribution per layer/weight. We support movement reweighting (Candès–Wakin–Boyd reweighted ℓ1 driven by a Sanh et al. movement importance), which gives each weight its own soft-threshold $\lambda \cdot a_i$: $a_i$ is large for unimportant weights (cut first) and small for important ones (protected). The multiplier is normalized to mean 1 over the live support, so the global ρ controller's per-layer average threshold — and thus the target rate — is unchanged; $a_i$ only redistributes *where* the cuts fall. Dead weights ($p=0$) get $a_i=1$ so Bregman revival keeps the baseline threshold.
-
-Two importance metrics (`move_importance`), objectively:
-
-| | `movement_signed` (default) | `taylor_abs` |
-|---|---|---|
-| Accumulated quantity | EMA of $-\nabla_i \cdot p_i$, then $\mathrm{relu}$ | EMA of $\lvert\nabla_i \cdot p_i\rvert$ |
-| Reads a weight as important when | it is *growing* under data pressure (moving away from zero) | zeroing it would raise the loss (first-order saliency) |
-| Effect | de-protects weights already being pushed to zero | always-positive saliency; ignores direction |
-
-**Memory**: one extra weight-sized buffer per regularized param (`move_ema`), lazily allocated only when the flag is on (≈ +33% optimizer state, ~+34 MB for the ResNet34 run). `move_dtype: bf16` halves it within a run (PyTorch's `load_state_dict` re-expands it to the param dtype on resume). It round-trips through `optimizer.state_dict()` for free; turning the flag on for an existing run is safe (the EMA starts uniform and fills during `move_warmup_steps`).
-
-**A/B recipe** — `sv_bregman_adabreg_movement.yaml` is `sv_bregman_adabreg.yaml` with only the optimizer changed, so a matched comparison at a fixed rate is:
+Standard Bregman is fully reversible: a zeroed weight revives whenever its dual variable grows back, so the support keeps oscillating late in training. The w_p anneal makes the support commit gradually. The primal readout becomes a per-element Bernoulli gate: each step, every weight takes its standard prox step
+with probability `w_p`, or is frozen at its current value (a zero stays zero) with probability `1 - w_p`. `WpAnnealer` sweeps `w_p` from `w_p_init` (1.0 = pure Bregman, reversible) down to `w_p_final` (≈0 = latched) over a `[start_fraction, end_fraction]` window: early on the support migrates freely (overshoots self-heal), late it latches and stops oscillating. This is what makes a sparse start (e.g. a random 99% mask) safe — keep `start_fraction > 0` so the random mask can migrate before it freezes. The gate is activated simply by configuring a `wp_annealer`, and is independent of the lambda scheduler.
 
 ```bash
-python src/train.py experiment=sv/sv_bregman_adabreg          _bregman_target_sparsity=0.99  # baseline
-python src/train.py experiment=sv/sv_bregman_adabreg_movement _bregman_target_sparsity=0.99  # reweighted
+python src/train.py +experiment=sv/sv_bregman_adabreg_wpanneal _bregman_target_sparsity=0.99
+python src/train.py +experiment=sv/sv_bregman_linbreg_wpanneal _bregman_target_sparsity=0.99
 ```
-Key knobs: `move_clip` (multiplier bounds, default `[0.1, 10.0]`), `move_beta` (EMA, `0.9`), `move_warmup_steps` (≈ one epoch so the EMA populates first).
 
-#### 1.7 Layerwise ERK / ER distribution (RigL)
+Key knobs (under `callbacks.model_pruning.wp_annealer`): `w_p_init`/`w_p_final`,
+`start_fraction`/`end_fraction`, `schedule` (`linear`|`cosine`).
+`scripts/plot_wp_annealer.py` renders what each knob does.
 
-Movement reweighting (1.6) redistributes a budget *within* a layer. ERK/ER instead set a budget *per layer* up front, from each layer's shape (RigL, arXiv:1911.11134 §3.1). Each layer's density (1 − sparsity) is proportional to a score, then all scores are scaled by one scalar so the kept-parameter count hits the global budget:
+#### 1.7 Trainable per-layer scales (learned allocation)
 
-- **ER**: $\dfrac{\text{fan\_in} + \text{fan\_out}}{\text{fan\_in} \cdot \text{fan\_out}}$ — ignores kernel size.
-- **ERK**: $\dfrac{\text{fan\_in} + \text{fan\_out} + \sum k}{\text{fan\_in} \cdot \text{fan\_out} \cdot \prod k}$ — the kernel enters the denominator, so larger-kernel (more-parameter) layers get a smaller score and thus **higher** sparsity. For a Linear layer (no kernel) ERK reduces to ER.
+A uniform L1 threshold spends the sparsity budget by magnitude alone. Trainable scales let the model learn how to *distribute* a global budget across layers. One global LambdaScheduler owns the sparsity LEVEL; each prunable layer gets one scalar log-scale `s_g` (an ordinary `nn.Parameter`, `e^{s_g}` is its lambda
+multiplier) trained by the SAME optimizer in a RegNone group, so it owns the cross-layer ALLOCATION. λ acts inside the no-grad prox, so the chain rule to `s_g` is closed-form; `BregmanPruner` injects it as
+`∂L/∂s = −δ·reg.lamda·Σ_live grad·sign(p) + scale_decay·s`. No new optimizer, EMA, or controller — a RegNone group's step is a plain Adam step. Scales start neutral (`s_g = 0`, scale 1), are clamped to `scale_clamp`, and a soft `scale_decay` pulls idle layers back toward 1.
 
-Tradeoff: ER spreads sparsity by fan only and over-prunes wide layers relative to their parameter share; ERK accounts for the kernel and lets parameter-heavy conv layers carry more of the sparsity. RigL found ERK better for conv nets; ER is the simpler kernel-agnostic baseline.
-
-The scalar solve uses RigL's **dense-clamp** redistribution: any layer whose computed density would exceed 1.0 is pinned dense, removed from the pool, and its budget redistributed — repeated until no layer exceeds 1.0 (`solve_erk_densities` in `src/callbacks/pruning/utils/erk_sparsity.py`, a pure, unit-tested function with a `__main__` smoke block).
-
-Integration is the existing per-group machinery at per-layer granularity. A group config carrying `auto_per_layer_erk` is expanded by `PruningManager` into one optimizer param group per matching weight, each with its own `RegL1`, its own ERK initial `sparsity_rate`, and an attached `erk_target_sparsity`. `BregmanPruner` clones the configured `lambda_scheduler` template once per layer, and each clone drives its layer's lambda from that layer's own measured sparsity to its ERK target. The per-layer *targets* sum to the global target by construction of the budget-solve, but there is no global runtime correction loop — the achieved total still depends on each per-layer controller reaching its own target (same caveat as the lambda-scheduler Note above).
-
-**Target basis (important):** the ERK budget — and `_bregman_target_sparsity` in the ERK recipe — is defined over the **prunable weight set** (Conv/Linear/Classifier weights). BN, norm, and bias params stay dense (`RegNone`), so the reported overall-model sparsity is slightly lower. Validation is gated on the *pruned* sparsity (not overall), since overall is diluted by the dense params and would never reach the target.
+A group config carrying `trainable_scales` is expanded by `PruningManager` into one param group per matching weight (each with its own `RegL1`, a uniform initial `sparsity_rate`, and a `trainable_scale` marker) plus one `bregman_log_scales` RegNone group holding the scalar log-scales. The controller and the validation
+gate measure OVERALL model sparsity, so `_bregman_target_sparsity` is an overall-model target.
 
 ```bash
-# ERK (kernel-aware) at 90% prunable sparsity
-python src/train.py +experiment=sv/sv_bregman_adabreg_erk _bregman_target_sparsity=0.9 _erk_mode=erk
-# ER (kernel-agnostic) baseline
-python src/train.py +experiment=sv/sv_bregman_adabreg_erk _bregman_target_sparsity=0.9 _erk_mode=er
+python src/train.py +experiment=sv/sv_bregman_adabreg_trainable_scales _bregman_target_sparsity=0.99
+python src/train.py +experiment=sv/sv_bregman_linbreg_trainable_scales _bregman_target_sparsity=0.99
 ```
 
-Key knobs: `_erk_mode` (`er`|`erk`); `auto_per_layer_erk.initial_target_sparsity` (`null` = start at the ERK target, RigL-faithful; a denser value = start sparser and let lambda ramp in). Per-layer schedulers checkpoint under `bregman_erk_layer_scheduler_states`; a resume whose model layer set differs from the checkpoint fails loud.
+Key knobs (under `trainable_scales`): `scale_lr` (the log-scales' own lr), `scale_decay` (prior pulling `s_g`→0), `scale_clamp` (bounds on `e^{s_g}`), `initial_sparsity` (uniform initial mask). Watch `bregman/scale_{min,max}` and the epoch-end "Trainable per-layer scales" table.
 
 ### Usage Example
 

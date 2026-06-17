@@ -65,7 +65,6 @@ callbacks:
     verbose: 2
     target_sparsity: ${_bregman_target_sparsity}
     tolerance: 0.01 # Tolerance of 1% means accept 89% if target is 90%
-    rescale_mode: "none" # "none", "subgradient_correction", "nestrovs_adaptive_update"
     # Global lambda scheduler configuration.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
