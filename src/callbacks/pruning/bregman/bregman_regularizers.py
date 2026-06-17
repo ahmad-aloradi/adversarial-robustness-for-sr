@@ -15,14 +15,17 @@ import torch
 class BregmanRegularizer:
     """Base class for Bregman regularizers."""
 
+    # Per-element Bernoulli w_p anneal (set by the BregmanPruner when a
+    # wp_annealer is configured). bernoulli_mask gates whether the optimizer
+    # applies the gate; w_p is the keep-probability: 1.0 => every weight takes
+    # the standard prox step, 0.0 => every weight frozen (latched). Declared at
+    # class level so regularizers unpickled from checkpoints saved before these
+    # attributes existed still resolve them.
+    bernoulli_mask = False
+    w_p = 1.0
+
     def __init__(self, lamda: float = 1.0, delta: float = 1.0):
         self.lamda = lamda
-        # Per-element Bernoulli w_p anneal (set by the BregmanPruner when a
-        # wp_annealer is configured). bernoulli_mask gates whether the optimizer
-        # applies the gate; w_p is the keep-probability: 1.0 => every weight
-        # takes the standard prox step, 0.0 => every weight frozen (latched).
-        self.bernoulli_mask = False
-        self.w_p = 1.0
 
     def __call__(self, x: torch.Tensor) -> float:
         raise NotImplementedError
