@@ -31,7 +31,7 @@ module:
         trainable_scales:
           scale_lr: ${module.optimizer.lr} # match the weight lr
           scale_decay: 1e-4 # soft prior pulling c_g toward 1
-          scale_min: 0.0 # floor: λ_eff = λ·c_g ≥ 0
+          scale_min: ${oc.eval:'${_bregman_target_sparsity} * 0.5'} # floor: λ_eff = λ·c_g ≥ 0
           initial_sparsity: ${_bregman_initial_sparsity}
         optimizer_settings:
           reg:
