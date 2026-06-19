@@ -107,35 +107,18 @@ Orchestrates the entire Bregman learning process:
 - Synchronizes optimizer parameter groups
 - Handles checkpoint save/load
 
-#### 1.6 Bernoulli w_p anneal (explore → commit)
+#### 1.6 Trainable per-layer scales (learned allocation)
 
-Standard Bregman is fully reversible: a zeroed weight revives whenever its dual variable grows back, so the support keeps oscillating late in training. The w_p anneal makes the support commit gradually. The primal readout becomes a per-element Bernoulli gate: each step, every weight takes its standard prox step
-with probability `w_p`, or is frozen at its current value (a zero stays zero) with probability `1 - w_p`. `WpAnnealer` sweeps `w_p` from `w_p_init` (1.0 = pure Bregman, reversible) down to `w_p_final` (≈0 = latched) over a `[start_fraction, end_fraction]` window: early on the support migrates freely (overshoots self-heal), late it latches and stops oscillating. This is what makes a sparse start (e.g. a random 99% mask) safe — keep `start_fraction > 0` so the random mask can migrate before it freezes. The gate is activated simply by configuring a `wp_annealer`, and is independent of the lambda scheduler.
+The global LambdaScheduler sets the sparsity LEVEL; one linear scale factor `c_g` per layer (`nn.Parameter`, init 1) learns the ALLOCATION, giving threshold `t_g = δ·λ_global·c_g`. The `c_g` train in a RegNone group of the same optimizer; since λ sits inside the no-grad prox, `BregmanPruner` injects the closed-form hypergradient `∂L/∂c = −δ·λ_global·Σ_live grad·sign(p) + scale_decay·(c−1)`. `scale_decay` pulls `c_g`→1 (finite equilibrium); the only bound is the floor `c_g ≥ 0`. A layer the loss is happy to shrink climbs (higher threshold → free to die); one fighting the threshold sinks toward `c_g = 0` (stays dense).
 
-```bash
-python src/train.py +experiment=sv/sv_bregman_adabreg_wpanneal _bregman_target_sparsity=0.99
-python src/train.py +experiment=sv/sv_bregman_linbreg_wpanneal _bregman_target_sparsity=0.99
-```
-
-Key knobs (under `callbacks.model_pruning.wp_annealer`): `w_p_init`/`w_p_final`,
-`start_fraction`/`end_fraction`, `schedule` (`linear`|`cosine`).
-`scripts/plot_wp_annealer.py` renders what each knob does.
-
-#### 1.7 Trainable per-layer scales (learned allocation)
-
-A uniform L1 threshold spends the sparsity budget by magnitude alone. Trainable scales let the model learn how to *distribute* a global budget across layers. One global LambdaScheduler owns the sparsity LEVEL; each prunable layer gets one scalar log-scale `s_g` (an ordinary `nn.Parameter`, `e^{s_g}` is its lambda
-multiplier) trained by the SAME optimizer in a RegNone group, so it owns the cross-layer ALLOCATION. λ acts inside the no-grad prox, so the chain rule to `s_g` is closed-form; `BregmanPruner` injects it as
-`∂L/∂s = −δ·reg.lamda·Σ_live grad·sign(p) + scale_decay·s`. No new optimizer, EMA, or controller — a RegNone group's step is a plain Adam step. Scales start neutral (`s_g = 0`, scale 1), are clamped to `scale_clamp`, and a soft `scale_decay` pulls idle layers back toward 1.
-
-A group config carrying `trainable_scales` is expanded by `PruningManager` into one param group per matching weight (each with its own `RegL1`, a uniform initial `sparsity_rate`, and a `trainable_scale` marker) plus one `bregman_log_scales` RegNone group holding the scalar log-scales. The controller and the validation
-gate measure OVERALL model sparsity, so `_bregman_target_sparsity` is an overall-model target.
+`PruningManager` expands a `trainable_scales` group into one `RegL1` group per weight plus one `bregman_scales` RegNone group for the factors. `_bregman_target_sparsity` is an OVERALL-model target.
 
 ```bash
 python src/train.py +experiment=sv/sv_bregman_adabreg_trainable_scales _bregman_target_sparsity=0.99
 python src/train.py +experiment=sv/sv_bregman_linbreg_trainable_scales _bregman_target_sparsity=0.99
 ```
 
-Key knobs (under `trainable_scales`): `scale_lr` (the log-scales' own lr), `scale_decay` (prior pulling `s_g`→0), `scale_clamp` (bounds on `e^{s_g}`), `initial_sparsity` (uniform initial mask). Watch `bregman/scale_{min,max}` and the epoch-end "Trainable per-layer scales" table.
+Knobs (under `trainable_scales`): `scale_lr`, `scale_decay`, `scale_min`, `initial_sparsity`. Full derivation: `docs/bregman_trainable_scales.md`.
 
 ### Usage Example
 

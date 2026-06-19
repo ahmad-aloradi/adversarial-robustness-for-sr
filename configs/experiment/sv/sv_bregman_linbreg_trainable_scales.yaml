@@ -1,24 +1,23 @@
 # @package _global_
-# LinBreg with trainable per-layer sparsity allocation. Mirrors
-# sv_bregman_adabreg_trainable_scales with the LinBreg optimizer.
-#
-# One global LambdaScheduler owns the sparsity LEVEL; each prunable layer's
-# lambda_scale = e^{s_g} is an ordinary nn.Parameter (one scalar per layer)
-# trained by the same optimizer in a RegNone group. Scales start neutral
-# (s_g = 0). The global controller and validation gate measure OVERALL model
-# sparsity.
+# LinBreg + trainable per-layer allocation. Mirrors the AdaBreg variant: a
+# global LambdaScheduler sets the sparsity LEVEL; a per-layer nn.Parameter c_g
+# (init 1, floor 0) learns the ALLOCATION. Overall-model target.
 
 defaults:
   - sv/sv_bregman_linbreg
   - _self_
 
-_bregman_target_sparsity: 0.99 # OVERALL-model target (global mode)
+_bregman_target_sparsity: 0.99
 _bregman_lambda: 1e-5
-_bregman_target_initial: 0.0 # ramp start; dense + ramp over _bregman_ramp_epochs
-_bregman_ramp_epochs: 10
+# initial weight sparsity (0.99) and fixed-target mode inherited from the base.
+
+trainer:
+  gradient_clip_val: 1.0 # the c_g hypergradient can be large
 
 module:
   model:
+    # Trainable-scale group over all prunable weights + Classifier;
+    # norm/bias/fallback stay dense (RegNone).
     pruning_groups:
       - name: trainable_prunable
         layer_types:
@@ -30,17 +29,15 @@ module:
           ]
         param_names: ["weight"]
         trainable_scales:
-          scale_lr: 1e-3 # lr of the log-scale params (their own optimizer group)
-          scale_decay: 1e-4 # soft prior pulling s_g toward 0 (scale 1)
-          scale_clamp: [0.25, 4.0] # symmetric clamp on e^{s_g}
-          # Uniform initial weight sparsity per layer; the global controller
-          # ramps the level in from this start over _bregman_ramp_epochs.
-          initial_sparsity: ${_bregman_target_initial}
+          scale_lr: ${module.optimizer.lr} # match the weight lr
+          scale_decay: 1e-4 # soft prior pulling c_g toward 1
+          scale_min: 0.0 # floor: λ_eff = λ·c_g ≥ 0
+          initial_sparsity: ${_bregman_initial_sparsity}
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
             lamda: ${_bregman_lambda}
-          lambda_scale: 1.0 # synced to e^{s_g} every batch
+          lambda_scale: 1.0 # synced to c_g each batch
         pruning_config:
           pruning_type: "unstructured"
 

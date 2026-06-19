@@ -902,118 +902,143 @@ def run_sv(transfer_data="false", force="false"):
     RUN_PRUNING_EXPS = False
     RUN_Bregman_EXPS = False
     RUN_AUX_BREGMAN_EXPS = False
-    RUN_PROGRESSIVE_Bregman_EXPS = True
-    RUN_TRAINABLE_SCALES_Bregman_EXPS = True
-    RUN_WPANNEAL_Bregman_EXPS = True
+    # Bregman cells: {ramp, fixed} x {trainable scales, uniform}.
+    RUN_PROGRESSIVE_ONLY_EXPS = True  # ramp,  uniform
+    RUN_TRAINABLE_FIXED_EXPS = True  # fixed, trainable
+    RUN_PROGRESSIVE_TRAINABLE_EXPS = False  # ramp,  trainable
+    RUN_VANILLA_FIXED_EXPS = False  # fixed, uniform
 
     ########################
-    # Experiment registry: one schema for every group.
-    #   required: sv_models, dataset_names, sparsity_rates ([None]=baseline)
+    # Experiment registry: a list of entries (same config may recur with
+    # different overrides, e.g. cases 2 and 3).
+    #   required: experiment, sv_models, dataset_names, sparsity_rates
     #   optional: extra_overrides, suffix, per_model,
     #             initial_target_sparsity + ramp_epochs (=> progressive ramp)
     ########################
-    EXPERIMENTS = {}
+    EXPERIMENTS = []
 
     # Baselines: no sparsity target, swept over default models/datasets.
     if RUN_BASELINE_EXPS:
         for _exp in ("sv_wespeaker", "sv_vanilla"):
-            EXPERIMENTS[_exp] = {
-                "sv_models": default_sv_models,
-                "dataset_names": dataset_names,
-                "sparsity_rates": [None],
-            }
-
-    # Magnitude pruning (struct/onetime variants kept for re-enabling).
-    if RUN_PRUNING_EXPS:
-        EXPERIMENTS.update(
-            {
-                # "sv_pruning_mag_struct": {
-                #     "sv_models": default_sv_models,
-                #     "sparsity_rates": default_sparsity_rates,
-                #     "dataset_names": dataset_names,
-                # },
-                "sv_pruning_mag_unstruct": {
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
                     "sv_models": default_sv_models,
-                    "sparsity_rates": default_sparsity_rates,
                     "dataset_names": dataset_names,
-                },
+                    "sparsity_rates": [None],
+                }
+            )
+
+    # Magnitude pruning (sv_pruning_mag_struct also available).
+    if RUN_PRUNING_EXPS:
+        EXPERIMENTS.append(
+            {
+                "experiment": "sv_pruning_mag_unstruct",
+                "sv_models": default_sv_models,
+                "sparsity_rates": default_sparsity_rates,
+                "dataset_names": dataset_names,
             }
         )
 
     # Bregman: both models use RegL1 on conv (set in the experiment configs).
     if RUN_Bregman_EXPS:
         for _exp in ("sv_bregman_linbreg", "sv_bregman_adabreg"):
-            EXPERIMENTS[_exp] = {
-                "sv_models": [ecapa, resnet34],
-                "sparsity_rates": [0.95, 0.99],
-                "dataset_names": ["multi_sv"],
-                "suffix": "-regl1_conv",
-            }
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "sv_models": [ecapa, resnet34],
+                    "sparsity_rates": [0.95, 0.99],
+                    "dataset_names": ["multi_sv"],
+                    "suffix": "-regl1_conv",
+                }
+            )
 
-    # Auxiliary fixed-target Bregman (proxsgd kept for re-enabling).
+    # Auxiliary fixed-lambda Bregman (static lambda, no scheduler).
     if RUN_AUX_BREGMAN_EXPS:
-        EXPERIMENTS.update(
-            {
-                "sv_bregman_adabreg_fixed": {
+        for _exp in ("sv_bregman_adabreg_fixed", "sv_bregman_linbreg_fixed"):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
                     "sv_models": [ecapa, resnet34],
                     "sparsity_rates": [0.90],
                     "dataset_names": ["datasets/cnceleb"],
-                },
-                "sv_bregman_linbreg_fixed": {
-                    "sv_models": [ecapa, resnet34],
-                    "sparsity_rates": [0.90],
-                    "dataset_names": ["datasets/cnceleb"],
-                },
-            }
-        )
+                }
+            )
 
-    # Bernoulli w_p anneal (AdaBreg + LinBreg).
-    if RUN_WPANNEAL_Bregman_EXPS:
-        for _exp in (
-            "sv_bregman_adabreg_wpanneal",
-            "sv_bregman_linbreg_wpanneal",
-        ):
-            EXPERIMENTS[_exp] = {
-                "sv_models": [ecapa],
-                "sparsity_rates": [0.99],
-                "dataset_names": ["multi_sv"],
-            }
-
-    # Trainable per-layer lambda scales (AdaBreg + LinBreg).
-    if RUN_TRAINABLE_SCALES_Bregman_EXPS:
-        for _exp in (
-            "sv_bregman_adabreg_trainable_scales",
-            "sv_bregman_linbreg_trainable_scales",
-        ):
-            EXPERIMENTS[_exp] = {
-                "sv_models": [ecapa],
-                "sparsity_rates": [0.99],
-                "dataset_names": ["multi_sv"],
-            }
-
-    # Progressive ramp from initial_target_sparsity up to sparsity_rate over
-    # ramp_epochs epochs, at both epoch and step granularity (suffix records
-    # which).
-    if RUN_PROGRESSIVE_Bregman_EXPS:
+    # CASE 1 — progressive ramp, uniform allocation.
+    if RUN_PROGRESSIVE_ONLY_EXPS:
         for _exp in (
             "sv_bregman_adabreg_progressive",
             "sv_bregman_linbreg_progressive",
         ):
-            EXPERIMENTS[_exp] = {
-                "sv_models": [ecapa],
-                "sparsity_rates": [0.99],
-                "dataset_names": ["multi_sv"],
-                "initial_target_sparsity": 0.0,
-                "ramp_epochs": 10,
-                "ramp_granularities": ["epoch", "step"],
-            }
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "sv_models": [ecapa],
+                    "sparsity_rates": [0.95, 0.99],
+                    "dataset_names": ["multi_sv"],
+                    "initial_target_sparsity": 0.0,
+                    "ramp_epochs": 10,
+                    "ramp_granularities": ["epoch", "step"],
+                }
+            )
+
+    # CASE 2 — trainable scales at a fixed target.
+    if RUN_TRAINABLE_FIXED_EXPS:
+        for _exp in (
+            "sv_bregman_adabreg_trainable_scales",
+            "sv_bregman_linbreg_trainable_scales",
+        ):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "sv_models": [ecapa, resnet34],
+                    "sparsity_rates": [0.99],
+                    "dataset_names": ["multi_sv"],
+                    "suffix": "-fixed_target",
+                }
+            )
+
+    # CASE 3 — trainable scales WITH a progressive ramp.
+    if RUN_PROGRESSIVE_TRAINABLE_EXPS:
+        for _exp in (
+            "sv_bregman_adabreg_trainable_scales",
+            "sv_bregman_linbreg_trainable_scales",
+        ):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "sv_models": [ecapa, resnet34],
+                    "sparsity_rates": [0.99],
+                    "dataset_names": ["multi_sv"],
+                    "initial_target_sparsity": 0.0,
+                    "ramp_epochs": 10,
+                    "ramp_granularities": ["epoch", "step"],
+                }
+            )
+
+    # CASE 4 — vanilla Bregman at a fixed target, uniform allocation. Dense start
+    # to match the other cells (base defaults to 0.99 sparse).
+    if RUN_VANILLA_FIXED_EXPS:
+        for _exp in ("sv_bregman_adabreg", "sv_bregman_linbreg"):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "sv_models": [ecapa],
+                    "sparsity_rates": [0.99],
+                    "dataset_names": ["multi_sv"],
+                    "extra_overrides": {"_bregman_initial_sparsity": 0.0},
+                    "suffix": "-fixed_target",
+                }
+            )
 
     # --- Volume estimation across clusters ---
     job_counts = {
         "alex": {"a40": 0, "a100": 0},
         "tinygpu": {"v100": 0, "a100": 0},
     }
-    for experiment, cfg in EXPERIMENTS.items():
+    for cfg in EXPERIMENTS:
+        experiment = cfg["experiment"]
         n_variants = len(cfg.get("ramp_granularities", [None]))
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
@@ -1040,39 +1065,56 @@ def run_sv(transfer_data="false", force="false"):
     print(f"{'='*50}\n")
 
     # --- Submit all experiments (only for current cluster) ---
-    for experiment, cfg in EXPERIMENTS.items():
-        base_overrides = cfg.get("extra_overrides") or {}
+    for cfg in EXPERIMENTS:
+        experiment = cfg["experiment"]
+        base_overrides = dict(cfg.get("extra_overrides") or {})
         base_suffix = cfg.get("suffix", "")
         per_model_cfg = cfg.get("per_model", {})
-        granularities = cfg.get("ramp_granularities", [None])
+
+        # Pin the schedule explicitly: progressive entries ramp; other Bregman
+        # entries pin a fixed target (never relying on the config default).
         prog = {}
         if "ramp_epochs" in cfg:
+            variants = cfg.get("ramp_granularities", ["epoch"])
+            sched_overrides = {
+                "_bregman_target_initial": cfg["initial_target_sparsity"],
+                "_bregman_ramp_epochs": cfg["ramp_epochs"],
+            }
             prog = {
                 "progressive": True,
                 "initial_target_sparsity": cfg["initial_target_sparsity"],
                 "ramp_epochs": cfg["ramp_epochs"],
             }
+        elif "bregman" in experiment:
+            variants = [None]
+            sched_overrides = {
+                "_bregman_target_initial": "null",
+                "_bregman_ramp_epochs": "null",
+            }
+        else:
+            variants = [None]
+            sched_overrides = {}
 
         for sv_model in cfg["sv_models"]:
             pm = per_model_cfg.get(sv_model, {})
             model_overrides = {
                 **base_overrides,
+                **sched_overrides,
                 **(pm.get("extra_overrides") or {}),
             }
             model_suffix = pm.get("suffix", base_suffix)
 
-            for granularity in granularities:
-                # None => leave the experiment config's granularity untouched;
-                # otherwise override it and record the choice in the suffix.
-                if granularity is None:
+            for variant in variants:
+                if variant is None:
                     extra_overrides = model_overrides
                     suffix = model_suffix
                 else:
                     extra_overrides = {
                         **model_overrides,
-                        "_bregman_ramp_granularity": granularity,
+                        "_bregman_ramp_granularity": variant,
                     }
-                    suffix = f"{model_suffix}-{granularity}wise"
+                    suffix = f"{model_suffix}-{variant}wise"
+                variant_prog = prog
 
                 for dataset_name in cfg["dataset_names"]:
                     for sparsity in cfg["sparsity_rates"]:
@@ -1096,7 +1138,7 @@ def run_sv(transfer_data="false", force="false"):
                             force_retest=force_retest,
                             extra_overrides=extra_overrides or None,
                             job_name_suffix=suffix,
-                            **prog,
+                            **variant_prog,
                         )
 
 

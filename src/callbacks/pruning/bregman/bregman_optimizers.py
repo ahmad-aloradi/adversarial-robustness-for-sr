@@ -15,14 +15,6 @@ from src.callbacks.pruning.bregman.bregman_regularizers import (
 )
 
 
-def bernoulli_masked_readout(
-    standard: torch.Tensor, weight: torch.Tensor, w_p: float
-) -> torch.Tensor:
-    """Per-element Bernoulli gate between the standard prox step and a freeze."""
-    keep = torch.bernoulli(torch.full_like(weight, float(w_p)))
-    return torch.where(keep.bool(), standard, weight)
-
-
 class LinBreg(torch.optim.Optimizer):
     """Linearized Bregman optimizer.
 
@@ -90,12 +82,7 @@ class LinBreg(torch.optim.Optimizer):
                     sub_grad.add_(-step_size * grad)
 
                 # Primal update (prox): θ^(k+1) = prox(δ·v^(k+1))
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if reg.bernoulli_mask:
-                    prox_result = bernoulli_masked_readout(
-                        prox_result, p.data, reg.w_p
-                    )
-                p.copy_(prox_result)
+                p.copy_(reg.prox(delta * sub_grad, delta))
 
         return loss
 
@@ -198,12 +185,7 @@ class AdaBreg(torch.optim.Optimizer):
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
                 # Primal update (prox): θ^(k+1) = prox(δ·v^(k+1))
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if reg.bernoulli_mask:
-                    prox_result = bernoulli_masked_readout(
-                        prox_result, p.data, reg.w_p
-                    )
-                p.copy_(prox_result)
+                p.copy_(reg.prox(delta * sub_grad, delta))
 
         return loss
 
@@ -311,12 +293,7 @@ class AdaBregW(AdaBreg):
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
                 # Primal update (prox): θ^(k+1) = prox(δ·v^(k+1))
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if reg.bernoulli_mask:
-                    prox_result = bernoulli_masked_readout(
-                        prox_result, p.data, reg.w_p
-                    )
-                p.copy_(prox_result)
+                p.copy_(reg.prox(delta * sub_grad, delta))
 
                 # Decoupled weight decay: shrink surviving weights
                 assert wd > 0, "Weight decay must be positive for AdaBregW"
@@ -416,12 +393,7 @@ class AdaBregL2(AdaBreg):
                 sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
                 # Primal update (prox): θ^(k+1) = prox(δ·v^(k+1))
-                prox_result = reg.prox(delta * sub_grad, delta)
-                if reg.bernoulli_mask:
-                    prox_result = bernoulli_masked_readout(
-                        prox_result, p.data, reg.w_p
-                    )
-                p.copy_(prox_result)
+                p.copy_(reg.prox(delta * sub_grad, delta))
 
         return loss
 

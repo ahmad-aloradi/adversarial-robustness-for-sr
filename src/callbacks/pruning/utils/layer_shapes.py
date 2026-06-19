@@ -1,7 +1,7 @@
 """Shape records for prunable weights, read off a live torch module.
 
 The only place that reads weight shapes off a model; used to enumerate the
-prunable layers when registering one trainable per-layer log-scale each.
+prunable layers when registering one trainable per-layer scale factor each.
 """
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
