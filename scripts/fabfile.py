@@ -12,7 +12,7 @@ import datetime
 import os
 import time
 
-from fabric.api import cd, env, local, run, task
+from fabric.api import cd, env, run, task
 from fabric.contrib.project import rsync_project
 
 # Cluster configuration
@@ -354,55 +354,33 @@ def lsa():
 
 
 def check_running_pending(job_name):
-    """Check if a job is pending or running on any cluster.
+    """Return True if ``job_name`` is already PENDING or RUNNING.
 
-    Runs from the local machine, which has SSH access to both
-    cluster login nodes.  Each cluster is queried separately to test if the job is running.
-    on either cluster.
+    Probe the queue through the same ``run`` + SLURM-on-PATH path that
+    ``run_bash_script`` uses to submit, so the check and the submission share
+    one working, authenticated environment. The old ``ssh ... 'squeue'`` probe
+    ran a non-login shell (no ``squeue`` on PATH) under BatchMode auth, came
+    back empty, and let pending jobs get submitted a second time.
 
-    Raises RuntimeError if no login node answers, so a transient SSH failure
-    can't masquerade as 'not running' and cause duplicate submissions.
+    Submissions only land on the active cluster, and a job name always routes
+    to the same cluster, so its queue is the only place a duplicate of this
+    submission could sit — one ``run`` on the connected login node covers it.
 
-    Args:
-        job_name (str): Name of the job to check
-
-    Returns:
-        bool: True if the job is pending or running, False otherwise
+    Raises RuntimeError if squeue errors instead of failing open: a broken
+    probe must not masquerade as "no such job" and resubmit.
     """
-    hosts = ["alex.nhr.fau.de", "tinyx.nhr.fau.de"]
-    sq = 'squeue -t PENDING,RUNNING --format "%200j" -h'
-    ssh_opts = "-o ConnectTimeout=5 -o BatchMode=yes"
-
-    answered = False
-    for host in hosts:
-        result = local(
-            f"ssh {ssh_opts} {env.user}@{host} '{sq}'; echo __SQ_EXIT__$?",
-            capture=True,
-        )
-        text = str(result) if result else ""
-        marker_idx = text.rfind("__SQ_EXIT__")
-        if marker_idx < 0:
-            print(
-                f"[warn] squeue probe on {host} produced no marker; skipping"
-            )
-            continue
-        exit_code = text[marker_idx + len("__SQ_EXIT__") :].strip()
-        if exit_code != "0":
-            print(
-                f"[warn] squeue probe on {host} exited {exit_code}; skipping"
-            )
-            continue
-        answered = True
-        body = text[:marker_idx]
-        jobs = [line.strip() for line in body.splitlines() if line.strip()]
-        if job_name in jobs:
-            return True
-
-    if not answered:
+    probe = (
+        "PATH=$PATH:/apps/slurm/current/bin && "
+        f'squeue -u {env.user} -t PENDING,RUNNING -h --format "%200j"'
+    )
+    result = run(probe, quiet=True, warn_only=True)
+    if result.failed:
         raise RuntimeError(
-            f"Could not query squeue on any login node ({hosts}); aborting to avoid duplicate submission of {job_name}"
+            f"squeue probe failed while checking {job_name!r}: "
+            f"{str(result)!r}. Refusing to submit and risk a duplicate."
         )
-    return False
+    jobs = {line.strip() for line in str(result).splitlines() if line.strip()}
+    return job_name in jobs
 
 
 def check_dir_exists(dir_path):
@@ -585,30 +563,40 @@ _GPU_MAP = {
 }
 
 
-def _get_job_routing(experiment, dataset_name, sparsity=None):
+def _get_job_routing(dataset_name, sparsity=None):
     """Return (cluster_name, gpu_type) for a job.
 
-    Targeting ~80% alex / ~20% tinygpu when all experiment types are active:
-    - ProxSGD -> tinygpu (baseline comparison, ~1/5 of experiment types)
-    - Rescale Prox v2 (lambda/prev_lambda) -> tinygpu
-    - All other Bregman/pruning -> alex
-    - Baselines (sparsity=None) -> current cluster (run on whichever is active)
+    Routing keys on sparsity so a single active experiment group still spans
+    both clusters (the old experiment-type keys are gone with their methods):
+    - Baselines (sparsity=None) -> current cluster (whichever is active)
+    - sr99 (>= 0.99)            -> tinygpu
+    - everything else           -> alex
     """
     if sparsity is None:
         cluster = CLUSTER_NAME
-    elif "proxsgd" in experiment:
-        cluster = "tinygpu"
-    elif "rescale_prox_v2" in experiment:
-        cluster = "tinygpu"
-    elif "subgrad_corr_v3" in experiment:
-        cluster = "tinygpu"
-    elif "fixed" in experiment:
+    elif sparsity >= 0.99:
         cluster = "tinygpu"
     else:
         cluster = "alex"
 
     gpu = _GPU_MAP[dataset_name][cluster]
     return cluster, gpu
+
+
+# ResNet overshoots with the ECAPA-TDNN default of 1.0; gentler value here.
+RESNET_ACCELERATION_FACTOR = 0.15
+
+
+def _bregman_has_lambda_scheduler(experiment):
+    # Fixed-lambda variants (sv_bregman_*_fixed) set lambda_scheduler=null.
+    return "bregman" in experiment and not experiment.endswith("_fixed")
+
+
+def _acceleration_factor_for(experiment, sv_model):
+    """ResNet override for the Bregman lambda acceleration_factor, else None."""
+    if "resnet" in sv_model and _bregman_has_lambda_scheduler(experiment):
+        return RESNET_ACCELERATION_FACTOR
+    return None
 
 
 def _submit_sv_job(
@@ -807,6 +795,13 @@ def _submit_sv_job(
     if extra_overrides:
         script_arguments.update(extra_overrides)
 
+    # ResNet always wins on acceleration_factor; applied after extra_overrides.
+    accel = _acceleration_factor_for(experiment, sv_model)
+    if accel is not None:
+        script_arguments[
+            "callbacks.model_pruning.lambda_scheduler.acceleration_factor"
+        ] = accel
+
     # Jobs submission logic
     if check_running_pending(job_name):
         print(f"Skipping {job_name} - already running or pending")
@@ -900,13 +895,12 @@ def run_sv(transfer_data="false", force="false"):
     ########################
     RUN_BASELINE_EXPS = False
     RUN_PRUNING_EXPS = False
-    RUN_Bregman_EXPS = False
-    RUN_AUX_BREGMAN_EXPS = False
-    # Bregman cells: {ramp, fixed} x {trainable scales, uniform}.
+    RUN_FIXED_BREGMAN_EXPS = False
+    # Adaptive Bregman options: {ramp, fixed} x {trainable scales, uniform}.
     RUN_PROGRESSIVE_ONLY_EXPS = True  # ramp,  uniform
-    RUN_TRAINABLE_FIXED_EXPS = True  # fixed, trainable
+    RUN_TRAINABLE_FIXED_EXPS = False  # fixed, trainable
     RUN_PROGRESSIVE_TRAINABLE_EXPS = False  # ramp,  trainable
-    RUN_VANILLA_FIXED_EXPS = False  # fixed, uniform
+    RUN_VANILLA_FIXED_EXPS = True  # fixed, uniform
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
@@ -940,21 +934,8 @@ def run_sv(transfer_data="false", force="false"):
             }
         )
 
-    # Bregman: both models use RegL1 on conv (set in the experiment configs).
-    if RUN_Bregman_EXPS:
-        for _exp in ("sv_bregman_linbreg", "sv_bregman_adabreg"):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "sv_models": [ecapa, resnet34],
-                    "sparsity_rates": [0.95, 0.99],
-                    "dataset_names": ["multi_sv"],
-                    "suffix": "-regl1_conv",
-                }
-            )
-
     # Auxiliary fixed-lambda Bregman (static lambda, no scheduler).
-    if RUN_AUX_BREGMAN_EXPS:
+    if RUN_FIXED_BREGMAN_EXPS:
         for _exp in ("sv_bregman_adabreg_fixed", "sv_bregman_linbreg_fixed"):
             EXPERIMENTS.append(
                 {
@@ -974,12 +955,12 @@ def run_sv(transfer_data="false", force="false"):
             EXPERIMENTS.append(
                 {
                     "experiment": _exp,
-                    "sv_models": [ecapa],
-                    "sparsity_rates": [0.95, 0.99],
+                    "sv_models": [ecapa, resnet34],
+                    "sparsity_rates": [0.90, 0.99],
                     "dataset_names": ["multi_sv"],
                     "initial_target_sparsity": 0.0,
                     "ramp_epochs": 10,
-                    "ramp_granularities": ["epoch", "step"],
+                    "ramp_granularities": ["epoch"], #["epoch", "step"],
                 }
             )
 
@@ -993,7 +974,7 @@ def run_sv(transfer_data="false", force="false"):
                 {
                     "experiment": _exp,
                     "sv_models": [ecapa, resnet34],
-                    "sparsity_rates": [0.99],
+                    "sparsity_rates": [0.90, 0.99],
                     "dataset_names": ["multi_sv"],
                     "suffix": "-fixed_target",
                 }
@@ -1013,7 +994,7 @@ def run_sv(transfer_data="false", force="false"):
                     "dataset_names": ["multi_sv"],
                     "initial_target_sparsity": 0.0,
                     "ramp_epochs": 10,
-                    "ramp_granularities": ["epoch", "step"],
+                    "ramp_granularities": ["epoch"], #["epoch", "step"],
                 }
             )
 
@@ -1027,7 +1008,6 @@ def run_sv(transfer_data="false", force="false"):
                     "sv_models": [ecapa],
                     "sparsity_rates": [0.99],
                     "dataset_names": ["multi_sv"],
-                    "extra_overrides": {"_bregman_initial_sparsity": 0.0},
                     "suffix": "-fixed_target",
                 }
             )
@@ -1038,13 +1018,10 @@ def run_sv(transfer_data="false", force="false"):
         "tinygpu": {"v100": 0, "a100": 0},
     }
     for cfg in EXPERIMENTS:
-        experiment = cfg["experiment"]
         n_variants = len(cfg.get("ramp_granularities", [None]))
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
-                cluster, gpu = _get_job_routing(
-                    experiment, dataset_name, sparsity
-                )
+                cluster, gpu = _get_job_routing(dataset_name, sparsity)
                 job_counts[cluster][gpu] += len(cfg["sv_models"]) * n_variants
 
     total_jobs = sum(sum(gpus.values()) for gpus in job_counts.values())
@@ -1063,6 +1040,25 @@ def run_sv(transfer_data="false", force="false"):
             f"  {cname}: {total} jobs ({pct:.0f}%) [{gpu_breakdown}]{marker}"
         )
     print(f"{'='*50}\n")
+
+    # --- Bregman acceleration_factor per encoder ---
+    accel_rows = {}
+    for cfg in EXPERIMENTS:
+        if not _bregman_has_lambda_scheduler(cfg["experiment"]):
+            continue
+        for sv_model in cfg["sv_models"]:
+            override = _acceleration_factor_for(cfg["experiment"], sv_model)
+            accel_rows[sv_model] = (
+                f"{override} (override)"
+                if override is not None
+                else "1.0 (YAML default)"
+            )
+    if accel_rows:
+        print(f"{'='*50}")
+        print("Bregman lambda acceleration_factor:")
+        for sv_model, shown in sorted(accel_rows.items()):
+            print(f"  {sv_model:<26} -> {shown}")
+        print(f"{'='*50}\n")
 
     # --- Submit all experiments (only for current cluster) ---
     for cfg in EXPERIMENTS:
@@ -1119,7 +1115,7 @@ def run_sv(transfer_data="false", force="false"):
                 for dataset_name in cfg["dataset_names"]:
                     for sparsity in cfg["sparsity_rates"]:
                         cluster, gpu = _get_job_routing(
-                            experiment, dataset_name, sparsity
+                            dataset_name, sparsity
                         )
                         if cluster != CLUSTER_NAME:
                             print(
