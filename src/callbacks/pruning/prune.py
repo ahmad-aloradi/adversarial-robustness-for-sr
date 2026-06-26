@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple
 
+import torch
 import torch.nn as nn
 import torch.nn.utils.prune as pytorch_prune
 from pytorch_lightning import Callback, LightningModule, Trainer
@@ -7,10 +8,7 @@ from pytorch_lightning import Callback, LightningModule, Trainer
 from src.callbacks.pruning.checkpoint_handler import PrunedCheckpointHandler
 from src.callbacks.pruning.parameter_manager import ParameterManager
 from src.callbacks.pruning.scheduler import PruningScheduler
-from src.callbacks.pruning.shared_prune_utils import (
-    ValidationSuppressor,
-    compute_sparsity,
-)
+from src.callbacks.pruning.shared_prune_utils import compute_sparsity
 from src.utils import get_pylogger
 
 logger = get_pylogger(__name__)
@@ -87,7 +85,6 @@ class MagnitudePruner(Callback):
         # State
         self._target_params = []
         self._logged_overview = False
-        self._suppressor = ValidationSuppressor()
 
         # Temp state for logging
         self._current_epoch_target = 0.0
@@ -102,14 +99,6 @@ class MagnitudePruner(Callback):
         if self.verbose and not self._logged_overview:
             self.manager.log_overview()
             self._logged_overview = True
-
-    def on_fit_start(
-        self, trainer: Trainer, pl_module: LightningModule
-    ) -> None:
-        """One-time setup: skip sanity check and start suppressed."""
-        if self.scheduled:
-            ValidationSuppressor.prepare(trainer)
-            trainer.limit_val_batches = 0
 
     def on_train_start(
         self, trainer: Trainer, pl_module: LightningModule
@@ -230,18 +219,17 @@ class MagnitudePruner(Callback):
         else:
             self._last_status = "Maintained"
 
-        # 4. Gate validation based on current sparsity vs final target.
         if self.scheduled:
-            self._suppressor.gate(trainer, new_sparsity, self.final_amount)
+            trainer.callback_metrics["pruning/sparsity"] = torch.tensor(
+                new_sparsity
+            )
 
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         """Logs metrics and manages trackers AFTER training step."""
         pruned_sparsity = compute_sparsity(self._target_params)
-        overall_sparsity = compute_sparsity(
-            list(pl_module.parameters()), threshold=1e-12
-        )
+        overall_sparsity = compute_sparsity(pl_module, threshold=1e-12)
 
         # 1. Log Metrics (Recorder)
         if hasattr(pl_module, "log"):
@@ -266,8 +254,8 @@ class MagnitudePruner(Callback):
             logger.info(
                 f"[Pruning Monitor] Epoch {trainer.current_epoch}: "
                 f"Target={self._current_epoch_target:.2%} | "
-                f"Result={pruned_sparsity:.2%} | "
-                f"Overall={overall_sparsity:.2%} | Status: {self._last_status}"
+                f"PrunedParams Sparsity={pruned_sparsity:.2%} | "
+                f"Total sparsity={overall_sparsity:.2%} | Status: {self._last_status}"
             )
 
     def on_train_end(

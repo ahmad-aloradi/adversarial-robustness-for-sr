@@ -30,6 +30,7 @@ seed: 42
 # setting _bregman_target_initial / _bregman_ramp_epochs and pointing
 # _bregman_initial_sparsity at _bregman_target_initial.
 _bregman_target_sparsity: 0.9 # final / steady target sparsity
+_bregman_tolerance: 0.01 # convergence band shared by the gates + scheduler: in-band iff |sparsity - target| <= this
 _bregman_target_initial: null # ramp start; null => fixed-target mode (no ramp)
 _bregman_ramp_epochs: null # ramp length in epochs (ramp mode only)
 _bregman_schedule_type: constant # linear | constant (log-space ramp)
@@ -45,6 +46,10 @@ trainer:
 
 callbacks:
   model_checkpoint:
+    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
+    target_sparsity: ${_bregman_target_sparsity} # band centre; top-k saved only within tolerance of this
+    tolerance: ${_bregman_tolerance} # in-band half-width: |sparsity - target| <= tolerance
+    sparsity_metric: sparsity # gate signal: `sparsity` = overall whole-model (Bregman); `pruning/sparsity` = pruned groups only (magnitude)
     mode: max
     monitor: ${replace:"valid/__metric__"}
     save_top_k: 5
@@ -53,37 +58,37 @@ callbacks:
     _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
     num_checkpoints: ${callbacks.model_checkpoint.save_top_k}
     output_filename: averaged_top{num}.ckpt
-  early_stopping:
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
-
-
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-12
     verbose: 2
     target_sparsity: ${_bregman_target_sparsity}
-    tolerance: 0.01 # Tolerance of 1% means accept 89% if target is 90%
-    # Global lambda scheduler configuration.
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
-      target_sparsity: ${_bregman_target_sparsity} # final / steady target
-      target_initial_sparsity: ${_bregman_target_initial} # null => fixed mode
-      schedule_type: ${_bregman_schedule_type}
-      epochs_to_ramp: ${_bregman_ramp_epochs}
-      ramp_granularity: ${_bregman_ramp_granularity}
+      target_sparsity: ${_bregman_target_sparsity}
       initial_lambda: ${_bregman_lambda}
       acceleration_factor: 1.0
-      warmup_epochs: 0 #${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
+      warmup_epochs: 0
       update_frequency: 50
       max_relative_change: null
-      # Near-target band: gentler/less-frequent updates AND the convergence
-      # gate (1%, matching the validation `tolerance` above).
-      damping_zone: 0.01
-      damping_acceleration_divisor: 2 # This means the acceleration will be 10x slower in the damping zone
-      damping_frequency_multiplier: 4 # This means updates will be 10x less frequent in the damping zone
+      damping_zone: ${_bregman_tolerance}
+      damping_acceleration_divisor: 2
+      damping_frequency_multiplier: 4
+  early_stopping:
+    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
+    target_sparsity: ${_bregman_target_sparsity} # patience advances only while in-band around this
+    tolerance: ${_bregman_tolerance} # shared in-band half-width
+    sparsity_metric: sparsity # gate signal (see model_checkpoint)
+    check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
+  ramp_validation_gate:
+    _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
+    target_sparsity: ${_bregman_target_sparsity} # validation runs only within tolerance of this
+    tolerance: ${_bregman_tolerance} # shared in-band half-width
+    sparsity_metric: sparsity # gate signal (see model_checkpoint)
 
 datamodule:
   dataset:

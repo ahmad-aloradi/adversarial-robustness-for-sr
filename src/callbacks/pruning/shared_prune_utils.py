@@ -1,156 +1,59 @@
-"""Shared validation-gating and sparsity utilities for pruners.
+"""Shared sparsity computation for pruners."""
 
-ValidationSuppressor: gate that toggles `trainer.limit_val_batches` based on
-whether current sparsity matches the target.
+from typing import Iterator, List, Tuple, Union
 
-compute_sparsity: Unified sparsity computation for both magnitude and Bregman
-pruning (handles raw Parameter lists and (Module, name) pairs).
-"""
-
-from typing import List, Tuple, Union
-
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+import torch
 import torch.nn as nn
-
-from src.utils import get_pylogger
-
-logger = get_pylogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Shared sparsity computation
-# ---------------------------------------------------------------------------
 
 
 def compute_sparsity(
-    params: Union[
+    target: Union[
+        nn.Module,
         List[nn.Parameter],
         List[Tuple[nn.Module, str]],
     ],
     threshold: float = 1e-12,
 ) -> float:
-    """Compute fraction of near-zero elements across parameters.
+    """Fraction of near-zero elements (|w| <= threshold) over ``target``.
 
-    Handles two calling conventions:
-    - List[Parameter]: raw parameter tensors (Bregman style)
-    - List[Tuple[Module, str]]: (module, param_name) pairs (magnitude style)
+    ``target`` is one of:
+    - nn.Module: every parameter as the module currently exposes it — a pruned
+      ``weight_orig`` is measured as its masked ``weight`` (whole-model sparsity).
+    - List[Parameter]: trainable parameter tensors (Bregman style).
+    - List[(Module, name)]: ``getattr(module, name)`` per pair, so a pruned
+      ``weight`` is already its masked value (magnitude style).
     """
-    if not params:
-        return 0.0
-
-    total = 0
-    zeros = 0
-
-    first = params[0]
-    is_tuple = isinstance(first, (tuple, list))
-
-    if is_tuple:
-        for module, name in params:
-            param = getattr(module, name, None)
-            if param is not None:
-                total += param.numel()
-                zeros += (param.abs() <= threshold).sum().item()
-    else:
-        for p in params:
-            if not p.requires_grad:
-                continue
-            total += p.numel()
-            zeros += (p.abs() <= threshold).sum().item()
-
+    total = zeros = 0
+    for tensor in _iter_tensors(target):
+        total += tensor.numel()
+        zeros += int((tensor.abs() <= threshold).sum())
     return zeros / max(1, total)
 
 
-# ---------------------------------------------------------------------------
-# Validation suppression
-# ---------------------------------------------------------------------------
+def _iter_tensors(target) -> Iterator[torch.Tensor]:
+    """Yield the tensor each entry contributes; for an nn.Module de-duplicated
+    by identity so weight-tied layers count once."""
+    if isinstance(target, nn.Module):
+        seen = set()
+        for module in target.modules():
+            for name, param in module.named_parameters(recurse=False):
+                if id(param) in seen:
+                    continue
+                seen.add(id(param))
+                # weight_orig exposes its masked weight after pruning.
+                name = name[:-5] if name.endswith("_orig") else name
+                yield getattr(module, name)
+    elif target and isinstance(target[0], (tuple, list)):
+        for module, name in target:
+            yield getattr(module, name)  # missing attr is a wiring bug
+    else:
+        yield from (p for p in target if p.requires_grad)
 
 
-class ValidationSuppressor:
-    """Validation gate driven by sparsity.
-
-    Usage (from a pruner callback):
-
-      # Once, in on_fit_start — prevents sanity check and makes the
-      # val-monitoring callbacks tolerant of skipped validations:
-      ValidationSuppressor.prepare(trainer)
-
-      # When you want to gate the upcoming validation epoch:
-      suppressor.gate(trainer, current_sparsity, target_sparsity)
-
-    Lightning decides whether to run the end-of-epoch validation loop in
-    ``on_advance_end`` (after the last training batch), reading
-    ``trainer.limit_val_batches`` via ``Trainer.enable_validation``. So
-    ``gate`` must run from a TRAINING hook before that point:
-      - sparsity fixed for the whole epoch (magnitude pruning): gate in
-        ``on_train_epoch_start``.
-      - sparsity drifts during the epoch (Bregman): gate in
-        ``on_train_batch_end`` on the last batch (``trainer.is_last_batch``),
-        so the decision uses the value Lightning is about to validate.
-    Validation hooks (``on_validation_start``/``on_validation_epoch_start``)
-    are too late: they fire only when validation already runs, after the skip
-    decision.
-
-    ``gate`` sets ``trainer.limit_val_batches`` to 0 when sparsity is outside
-    tolerance of target, else to ``restore_limit``; the only retained state is
-    a flag that throttles logging to transitions. Re-suppression works every
-    epoch — ``limit_val_batches`` is honored at the training-loop level, not
-    frozen by the eval loop's dataloader cache.
-    """
-
-    def __init__(self, tolerance: float = 1e-2, restore_limit: float = 1.0):
-        self.tolerance = tolerance
-        self.restore_limit = restore_limit
-        self._was_suppressed = True  # only used for log throttling
-
-    def gate(
-        self,
-        trainer: Trainer,
-        current_sparsity: float,
-        target_sparsity: float,
-    ) -> None:
-        # +1e-9 absorbs IEEE-754 rounding at the exact boundary, e.g.
-        # abs(0.91 - 0.90) == 0.010000000000000009 > 0.01 without the slack.
-        suppress = (
-            abs(current_sparsity - target_sparsity) > self.tolerance + 1e-9
-        )
-        trainer.limit_val_batches = (
-            0 if suppress else self.restore_limit
-        )
-        if suppress != self._was_suppressed:
-            self._was_suppressed = suppress
-            if suppress:
-                logger.info(
-                    f"Validation suppressed (sparsity {current_sparsity:.2%}"
-                    f" outside target {target_sparsity:.2%}"
-                    f" ± {self.tolerance:.1%})"
-                )
-            else:
-                logger.info(
-                    f"Validation restored (sparsity {current_sparsity:.2%}"
-                    f" reached target {target_sparsity:.2%})"
-                )
-
-    @staticmethod
-    def prepare(trainer: Trainer) -> None:
-        """One-time setup in ``on_fit_start``.
-
-        Configures sibling callbacks to tolerate skipped validations:
-        - ``num_sanity_val_steps = 0``: skip the pre-training sanity check.
-        - ``EarlyStopping._check_on_train_epoch_end = False``: prevent ES
-          from firing on training metrics while val is suppressed.
-        - ``ModelCheckpoint.save_on_train_epoch_end = False``: force saves to
-          occur at end of validation, so suppressed epochs simply skip saving
-          rather than checkpointing on a missing monitor.
-        - ``ReduceLROnPlateau.strict = False``: tolerate the missing val
-          monitor metric during suppressed epochs.
-        """
-        trainer.num_sanity_val_steps = 0
-        for cb in trainer.callbacks:
-            if isinstance(cb, EarlyStopping):
-                cb._check_on_train_epoch_end = False
-            elif isinstance(cb, ModelCheckpoint):
-                cb.save_on_train_epoch_end = False
-        for c in trainer.lr_scheduler_configs:
-            if c.reduce_on_plateau:
-                c.strict = False
+if __name__ == "__main__":
+    half_zero = nn.Parameter(torch.tensor([0.0, 0.0, 1.0, 2.0]))
+    print("raw list:", compute_sparsity([half_zero]))  # 0.5
+    linear = nn.Linear(4, 4)
+    linear.weight.data.zero_()
+    print("(module, name):", compute_sparsity([(linear, "weight")]))  # 1.0
+    print("whole module:", compute_sparsity(linear))  # 0.8

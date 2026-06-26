@@ -231,6 +231,7 @@ def test_bregman_pruner_updates_lambda_per_batch():
     mock_trainer = Mock()
     mock_trainer.optimizers = [mock_optimizer]
     mock_trainer.global_step = 0
+    mock_trainer.callback_metrics = {}  # real dict for the gate-metric publish
     pruner._optimizer = mock_optimizer  # on_fit_start normally stores this
 
     # Create mock pl_module with log method
@@ -292,6 +293,7 @@ def test_bregman_pruner_propagates_lambda_to_optimizer():
     mock_trainer = Mock()
     mock_trainer.optimizers = [mock_optimizer]
     mock_trainer.global_step = 0
+    mock_trainer.callback_metrics = {}  # real dict for the gate-metric publish
     pruner._optimizer = mock_optimizer  # on_fit_start normally stores this
 
     mock_pl_module = Mock()
@@ -343,6 +345,7 @@ def test_bregman_pruner_respects_lambda_scale():
     mock_trainer = Mock()
     mock_trainer.optimizers = [mock_optimizer]
     mock_trainer.global_step = 0
+    mock_trainer.callback_metrics = {}  # real dict for the gate-metric publish
     pruner._optimizer = mock_optimizer  # on_fit_start normally stores this
 
     mock_pl_module = Mock()

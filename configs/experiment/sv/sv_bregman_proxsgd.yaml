@@ -21,6 +21,7 @@ seed: 42
 
 # Single source of truth for Bregman lambda values
 _bregman_target_sparsity: 0.9
+_bregman_tolerance: 0.01 # convergence band shared by the gates + scheduler: in-band iff |sparsity - target| <= this
 _bregman_lambda: ${bregman_lambda:ProxSGD,${_bregman_target_sparsity},initial_lambda}
 
 trainer:
@@ -31,6 +32,10 @@ trainer:
 
 callbacks:
   model_checkpoint:
+    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
+    target_sparsity: ${_bregman_target_sparsity} # band centre; top-k saved only within tolerance of this
+    tolerance: ${_bregman_tolerance} # in-band half-width: |sparsity - target| <= tolerance
+    sparsity_metric: sparsity # gate signal: `sparsity` = overall whole-model (Bregman); `pruning/sparsity` = pruned groups only (magnitude)
     mode: max
     monitor: ${replace:"valid/__metric__"}
     save_top_k: 5
@@ -39,17 +44,13 @@ callbacks:
     _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
     num_checkpoints: ${callbacks.model_checkpoint.save_top_k}
     output_filename: averaged_top{num}.ckpt
-  early_stopping:
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
-
+  # model_pruning publishes the gate metric at the last batch, so it must come
+  # before the gates that read it (RampValidationGate reads it in the same hook).
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-12
     verbose: 2
     target_sparsity: ${_bregman_target_sparsity}
-    tolerance: 0.01
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
@@ -60,10 +61,24 @@ callbacks:
       update_frequency: 50
       max_relative_change: null
       # Near-target band: gentler/less-frequent updates AND the convergence
-      # gate (1%, matching the validation `tolerance` above).
-      damping_zone: 0.01
+      # gate; shares the gates' tolerance so they stay in lock-step.
+      damping_zone: ${_bregman_tolerance}
       damping_acceleration_divisor: 2
       damping_frequency_multiplier: 4
+  early_stopping:
+    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
+    target_sparsity: ${_bregman_target_sparsity} # patience advances only while in-band around this
+    tolerance: ${_bregman_tolerance} # shared in-band half-width
+    sparsity_metric: sparsity # gate signal (see model_checkpoint)
+    check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
+  ramp_validation_gate:
+    _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
+    target_sparsity: ${_bregman_target_sparsity} # validation runs only within tolerance of this
+    tolerance: ${_bregman_tolerance} # shared in-band half-width
+    sparsity_metric: sparsity # gate signal (see model_checkpoint)
 
 datamodule:
   dataset:

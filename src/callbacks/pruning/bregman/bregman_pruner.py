@@ -15,10 +15,7 @@ from pytorch_lightning import Callback, LightningModule, Trainer
 from pytorch_lightning.utilities import rank_zero_only
 
 from src import utils
-from src.callbacks.pruning.shared_prune_utils import (
-    ValidationSuppressor,
-    compute_sparsity,
-)
+from src.callbacks.pruning.shared_prune_utils import compute_sparsity
 from src.callbacks.pruning.utils.pruning_manager import (
     SCALES_ATTR,
     PruningManager,
@@ -56,17 +53,16 @@ class BregmanPruner(Callback):
         verbose: int = 1,
         lambda_scheduler: Optional[LambdaScheduler] = None,
         target_sparsity: Optional[Union[float, List[float]]] = None,
-        tolerance: float = 0.01,
     ):
         """
         Args:
             sparsity_threshold: Threshold below which a weight is considered zero.
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
             lambda_scheduler: Optional scheduler for dynamic lambda updates.
-            target_sparsity: Final target sparsity for validation suppression.
-                Validation stays suppressed until the model reaches it. A list
-                collapses to its last entry.
-            tolerance: Convergence band for validation suppression.
+            target_sparsity: Gate target published for the sparsity-gated
+                callbacks; the model's overall sparsity gates validation and
+                checkpointing until it reaches this. A list collapses to its
+                last entry.
         """
         super().__init__()
         self.sparsity_threshold = sparsity_threshold
@@ -88,7 +84,6 @@ class BregmanPruner(Callback):
         self._initialized = False
         self._warmup_resolved = False
         self._ckpt_scheduler_state: Optional[dict] = None
-        self._suppressor = ValidationSuppressor(tolerance=tolerance)
 
         # Trainable per-layer allocation: one scalar scale factor c_g
         # nn.Parameter per prunable weight, trained by the same optimizer in a
@@ -146,20 +141,6 @@ class BregmanPruner(Callback):
         self._initialized = True
         self._log_configuration(optimizer)
         self._log_group_assignments(pl_module)
-
-        # Fixed-lambda experiments run validation unconditionally.
-        if (
-            self.lambda_scheduler is not None
-            and self._target_final is not None
-        ):
-            ValidationSuppressor.prepare(trainer)
-            # Start suppressed; _gate_validation reopens it at each epoch end.
-            trainer.limit_val_batches = 0
-            log.info(
-                "Validation suppression ENABLED for adaptive lambda scheduling."
-            )
-        else:
-            log.info("Validation suppression DISABLED (no target provided).")
 
     def on_train_start(
         self, trainer: Trainer, pl_module: LightningModule
@@ -290,7 +271,7 @@ class BregmanPruner(Callback):
         # Lightning is about to validate; this is the latest hook before it
         # reads limit_val_batches (via Trainer.enable_validation).
         if trainer.is_last_batch:
-            self._gate_validation(trainer)
+            self._publish_gate_metric(trainer)
 
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule
@@ -334,22 +315,16 @@ class BregmanPruner(Callback):
             self._log_scale_table()
             self._record_scale_history(trainer, pl_module)
 
-    def _gate_validation(self, trainer: Trainer) -> None:
-        """Open or suppress the upcoming validation epoch.
+    def _publish_gate_metric(self, trainer: Trainer) -> None:
+        """Publish fresh overall sparsity for the sparsity-gated callbacks.
 
-        Gates on the FINAL target with the current (end-of-epoch) sparsity, so
-        validation stays suppressed across the whole ramp and only opens once
-        the model sits within tolerance of the final target — matching the
-        gradual magnitude pruner's contract.
+        Injected at the last batch so RampValidationGate reads the end-of-epoch
+        value before Lightning decides whether to validate; it persists to
+        on_validation_end for the gated checkpoint/early-stopping callbacks.
         """
-        if self.lambda_scheduler is None or self._target_final is None:
-            return
-        current_sparsity = (
+        trainer.callback_metrics["sparsity"] = torch.tensor(
             self._overall_sparsity()
-            if WHICH_SPARSITY_PERCENTAGE == "overall"
-            else self._pruned_sparsity()
         )
-        self._suppressor.gate(trainer, current_sparsity, self._target_final)
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict

@@ -13,3 +13,11 @@ _bregman_lambda: ${_bregman_fixed_lambda}
 callbacks:
   model_pruning:
     lambda_scheduler: null
+  # Fixed lambda has no ramp, so don't gate validation on sparsity: tolerance
+  # 1.0 spans all sparsities -> gates never suppress (ramp variants keep 0.01).
+  model_checkpoint:
+    tolerance: 1.0
+  early_stopping:
+    tolerance: 1.0
+  ramp_validation_gate:
+    tolerance: 1.0

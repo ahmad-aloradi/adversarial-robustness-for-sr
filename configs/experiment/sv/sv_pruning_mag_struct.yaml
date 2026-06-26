@@ -28,6 +28,8 @@ tags:
   ]
 seed: 42
 
+_pruning_tolerance: 0.01 # convergence band shared by the gates: in-band iff |sparsity - target| <= this
+
 trainer:
   max_epochs: 50
   min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
@@ -36,6 +38,10 @@ trainer:
 
 callbacks:
   model_checkpoint:
+    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
+    target_sparsity: ${callbacks.model_pruning.final_amount} # band centre = pruning rate; top-k saved only within tolerance of this
+    tolerance: ${_pruning_tolerance} # in-band half-width: |sparsity - target| <= tolerance
+    sparsity_metric: "pruning/sparsity" # gate signal: pruned groups only (the pruning rate); `sparsity` would be overall whole-model
     mode: max
     monitor: ${replace:"valid/__metric__"}
     save_top_k: 5
@@ -44,11 +50,6 @@ callbacks:
     _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
     num_checkpoints: ${callbacks.model_checkpoint.save_top_k}
     output_filename: averaged_top{num}.ckpt
-  early_stopping:
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
-
   model_pruning:
     _target_: src.callbacks.pruning.prune.MagnitudePruner
     pruning_fn: ln_structured # Pruning from torch.nn.utils.prunefunctions: ['ln_structured', 'l1_unstructured', 'random_structured', 'random_unstructured'] or a custom callable
@@ -67,8 +68,21 @@ callbacks:
     final_amount: 0.9 # Final pruning amount when using scheduled_pruning (must be between 0 and 1)
     # epochs_to_ramp: ${oc.eval:${trainer.max_epochs} // 1.5} # Number of epochs over which to linearly increase pruning  to final_amount
     epochs_to_ramp: 10 # Number of epochs over which to linearly increase pruning to final_amount
-    save_when_sparser_than: 0.9 # Disable checkpointing until model sparsity is >= final_amount
     schedule_type: constant
+  early_stopping:
+    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
+    target_sparsity: ${callbacks.model_pruning.final_amount} # patience advances only while in-band around this
+    tolerance: ${_pruning_tolerance} # shared in-band half-width
+    sparsity_metric: "pruning/sparsity" # gate signal (see model_checkpoint)
+    check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
+  ramp_validation_gate:
+    _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
+    target_sparsity: ${callbacks.model_pruning.final_amount} # validation runs only within tolerance of this
+    tolerance: ${_pruning_tolerance} # shared in-band half-width
+    sparsity_metric: "pruning/sparsity" # gate signal (see model_checkpoint)
 
 datamodule:
   dataset:

@@ -788,9 +788,6 @@ def _submit_sv_job(
             script_arguments[
                 "callbacks.model_pruning.final_amount"
             ] = target_sparsity
-            script_arguments[
-                "callbacks.model_pruning.save_when_sparser_than"
-            ] = target_sparsity
 
     if extra_overrides:
         script_arguments.update(extra_overrides)

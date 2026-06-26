@@ -65,7 +65,6 @@ callbacks:
     scheduled_pruning: false
     final_amount: null
     epochs_to_ramp: null
-    save_when_sparser_than: 0.9 # Disable checkpointing until model sparsity is >= amount
     schedule_type: linear
 
 datamodule:
