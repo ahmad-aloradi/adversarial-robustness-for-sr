@@ -46,46 +46,26 @@ Each regularizer implements:
 
 Located in `src/callbacks/pruning/bregman/lambda_scheduler.py`:
 
-A feedback controller that adjusts the regularization strength $\lambda$ during training to track a target sparsity level. The target has two modes.
-
-**Fixed target** (default) — $\lambda$ is driven toward a constant `target_sparsity`:
+A feedback controller that adjusts the regularization strength $\lambda$ to drive sparsity toward a target **supplied by `BregmanPruner` each step** ($\lambda$ rises when measured sparsity is below the target, falls when above). The scheduler holds no target of its own, so fixed and progressive targets both work unchanged.
 
 ```python
 lambda_scheduler:
   _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
   initial_lambda: 1e-2
-  target_sparsity: 0.9
   acceleration_factor: 1.0
-  damping_zone: 0.01         # near-target band + convergence gate (1%)
-  max_relative_change: null   # |Δλ|/λ cap once converged
+  damping_zone: 0.01         # near-target band: gentler/less-frequent updates (1%)
 ```
 
-**Progressive target** — the target ramps `target_initial_sparsity → target_sparsity` over `epochs_to_ramp`:
-
-```python
-lambda_scheduler:
-  _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
-  initial_lambda: 1.0
-  target_sparsity: 0.99        # ramp endpoint (held afterward)
-  target_initial_sparsity: 0.0 # ramp start
-  epochs_to_ramp: 10
-  schedule_type: constant      # linear | constant (log-space)
-  ramp_granularity: step       # step (per-optim step) | epoch
-```
-
-In progressive mode the model should start at the ramp's initial sparsity; the progressive experiments wire `sparsity_rate` to `target_initial_sparsity` automatically (see `sv_bregman_adabreg_progressive.yaml`). Validation is suppressed until the model reaches the final target.
+The target sparsity lives on the pruner (`model_pruning.target_sparsity`); validation is suppressed until the model reaches its band (see the sparsity-gated callbacks).
 
 **Key Parameters:**
 - `initial_lambda`: Starting regularization strength
-- `target_sparsity`: Final / steady target fraction of zero weights (0.0-1.0)
-- `target_initial_sparsity`: Ramp start; `null` selects fixed-target mode
-- `schedule_type`: `linear` or `constant` (log-space) ramp interpolation
-- `epochs_to_ramp` / `ramp_granularity`: ramp length, and whether the target advances per step or per epoch
+- `target_sparsity`: Set on `BregmanPruner` (`model_pruning.target_sparsity`), not the scheduler; the controller is driven toward it each step (0.0-1.0)
 - `acceleration_factor`: Controls how aggressively λ adapts (0.0-1.0)
-- `damping_zone`: Near-target band where updates become gentler and less frequent; it also acts as the convergence band that arms `max_relative_change` (0.0 disables both)
-- `max_relative_change`: Caps the per-update relative change in λ once the controller has converged; `null` disables the clamp
+- `damping_zone`: Near-target band where updates become gentler and less frequent (0.0 disables)
+- `update_frequency`: Steps between λ updates (multiplied inside the damping zone)
 
-The update is defined as: `λ *= 1+a·gap` if s < target and `λ /= 1+a·|gap|` if target > sparsity.
+The update is defined as: `λ *= 1+a·gap` if s < target and `λ /= 1+a·|gap|` if sparsity > target.
 
 **Note**: Depending on many factors (Bregman optimizer type, `lr` value, `lr_scheduler`, etc.), the target sparsity is not guaranteed to be reached. There is a balancing act between the contribution of the optimzier and regularizer terms in the weights updates.
 
@@ -131,14 +111,13 @@ callbacks:
     sparsity_threshold: 1e-12
     collect_metrics: true
     verbose: 2
+    target_sparsity: 0.9        # controller setpoint + gate band centre
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
       initial_lambda: 1e-2
-      target_sparsity: 0.9
       acceleration_factor: 1.0
       damping_zone: 0.01
-      max_relative_change: null
 
 module:
   optimizer:
@@ -369,7 +348,7 @@ Ensures weights are never "un-pruned" during training.
 ### Bregman Learning
 
 **Issue**: Sparsity not reaching target
-- **Solution**: Increase `acceleration_factor` (or `max_relative_change`, which caps the per-update change after convergence)
+- **Solution**: Increase `acceleration_factor`
 
 **Issue**: Training unstable
 - **Solution**: Decrease `initial_lambda` or try using a different regularizer (e.g., `RegL1L2` instead of `RegL1`)

@@ -572,13 +572,14 @@ def _get_job_routing(dataset_name, sparsity=None):
     - sr99 (>= 0.99)            -> tinygpu
     - everything else           -> alex
     """
-    if sparsity is None:
-        cluster = CLUSTER_NAME
-    elif sparsity >= 0.99:
-        cluster = "tinygpu"
-    else:
-        cluster = "alex"
+    # if sparsity is None:
+    #     cluster = CLUSTER_NAME
+    # elif sparsity >= 0.99:
+    #     cluster = "tinygpu"
+    # else:
+    #     cluster = "alex"
 
+    cluster = "alex"
     gpu = _GPU_MAP[dataset_name][cluster]
     return cluster, gpu
 
@@ -610,10 +611,6 @@ def _submit_sv_job(
     batch_size_base=128,
     target_sparsity=None,
     log_every_n_steps=1,
-    # progressive ramp (Bregman only)
-    progressive=False,
-    initial_target_sparsity=None,
-    ramp_epochs=None,
     # other options
     gpu_device=GPU,
     bypass_exps=None,
@@ -710,22 +707,13 @@ def _submit_sv_job(
         if target_sparsity is not None
         else ""
     )
-    progressive_str = (
-        f"-ramp{int(initial_target_sparsity * 100)}to"
-        f"{int(target_sparsity * 100)}_{ramp_epochs}ep"
-        if progressive
-        and initial_target_sparsity is not None
-        and target_sparsity is not None
-        and ramp_epochs is not None
-        else ""
-    )
     num_ckpt_avg_str = f"-avg{num_ckpt_avg}" if num_ckpt_avg > 1 else ""
 
     job_name = (
         f"{experiment}{ramp_str}-{sv_model}-{os.path.basename(dataset_name)}"
         f"-virt-{virtual_spks}-bs{batch_size}-vad{apply_vad}"
         f"{num_ckpt_avg_str}-ep{max_epochs}-aug{apply_augmentation}"
-        f"{sparsity_str}{progressive_str}{job_name_suffix}"
+        f"{sparsity_str}{job_name_suffix}"
     )
 
     settings = settings.copy()
@@ -893,18 +881,15 @@ def run_sv(transfer_data="false", force="false"):
     RUN_BASELINE_EXPS = False
     RUN_PRUNING_EXPS = False
     RUN_FIXED_BREGMAN_EXPS = False
-    # Adaptive Bregman options: {ramp, fixed} x {trainable scales, uniform}.
-    RUN_PROGRESSIVE_ONLY_EXPS = True  # ramp,  uniform
+    # Adaptive Bregman options at a fixed target: {trainable scales, uniform}.
     RUN_TRAINABLE_FIXED_EXPS = False  # fixed, trainable
-    RUN_PROGRESSIVE_TRAINABLE_EXPS = False  # ramp,  trainable
-    RUN_VANILLA_FIXED_EXPS = True  # fixed, uniform
+    RUN_ADAPTIVE_CLASSICAL = True  # fixed, uniform
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
-    # different overrides, e.g. cases 2 and 3).
+    # different overrides).
     #   required: experiment, sv_models, dataset_names, sparsity_rates
-    #   optional: extra_overrides, suffix, per_model,
-    #             initial_target_sparsity + ramp_epochs (=> progressive ramp)
+    #   optional: extra_overrides, suffix, per_model
     ########################
     EXPERIMENTS = []
 
@@ -943,25 +928,7 @@ def run_sv(transfer_data="false", force="false"):
                 }
             )
 
-    # CASE 1 — progressive ramp, uniform allocation.
-    if RUN_PROGRESSIVE_ONLY_EXPS:
-        for _exp in (
-            "sv_bregman_adabreg_progressive",
-            "sv_bregman_linbreg_progressive",
-        ):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "sv_models": [ecapa, resnet34],
-                    "sparsity_rates": [0.90, 0.99],
-                    "dataset_names": ["multi_sv"],
-                    "initial_target_sparsity": 0.0,
-                    "ramp_epochs": 10,
-                    "ramp_granularities": ["epoch"], #["epoch", "step"],
-                }
-            )
-
-    # CASE 2 — trainable scales at a fixed target.
+    # CASE 1 — trainable scales at a fixed target.
     if RUN_TRAINABLE_FIXED_EXPS:
         for _exp in (
             "sv_bregman_adabreg_trainable_scales",
@@ -977,27 +944,9 @@ def run_sv(transfer_data="false", force="false"):
                 }
             )
 
-    # CASE 3 — trainable scales WITH a progressive ramp.
-    if RUN_PROGRESSIVE_TRAINABLE_EXPS:
-        for _exp in (
-            "sv_bregman_adabreg_trainable_scales",
-            "sv_bregman_linbreg_trainable_scales",
-        ):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "sv_models": [ecapa, resnet34],
-                    "sparsity_rates": [0.99],
-                    "dataset_names": ["multi_sv"],
-                    "initial_target_sparsity": 0.0,
-                    "ramp_epochs": 10,
-                    "ramp_granularities": ["epoch"], #["epoch", "step"],
-                }
-            )
-
-    # CASE 4 — vanilla Bregman at a fixed target, uniform allocation. Dense start
+    # CASE 2 — vanilla Bregman at a fixed target, uniform allocation. Dense start
     # to match the other cells (base defaults to 0.99 sparse).
-    if RUN_VANILLA_FIXED_EXPS:
+    if RUN_ADAPTIVE_CLASSICAL:
         for _exp in ("sv_bregman_adabreg", "sv_bregman_linbreg"):
             EXPERIMENTS.append(
                 {
@@ -1015,11 +964,10 @@ def run_sv(transfer_data="false", force="false"):
         "tinygpu": {"v100": 0, "a100": 0},
     }
     for cfg in EXPERIMENTS:
-        n_variants = len(cfg.get("ramp_granularities", [None]))
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
                 cluster, gpu = _get_job_routing(dataset_name, sparsity)
-                job_counts[cluster][gpu] += len(cfg["sv_models"]) * n_variants
+                job_counts[cluster][gpu] += len(cfg["sv_models"])
 
     total_jobs = sum(sum(gpus.values()) for gpus in job_counts.values())
     print(f"\n{'='*50}")
@@ -1064,75 +1012,35 @@ def run_sv(transfer_data="false", force="false"):
         base_suffix = cfg.get("suffix", "")
         per_model_cfg = cfg.get("per_model", {})
 
-        # Pin the schedule explicitly: progressive entries ramp; other Bregman
-        # entries pin a fixed target (never relying on the config default).
-        prog = {}
-        if "ramp_epochs" in cfg:
-            variants = cfg.get("ramp_granularities", ["epoch"])
-            sched_overrides = {
-                "_bregman_target_initial": cfg["initial_target_sparsity"],
-                "_bregman_ramp_epochs": cfg["ramp_epochs"],
-            }
-            prog = {
-                "progressive": True,
-                "initial_target_sparsity": cfg["initial_target_sparsity"],
-                "ramp_epochs": cfg["ramp_epochs"],
-            }
-        elif "bregman" in experiment:
-            variants = [None]
-            sched_overrides = {
-                "_bregman_target_initial": "null",
-                "_bregman_ramp_epochs": "null",
-            }
-        else:
-            variants = [None]
-            sched_overrides = {}
-
         for sv_model in cfg["sv_models"]:
             pm = per_model_cfg.get(sv_model, {})
-            model_overrides = {
+            extra_overrides = {
                 **base_overrides,
-                **sched_overrides,
                 **(pm.get("extra_overrides") or {}),
             }
-            model_suffix = pm.get("suffix", base_suffix)
+            suffix = pm.get("suffix", base_suffix)
 
-            for variant in variants:
-                if variant is None:
-                    extra_overrides = model_overrides
-                    suffix = model_suffix
-                else:
-                    extra_overrides = {
-                        **model_overrides,
-                        "_bregman_ramp_granularity": variant,
-                    }
-                    suffix = f"{model_suffix}-{variant}wise"
-                variant_prog = prog
-
-                for dataset_name in cfg["dataset_names"]:
-                    for sparsity in cfg["sparsity_rates"]:
-                        cluster, gpu = _get_job_routing(
-                            dataset_name, sparsity
+            for dataset_name in cfg["dataset_names"]:
+                for sparsity in cfg["sparsity_rates"]:
+                    cluster, gpu = _get_job_routing(dataset_name, sparsity)
+                    if cluster != CLUSTER_NAME:
+                        print(
+                            f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
                         )
-                        if cluster != CLUSTER_NAME:
-                            print(
-                                f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
-                            )
-                            continue
-                        _submit_sv_job(
-                            experiment=experiment,
-                            sv_model=sv_model,
-                            dataset_name=dataset_name,
-                            batch_size_base=batch_sizes[sv_model],
-                            transfer_data_bool=transfer_data_bool,
-                            max_epochs=base_max_epochs[dataset_name],
-                            target_sparsity=sparsity,
-                            gpu_device=gpu,
-                            force_retest=force_retest,
-                            extra_overrides=extra_overrides or None,
-                            job_name_suffix=suffix,
-                            **variant_prog,
-                        )
+                        continue
+                    _submit_sv_job(
+                        experiment=experiment,
+                        sv_model=sv_model,
+                        dataset_name=dataset_name,
+                        batch_size_base=batch_sizes[sv_model],
+                        transfer_data_bool=transfer_data_bool,
+                        max_epochs=base_max_epochs[dataset_name],
+                        target_sparsity=sparsity,
+                        gpu_device=gpu,
+                        force_retest=force_retest,
+                        extra_overrides=extra_overrides or None,
+                        job_name_suffix=suffix,
+                    )
 
 
 def create_eval_bash_script(settings, script_arguments):

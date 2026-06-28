@@ -26,15 +26,8 @@ tags:
 seed: 42
 
 # Single source of truth for Bregman sparsity targets and lambda values.
-# Fixed-target mode by default; the progressive variants flip on the ramp by
-# setting _bregman_target_initial / _bregman_ramp_epochs and pointing
-# _bregman_initial_sparsity at _bregman_target_initial.
-_bregman_target_sparsity: 0.9 # final / steady target sparsity
+_bregman_target_sparsity: 0.9 # target sparsity the feedback loop drives toward
 _bregman_tolerance: 0.01 # convergence band shared by the gates + scheduler: in-band iff |sparsity - target| <= this
-_bregman_target_initial: null # ramp start; null => fixed-target mode (no ramp)
-_bregman_ramp_epochs: null # ramp length in epochs (ramp mode only)
-_bregman_schedule_type: constant # linear | constant (log-space ramp)
-_bregman_ramp_granularity: epoch # step | epoch (ramp mode only)
 _bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
 
@@ -67,18 +60,11 @@ callbacks:
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
-      target_sparsity: ${_bregman_target_sparsity} # final / steady target
-      target_initial_sparsity: ${_bregman_target_initial} # null => fixed mode
-      schedule_type: ${_bregman_schedule_type}
-      epochs_to_ramp: ${_bregman_ramp_epochs}
-      ramp_granularity: ${_bregman_ramp_granularity}
       initial_lambda: ${_bregman_lambda}
       acceleration_factor: 1.0
-      warmup_epochs: 0 #${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
       update_frequency: 50
-      max_relative_change: null
-      # Near-target band: gentler/less-frequent updates AND the convergence
-      # gate; shares the gates' tolerance so they stay in lock-step.
+      # Near-target band: gentler/less-frequent updates; shares the gates'
+      # tolerance so they stay in lock-step.
       damping_zone: ${_bregman_tolerance}
       damping_acceleration_divisor: 2 # alpha will be x-times smaller in the damping zone
       damping_frequency_multiplier: 4 # f will be x-times less frequent in the damping zone

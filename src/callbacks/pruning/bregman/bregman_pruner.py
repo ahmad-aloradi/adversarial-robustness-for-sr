@@ -8,7 +8,7 @@ adjusts regularization strength to drive sparsity toward a target level.
 
 import csv
 import os
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional
 
 import torch
 from pytorch_lightning import Callback, LightningModule, Trainer
@@ -41,7 +41,7 @@ class BregmanPruner(Callback):
     This callback:
     - Applies initial sparsity to the model (via PruningManager)
     - Optionally updates regularization strength (lambda) per batch via
-      LambdaScheduler (fixed-target or progressive ramp)
+      LambdaScheduler (fixed-target feedback)
     - Optionally trains one scalar per-layer scale factor (allocation) when
       groups carry a trainable_scale marker
     - Logs sparsity metrics and checkpoints the scheduler state
@@ -52,45 +52,41 @@ class BregmanPruner(Callback):
         sparsity_threshold: float = 1e-12,
         verbose: int = 1,
         lambda_scheduler: Optional[LambdaScheduler] = None,
-        target_sparsity: Optional[Union[float, List[float]]] = None,
+        target_sparsity: Optional[float] = None,
     ):
         """
         Args:
             sparsity_threshold: Threshold below which a weight is considered zero.
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
             lambda_scheduler: Optional scheduler for dynamic lambda updates.
-            target_sparsity: Gate target published for the sparsity-gated
-                callbacks; the model's overall sparsity gates validation and
-                checkpointing until it reaches this. A list collapses to its
-                last entry.
+            target_sparsity: Sparsity setpoint the lambda controller is driven
+                toward, the value the feasibility check guards, and the target
+                logged each epoch. The sparsity-gated callbacks are configured
+                with the same value independently. Required when a
+                lambda_scheduler is set.
         """
         super().__init__()
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
-        # Validation gates on the FINAL target only (suppressed until the model
-        # reaches it). A list collapses to its last entry for back-compat.
         if target_sparsity is None:
-            self._target_final: Optional[float] = None
-        elif isinstance(target_sparsity, (list, tuple)):
-            if len(target_sparsity) == 0:
-                raise ValueError("target_sparsity list must not be empty")
-            self._target_final = float(target_sparsity[-1])
+            self._target_sparsity: Optional[float] = None
         else:
-            self._target_final = float(target_sparsity)
+            self._target_sparsity = float(target_sparsity)
+            if not 0.0 <= self._target_sparsity <= 1.0:
+                raise ValueError(
+                    "target_sparsity must be in [0.0, 1.0], got "
+                    f"{self._target_sparsity}"
+                )
 
         self.manager: Optional[PruningManager] = None
         self._optimizer: Optional[torch.optim.Optimizer] = None
         self._initialized = False
-        self._warmup_resolved = False
         self._ckpt_scheduler_state: Optional[dict] = None
 
-        # Trainable per-layer allocation: one scalar scale factor c_g
-        # nn.Parameter per prunable weight, trained by the same optimizer in a
-        # RegNone group and mapped here by weight-group name. Populated at
-        # on_fit_start when the groups carry a trainable_scale marker; stays
-        # empty (no-op) otherwise.
-        self._trainable_scales_active = False
+        # Per-layer scale factor c_g, keyed by weight-group name; filled at
+        # on_fit_start iff groups carry a trainable_scale marker. Non-empty
+        # = active.
         self._scale_params: Dict[str, torch.nn.Parameter] = {}
         self._scale_decay: float = 0.0
         # Domain floor on c_g so λ_eff = λ_global · c_g stays ≥ 0.
@@ -122,6 +118,8 @@ class BregmanPruner(Callback):
         self._optimizer = optimizer
         is_resuming = trainer.ckpt_path is not None
 
+        self._verify_gate_target_reachable(pl_module)
+
         if is_resuming:
             log.info("BregmanPruner: Resuming from checkpoint.")
         else:
@@ -141,69 +139,6 @@ class BregmanPruner(Callback):
         self._initialized = True
         self._log_configuration(optimizer)
         self._log_group_assignments(pl_module)
-
-    def on_train_start(
-        self, trainer: Trainer, pl_module: LightningModule
-    ) -> None:
-        """Fail loud if a ramp can't finish; enforce min_epochs; log
-        schedule."""
-        if self.lambda_scheduler is None:
-            return
-        max_epochs = trainer.max_epochs
-        if not (isinstance(max_epochs, int) and max_epochs > 0):
-            return
-        self.lambda_scheduler.verify_ramp_feasibility(max_epochs)
-
-        # Fixed-target runs have nothing to ramp; the schedule is the constant.
-        if self.lambda_scheduler._target_initial is None:
-            return
-
-        self._ensure_min_epochs_for_ramp(trainer, self.lambda_scheduler)
-
-        n_batches = trainer.num_training_batches
-        if isinstance(n_batches, int) and n_batches > 0:
-            targets = self.lambda_scheduler.get_epoch_targets(
-                max_epochs, n_batches
-            )
-            lines = [
-                f"  epoch {epoch:3d}: {target:.4f}"
-                for epoch, target in targets
-            ]
-            log.info(
-                f"Bregman sparsity target schedule ({max_epochs} epochs):\n"
-                + "\n".join(lines)
-            )
-
-    def _ensure_min_epochs_for_ramp(self, trainer: Trainer, scheduler) -> None:
-        """Bump trainer.min_epochs so a ramped target reaches progress 1.0 (one
-        epoch past warmup+epochs_to_ramp, see verify_ramp_feasibility).
-
-        No-op for a fixed-target scheduler (_target_initial is None).
-        """
-        if scheduler._target_initial is None:
-            return
-        min_needed = scheduler.warmup_epochs + scheduler._epochs_to_ramp + 1
-        current_min = trainer.fit_loop.min_epochs
-        if current_min is None or current_min < min_needed:
-            trainer.fit_loop.min_epochs = min_needed
-            log.info(
-                f"BregmanPruner: trainer.min_epochs {current_min} -> "
-                f"{min_needed} to ensure the sparsity ramp completes."
-            )
-
-    def on_train_epoch_start(
-        self, trainer: Trainer, pl_module: LightningModule
-    ) -> None:
-        """Resolve warmup steps on the first epoch (resume-safe)."""
-        if not self._initialized:
-            return
-
-        if not self._warmup_resolved and self.lambda_scheduler is not None:
-            if hasattr(self.lambda_scheduler, "resolve_warmup_steps"):
-                self.lambda_scheduler.resolve_warmup_steps(
-                    trainer.num_training_batches
-                )
-            self._warmup_resolved = True
 
     def on_before_optimizer_step(
         self,
@@ -225,7 +160,7 @@ class BregmanPruner(Callback):
         from the scheduler (``reg.lamda`` is undefined per-``c`` once a protected
         layer floors at ``c = 0``); ``sign(0)=0`` drops dead weights.
         """
-        if not self._trainable_scales_active:
+        if not self._scale_params:
             return
         lam_global = self.lambda_scheduler.get_lambda()
         with torch.no_grad():
@@ -258,20 +193,20 @@ class BregmanPruner(Callback):
 
         # Floor the just-stepped scale factors and push c into lambda_scale so
         # the scheduler step below sets reg.lamda = λ · c.
-        if self._trainable_scales_active:
+        if self._scale_params:
             self._sync_trainable_scales(trainer.optimizers[0])
 
         if self.lambda_scheduler is not None:
             self._step_lambda_scheduler(trainer)
 
         # Log metrics via Lightning's logging system (respects logging_params)
-        self._log_metrics(pl_module, trainer)
+        self._log_metrics(pl_module)
 
-        # On the last batch, measured sparsity is the end-of-epoch value
-        # Lightning is about to validate; this is the latest hook before it
-        # reads limit_val_batches (via Trainer.enable_validation).
+        # Last batch: publish overall sparsity before the validation gate reads it.
         if trainer.is_last_batch:
-            self._publish_gate_metric(trainer)
+            trainer.callback_metrics["sparsity"] = torch.tensor(
+                self._overall_sparsity()
+            )
 
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule
@@ -282,11 +217,7 @@ class BregmanPruner(Callback):
 
         sparsity = self._overall_sparsity()
         pruned_sparsity = self._pruned_sparsity()
-        target = (
-            self._target_final
-            if self.lambda_scheduler is None
-            else self.lambda_scheduler.target_sparsity
-        )
+        target = self._target_sparsity
 
         # Inject end-of-epoch sparsity directly into callback_metrics so that
         # ModelCheckpoint filenames and train_log.txt get the true final value
@@ -311,20 +242,9 @@ class BregmanPruner(Callback):
                 f"{target_str}"
             )
 
-        if self._trainable_scales_active:
+        if self._scale_params:
             self._log_scale_table()
             self._record_scale_history(trainer, pl_module)
-
-    def _publish_gate_metric(self, trainer: Trainer) -> None:
-        """Publish fresh overall sparsity for the sparsity-gated callbacks.
-
-        Injected at the last batch so RampValidationGate reads the end-of-epoch
-        value before Lightning decides whether to validate; it persists to
-        on_validation_end for the gated checkpoint/early-stopping callbacks.
-        """
-        trainer.callback_metrics["sparsity"] = torch.tensor(
-            self._overall_sparsity()
-        )
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
@@ -361,24 +281,22 @@ class BregmanPruner(Callback):
         if self.lambda_scheduler is None:
             return
 
-        # Handle Hydra partial instantiation
+        # Configs pass the scheduler as a Hydra partial (_partial_: true).
         if not hasattr(self.lambda_scheduler, "step"):
-            if not callable(self.lambda_scheduler):
-                raise TypeError(
-                    f"lambda_scheduler must have a 'step' method or be callable, "
-                    f"got {type(self.lambda_scheduler)}"
-                )
             self.lambda_scheduler = self.lambda_scheduler()
+
+        if self._target_sparsity is None:
+            raise ValueError(
+                "BregmanPruner.target_sparsity is required when a "
+                "lambda_scheduler is set; it is the controller setpoint."
+            )
 
         # Restore state from checkpoint
         if is_resuming and self._ckpt_scheduler_state:
             self.lambda_scheduler.load_state(self._ckpt_scheduler_state)
-            # _steps_per_epoch is restored with the state; skip re-resolution in
-            # on_train_epoch_start so ramp_steps stays stable across the resume.
-            self._warmup_resolved = True
 
         log.info(
-            f"Lambda scheduler active: target_sparsity={self.lambda_scheduler.target_sparsity}, "
+            f"Lambda scheduler active: target_sparsity={self._target_sparsity}, "
             f"initial_lambda={self.lambda_scheduler.get_lambda():.4f}"
         )
 
@@ -391,23 +309,22 @@ class BregmanPruner(Callback):
         )
 
         new_lambda = self.lambda_scheduler.step(
-            current_sparsity, trainer.global_step
+            current_sparsity, self._target_sparsity, trainer.global_step
         )
-
-        for group in trainer.optimizers[0].param_groups:
-            if self._group_regularized(group):
-                scale = self._lambda_scale(group)
-                group["reg"].lamda = new_lambda * scale
+        self._broadcast_lambda(trainer.optimizers[0], new_lambda)
 
     def _apply_lambda_to_groups(self, trainer: Trainer) -> None:
         """Apply current scheduler lambda to all regularized groups."""
         if self.lambda_scheduler is None:
             return
         current_lambda = self.lambda_scheduler.get_lambda()
-        for group in trainer.optimizers[0].param_groups:
+        self._broadcast_lambda(trainer.optimizers[0], current_lambda)
+
+    def _broadcast_lambda(self, optimizer, lambda_value: float) -> None:
+        """Set reg.lamda = λ · lambda_scale on every regularized group."""
+        for group in optimizer.param_groups:
             if self._group_regularized(group):
-                scale = self._lambda_scale(group)
-                group["reg"].lamda = current_lambda * scale
+                group["reg"].lamda = lambda_value * self._lambda_scale(group)
 
     # -------------------------------------------------------------------------
     # Trainable per-layer scales (scalar, one per layer)
@@ -426,7 +343,6 @@ class BregmanPruner(Callback):
             g for g in optimizer.param_groups if g.get("trainable_scale")
         ]
         if not trainable_groups:
-            self._trainable_scales_active = False
             return
         if self.lambda_scheduler is None:
             raise ValueError(
@@ -462,7 +378,6 @@ class BregmanPruner(Callback):
         assert (
             self._scale_min >= 0.0
         ), f"scale_min must be ≥ 0 (λ_eff ≥ 0), got {self._scale_min}"
-        self._trainable_scales_active = True
 
         # Sync c into lambda_scale now (before _apply_lambda_to_groups).
         self._sync_trainable_scales(optimizer)
@@ -476,8 +391,8 @@ class BregmanPruner(Callback):
         """Floor each scale factor in place and fold c into the group's
         ``lambda_scale`` so the scheduler sets reg.lamda = λ_global · c.
 
-        One device->host read for all layers: a single stacked tolist()
-        instead of a float() each.
+        One device->host read for all layers: a single stacked tolist() instead
+        of a float() each.
         """
         groups, scales = [], []
         for group in optimizer.param_groups:
@@ -499,7 +414,7 @@ class BregmanPruner(Callback):
 
     def _scale_extremes(self) -> tuple:
         """Global (min, max) of c over every trainable scale."""
-        vals = [float(c.detach()) for c in self._scale_params.values()]
+        vals = self._trainable_scale_values().values()
         return (min(vals), max(vals))
 
     @rank_zero_only
@@ -530,7 +445,8 @@ class BregmanPruner(Callback):
         self._write_scale_history_csv(trainer)
 
     def _write_scale_history_csv(self, trainer: Trainer) -> None:
-        """Overwrite the run's scale-history CSV (small; rewrite is crash-safe)."""
+        """Overwrite the run's scale-history CSV (small; rewrite is crash-
+        safe)."""
         out_dir = trainer.default_root_dir
         if not out_dir:
             return
@@ -566,13 +482,40 @@ class BregmanPruner(Callback):
         params = self._regularized_parameters()
         return compute_sparsity(params, threshold=self.sparsity_threshold)
 
+    def _verify_gate_target_reachable(
+        self, pl_module: LightningModule
+    ) -> None:
+        """Fail loud if the gate target can never reopen validation.
+
+        Validation, checkpointing, and early stopping reopen only once overall
+        sparsity reaches the target band. Non-regularized groups (norm/bias)
+        stay dense, so overall sparsity is capped at prunable/total; a target
+        above that ceiling leaves the band unreachable for the whole run.
+        """
+        if self._target_sparsity is None:
+            return
+        total = sum(p.numel() for p in pl_module.parameters())
+        prunable = sum(p.numel() for p in self._regularized_parameters())
+        ceiling = prunable / total if total else 0.0
+        assert self._target_sparsity <= ceiling, (
+            f"target_sparsity={self._target_sparsity} exceeds the achievable "
+            f"overall-sparsity ceiling={ceiling:.4f} "
+            f"({prunable}/{total} params prunable); the validation gate could "
+            f"never reopen. Lower target_sparsity or regularize more groups."
+        )
+        if WHICH_SPARSITY_PERCENTAGE != "overall":
+            log.warning(
+                f"Lambda steers on '{WHICH_SPARSITY_PERCENTAGE}' sparsity "
+                f"while the gates measure overall sparsity; the setpoint "
+                f"may never enter the validation band (gate target "
+                f"{self._target_sparsity})."
+            )
+
     # -------------------------------------------------------------------------
     # Logging
     # -------------------------------------------------------------------------
 
-    def _log_metrics(
-        self, pl_module: LightningModule, trainer: Trainer
-    ) -> None:
+    def _log_metrics(self, pl_module: LightningModule) -> None:
         """Log sparsity and lambda metrics via Lightning's logging system."""
         default_logging_params = {
             "on_step": False,
@@ -583,35 +526,26 @@ class BregmanPruner(Callback):
         logging_params = getattr(
             pl_module, "logging_params", default_logging_params
         )
+        # Per-step only for TensorBoard/WandB tracking; epoch-level "sparsity"
+        # is injected in on_train_epoch_end.
+        per_step = {**logging_params, "on_step": True, "on_epoch": False}
 
-        sparsity = self._overall_sparsity()
-        pruned_sparsity = self._pruned_sparsity()
-        # Log per-step only for TensorBoard/WandB tracking;
-        # epoch-level "sparsity" is injected in on_train_epoch_end.
-        step_params = {**logging_params, "on_step": True, "on_epoch": False}
-        pl_module.log("bregman/sparsity", sparsity, **step_params)
+        pl_module.log("bregman/sparsity", self._overall_sparsity(), **per_step)
         pl_module.log(
-            "bregman/pruned_sparsity", pruned_sparsity, **step_params
+            "bregman/pruned_sparsity", self._pruned_sparsity(), **per_step
         )
 
-        # Lambda changes per step, so always log on_step; override on_epoch.
-        lambda_params = {**logging_params, "on_epoch": False, "on_step": True}
         if self.lambda_scheduler:
             pl_module.log(
                 "bregman/global_lambda",
                 self.lambda_scheduler.get_lambda(),
-                **lambda_params,
+                **per_step,
             )
 
-        if self._trainable_scales_active:
+        if self._scale_params:
             scale_min, scale_max = self._scale_extremes()
-            scale_params = {
-                **logging_params,
-                "on_epoch": False,
-                "on_step": True,
-            }
-            pl_module.log("bregman/scale_min", scale_min, **scale_params)
-            pl_module.log("bregman/scale_max", scale_max, **scale_params)
+            pl_module.log("bregman/scale_min", scale_min, **per_step)
+            pl_module.log("bregman/scale_max", scale_max, **per_step)
 
     @rank_zero_only
     def _log_configuration(self, optimizer) -> None:
@@ -624,7 +558,7 @@ class BregmanPruner(Callback):
 
         if self.lambda_scheduler:
             sched_info = (
-                f"Lambda Scheduler: target_sparsity={self.lambda_scheduler.target_sparsity}, "
+                f"Lambda Scheduler: target_sparsity={self._target_sparsity}, "
                 f"lambda={self.lambda_scheduler.get_lambda():.4f}, "
                 f"update_frequency={self.lambda_scheduler.update_frequency}"
             )
@@ -646,13 +580,13 @@ class BregmanPruner(Callback):
 
             # Non-uniform scaling is the point under trainable allocation, so
             # only warn about a hand-set scale in the other modes.
-            if scale != 1.0 and not self._trainable_scales_active:
+            if scale != 1.0 and not self._scale_params:
                 log.warning(
                     f"Group '{name}' has lambda_scale={scale} != 1.0. "
                     "Non-uniform regularization is generally not recommended."
                 )
 
-        if self._trainable_scales_active:
+        if self._scale_params:
             self._log_scale_table()
 
         log.info("Current sparsity by group:")

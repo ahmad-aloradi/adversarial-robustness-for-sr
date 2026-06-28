@@ -113,18 +113,11 @@ learned.
 
 ### Mode and target
 
-Runs in **fixed-target mode** by default (`_bregman_target_initial: null`): the
-model starts dense and the controller drives `λ_global` from step 0, so the
-scales allocate over the whole run. `_bregman_target_sparsity: 0.99` is an
-**overall-model** target (global single-scheduler mode); the controller and
-validation gate measure whole-model sparsity. The dense BN/bias floor caps the
-reachable maximum near ~0.996, so 0.99 is attainable.
-
-Deliberately **not** combined with a progressive ramp: under a ramp `λ_global`
-stays ≈0 until it completes, leaving the scales (whose hypergradient ∝
-`λ_global`) dormant for that whole phase. Re-enable a ramp explicitly with
-`_bregman_target_initial` / `_bregman_ramp_epochs` if you want that variant (the
-fabfile exposes it as a separate "progressive + trainable scales" case).
+The controller drives `λ_global` toward a fixed `_bregman_target_sparsity` from
+step 0, so the scales allocate over the whole run. `_bregman_target_sparsity:
+0.99` is an **overall-model** target (global single-scheduler mode); the
+controller and validation gate measure whole-model sparsity. The dense BN/bias
+floor caps the reachable maximum near ~0.996, so 0.99 is attainable.
 
 A `LinBreg` counterpart exists at
 `sv/sv_bregman_linbreg_trainable_scales` (same allocation machinery, plain

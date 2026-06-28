@@ -43,7 +43,7 @@ class _StubScheduler:
     def get_lambda(self):
         return self._lam
 
-    def step(self, current_sparsity, current_step=None):
+    def step(self, current_sparsity, target_sparsity=None, current_step=None):
         return self._lam
 
 

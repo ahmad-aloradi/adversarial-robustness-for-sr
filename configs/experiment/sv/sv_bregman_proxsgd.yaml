@@ -54,14 +54,11 @@ callbacks:
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
-      target_sparsity: ${_bregman_target_sparsity}
       initial_lambda: ${_bregman_lambda}
       acceleration_factor: 1.0
-      warmup_epochs: 0
       update_frequency: 50
-      max_relative_change: null
-      # Near-target band: gentler/less-frequent updates AND the convergence
-      # gate; shares the gates' tolerance so they stay in lock-step.
+      # Near-target band: gentler/less-frequent updates; shares the gates'
+      # tolerance so they stay in lock-step.
       damping_zone: ${_bregman_tolerance}
       damping_acceleration_divisor: 2
       damping_frequency_multiplier: 4

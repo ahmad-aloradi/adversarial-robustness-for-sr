@@ -9,6 +9,7 @@ works correctly together in abbreviated training loops:
 - Scheduled target mode works end-to-end
 """
 
+import logging
 from unittest.mock import Mock
 
 import pytest
@@ -121,10 +122,6 @@ def _run_mini_bregman_training(
     initial_sparsity=0.99,
     num_epochs=10,
     num_batches_per_epoch=20,
-    schedule_type=None,
-    initial_target=None,
-    final_target=None,
-    epochs_to_ramp=None,
 ):
     """Run mini Bregman training loop and return metrics.
 
@@ -150,26 +147,16 @@ def _run_mini_bregman_training(
     pl_module = MiniBregmanModule(model, optimizer_config)
 
     # Create lambda scheduler
-    if schedule_type is not None:
-        scheduler = LambdaScheduler(
-            schedule_type=schedule_type,
-            target_initial_sparsity=initial_target,
-            target_sparsity=final_target,
-            epochs_to_ramp=epochs_to_ramp,
-            ramp_granularity="step",
-            initial_lambda=0.1,
-        )
-    else:
-        scheduler = LambdaScheduler(
-            target_sparsity=target_sparsity,
-            initial_lambda=0.1,
-        )
+    scheduler = LambdaScheduler(
+        initial_lambda=0.1,
+    )
 
     # Create pruner
     pruner = BregmanPruner(
         sparsity_threshold=1e-12,
         verbose=0,
         lambda_scheduler=scheduler,
+        target_sparsity=target_sparsity,
     )
 
     # Initialize optimizer (needed for pruner setup)
@@ -319,23 +306,60 @@ def test_bregman_lambda_evolves_during_training():
     ), f"Expected lambda to decrease, but {initial_lambda} -> {final_lambda}"
 
 
-@pytest.mark.slow
-def test_bregman_scheduled_ramp_mode():
-    """Ramp mode runs end-to-end and drives sparsity up toward the final target.
+# =============================================================================
+# Target feasibility (validation can only reopen if the target is reachable)
+# =============================================================================
 
-    The model starts dense (matching the ramp's initial sparsity); the rising
-    target pushes lambda up via the feedback loop, which sparsifies the weights.
+
+def _make_pruner_for_fit(target_sparsity):
+    """Real model + optimizer + pruner wired to run on_fit_start.
+
+    SimpleMLP has 1800 prunable Linear weights of 1840 trainable params, so the
+    achievable overall-sparsity ceiling is ~0.978.
     """
-    sparsity_per_epoch, lambda_per_step, _, _ = _run_mini_bregman_training(
-        schedule_type="linear",
-        initial_target=0.0,
-        final_target=0.8,
-        epochs_to_ramp=5,
-        initial_sparsity=0.0,  # start dense, matching the ramp start
-        num_epochs=8,
-        num_batches_per_epoch=20,
+    model = SimpleMLP()
+    pl_module = MiniBregmanModule(
+        model, {"lr": 0.01, "lambda": 0.5, "initial_sparsity": 0.0}
     )
-    assert lambda_per_step[-1] > lambda_per_step[0], "lambda should rise"
-    assert (
-        sparsity_per_epoch[-1] > sparsity_per_epoch[0]
-    ), "sparsity should rise as the target ramps up"
+    optimizer = pl_module.configure_optimizers()
+    scheduler = LambdaScheduler(initial_lambda=0.1)
+    pruner = BregmanPruner(
+        verbose=0,
+        lambda_scheduler=scheduler,
+        target_sparsity=target_sparsity,
+    )
+
+    trainer = Mock()
+    trainer.optimizers = [optimizer]
+    trainer.ckpt_path = None
+    trainer.callbacks = []
+    trainer.lr_scheduler_configs = []
+    trainer.limit_val_batches = 1.0
+    trainer.num_training_batches = 20
+    trainer.callback_metrics = {}
+    return pruner, trainer, pl_module
+
+
+def test_target_above_overall_ceiling_raises():
+    """A target above the prunable fraction can never reopen validation."""
+    pruner, trainer, pl_module = _make_pruner_for_fit(target_sparsity=0.99)
+    with pytest.raises(AssertionError, match="ceiling"):
+        pruner.on_fit_start(trainer, pl_module)
+
+
+def test_feasible_target_passes_fit_start():
+    """A target below the ceiling initializes without raising."""
+    pruner, trainer, pl_module = _make_pruner_for_fit(target_sparsity=0.7)
+    pruner.on_fit_start(trainer, pl_module)
+    assert pruner._target_sparsity == 0.7
+
+
+def test_pruned_steering_warns_against_overall_gate(monkeypatch, caplog):
+    """Steering on a non-overall metric while gating on overall is flagged."""
+    from src.callbacks.pruning.bregman import bregman_pruner as bp
+
+    monkeypatch.setattr(bp, "WHICH_SPARSITY_PERCENTAGE", "pruned")
+    pruner, trainer, pl_module = _make_pruner_for_fit(target_sparsity=0.7)
+    with caplog.at_level(logging.WARNING):
+        pruner.on_fit_start(trainer, pl_module)
+    assert any("validation band" in r.message for r in caplog.records)
