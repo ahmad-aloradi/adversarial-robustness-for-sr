@@ -16,9 +16,11 @@ from .sparsity_applier import SparsityApplier
 logger = logging.getLogger(__name__)
 
 _REGNONE_TARGET = "src.callbacks.pruning.bregman.bregman_regularizers.RegNone"
-# Where the trainable per-layer scale factors live on the LightningModule, and
-# the anchored pattern the optimizer group uses to grab exactly those params.
-SCALES_ATTR = "bregman_scales"
+# Where the trainable per-layer log-scale factors s_g live on the
+# LightningModule, and the anchored pattern the optimizer group uses to grab
+# exactly those params. The "log_" name is load-bearing: it keys the state on
+# s, so a strict load of a c-valued checkpoint fails loud (key mismatch).
+SCALES_ATTR = "bregman_log_scales"
 
 
 def _sanitize_scale_key(module_name: str) -> str:
@@ -90,13 +92,13 @@ def create_scale_params(
     pl_module: LightningModule,
     group_configs: List[Dict[str, Any]],
 ) -> Optional[str]:
-    """Register ``pl_module.bregman_scales`` for trainable allocation.
+    """Register ``pl_module.bregman_log_scales`` for trainable allocation.
 
     Scans ``group_configs`` for the single ``trainable_scales`` group, collects
     its prunable layer names (same predicate as the optimizer assignment), and
-    registers one scalar scale-factor Parameter per layer in an
-    ``nn.ParameterDict`` keyed by the ``.``-sanitized module name. Each scale is
-    initialized to 1 (neutral: λ_eff = λ_global · 1).
+    registers one scalar log-scale Parameter s_g per layer in an
+    ``nn.ParameterDict`` keyed by the ``.``-sanitized module name. Each is
+    initialized to 0 (neutral: c_g = exp(0) = 1, λ_eff = λ_global · 1).
 
     Must run from ``LightningModule.setup`` (before Lightning restores model
     state on resume) so the keys exist for the strict ``load_state_dict``.
@@ -145,7 +147,7 @@ def create_scale_params(
         pl_module,
         SCALES_ATTR,
         nn.ParameterDict(
-            {keys[s.name]: nn.Parameter(torch.ones(())) for s in shapes}
+            {keys[s.name]: nn.Parameter(torch.zeros(())) for s in shapes}
         ),
     )
     return SCALES_ATTR
@@ -160,10 +162,10 @@ class PruningManager:
     2.  Provide these groups to an optimizer with group-specific settings (e.g., regularization).
     3.  Apply initial sparsity to each group according to its configuration.
 
-    A group config may carry ``trainable_scales: {scale_lr, scale_decay,
-    scale_min, initial_sparsity}``; it is expanded at construction into one
-    group per matching weight (each carrying a ``trainable_scale`` marker) plus
-    one group holding the per-layer scale-factor Parameters.
+    A group config may carry ``trainable_scales: {scale_lr,
+    initial_sparsity}``; it is expanded at construction into one group per
+    matching weight (each carrying a ``trainable_scale`` marker) plus one group
+    holding the per-layer log-scale Parameters.
 
     Args:
         pl_module (LightningModule): The model containing the parameters.
@@ -248,14 +250,12 @@ class PruningManager:
         targets a single module by its exact name, carries the base group's
         optimizer_settings (reg + lambda_scale), a uniform initial
         ``sparsity_rate``, and a ``trainable_scale`` marker pointing at its
-        scale Parameter. One extra ``bregman_scales`` group holds those params,
-        trained by the same optimizer in a RegNone group at its own lr.
+        scale Parameter. One extra ``bregman_log_scales`` group holds those
+        params, trained by the same optimizer in a RegNone group at its own lr.
         """
         from .layer_shapes import collect_prunable_layer_shapes
 
         ts_cfg = config["trainable_scales"]
-        scale_decay = ts_cfg.get("scale_decay", 1e-4)
-        scale_min = ts_cfg.get("scale_min", 0.0)
         scale_lr = ts_cfg.get("scale_lr", 1e-3)
         initial_sparsity = ts_cfg.get("initial_sparsity", 0.0)
 
@@ -297,8 +297,6 @@ class PruningManager:
                 },
                 "trainable_scale": True,
                 "trainable_scale_key": _sanitize_scale_key(mod_name),
-                "scale_decay": scale_decay,
-                "scale_min": float(scale_min),
             }
             if base_layer_types is not None:
                 layer_config["layer_types"] = list(base_layer_types)
@@ -333,12 +331,7 @@ class PruningManager:
             # pruner can map a weight group to its scale Parameter and read its
             # decay/floor without re-parsing names.
             if group["config"].get("trainable_scale"):
-                for key in (
-                    "trainable_scale",
-                    "trainable_scale_key",
-                    "scale_decay",
-                    "scale_min",
-                ):
+                for key in ("trainable_scale", "trainable_scale_key"):
                     optimizer_group[key] = group["config"][key]
             optimizer_groups.append(optimizer_group)
         return optimizer_groups

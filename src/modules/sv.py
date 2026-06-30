@@ -503,7 +503,7 @@ class SpeakerVerification(pl.LightningModule):
         """Register trainable per-layer Bregman scale factors, if configured.
 
         Runs before Lightning restores model state on resume, so the
-        ``bregman_scales.*`` keys exist for the strict ``load_state_dict``;
+        ``bregman_log_scales.*`` keys exist for the strict ``load_state_dict``;
         ``configure_optimizers`` is too late. A no-op unless a pruning group
         sets a ``trainable_scales`` block.
         """

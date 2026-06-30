@@ -1,7 +1,8 @@
 # @package _global_
-# AdaBreg + trainable per-layer allocation. A global LambdaScheduler sets the
-# sparsity LEVEL; a per-layer nn.Parameter c_g (init 1, floor 0) learns the
-# ALLOCATION via the closed-form hypergradient. Overall-model target.
+# AdaBreg + trainable per-layer allocation (water-filling). A global
+# LambdaScheduler sets the sparsity LEVEL; a per-layer log-scale s_g (init 0 ⇒
+# c_g = exp(s_g) = 1) learns the ALLOCATION. Overall-model target. Pre-log-scale
+# (c-valued) checkpoints do not resume.
 
 defaults:
   - sv/sv_bregman_adabreg
@@ -9,10 +10,6 @@ defaults:
 
 _bregman_target_sparsity: 0.99
 _bregman_lambda: 1e-3
-# initial weight sparsity (0.99) and fixed-target mode inherited from the base.
-
-trainer:
-  gradient_clip_val: 1.0 # the c_g hypergradient can be large
 
 module:
   model:
@@ -30,15 +27,12 @@ module:
         param_names: ["weight"]
         trainable_scales:
           scale_lr: ${module.optimizer.lr} # match the weight lr
-          scale_decay: 1e-4 # soft prior pulling c_g toward 1
-          # Set to 50% of the target sparsity, to give the trainable scales room to grow or shrink.
-          scale_min: ${oc.eval:'${_bregman_target_sparsity} * 0.5'}
           initial_sparsity: ${_bregman_initial_sparsity}
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
             lamda: ${_bregman_lambda}
-          lambda_scale: 1.0 # synced to c_g each batch
+          lambda_scale: 1.0 # synced to c_g = exp(s_g) each batch
         pruning_config:
           pruning_type: "unstructured"
 
