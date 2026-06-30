@@ -11,6 +11,12 @@ defaults:
 _bregman_target_sparsity: 0.99
 _bregman_lambda: 1e-5
 
+callbacks:
+  model_pruning:
+    scale_update_freq: 25  # water-filling gradient every K steps; matches allocation timescale
+    kill_rate: hard_band  # κ estimator; "soft" keeps survivor-only layers live
+
+
 module:
   model:
     # Trainable-scale group over all prunable weights + Classifier;

@@ -59,6 +59,8 @@ class BregmanPruner(Callback):
         verbose: int = 1,
         lambda_scheduler: Optional[LambdaScheduler] = None,
         target_sparsity: Optional[float] = None,
+        scale_update_freq: int = 10,  # water-filling gradient period (O(params) per call)
+        kill_rate: Literal["hard_band", "soft"] = "hard_band",  # κ estimator
     ):
         """
         Args:
@@ -70,8 +72,19 @@ class BregmanPruner(Callback):
                 logged each epoch. The sparsity-gated callbacks are configured
                 with the same value independently. Required when a
                 lambda_scheduler is set.
+            kill_rate: Per-layer kill-rate κ_g estimator for the allocation.
+                "hard_band" counts survivors in (0, SCALE_BAND·t] and freezes a
+                layer with none. "soft" uses κ_g = Σ_surv exp(−|θ|/h)/h with
+                h = SCALE_BAND·t, so a layer freezes only when it has no
+                survivor at all (avoids the spurious dead-layer freeze that
+                stalls allocation at high sparsity).
         """
         super().__init__()
+        if kill_rate not in ("hard_band", "soft"):
+            raise ValueError(
+                f"kill_rate must be 'hard_band' or 'soft', got {kill_rate!r}."
+            )
+        self.kill_rate = kill_rate
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
@@ -85,10 +98,12 @@ class BregmanPruner(Callback):
                     f"{self._target_sparsity}"
                 )
 
+        self.scale_update_freq = scale_update_freq
         self.manager: Optional[PruningManager] = None
         self._optimizer: Optional[torch.optim.Optimizer] = None
         self._initialized = False
         self._ckpt_scheduler_state: Optional[dict] = None
+        self._scales_need_sync: bool = False
 
         # Per-layer log-scale s_g (c_g = exp(s_g)), keyed by weight-group name;
         # filled at on_fit_start iff groups carry a trainable_scale marker.
@@ -112,16 +127,19 @@ class BregmanPruner(Callback):
         self._validate_module(pl_module)
         self.manager = pl_module.pruning_manager
 
-        if self._initialized:
-            return
-
         if not trainer.optimizers:
             raise ValueError("BregmanPruner: No optimizers found.")
         if len(trainer.optimizers) > 1:
             raise ValueError("BregmanPruner supports only a single optimizer.")
 
+        # Lightning rebuilds the optimizer on every fit(); refresh the reference
+        # even when already initialized so sparsity reads live param tensors.
         optimizer = trainer.optimizers[0]
         self._optimizer = optimizer
+
+        if self._initialized:
+            return
+
         is_resuming = trainer.ckpt_path is not None
 
         self._verify_gate_target_reachable(pl_module)
@@ -159,47 +177,68 @@ class BregmanPruner(Callback):
         ``t = δ·λ_global·c_g`` (``reg.lamda = λ_global·c_g``):
 
             S_g = Σ_live grad_i·sign(θ_i)        (loss change per unit shrink)
-            κ_g = n_band / (SCALE_BAND·t)         (kill-rate: survivors near 0)
+            κ_g = kill_qty / (SCALE_BAND·t)       (kill-rate; see kill_rate arg)
             ρ_g = −S_g / κ_g                      (marginal loss per killed weight)
             s_g.grad = ρ_g − mean_live(ρ)         (gauge-projected, budget-neutral)
 
-        ``sign(0)=0`` drops dead weights from S_g. A layer with no survivors in
-        the band is dead: frozen (``s.grad = None``) and excluded from the live
-        mean, else its centered gradient diverges. The stationary point
-        ρ_g = μ ∀ live g is the water-filling optimum.
+        ``sign(0)=0`` drops dead weights from S_g. A dead layer (hard_band: no
+        in-band survivor; soft: no survivor at all) is frozen (``s.grad = None``)
+        and excluded from the live mean, else its centered gradient diverges.
+        The stationary point ρ_g = μ ∀ live g is the water-filling optimum.
         """
         if not self._scale_params:
             return
+        global_step = 0 if trainer is None else trainer.global_step
+        if global_step % self.scale_update_freq != 0:
+            self._scales_need_sync = False
+            return
+        self._scales_need_sync = True
         lam_global = self.lambda_scheduler.get_lambda()
         with torch.no_grad():
-            # Two passes so all band-counts read back in one stacked tolist()
-            # (one device->host sync), not a float() per group in the loop.
-            pending, n_bands = [], []
+            # Two passes so the per-group kill quantities read back in one
+            # stacked tolist() (one device->host sync), not a float() per group.
+            pending, kill_qtys, alive_counts = [], [], []
             for group in optimizer.param_groups:
                 name = group.get("name")
                 if name not in self._scale_params:
                     continue
                 s = self._scale_params[name]
-                band = SCALE_BAND * group["delta"] * lam_global * torch.exp(s)
+                h = SCALE_BAND * group["delta"] * lam_global * torch.exp(s)
                 signal = s.new_zeros(())
-                n_band = s.new_zeros(())
+                kill_qty = s.new_zeros(())  # κ_g·h: band count or kernel sum
+                n_alive = s.new_zeros(())
                 for p in group["params"]:
                     if p.grad is None:
                         continue
                     signal = signal + (p.grad * torch.sign(p)).sum()
                     abs_p = p.abs()
-                    n_band = n_band + ((abs_p > 0) & (abs_p <= band)).sum()
-                pending.append((name, s, signal, band))
-                n_bands.append(n_band)
+                    alive = abs_p > self.sparsity_threshold
+                    n_alive = n_alive + alive.sum()
+                    if self.kill_rate == "hard_band":
+                        kill_qty = kill_qty + (alive & (abs_p <= h)).sum()
+                    else:  # survivor-kernel density at 0 (no spurious freeze)
+                        kill_qty = kill_qty + torch.exp(-abs_p[alive] / h).sum()
+                pending.append((name, s, signal, h))
+                kill_qtys.append(kill_qty)
+                alive_counts.append(n_alive)
 
-            counts = torch.stack(n_bands).tolist() if n_bands else []
+            qtys = torch.stack(kill_qtys).tolist() if kill_qtys else []
+            alives = torch.stack(alive_counts).tolist() if alive_counts else []
             rho: Dict[str, torch.Tensor] = {}
-            for (name, s, signal, band), n in zip(pending, counts):
-                if n == 0.0:
-                    s.grad = None  # dead / empty band: freeze, drop from mean
+            for (name, s, signal, h), qty, n_alive in zip(
+                pending, qtys, alives
+            ):
+                # Dead: hard_band has no in-band survivor; soft has none at all.
+                dead = (
+                    n_alive == 0.0
+                    if self.kill_rate == "soft"
+                    else qty == 0.0
+                )
+                if dead:
+                    s.grad = None  # freeze, drop from the live mean
                     continue
-                kill_rate = n / band  # κ_g = n_band / (SCALE_BAND·t_g)
-                rho[name] = -signal / kill_rate
+                kappa = qty / h  # κ_g
+                rho[name] = -signal / kappa
 
             self._live_scale_names = set(rho)
             if not rho:
@@ -220,9 +259,9 @@ class BregmanPruner(Callback):
         if not self._initialized:
             return
 
-        # Re-center the just-stepped log-scales (gauge) and fold c = exp(s) into
-        # lambda_scale so the scheduler step below sets reg.lamda = λ · c.
-        if self._scale_params:
+        # Re-center and fold c = exp(s) into lambda_scale only when scales were
+        # actually stepped this batch (avoids a GPU→CPU sync on skipped steps).
+        if self._scale_params and self._scales_need_sync:
             self._sync_trainable_scales(trainer.optimizers[0])
 
         # Whole-model sparsity is the dominant per-batch cost; compute once and
@@ -259,6 +298,14 @@ class BregmanPruner(Callback):
         trainer.callback_metrics["bregman/sparsity"] = torch.tensor(sparsity)
         trainer.callback_metrics["bregman/pruned_sparsity"] = torch.tensor(
             pruned_sparsity
+        )
+        pl_module.log(
+            "bregman/pruned_sparsity",
+            pruned_sparsity,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            prog_bar=False,
         )
         if target is not None:
             trainer.callback_metrics["bregman/target_sparsity"] = torch.tensor(
@@ -406,7 +453,9 @@ class BregmanPruner(Callback):
             )
             self._scale_params[group["name"]] = c
 
-        self._live_scale_names = set(self._scale_params)
+        # Populated by the first allocation step; left empty here so the eager
+        # sync folds exp(s) into lambda_scale without centering on dead layers.
+        self._live_scale_names = set()
 
         # Sync c = exp(s) into lambda_scale now (before _apply_lambda_to_groups).
         self._sync_trainable_scales(optimizer)
@@ -454,16 +503,23 @@ class BregmanPruner(Callback):
             name: float(torch.exp(s)) for name, s in self._scale_params.items()
         }
 
+    def _live_scale_params(self) -> List[torch.nn.Parameter]:
+        """The log-scales the last allocation moved. Frozen dead layers sit at a
+        stale s and would skew (min, max, std), so the scalar diagnostics read
+        only these. Falls back to all before the first allocation step."""
+        live = self._live_scale_names or set(self._scale_params)
+        return [s for name, s in self._scale_params.items() if name in live]
+
     def _scale_extremes(self) -> tuple:
-        """Global (min, max) of c over every trainable scale."""
-        vals = self._trainable_scale_values().values()
+        """Global (min, max) of c = exp(s) over the live trainable scales."""
+        vals = [float(torch.exp(s)) for s in self._live_scale_params()]
         return (min(vals), max(vals))
 
     def _scale_spread(self) -> torch.Tensor:
-        """Std of the log-scales s across layers — how far the per-layer
-        allocation has spread from neutral. Diagnostic only."""
+        """Std of the live log-scales s — how far the per-layer allocation has
+        spread from neutral. Diagnostic only."""
         with torch.no_grad():
-            scales = torch.stack(list(self._scale_params.values()))
+            scales = torch.stack(self._live_scale_params())
             if scales.numel() < 2:
                 return scales.new_zeros(())
             return scales.std()
@@ -579,14 +635,12 @@ class BregmanPruner(Callback):
         logging_params = getattr(
             pl_module, "logging_params", default_logging_params
         )
-        # Per-step only for TensorBoard/WandB tracking; epoch-level "sparsity"
-        # is injected in on_train_epoch_end.
+        # Per-step only for TensorBoard/WandB tracking; epoch-level values are
+        # injected in on_train_epoch_end (pruned_sparsity there avoids a full
+        # scan every batch).
         per_step = {**logging_params, "on_step": True, "on_epoch": False}
 
         pl_module.log("bregman/sparsity", overall_sparsity, **per_step)
-        pl_module.log(
-            "bregman/pruned_sparsity", self._pruned_sparsity(), **per_step
-        )
 
         if self.lambda_scheduler:
             pl_module.log(
