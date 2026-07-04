@@ -1,0 +1,5 @@
+# @package module.model.net
+_target_: src.modules.models.vision_resnet.build_resnet
+arch: resnet50
+num_classes: ${datamodule.num_classes}
+in_channels: ${datamodule.in_channels}

@@ -1,0 +1,13 @@
+# @package _global_
+
+# Wide-ResNet-28-10 dense SGD baseline on CIFAR-10 (standard CIFAR WRN
+# benchmark recipe). Inherits cifar10_dense_sgd; swaps only the backbone.
+# WRN is CIFAR-only (32x32) — see src/modules/models/wide_resnet.py.
+# Run: python src/train.py experiment=img/cifar10_dense_sgd_wrn28_10
+
+defaults:
+  - /experiment/img/cifar10_dense_sgd
+  - override /module/img_model: wrn28_10
+  - _self_
+
+tags: ["img", "cifar10", "dense", "sgd", "wrn28_10"]
