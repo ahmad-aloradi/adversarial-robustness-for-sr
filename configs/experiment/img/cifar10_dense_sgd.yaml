@@ -1,0 +1,50 @@
+# @package _global_
+
+# ResNet-18 dense SGD baseline on CIFAR-10 (standard ~95.5% top-1 recipe).
+# Parent for the other datasets' dense baselines (they override /datamodule).
+# Run: python src/train.py experiment=img/cifar10_dense_sgd
+
+defaults:
+  - override /datamodule: datasets/cifar10.yaml
+  - override /module: img.yaml
+  - override /trainer: gpu.yaml
+  - override /callbacks: default.yaml
+  - override /logger: tensorboard.yaml
+  - _self_
+
+tags: ["img", "cifar10", "dense", "sgd"]
+seed: 42
+
+trainer:
+  max_epochs: 200
+  min_epochs: 1
+  # AdaptiveAvgPool2d has no deterministic CUDA backward; trainer/default sets
+  # deterministic: True, which would raise on GPU.
+  deterministic: warn
+
+module:
+  optimizer:
+    _target_: torch.optim.SGD
+    _partial_: True
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 5e-4
+    nesterov: True
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+      T_max: ${trainer.max_epochs}
+    extras:
+      interval: epoch
+      frequency: ${trainer.check_val_every_n_epoch}
+
+callbacks:
+  model_checkpoint:
+    monitor: ${replace:"valid/__metric__"}
+    mode: max
+    save_top_k: 5
+    every_n_epochs: 1
+  # checkpoint_averaging:
+  #   _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
+  #   num_checkpoints: ${callbacks.model_checkpoint.save_top_k}
+  #   output_filename: averaged_top{num}.ckpt

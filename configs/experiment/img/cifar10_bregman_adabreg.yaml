@@ -1,0 +1,157 @@
+# @package _global_
+
+# Adaptive-lambda AdaBreg pruning of ResNet-18 on CIFAR-10.
+# Canonical Bregman parent: the adabreg_fixed / linbreg / linbreg_fixed
+# variants and the other datasets all inherit these pruning_groups.
+# Run: python src/train.py experiment=img/cifar10_bregman_adabreg
+
+defaults:
+  - override /datamodule: datasets/cifar10.yaml
+  - override /module: img.yaml
+  - override /trainer: gpu.yaml
+  - override /callbacks: default.yaml
+  - override /logger: tensorboard.yaml
+  - _self_
+
+tags: ["img", "cifar10", "Bregman_learning", "Adabreg"]
+seed: 42
+
+# Single source of truth for Bregman sparsity targets and lambda values.
+_bregman_target_sparsity: 0.9 # target sparsity the feedback loop drives toward
+_bregman_tolerance: 0.01 # convergence band shared by the gates + scheduler: in-band iff |sparsity - target| <= this
+_bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
+_bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
+
+trainer:
+  max_epochs: 200
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
+  gradient_clip_val: 1.0
+  num_sanity_val_steps: 0
+  # AdaptiveAvgPool2d has no deterministic CUDA backward.
+  deterministic: warn
+
+callbacks:
+  model_checkpoint:
+    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
+    target_sparsity: ${_bregman_target_sparsity} # band centre; top-k saved only within tolerance of this
+    tolerance: ${_bregman_tolerance} # in-band half-width: |sparsity - target| <= tolerance
+    sparsity_metric: sparsity # gate signal: `sparsity` = overall whole-model (Bregman)
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    save_top_k: 5
+    every_n_epochs: 1
+  model_pruning:
+    _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
+    sparsity_threshold: 1e-12
+    verbose: 2
+    target_sparsity: ${_bregman_target_sparsity}
+    lambda_scheduler:
+      _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
+      _partial_: true
+      initial_lambda: ${_bregman_lambda}
+      acceleration_factor: 1.0
+      update_frequency: 50
+      # Near-target band: gentler/less-frequent updates; shares the gates'
+      # tolerance so they stay in lock-step.
+      damping_zone: ${_bregman_tolerance}
+      damping_acceleration_divisor: 2 # alpha x-times smaller in the damping zone
+      damping_frequency_multiplier: 4 # f x-times less frequent in the damping zone
+  early_stopping:
+    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
+    target_sparsity: ${_bregman_target_sparsity} # patience advances only while in-band around this
+    tolerance: ${_bregman_tolerance} # shared in-band half-width
+    sparsity_metric: sparsity # gate signal (see model_checkpoint)
+    check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
+  ramp_validation_gate:
+    _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
+    target_sparsity: ${_bregman_target_sparsity} # validation runs only within tolerance of this
+    tolerance: ${_bregman_tolerance} # shared in-band half-width
+    sparsity_metric: sparsity # gate signal (see model_checkpoint)
+
+module:
+  optimizer:
+    _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
+    _partial_: true
+    lr: 1e-2
+
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      mode: "max"
+      factor: 0.25
+      min_lr: 1.0e-6
+      patience: 2
+      verbose: True
+    extras:
+      monitor: ${replace:"valid/__metric__"}
+      interval: "epoch"
+      frequency: ${trainer.check_val_every_n_epoch}
+
+  model:
+    # torchvision ResNet-18: match by module TYPE, not name. Its downsample
+    # layers are named layerX.0.downsample.0/.1 (no "conv"/"bn" substring), so
+    # a name regex would misroute downsample BatchNorm gammas into the RegL1
+    # fallback and silently L1-shrink them. Stem conv1 and fc head are pruned;
+    # to keep either dense, add its module name to exclude_module_name_patterns
+    # on the relevant group.
+    pruning_groups:
+      # Prunable convolutions (stem conv1 + all block convs + downsample convs).
+      - name: conv_layers
+        layer_types: ["torch.nn.Conv2d"]
+        param_names: ["weight"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            lamda: ${_bregman_lambda}
+          lambda_scale: 1.0
+        pruning_config:
+          pruning_type: "unstructured"
+          sparsity_rate: ${_bregman_initial_sparsity}
+
+      # Prunable classifier head (fc).
+      - name: linear_layers
+        layer_types: ["torch.nn.Linear"]
+        param_names: ["weight"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            lamda: ${_bregman_lambda}
+          lambda_scale: 1.0
+        pruning_config:
+          pruning_type: "unstructured"
+          sparsity_rate: ${_bregman_initial_sparsity}
+
+      # BatchNorm weight+bias — never pruned (catches downsample BN too).
+      - name: norm_params
+        layer_types: ["torch.nn.BatchNorm2d"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
+            lamda: ${_bregman_lambda}
+          lambda_scale: 0.0
+
+      # Biases from any remaining layer type — never pruned.
+      - name: bias_params
+        param_names: ["bias"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
+            lamda: ${_bregman_lambda}
+          lambda_scale: 0.0
+
+      # Catches anything left over (empty for resnet18). MUST BE LAST.
+      - name: fallback
+        is_fallback: True
+        module_name_patterns: [".*"]
+        param_names: ["weight"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            lamda: ${_bregman_lambda}
+          lambda_scale: 1.0
+        pruning_config:
+          pruning_type: "unstructured"
+          sparsity_rate: ${_bregman_initial_sparsity}

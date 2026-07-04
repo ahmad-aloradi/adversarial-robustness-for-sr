@@ -1,0 +1,15 @@
+# @package _global_
+
+# ResNet-18 dense SGD baseline on TinyImageNet (~60-65% top-1).
+# Prep first: bash scripts/datasets/prep_tiny_imagenet.sh
+# Run: python src/train.py experiment=img/tinyimagenet_dense_sgd
+
+defaults:
+  - /experiment/img/cifar10_dense_sgd
+  - override /datamodule: datasets/tinyimagenet.yaml
+  - _self_
+
+tags: ["img", "tinyimagenet", "dense", "sgd"]
+
+trainer:
+  max_epochs: 100

@@ -1,0 +1,15 @@
+# @package _global_
+
+# MNIST — global unstructured gradual magnitude pruning of ResNet-18.
+# Inherits cifar10_pruning_mag_unstruct; swaps only the dataset + epoch budget.
+# Run: python src/train.py experiment=img/mnist_pruning_mag_unstruct
+
+defaults:
+  - /experiment/img/cifar10_pruning_mag_unstruct
+  - override /datamodule: datasets/mnist.yaml
+  - _self_
+
+tags: ["img", "mnist", "pruning", "l1_unstructured", "gradual"]
+
+trainer:
+  max_epochs: 50

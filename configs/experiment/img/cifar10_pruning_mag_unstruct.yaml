@@ -1,0 +1,84 @@
+# @package _global_
+
+# Global unstructured (l1_unstructured) gradual magnitude pruning of
+# ResNet-18 on CIFAR-10. Canonical parent: the other datasets inherit this
+# and swap only the dataset + epoch budget. Equivalent recipe to
+# configs/experiment/sv/sv_pruning_mag_unstruct.yaml.
+# Run: python src/train.py experiment=img/cifar10_pruning_mag_unstruct
+
+defaults:
+  - override /datamodule: datasets/cifar10.yaml
+  - override /module: img.yaml
+  - override /trainer: gpu.yaml
+  - override /callbacks:
+      - default.yaml
+      - checkpoint_handler.yaml
+  - override /logger: tensorboard.yaml
+  - _self_
+
+tags: ["img", "cifar10", "pruning", "l1_unstructured", "gradual"]
+seed: 42
+
+_pruning_tolerance: 0.01 # convergence band shared by the gates: in-band iff |sparsity - target| <= this
+
+trainer:
+  max_epochs: 200
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
+  gradient_clip_val: 1.0
+  num_sanity_val_steps: 0
+  # AdaptiveAvgPool2d has no deterministic CUDA backward.
+  deterministic: warn
+
+callbacks:
+  model_checkpoint:
+    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
+    target_sparsity: ${callbacks.model_pruning.amount} # band centre = pruning rate; top-k saved only within tolerance of this
+    tolerance: ${_pruning_tolerance} # in-band half-width: |sparsity - target| <= tolerance
+    sparsity_metric: "pruning/sparsity" # gate signal: pruned params only (the pruning rate); `sparsity` would be overall whole-model
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    save_top_k: 5
+    every_n_epochs: 1
+  model_pruning:
+    _target_: src.callbacks.pruning.prune.MagnitudePruner
+    pruning_fn: l1_unstructured # torch.nn.utils.prune function: ln_structured, l1_unstructured, random_structured, random_unstructured
+    amount: 0.9 # final sparsity once scheduled_pruning finishes ramping
+    use_global_unstructured: true # single global ranking across all prunable parameters
+    make_pruning_permanent: true # fuse masks into weights at training end
+    pruning_dim: null # not applicable to unstructured pruning
+    pruning_norm: null # not applicable to unstructured pruning
+    verbose: 1
+    scheduled_pruning: true # ramp sparsity to `amount` over `epochs_to_ramp`
+    epochs_to_ramp: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% of training, matching the SV recipe's ratio
+    schedule_type: linear # linear sparsity ramp from 0 to `amount`
+    tolerance: ${_pruning_tolerance} # monotonicity check band, shared with the gates
+  early_stopping:
+    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
+    target_sparsity: ${callbacks.model_pruning.amount} # patience advances only while in-band around this
+    tolerance: ${_pruning_tolerance} # shared in-band half-width
+    sparsity_metric: "pruning/sparsity" # gate signal (see model_checkpoint)
+    check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
+    mode: max
+    monitor: ${replace:"valid/__metric__"}
+    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
+  ramp_validation_gate:
+    _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
+    target_sparsity: ${callbacks.model_pruning.amount} # validation runs only within tolerance of this
+    tolerance: ${_pruning_tolerance} # shared in-band half-width
+    sparsity_metric: "pruning/sparsity" # gate signal (see model_checkpoint)
+
+module:
+  optimizer:
+    _target_: torch.optim.SGD
+    _partial_: True
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 5e-4
+    nesterov: True
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+      T_max: ${trainer.max_epochs}
+    extras:
+      interval: epoch
+      frequency: ${trainer.check_val_every_n_epoch}

@@ -1,0 +1,46 @@
+_target_: src.modules.img.ImageClassification
+
+defaults:
+  - _self_
+
+model:
+  net:
+    _target_: src.modules.models.vision_resnet.build_resnet18
+    num_classes: ${datamodule.num_classes}
+    in_channels: ${datamodule.in_channels}
+
+### criteria and metrics ###
+criterion:
+  train_criterion:
+    _target_: torch.nn.CrossEntropyLoss
+  # For the `replace` resolver (__loss__). Non-`_partial_` so it resolves to
+  # the class name, not "partial".
+  loss: ${module.criterion.train_criterion}
+
+metrics:
+  train:
+    _target_: torchmetrics.Accuracy
+    task: multiclass
+    num_classes: ${datamodule.num_classes}
+  valid:
+    _target_: torchmetrics.Accuracy
+    task: multiclass
+    num_classes: ${datamodule.num_classes}
+  valid_best:
+    _target_: torchmetrics.MaxMetric
+  test:
+    _target_: torchmetrics.Accuracy
+    task: multiclass
+    num_classes: ${datamodule.num_classes}
+
+### optimizer and lr_scheduler (set per experiment; `???` blocks stale kwargs
+### from leaking across scheduler swaps, e.g. cosine T_max -> ReduceLROnPlateau)
+optimizer: ???
+lr_scheduler: ???
+
+### extras and callbacks ###
+logging_params:
+  on_step: False
+  on_epoch: True
+  sync_dist: True
+  prog_bar: True

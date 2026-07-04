@@ -1,0 +1,25 @@
+# @package _global_
+
+# Fixed-lambda AdaBreg: no scheduler, static regularization.
+# Run: python src/train.py experiment=img/cifar10_bregman_adabreg_fixed
+
+defaults:
+  - /experiment/img/cifar10_bregman_adabreg
+  - _self_
+
+tags: ["img", "cifar10", "Bregman_learning", "Adabreg", "fixed"]
+
+_bregman_fixed_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},fixed_lambda}
+_bregman_lambda: ${_bregman_fixed_lambda}
+
+callbacks:
+  model_pruning:
+    lambda_scheduler: null
+  # Fixed lambda has no ramp, so don't gate validation on sparsity: tolerance
+  # 1.0 spans all sparsities -> gates never suppress (adaptive keeps 0.01).
+  model_checkpoint:
+    tolerance: 1.0
+  early_stopping:
+    tolerance: 1.0
+  ramp_validation_gate:
+    tolerance: 1.0

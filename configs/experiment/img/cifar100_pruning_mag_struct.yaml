@@ -1,0 +1,12 @@
+# @package _global_
+
+# CIFAR-100 — structured gradual magnitude pruning of ResNet-18.
+# Inherits cifar10_pruning_mag_struct; swaps only the dataset.
+# Run: python src/train.py experiment=img/cifar100_pruning_mag_struct
+
+defaults:
+  - /experiment/img/cifar10_pruning_mag_struct
+  - override /datamodule: datasets/cifar100.yaml
+  - _self_
+
+tags: ["img", "cifar100", "pruning", "ln_structured", "gradual"]

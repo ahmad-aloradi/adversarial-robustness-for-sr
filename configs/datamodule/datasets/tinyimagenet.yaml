@@ -1,0 +1,45 @@
+_target_: src.datamodules.vision_datamodule.VisionDataModule
+
+dataset:
+  # TinyImageNet is not a torchvision download; prep restructures the val split
+  # into val_structured/<wnid>/ so ImageFolder gives matching train/val labels.
+  prep_hint: bash scripts/datasets/prep_tiny_imagenet.sh
+  train_dataset:
+    _target_: torchvision.datasets.ImageFolder
+    root: ${paths.data_dir}/tiny-imagenet-200/train
+  valid_dataset:
+    _target_: torchvision.datasets.ImageFolder
+    root: ${paths.data_dir}/tiny-imagenet-200/val_structured
+  test_dataset: ${.valid_dataset}
+
+transforms:
+  train:
+    - { _target_: torchvision.transforms.RandomCrop, size: 64, padding: 4 }
+    - { _target_: torchvision.transforms.RandomHorizontalFlip }
+    - { _target_: torchvision.transforms.ToTensor }
+    - _target_: torchvision.transforms.Normalize
+      mean: [0.4802, 0.4481, 0.3975]
+      std: [0.2770, 0.2691, 0.2821]
+  eval:
+    - { _target_: torchvision.transforms.ToTensor }
+    - _target_: torchvision.transforms.Normalize
+      mean: [0.4802, 0.4481, 0.3975]
+      std: [0.2770, 0.2691, 0.2821]
+
+num_classes: 200
+in_channels: 3
+
+loaders:
+  train:
+    batch_size: 256
+    shuffle: True
+    num_workers: 8
+    drop_last: False
+    pin_memory: True
+  valid:
+    batch_size: 256
+    shuffle: False
+    num_workers: 8
+    drop_last: False
+    pin_memory: True
+  test: ${.valid}
