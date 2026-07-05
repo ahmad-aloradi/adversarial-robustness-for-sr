@@ -6,8 +6,6 @@ model and allows it to become denser during training. The lambda scheduler
 adjusts regularization strength to drive sparsity toward a target level.
 """
 
-import csv
-import os
 from typing import Any, Dict, List, Literal, Optional
 
 import torch
@@ -16,12 +14,10 @@ from pytorch_lightning.utilities import rank_zero_only
 
 from src import utils
 from src.callbacks.pruning.shared_prune_utils import compute_sparsity
-from src.callbacks.pruning.utils.pruning_manager import (
-    SCALES_ATTR,
-    PruningManager,
-)
+from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
-from .bregman_regularizers import RegNone
+from .activation_stats import ActivationStats
+from .bregman_regularizers import RegL1ColWeighted, RegNone
 from .lambda_scheduler import LambdaScheduler
 
 log = utils.get_pylogger(__name__)
@@ -31,15 +27,6 @@ log = utils.get_pylogger(__name__)
 # (the feedback loop sees exactly the params the regularizer acts on).
 WHICH_SPARSITY_PERCENTAGE: Literal["overall", "pruned"] = "overall"
 
-# Per-layer scale evolution dump; read back by src/vis/scale_evolution.py.
-SCALE_HISTORY_CSV = "trainable_scales_history.csv"
-
-# Water-filling allocation: a survivor with 0 < |θ| ≤ SCALE_BAND·t counts toward
-# the kill-rate κ_g = n_band/(SCALE_BAND·t); ρ_g = −S_g/κ_g equalizes at optimum.
-SCALE_BAND: float = 0.25
-# Numeric guard on the log-scale s_g (c = e^s ∈ [~1e-13, 1e13]); not a floor.
-SCALE_CLAMP: float = 30.0
-
 
 class BregmanPruner(Callback):
     """Orchestrates sparsity-related operations during Bregman-based training.
@@ -48,8 +35,7 @@ class BregmanPruner(Callback):
     - Applies initial sparsity to the model (via PruningManager)
     - Optionally updates regularization strength (lambda) per batch via
       LambdaScheduler (fixed-target feedback)
-    - Optionally trains one scalar per-layer scale factor (allocation) when
-      groups carry a trainable_scale marker
+    - Refreshes activation statistics for RegL1ColWeighted (Wanda) groups
     - Logs sparsity metrics and checkpoints the scheduler state
     """
 
@@ -59,8 +45,7 @@ class BregmanPruner(Callback):
         verbose: int = 1,
         lambda_scheduler: Optional[LambdaScheduler] = None,
         target_sparsity: Optional[float] = None,
-        scale_update_freq: int = 10,  # water-filling gradient period (O(params) per call)
-        kill_rate: Literal["hard_band", "soft"] = "hard_band",  # κ estimator
+        act_update_freq: int = 100,  # batches between activation refreshes
     ):
         """
         Args:
@@ -72,19 +57,15 @@ class BregmanPruner(Callback):
                 logged each epoch. The sparsity-gated callbacks are configured
                 with the same value independently. Required when a
                 lambda_scheduler is set.
-            kill_rate: Per-layer kill-rate κ_g estimator for the allocation.
-                "hard_band" counts survivors in (0, SCALE_BAND·t] and freezes a
-                layer with none. "soft" uses κ_g = Σ_surv exp(−|θ|/h)/h with
-                h = SCALE_BAND·t, so a layer freezes only when it has no
-                survivor at all (avoids the spurious dead-layer freeze that
-                stalls allocation at high sparsity).
+            act_update_freq: Batches between activation-stat refreshes for
+                RegL1ColWeighted (Wanda) groups. Per-batch refresh churns
+                the thresholds; ~100 is stable.
         """
         super().__init__()
-        if kill_rate not in ("hard_band", "soft"):
-            raise ValueError(
-                f"kill_rate must be 'hard_band' or 'soft', got {kill_rate!r}."
-            )
-        self.kill_rate = kill_rate
+        assert act_update_freq >= 1, (
+            f"act_update_freq must be >= 1, got {act_update_freq}"
+        )
+        self.act_update_freq = act_update_freq
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
@@ -98,23 +79,17 @@ class BregmanPruner(Callback):
                     f"{self._target_sparsity}"
                 )
 
-        self.scale_update_freq = scale_update_freq
         self.manager: Optional[PruningManager] = None
         self._optimizer: Optional[torch.optim.Optimizer] = None
         self._initialized = False
         self._ckpt_scheduler_state: Optional[dict] = None
-        self._scales_need_sync: bool = False
 
-        # Per-layer log-scale s_g (c_g = exp(s_g)), keyed by weight-group name;
-        # filled at on_fit_start iff groups carry a trainable_scale marker.
-        # Non-empty = active.
-        self._scale_params: Dict[str, torch.nn.Parameter] = {}
-        # Live (non-dead) scale groups from the last allocation step; the gauge
-        # re-centering and the ρ̄ injection exclude dead/frozen layers.
-        self._live_scale_names: set = set()
-        # One row per epoch: {"epoch", "step", <layer>: c, ...}. Dumped to
-        # SCALE_HISTORY_CSV and persisted in the checkpoint (resume-safe).
-        self._scale_history: List[Dict[str, float]] = []
+        # Wanda groups: {group_name: reg}, hooks in _act_stats. Activation
+        # stats are derived state (nothing checkpointed): _act_refresh_pending
+        # forces a refresh on the first batch after every fit start.
+        self._wanda_regs: Dict[str, RegL1ColWeighted] = {}
+        self._act_stats: Optional[ActivationStats] = None
+        self._act_refresh_pending: bool = False
 
     # -------------------------------------------------------------------------
     # Lightning hooks
@@ -124,7 +99,6 @@ class BregmanPruner(Callback):
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         """Initialize the callback at the start of training."""
-        self._validate_module(pl_module)
         self.manager = pl_module.pruning_manager
 
         if not trainer.optimizers:
@@ -151,11 +125,7 @@ class BregmanPruner(Callback):
             self.manager.apply_initial_sparsity()
 
         self._setup_lambda_scheduler(optimizer, trainer, is_resuming)
-
-        # Resolve trainable scales before applying lambda so c (restored, else
-        # neutral 1) is already in lambda_scale at batch 0.
-        self._setup_trainable_scales(optimizer, pl_module)
-
+        self._setup_activation_stats(optimizer, pl_module)
         self._apply_lambda_to_groups(trainer)
         if is_resuming and self._ckpt_scheduler_state:
             log.info("Restored lambda values to optimizer parameter groups.")
@@ -164,88 +134,36 @@ class BregmanPruner(Callback):
         self._log_configuration(optimizer)
         self._log_group_assignments(pl_module)
 
+    def on_train_batch_start(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        """Arm the activation hooks on refresh batches (Wanda groups only)."""
+        if self._act_stats is None:
+            return
+        if (
+            self._act_refresh_pending
+            or trainer.global_step % self.act_update_freq == 0
+        ):
+            self._act_stats.arm()
+
     def on_before_optimizer_step(
         self,
         trainer: Trainer,
         pl_module: LightningModule,
         optimizer: torch.optim.Optimizer,
     ) -> None:
-        """Inject the water-filling allocation gradient into each log-scale s_g.
-
-        λ acts inside the no-grad prox, so autograd never sees the scale; the
-        link is supplied here. For layer g with c_g = exp(s_g) and threshold
-        ``t = δ·λ_global·c_g`` (``reg.lamda = λ_global·c_g``):
-
-            S_g = Σ_live grad_i·sign(θ_i)        (loss change per unit shrink)
-            κ_g = kill_qty / (SCALE_BAND·t)       (kill-rate; see kill_rate arg)
-            ρ_g = −S_g / κ_g                      (marginal loss per killed weight)
-            s_g.grad = ρ_g − mean_live(ρ)         (gauge-projected, budget-neutral)
-
-        ``sign(0)=0`` drops dead weights from S_g. A dead layer (hard_band: no
-        in-band survivor; soft: no survivor at all) is frozen (``s.grad = None``)
-        and excluded from the live mean, else its centered gradient diverges.
-        The stationary point ρ_g = μ ∀ live g is the water-filling optimum.
-        """
-        if not self._scale_params:
+        """Fold freshly captured activation stats into the Wanda regs, so
+        this batch's prox already thresholds in the new metric."""
+        if self._act_stats is None or not self._act_stats.fresh():
             return
-        global_step = 0 if trainer is None else trainer.global_step
-        if global_step % self.scale_update_freq != 0:
-            self._scales_need_sync = False
-            return
-        self._scales_need_sync = True
-        lam_global = self.lambda_scheduler.get_lambda()
-        with torch.no_grad():
-            # Two passes so the per-group kill quantities read back in one
-            # stacked tolist() (one device->host sync), not a float() per group.
-            pending, kill_qtys, alive_counts = [], [], []
-            for group in optimizer.param_groups:
-                name = group.get("name")
-                if name not in self._scale_params:
-                    continue
-                s = self._scale_params[name]
-                h = SCALE_BAND * group["delta"] * lam_global * torch.exp(s)
-                signal = s.new_zeros(())
-                kill_qty = s.new_zeros(())  # κ_g·h: band count or kernel sum
-                n_alive = s.new_zeros(())
-                for p in group["params"]:
-                    if p.grad is None:
-                        continue
-                    signal = signal + (p.grad * torch.sign(p)).sum()
-                    abs_p = p.abs()
-                    alive = abs_p > self.sparsity_threshold
-                    n_alive = n_alive + alive.sum()
-                    if self.kill_rate == "hard_band":
-                        kill_qty = kill_qty + (alive & (abs_p <= h)).sum()
-                    else:  # survivor-kernel density at 0 (no spurious freeze)
-                        kill_qty = kill_qty + torch.exp(-abs_p[alive] / h).sum()
-                pending.append((name, s, signal, h))
-                kill_qtys.append(kill_qty)
-                alive_counts.append(n_alive)
-
-            qtys = torch.stack(kill_qtys).tolist() if kill_qtys else []
-            alives = torch.stack(alive_counts).tolist() if alive_counts else []
-            rho: Dict[str, torch.Tensor] = {}
-            for (name, s, signal, h), qty, n_alive in zip(
-                pending, qtys, alives
-            ):
-                # Dead: hard_band has no in-band survivor; soft has none at all.
-                dead = (
-                    n_alive == 0.0
-                    if self.kill_rate == "soft"
-                    else qty == 0.0
-                )
-                if dead:
-                    s.grad = None  # freeze, drop from the live mean
-                    continue
-                kappa = qty / h  # κ_g
-                rho[name] = -signal / kappa
-
-            self._live_scale_names = set(rho)
-            if not rho:
-                return
-            rho_bar = torch.stack(list(rho.values())).mean()
-            for name, rho_g in rho.items():
-                self._scale_params[name].grad = rho_g - rho_bar
+        for name, col_weights in self._act_stats.consume().items():
+            self._wanda_regs[name].col_weights = col_weights
+        self._resync_wanda_dual(optimizer)
+        self._act_refresh_pending = False
 
     def on_train_batch_end(
         self,
@@ -258,11 +176,6 @@ class BregmanPruner(Callback):
         """Update lambda scheduler and log metrics after each batch."""
         if not self._initialized:
             return
-
-        # Re-center and fold c = exp(s) into lambda_scale only when scales were
-        # actually stepped this batch (avoids a GPU→CPU sync on skipped steps).
-        if self._scale_params and self._scales_need_sync:
-            self._sync_trainable_scales(trainer.optimizers[0])
 
         # Whole-model sparsity is the dominant per-batch cost; compute once and
         # share it with the scheduler step, the metric logging, and the gate.
@@ -322,10 +235,6 @@ class BregmanPruner(Callback):
                 f"{target_str}"
             )
 
-        if self._scale_params:
-            self._log_scale_table()
-            self._record_scale_history(trainer, pl_module)
-
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
     ) -> None:
@@ -334,8 +243,6 @@ class BregmanPruner(Callback):
             checkpoint["bregman_lambda_scheduler_state"] = (
                 self.lambda_scheduler.get_state()
             )
-        if self._scale_history:
-            checkpoint["bregman_scale_history"] = self._scale_history
 
     def on_load_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
@@ -345,10 +252,13 @@ class BregmanPruner(Callback):
             "bregman_lambda_scheduler_state",
             checkpoint.get("lambda_scheduler_state"),  # pre-rename compat
         )
-        # Absent only for pre-feature ckpts / non-trainable runs; a present but
-        # malformed value still raises (list() on a non-iterable).
-        if "bregman_scale_history" in checkpoint:
-            self._scale_history = list(checkpoint["bregman_scale_history"])
+
+    def teardown(
+        self, trainer: Trainer, pl_module: LightningModule, stage: str
+    ) -> None:
+        """Deregister the activation hooks."""
+        if self._act_stats is not None:
+            self._act_stats.remove()
 
     # -------------------------------------------------------------------------
     # Scheduler management
@@ -409,160 +319,83 @@ class BregmanPruner(Callback):
                 group["reg"].lamda = lambda_value * self._lambda_scale(group)
 
     # -------------------------------------------------------------------------
-    # Trainable per-layer scales (scalar, one per layer)
+    # Activation statistics (Wanda ordering)
     # -------------------------------------------------------------------------
 
-    def _setup_trainable_scales(
+    def _setup_activation_stats(
         self, optimizer, pl_module: LightningModule
     ) -> None:
-        """Map each trainable weight group to its scalar scale factor c_g.
+        """Wire forward hooks for every RegL1ColWeighted (Wanda) group.
 
-        No-op unless groups carry the ``trainable_scale`` marker. One global
-        LambdaScheduler owns the sparsity level; each layer's scalar c_g owns
-        its share of the allocation, so the scheduler is required.
+        Each such group must hold exactly one weight tensor (the prox has no
+        param identity), produced by ``expand_per_layer: true`` on the group
+        config. col_weights start at ones (so the lazy sub_grad init in the
+        first optimizer step works) and are refreshed from the first batch.
         """
-        trainable_groups = [
-            g for g in optimizer.param_groups if g.get("trainable_scale")
+        wanda_groups = [
+            g
+            for g in optimizer.param_groups
+            if isinstance(g.get("reg"), RegL1ColWeighted)
         ]
-        if not trainable_groups:
+        self._wanda_regs = {}
+        self._act_stats = None
+        if not wanda_groups:
             return
-        if self.lambda_scheduler is None:
-            raise ValueError(
-                "trainable per-layer scales require a global lambda_scheduler "
-                "(it owns the sparsity level the scales allocate)."
-            )
-        if not hasattr(pl_module, SCALES_ATTR):
-            raise AttributeError(
-                f"trainable_scale groups present but pl_module has no "
-                f"'{SCALES_ATTR}'; call create_scale_params in setup()."
-            )
-        scale_dict = getattr(pl_module, SCALES_ATTR)
 
-        self._scale_params = {}
-        for group in trainable_groups:
-            key = group["trainable_scale_key"]
-            if key not in scale_dict:
-                raise KeyError(
-                    f"trainable_scale group '{group.get('name')}' references "
-                    f"missing scale key '{key}'."
-                )
-            c = scale_dict[key]
-            assert c.dim() == 0, (
-                f"trainable_scale '{group.get('name')}' expects a scalar "
-                f"scale factor, got shape {tuple(c.shape)}."
+        param_to_module = {
+            id(p): (mod_name, module)
+            for mod_name, module in pl_module.named_modules()
+            for _, p in module.named_parameters(recurse=False)
+        }
+        hooked_modules = {}
+        for group in wanda_groups:
+            name = group["name"]
+            assert len(group["params"]) == 1, (
+                f"Wanda group '{name}' must hold exactly one weight; set "
+                f"expand_per_layer: true on the group config."
             )
-            self._scale_params[group["name"]] = c
+            weight = group["params"][0]
+            assert id(weight) in param_to_module, (
+                f"Wanda group '{name}': owning module not found."
+            )
+            mod_name, module = param_to_module[id(weight)]
+            group["reg"].col_weights = torch.ones(
+                weight.shape[1], device=weight.device
+            )
+            hooked_modules[name] = module
+            self._wanda_regs[name] = group["reg"]
 
-        # Populated by the first allocation step; left empty here so the eager
-        # sync folds exp(s) into lambda_scale without centering on dead layers.
-        self._live_scale_names = set()
-
-        # Sync c = exp(s) into lambda_scale now (before _apply_lambda_to_groups).
-        self._sync_trainable_scales(optimizer)
+        self._act_stats = ActivationStats(hooked_modules)
+        self._act_refresh_pending = True
         log.info(
-            f"BregmanPruner: trainable per-layer scales active "
-            f"({len(self._scale_params)} layers, water-filling allocation, "
-            f"band={SCALE_BAND})."
+            f"BregmanPruner: Wanda ordering active "
+            f"({len(self._wanda_regs)} layers, "
+            f"act_update_freq={self.act_update_freq})."
         )
 
-    def _sync_trainable_scales(self, optimizer) -> None:
-        """Re-center the live log-scales to zero mean (the gauge Σ_live s = 0),
-        clamp s to the numeric range, and fold c = exp(s) into each group's
-        ``lambda_scale`` so the scheduler sets reg.lamda = λ_global · c.
-
-        Dead/frozen layers are excluded from the re-centering (a pinned dead s
-        would otherwise offset the mean and distort every live allocation).
-        """
-        live_s = [
-            self._scale_params[name]
-            for name in self._scale_params
-            if name in self._live_scale_names
-        ]
-        if live_s:
-            mean_s = torch.stack([s.data for s in live_s]).mean()
-            for s in live_s:
-                s.data.sub_(mean_s)
-
-        groups, scales = [], []
-        for group in optimizer.param_groups:
-            name = group.get("name")
-            if name not in self._scale_params:
-                continue
-            s = self._scale_params[name]
-            s.data.clamp_(-SCALE_CLAMP, SCALE_CLAMP)
-            groups.append(group)
-            scales.append(s)
-        if scales:
-            values = torch.stack([torch.exp(s.data) for s in scales]).tolist()
-            for group, value in zip(groups, values):
-                group["lambda_scale"] = value
-
-    def _trainable_scale_values(self) -> Dict[str, float]:
-        """Per-layer effective scale factor c = exp(s) as one float."""
-        return {
-            name: float(torch.exp(s)) for name, s in self._scale_params.items()
-        }
-
-    def _live_scale_params(self) -> List[torch.nn.Parameter]:
-        """The log-scales the last allocation moved. Frozen dead layers sit at a
-        stale s and would skew (min, max, std), so the scalar diagnostics read
-        only these. Falls back to all before the first allocation step."""
-        live = self._live_scale_names or set(self._scale_params)
-        return [s for name, s in self._scale_params.items() if name in live]
-
-    def _scale_extremes(self) -> tuple:
-        """Global (min, max) of c = exp(s) over the live trainable scales."""
-        vals = [float(torch.exp(s)) for s in self._live_scale_params()]
-        return (min(vals), max(vals))
-
-    def _scale_spread(self) -> torch.Tensor:
-        """Std of the live log-scales s — how far the per-layer allocation has
-        spread from neutral. Diagnostic only."""
-        with torch.no_grad():
-            scales = torch.stack(self._live_scale_params())
-            if scales.numel() < 2:
-                return scales.new_zeros(())
-            return scales.std()
-
-    @rank_zero_only
-    def _record_scale_history(
-        self, trainer: Trainer, pl_module: LightningModule
+    @torch.no_grad()
+    def _resync_wanda_dual(
+        self, optimizer: torch.optim.Optimizer
     ) -> None:
-        """Append this epoch's per-layer c, log it, and rewrite the CSV.
+        """Rebuild the Bregman dual variable after a col_weights refresh.
 
-        The logger records only the scalar min/max; the full per-layer time
-        series goes to the tracker (one series per layer) and to
-        SCALE_HISTORY_CSV for src/vis/scale_evolution.py.
+        Bregman stores its iterate as v = θ/δ + ∂J(θ); for the column-weighted
+        L1 the subgradient baseline in v scales as λ/col_weights. Changing
+        col_weights mid-run would leave v holding the old baseline while the
+        prox subtracts the new threshold, releasing the stale baseline as an
+        exploding weight. Recomputing v from the current θ and the new
+        col_weights restores the invariant and leaves θ = prox(δv) unchanged.
         """
-        scales = self._trainable_scale_values()
-        row: Dict[str, float] = {
-            "epoch": trainer.current_epoch,
-            "step": trainer.global_step,
-        }
-        row.update(scales)
-        self._scale_history.append(row)
-        for name, value in scales.items():
-            pl_module.log(
-                f"bregman/scale/{name}",
-                value,
-                on_step=False,
-                on_epoch=True,
-                sync_dist=False,
-            )
-        self._write_scale_history_csv(trainer)
-
-    def _write_scale_history_csv(self, trainer: Trainer) -> None:
-        """Overwrite the run's scale-history CSV (small; rewrite is crash-
-        safe)."""
-        out_dir = trainer.default_root_dir
-        if not out_dir:
-            return
-        path = os.path.join(out_dir, SCALE_HISTORY_CSV)
-        fieldnames = ["epoch", "step", *self._scale_params.keys()]
-        with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(self._scale_history)
+        for group in optimizer.param_groups:
+            reg = group.get("reg")
+            if not isinstance(reg, RegL1ColWeighted):
+                continue
+            delta = group["delta"]
+            for p in group["params"]:
+                state = optimizer.state[p]
+                if "sub_grad" not in state:
+                    continue  # first step: the optimizer initializes it itself
+                state["sub_grad"] = p.data / delta + reg.sub_grad(p.data)
 
     # -------------------------------------------------------------------------
     # Sparsity
@@ -649,14 +482,6 @@ class BregmanPruner(Callback):
                 **per_step,
             )
 
-        if self._scale_params:
-            scale_min, scale_max = self._scale_extremes()
-            pl_module.log("bregman/scale_min", scale_min, **per_step)
-            pl_module.log("bregman/scale_max", scale_max, **per_step)
-            pl_module.log(
-                "bregman/scale_spread", self._scale_spread(), **per_step
-            )
-
     @rank_zero_only
     def _log_configuration(self, optimizer) -> None:
         """Log the configuration of all parameter groups."""
@@ -688,16 +513,11 @@ class BregmanPruner(Callback):
                 f"  Group '{name}': {reg_type}, lambda={lamda:.4f}, scale={scale}"
             )
 
-            # Non-uniform scaling is the point under trainable allocation, so
-            # only warn about a hand-set scale in the other modes.
-            if scale != 1.0 and not self._scale_params:
+            if scale != 1.0:
                 log.warning(
                     f"Group '{name}' has lambda_scale={scale} != 1.0. "
                     "Non-uniform regularization is generally not recommended."
                 )
-
-        if self._scale_params:
-            self._log_scale_table()
 
         log.info("Current sparsity by group:")
         for group in self.manager.processed_groups:
@@ -715,18 +535,6 @@ class BregmanPruner(Callback):
             f"(pruned only: {self._pruned_sparsity():.3%})"
         )
         log.info("=== End Configuration ===")
-
-    @rank_zero_only
-    def _log_scale_table(self) -> None:
-        """Log the per-layer effective scale factor c, highest first (most
-        pruning pressure), so cross-layer allocation drift is visible."""
-        scales = self._trainable_scale_values()
-        ordered = sorted(scales.items(), key=lambda kv: kv[1], reverse=True)
-        lines = [f"  {name}: {scale:.4f}" for name, scale in ordered]
-        log.info(
-            "Trainable per-layer scales (c, high pressure first):\n"
-            + "\n".join(lines)
-        )
 
     @rank_zero_only
     def _log_group_assignments(self, pl_module: LightningModule) -> None:
@@ -795,15 +603,3 @@ class BregmanPruner(Callback):
             and BregmanPruner._lambda_scale(group) > 0.0
         )
 
-    @staticmethod
-    def _validate_module(pl_module: LightningModule) -> None:
-        """Validate that the module has a pruning_manager."""
-        if not hasattr(pl_module, "pruning_manager"):
-            raise AttributeError(
-                "LightningModule must have a 'pruning_manager' attribute. "
-                "Please instantiate it in configure_optimizers()."
-            )
-        if not isinstance(pl_module.pruning_manager, PruningManager):
-            raise TypeError(
-                f"pruning_manager must be a PruningManager, got {type(pl_module.pruning_manager)}"
-            )

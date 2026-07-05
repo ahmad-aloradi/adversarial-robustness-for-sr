@@ -585,7 +585,7 @@ def _get_job_routing(dataset_name, sparsity=None):
 
 
 # ResNet overshoots with the ECAPA-TDNN default of 1.0; gentler value here.
-RESNET_ACCELERATION_FACTOR = 0.15
+RESNET_ACCELERATION_FACTOR = 0.25
 
 
 def _bregman_has_lambda_scheduler(experiment):
@@ -594,8 +594,17 @@ def _bregman_has_lambda_scheduler(experiment):
 
 
 def _acceleration_factor_for(experiment, sv_model):
-    """ResNet override for the Bregman lambda acceleration_factor, else None."""
-    if "resnet" in sv_model and _bregman_has_lambda_scheduler(experiment):
+    """ResNet override for the Bregman lambda acceleration_factor, else None.
+
+    Only adaptive Bregman (lambda scheduler) carries an acceleration_factor to
+    override; vanilla fixed-lambda variants set lambda_scheduler=null, so they
+    are excluded via _bregman_has_lambda_scheduler.
+    """
+    if (
+        "resnet" in sv_model
+        and _bregman_has_lambda_scheduler(experiment)
+        and "adabreg" in experiment
+    ):
         return RESNET_ACCELERATION_FACTOR
     return None
 
@@ -880,10 +889,11 @@ def run_sv(transfer_data="false", force="false"):
     ########################
     RUN_BASELINE_EXPS = False
     RUN_PRUNING_EXPS = False
+    # Vanilla Bregman: fixed lambda, no scheduler (sv_bregman_*_fixed).
     RUN_FIXED_BREGMAN_EXPS = False
-    # Adaptive Bregman options at a fixed target: {trainable scales, uniform}.
-    RUN_TRAINABLE_FIXED_EXPS = False  # fixed, trainable
-    RUN_ADAPTIVE_CLASSICAL = True  # fixed, uniform
+    # Adaptive Bregman (lambda scheduler), two ordering modes:
+    RUN_WANDA_ADAPTIVE_EXPS = False  # adaptive, Wanda ordering
+    RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
@@ -916,7 +926,7 @@ def run_sv(transfer_data="false", force="false"):
             }
         )
 
-    # Auxiliary fixed-lambda Bregman (static lambda, no scheduler).
+    # Vanilla Bregman: fixed lambda, no scheduler.
     if RUN_FIXED_BREGMAN_EXPS:
         for _exp in ("sv_bregman_adabreg_fixed", "sv_bregman_linbreg_fixed"):
             EXPERIMENTS.append(
@@ -928,24 +938,19 @@ def run_sv(transfer_data="false", force="false"):
                 }
             )
 
-    # CASE 1 — trainable scales at a fixed target.
-    if RUN_TRAINABLE_FIXED_EXPS:
-        for _exp in (
-            "sv_bregman_adabreg_trainable_scales",
-            "sv_bregman_linbreg_trainable_scales",
-        ):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "sv_models": [ecapa, resnet34],
-                    "sparsity_rates": [0.90, 0.99],
-                    "dataset_names": ["multi_sv"],
-                    "suffix": "-fixed_target",
-                }
-            )
+    # CASE 1 — adaptive Bregman, Wanda (activation-weighted) ordering.
+    if RUN_WANDA_ADAPTIVE_EXPS:
+        EXPERIMENTS.append(
+            {
+                "experiment": "sv_bregman_adabreg_wanda",
+                "sv_models": [ecapa, resnet34],
+                "sparsity_rates": [0.90, 0.99],
+                "dataset_names": ["multi_sv"],
+            }
+        )
 
-    # CASE 2 — vanilla Bregman at a fixed target, uniform allocation. Dense start
-    # to match the other cells (base defaults to 0.99 sparse).
+    # CASE 2 — adaptive Bregman, uniform allocation. Dense start to match the
+    # other cells (base defaults to 0.99 sparse).
     if RUN_ADAPTIVE_CLASSICAL:
         for _exp in ("sv_bregman_adabreg", "sv_bregman_linbreg"):
             EXPERIMENTS.append(
@@ -954,7 +959,7 @@ def run_sv(transfer_data="false", force="false"):
                     "sv_models": [ecapa],
                     "sparsity_rates": [0.99],
                     "dataset_names": ["multi_sv"],
-                    "suffix": "-fixed_target",
+                    # "suffix": "-fixed_target",
                 }
             )
 
@@ -989,11 +994,12 @@ def run_sv(transfer_data="false", force="false"):
     # --- Bregman acceleration_factor per encoder ---
     accel_rows = {}
     for cfg in EXPERIMENTS:
-        if not _bregman_has_lambda_scheduler(cfg["experiment"]):
+        experiment = cfg["experiment"]
+        if not _bregman_has_lambda_scheduler(experiment):
             continue
         for sv_model in cfg["sv_models"]:
-            override = _acceleration_factor_for(cfg["experiment"], sv_model)
-            accel_rows[sv_model] = (
+            override = _acceleration_factor_for(experiment, sv_model)
+            accel_rows[(experiment, sv_model)] = (
                 f"{override} (override)"
                 if override is not None
                 else "1.0 (YAML default)"
@@ -1001,8 +1007,8 @@ def run_sv(transfer_data="false", force="false"):
     if accel_rows:
         print(f"{'='*50}")
         print("Bregman lambda acceleration_factor:")
-        for sv_model, shown in sorted(accel_rows.items()):
-            print(f"  {sv_model:<26} -> {shown}")
+        for (experiment, sv_model), shown in sorted(accel_rows.items()):
+            print(f"  {experiment} / {sv_model:<26} -> {shown}")
         print(f"{'='*50}\n")
 
     # --- Submit all experiments (only for current cluster) ---

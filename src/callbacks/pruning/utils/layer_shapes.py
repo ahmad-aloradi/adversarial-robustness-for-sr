@@ -1,7 +1,7 @@
 """Shape records for prunable weights, read off a live torch module.
 
 The only place that reads weight shapes off a model; used to enumerate the
-prunable layers when registering one trainable per-layer scale factor each.
+prunable layers when expanding a per-layer group.
 """
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
@@ -55,7 +55,7 @@ def collect_prunable_layer_shapes(
             ):
                 continue
             assert p_obj.ndim >= 2, (
-                f"a trainable per-layer scale needs a weight with "
+                f"per-layer group expansion needs a weight with "
                 f"fan_in/fan_out, got shape {tuple(p_obj.shape)} for "
                 f"{mod_name}.{p_name}"
             )

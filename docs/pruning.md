@@ -87,18 +87,15 @@ Orchestrates the entire Bregman learning process:
 - Synchronizes optimizer parameter groups
 - Handles checkpoint save/load
 
-#### 1.6 Trainable per-layer scales (learned allocation)
+#### 1.6 Wanda ordering (activation-weighted L1)
 
-The global LambdaScheduler sets the sparsity LEVEL; one linear scale factor `c_g` per layer (`nn.Parameter`, init 1) learns the ALLOCATION, giving threshold `t_g = δ·λ_global·c_g`. The `c_g` train in a RegNone group of the same optimizer; since λ sits inside the no-grad prox, `BregmanPruner` injects the closed-form hypergradient `∂L/∂c = −δ·λ_global·Σ_live grad·sign(p) + scale_decay·(c−1)`. `scale_decay` pulls `c_g`→1 (finite equilibrium); the only bound is the floor `c_g ≥ 0`. A layer the loss is happy to shrink climbs (higher threshold → free to die); one fighting the threshold sinks toward `c_g = 0` (stays dense).
+`RegL1ColWeighted` weights the L1 threshold per input column: weight `(i,j)` survives the prox iff `a_hat_j·|v_ij| > λ`, where `a_hat_j` is the std of the layer's input channel j from a recent training batch (geometric mean 1 over live channels), clamped to `[1/MAX_RATIO, MAX_RATIO]`. A constant channel — e.g. fed by a fully pruned upstream row — clamps to the `1/MAX_RATIO` floor: its consumer columns get the strongest (but bounded) threshold. The bound keeps the Bregman dual, which carries a `λ/a_hat` baseline, inside fp32's usable range.
 
-`PruningManager` expands a `trainable_scales` group into one `RegL1` group per weight plus one `bregman_scales` RegNone group for the factors. `_bregman_target_sparsity` is an OVERALL-model target.
+Stats come from forward hooks, refreshed every `act_update_freq` batches (per-batch refresh churns the thresholds). They are derived state: nothing is checkpointed; a resumed run re-derives them from its first batch. Wanda groups need `expand_per_layer: true` (one group per weight — each group's regularizer holds that layer's column weights). The AAM classifier keeps plain `RegL1`: it L2-normalizes both weight and embedding, so activation scale carries no signal there.
 
 ```bash
-python src/train.py +experiment=sv/sv_bregman_adabreg_trainable_scales _bregman_target_sparsity=0.99
-python src/train.py +experiment=sv/sv_bregman_linbreg_trainable_scales _bregman_target_sparsity=0.99
+python src/train.py +experiment=sv/sv_bregman_adabreg_wanda
 ```
-
-Knobs (under `trainable_scales`): `scale_lr`, `scale_decay`, `scale_min`, `initial_sparsity`. Full derivation: `docs/bregman_trainable_scales.md`.
 
 ### Usage Example
 

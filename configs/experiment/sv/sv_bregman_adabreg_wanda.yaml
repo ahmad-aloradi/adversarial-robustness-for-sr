@@ -1,0 +1,97 @@
+# @package _global_
+# AdaBreg with Wanda ordering: encoder weight (i,j) survives the prox iff
+# a_hat_j * |v_ij| > lambda, with a_hat_j the per-input-channel activation
+# std (derived state — a resumed run re-derives it within one batch).
+# Run: python train.py experiment=sv/sv_bregman_adabreg_wanda
+
+defaults:
+  - sv/sv_bregman_adabreg # inherit parent
+  - _self_
+
+callbacks:
+  model_pruning:
+    act_update_freq: 100 # batches between activation-std refreshes
+
+module:
+  model:
+    # Hydra replaces lists wholesale: full copy of the parent's groups.
+    # Deltas: conv/linear groups get expand_per_layer + RegL1ColWeighted.
+    pruning_groups:
+      - name: conv_layers
+        layer_types: ["torch.nn.Conv1d", "torch.nn.Conv2d"]
+        param_names: ["weight"]
+        module_name_patterns:
+          - ".*conv.*"
+        expand_per_layer: true # one group per weight (per-layer col_weights)
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1ColWeighted
+            lamda: ${_bregman_lambda}
+          lambda_scale: 1.0
+        pruning_config:
+          pruning_type: "unstructured"
+          sparsity_rate: ${_bregman_initial_sparsity}
+
+      - name: linear_layers
+        layer_types: ["torch.nn.Linear"]
+        param_names: ["weight"]
+        expand_per_layer: true # one group per weight (per-layer col_weights)
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1ColWeighted
+            lamda: ${_bregman_lambda}
+          lambda_scale: 1.0
+        pruning_config:
+          pruning_type: "unstructured"
+          sparsity_rate: ${_bregman_initial_sparsity}
+
+      # AAM head L2-normalizes weight and embedding, so activation scale
+      # carries no signal there: plain RegL1.
+      - name: classifier
+        layer_types: ["speechbrain.lobes.models.ECAPA_TDNN.Classifier"]
+        module_name_patterns:
+          - ".*classifier.*"
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            lamda: ${_bregman_lambda}
+          lambda_scale: 1.0
+        pruning_config:
+          pruning_type: "unstructured"
+          sparsity_rate: ${_bregman_initial_sparsity}
+
+      - name: norm_params
+        layer_types:
+          [
+            "torch.nn.BatchNorm1d",
+            "torch.nn.BatchNorm2d",
+            "torch.nn.LayerNorm",
+            "torch.nn.GroupNorm",
+          ]
+        module_name_patterns:
+          [".*gn.*", ".*ln.*", ".*bn.*", ".*norm.*", ".*pos_enc.*", ".*head.*"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
+          lambda_scale: 0.0
+
+      - name: bias_params
+        param_names: ["bias"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
+            lamda: ${_bregman_lambda}
+          lambda_scale: 0.0
+
+      - name: fallback
+        is_fallback: True
+        module_name_patterns: [".*"]
+        param_names: ["weight"]
+        optimizer_settings:
+          reg:
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            lamda: ${_bregman_lambda}
+          lambda_scale: 1.0
+        pruning_config:
+          pruning_type: "unstructured"
+          sparsity_rate: ${_bregman_initial_sparsity}
