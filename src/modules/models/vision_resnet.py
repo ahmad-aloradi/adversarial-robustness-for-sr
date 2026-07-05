@@ -42,7 +42,8 @@ def build_resnet(
     """torchvision ResNet variant with a small-image stem and a fresh head.
 
     Args:
-        arch: one of {sorted(_ARCHS)}.
+        arch: one of "resnet18", "resnet34", "resnet50", "resnet101",
+            "resnet152", "wide_resnet50_2", "wide_resnet101_2".
         num_classes: number of output classes (fc head width).
         in_channels: input channels — 3 for RGB (CIFAR/TinyImageNet), 1 for
             grayscale (MNIST).

@@ -169,6 +169,20 @@ def _load_exp_overrides(exp_dir: Path) -> list[str]:
     return [str(item) for item in data] if isinstance(data, list) else []
 
 
+def _datamodule_declares_artifacts(exp_dir: Path) -> bool:
+    """Whether the training-time datamodule config used `artifacts_dir`.
+
+    Audio SV/CM/VPC datasets stage CSV metadata under `{name}_artifacts/`.
+    Torchvision image datasets (CIFAR/MNIST/TinyImageNet) have no such
+    concept, so their exp_dirs never contain one. Checked via substring
+    match on the raw composed config to avoid resolving interpolations.
+    """
+    config_path = exp_dir / ".hydra" / "config.yaml"
+    if not config_path.exists():
+        return True
+    return "artifacts_dir" in config_path.read_text()
+
+
 def _sanitize_overrides_for_eval(
     overrides: list[str],
     exp_dir: Path,
@@ -234,7 +248,8 @@ def _sanitize_overrides_for_eval(
         for p in exp_dir.glob("*_artifacts")
         if not p.name.startswith("_") and not p.name.startswith("test")
     ]
-    assert artifacts_dirs, f"No artifacts dirs found in {exp_dir}"
+    if _datamodule_declares_artifacts(exp_dir):
+        assert artifacts_dirs, f"No artifacts dirs found in {exp_dir}"
     if len(artifacts_dirs) == 1:
         sanitized.append(
             "datamodule.dataset.artifacts_dir="

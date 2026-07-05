@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pytorch_lightning as pl
 import torch
@@ -151,7 +151,6 @@ class ImageClassification(pl.LightningModule):
         BREGMAN_OPTIMIZERS = {
             "AdaBreg",
             "AdaBregW",
-            "AdaBregL2",
             "LinBreg",
             "ProxSGD",
         }
