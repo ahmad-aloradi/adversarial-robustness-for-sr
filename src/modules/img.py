@@ -202,7 +202,7 @@ if __name__ == "__main__":
         dotenv=True,
     )
     cfgd = str(root / "configs")
-    ov = ["experiment=img/cifar10_dense_sgd", "logger=[]"] + sys.argv[1:]
+    ov = ["experiment=img/dense_sgd", "logger=[]"] + sys.argv[1:]
 
     @register_custom_resolvers(
         config_name="train.yaml",

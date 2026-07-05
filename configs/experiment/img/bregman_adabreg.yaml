@@ -1,9 +1,11 @@
 # @package _global_
 
-# Adaptive-lambda AdaBreg pruning of ResNet-18 on CIFAR-10.
+# Adaptive-lambda AdaBreg pruning of ResNet-18.
 # Canonical Bregman parent: the adabreg_fixed / linbreg / linbreg_fixed
-# variants and the other datasets all inherit these pruning_groups.
-# Run: python src/train.py experiment=img/cifar10_bregman_adabreg
+# variants inherit these pruning_groups. Dataset-agnostic — the epoch budget
+# comes from the dataset config.
+# Run: python src/train.py experiment=img/bregman_adabreg datamodule=datasets/cifar100
+# (defaults to CIFAR-10 when no datamodule override is given)
 
 defaults:
   - override /datamodule: datasets/cifar10.yaml
@@ -13,7 +15,7 @@ defaults:
   - override /logger: tensorboard.yaml
   - _self_
 
-tags: ["img", "cifar10", "Bregman_learning", "Adabreg"]
+tags: ["img", "${datamodule.name}", "Bregman_learning", "Adabreg"]
 seed: 42
 
 # Single source of truth for Bregman sparsity targets and lambda values.
@@ -23,7 +25,7 @@ _bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
 
 trainer:
-  max_epochs: 200
+  max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
   min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0

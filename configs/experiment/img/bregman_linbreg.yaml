@@ -2,13 +2,13 @@
 
 # Adaptive-lambda LinBreg: inherits the AdaBreg parent's ResNet-18
 # pruning_groups + callbacks; swaps only the optimizer and the lambda source.
-# Run: python src/train.py experiment=img/cifar10_bregman_linbreg
+# Run: python src/train.py experiment=img/bregman_linbreg datamodule=datasets/cifar100
 
 defaults:
-  - /experiment/img/cifar10_bregman_adabreg
+  - /experiment/img/bregman_adabreg
   - _self_
 
-tags: ["img", "cifar10", "Bregman_learning", "Linbreg"]
+tags: ["img", "${datamodule.name}", "Bregman_learning", "Linbreg"]
 
 _bregman_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},initial_lambda}
 

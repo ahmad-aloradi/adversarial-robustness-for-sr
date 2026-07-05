@@ -1,8 +1,10 @@
 # @package _global_
 
-# ResNet-18 dense SGD baseline on CIFAR-10 (standard ~95.5% top-1 recipe).
-# Parent for the other datasets' dense baselines (they override /datamodule).
-# Run: python src/train.py experiment=img/cifar10_dense_sgd
+# Dense SGD baseline (standard literature recipe, ResNet-18 backbone).
+# One recipe for every dataset: the epoch budget and loaders come from the
+# dataset config, the backbone never changes.
+# Run: python src/train.py experiment=img/dense_sgd datamodule=datasets/mnist
+# (defaults to CIFAR-10 when no datamodule override is given)
 
 defaults:
   - override /datamodule: datasets/cifar10.yaml
@@ -12,11 +14,11 @@ defaults:
   - override /logger: tensorboard.yaml
   - _self_
 
-tags: ["img", "cifar10", "dense", "sgd"]
+tags: ["img", "${datamodule.name}", "dense", "sgd"]
 seed: 42
 
 trainer:
-  max_epochs: 200
+  max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
   min_epochs: 1
   # AdaptiveAvgPool2d has no deterministic CUDA backward; trainer/default sets
   # deterministic: True, which would raise on GPU.
@@ -44,7 +46,3 @@ callbacks:
     mode: max
     save_top_k: 5
     every_n_epochs: 1
-  # checkpoint_averaging:
-  #   _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
-  #   num_checkpoints: ${callbacks.model_checkpoint.save_top_k}
-  #   output_filename: averaged_top{num}.ckpt

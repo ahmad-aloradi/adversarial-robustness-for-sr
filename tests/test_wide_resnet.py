@@ -1,8 +1,8 @@
 """Shape/contract tests for the Wide-ResNet (WRN) CIFAR builder.
 
-Covers the standard WRN-28-10 configuration, the CIFAR-only 32x32 input
-assert (pytorchcv's CIFARWRN pools with a fixed 8x8 kernel), and that the
-same type-based pruning-group matching used for the ResNet family also
+Covers the standard WRN-28-10 configuration, the supported 32x32/64x64 input
+sizes (global average pooling replaces pytorchcv's fixed 8x8 kernel), and that
+the same type-based pruning-group matching used for the ResNet family also
 routes WRN's Conv2d/BatchNorm2d/Linear parameters correctly.
 """
 
@@ -32,10 +32,16 @@ def test_grayscale_in_channels():
     assert tuple(out.shape) == (2, 10)
 
 
-@pytest.mark.parametrize("hw", [(28, 28), (64, 64)])
+def test_output_shape_tinyimagenet():
+    net = build_wide_resnet(num_classes=200, in_channels=3)
+    out = net(torch.randn(2, 3, 64, 64))
+    assert tuple(out.shape) == (2, 200)
+
+
+@pytest.mark.parametrize("hw", [(28, 28), (48, 48), (32, 64)])
 def test_wrong_resolution_raises(hw):
     net = build_wide_resnet(num_classes=10, in_channels=3)
-    with pytest.raises(AssertionError, match="expects 32x32"):
+    with pytest.raises(AssertionError, match="square input in"):
         net(torch.randn(2, 3, *hw))
 
 

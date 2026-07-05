@@ -1,4 +1,4 @@
-"""torchvision ResNet family with the standard small-image stem.
+"""Torchvision ResNet family with the standard small-image stem.
 
 The stock torchvision ResNet down-samples 4x in its stem (7x7 stride-2 conv
 + 3x3 stride-2 maxpool), which throws away most of a 32x32 CIFAR image before
@@ -39,25 +39,26 @@ _ARCHS = {
 def build_resnet(
     arch: str, num_classes: int, in_channels: int = 3
 ) -> nn.Module:
-    """torchvision ResNet variant with a small-image stem and a fresh head.
+    """Torchvision ResNet variant with a small-image stem and a fresh head.
 
     Args:
         arch: one of "resnet18", "resnet34", "resnet50", "resnet101",
             "resnet152", "wide_resnet50_2", "wide_resnet101_2".
         num_classes: number of output classes (fc head width).
-        in_channels: input channels — 3 for RGB (CIFAR/TinyImageNet), 1 for
-            grayscale (MNIST).
+        in_channels: input channels — 3 for RGB, 1 for grayscale (the
+            benchmark datamodules all emit 3-channel images).
 
     Returns the torchvision model whose `conv1` is a 3x3 stride-1 conv over
     `in_channels` and whose `maxpool` is removed.
     """
     assert num_classes > 0, f"num_classes must be positive, got {num_classes}"
-    assert in_channels in (1, 3), (
-        f"in_channels must be 1 or 3, got {in_channels}"
-    )
-    assert arch in _ARCHS, (
-        f"unknown arch {arch!r}, expected one of {sorted(_ARCHS)}"
-    )
+    assert in_channels in (
+        1,
+        3,
+    ), f"in_channels must be 1 or 3, got {in_channels}"
+    assert (
+        arch in _ARCHS
+    ), f"unknown arch {arch!r}, expected one of {sorted(_ARCHS)}"
 
     model = _ARCHS[arch](weights=None, num_classes=num_classes)
     model.conv1 = nn.Conv2d(

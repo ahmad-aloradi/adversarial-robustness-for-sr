@@ -40,7 +40,6 @@ def test_fakedata_mechanics():
             },
             "transforms": {"train": [_TOTENSOR], "eval": [_TOTENSOR]},
             "num_classes": 10,
-            "in_channels": 3,
             "loaders": _loaders(),
         }
     )
@@ -84,7 +83,6 @@ def test_mnist_real_download(tmp_path):
                 "eval": [_TOTENSOR, normalize],
             },
             "num_classes": 10,
-            "in_channels": 1,
             "loaders": _loaders(),
         }
     )

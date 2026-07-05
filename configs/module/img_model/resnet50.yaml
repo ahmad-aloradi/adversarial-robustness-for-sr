@@ -2,4 +2,4 @@
 _target_: src.modules.models.vision_resnet.build_resnet
 arch: resnet50
 num_classes: ${datamodule.num_classes}
-in_channels: ${datamodule.in_channels}
+in_channels: 3 # fixed input contract; every dataset emits 3-channel images

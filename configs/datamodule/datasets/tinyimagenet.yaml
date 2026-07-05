@@ -26,8 +26,9 @@ transforms:
       mean: [0.4802, 0.4481, 0.3975]
       std: [0.2770, 0.2691, 0.2821]
 
+name: tinyimagenet # dataset tag for logging
 num_classes: 200
-in_channels: 3
+max_epochs: 100 # standard literature budget; experiments read this via ${datamodule.max_epochs}
 
 loaders:
   train:

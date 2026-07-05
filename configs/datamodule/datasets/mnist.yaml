@@ -14,20 +14,27 @@ dataset:
   test_dataset: ${.valid_dataset}
 
 # MNIST recipe uses no train augmentation, so train == eval transforms.
+# Pad 28->32 and replicate grayscale to 3 channels so MNIST meets the same
+# 3x32x32 input contract as CIFAR — the model is identical across datasets.
 transforms:
   train:
+    - { _target_: torchvision.transforms.Pad, padding: 2 }
+    - { _target_: torchvision.transforms.Grayscale, num_output_channels: 3 }
     - { _target_: torchvision.transforms.ToTensor }
     - _target_: torchvision.transforms.Normalize
-      mean: [0.1307]
-      std: [0.3081]
+      mean: [0.1307, 0.1307, 0.1307]
+      std: [0.3081, 0.3081, 0.3081]
   eval:
+    - { _target_: torchvision.transforms.Pad, padding: 2 }
+    - { _target_: torchvision.transforms.Grayscale, num_output_channels: 3 }
     - { _target_: torchvision.transforms.ToTensor }
     - _target_: torchvision.transforms.Normalize
-      mean: [0.1307]
-      std: [0.3081]
+      mean: [0.1307, 0.1307, 0.1307]
+      std: [0.3081, 0.3081, 0.3081]
 
+name: mnist # dataset tag for logging
 num_classes: 10
-in_channels: 1
+max_epochs: 50 # one budget for dense and Bregman (dense converges well before)
 
 loaders:
   train:

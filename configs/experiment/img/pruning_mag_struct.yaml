@@ -1,10 +1,11 @@
 # @package _global_
 
-# Structured (ln_structured) gradual magnitude pruning of ResNet-18 on
-# CIFAR-10. Canonical parent: the other datasets inherit this and swap only
-# the dataset + epoch budget. Equivalent recipe to
-# configs/experiment/sv/sv_pruning_mag_struct.yaml.
-# Run: python src/train.py experiment=img/cifar10_pruning_mag_struct
+# Structured (ln_structured) gradual magnitude pruning of ResNet-18.
+# Canonical magnitude-pruning parent: the unstructured variant inherits this.
+# Dataset-agnostic — the epoch budget comes from the dataset config. Equivalent
+# recipe to configs/experiment/sv/sv_pruning_mag_struct.yaml.
+# Run: python src/train.py experiment=img/pruning_mag_struct datamodule=datasets/cifar100
+# (defaults to CIFAR-10 when no datamodule override is given)
 
 defaults:
   - override /datamodule: datasets/cifar10.yaml
@@ -16,13 +17,13 @@ defaults:
   - override /logger: tensorboard.yaml
   - _self_
 
-tags: ["img", "cifar10", "pruning", "ln_structured", "gradual"]
+tags: ["img", "${datamodule.name}", "pruning", "ln_structured", "gradual"]
 seed: 42
 
 _pruning_tolerance: 0.01 # convergence band shared by the gates: in-band iff |sparsity - target| <= this
 
 trainer:
-  max_epochs: 200
+  max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
   min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0

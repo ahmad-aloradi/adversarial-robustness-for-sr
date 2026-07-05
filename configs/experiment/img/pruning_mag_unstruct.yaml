@@ -1,0 +1,19 @@
+# @package _global_
+
+# Global unstructured (l1_unstructured) gradual magnitude pruning of ResNet-18.
+# Inherits the structured parent (incl. the constant-rate schedule); swaps only
+# the pruning function and global-ranking flag.
+# Run: python src/train.py experiment=img/pruning_mag_unstruct datamodule=datasets/mnist
+
+defaults:
+  - /experiment/img/pruning_mag_struct
+  - _self_
+
+tags: ["img", "${datamodule.name}", "pruning", "l1_unstructured", "gradual"]
+
+callbacks:
+  model_pruning:
+    pruning_fn: l1_unstructured # single global L1 ranking, not per-layer structures
+    use_global_unstructured: true # single global ranking across all prunable parameters
+    pruning_dim: null # not applicable to unstructured pruning
+    pruning_norm: null # not applicable to unstructured pruning

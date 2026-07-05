@@ -1,13 +1,13 @@
 # @package _global_
 
 # Fixed-lambda AdaBreg: no scheduler, static regularization.
-# Run: python src/train.py experiment=img/cifar10_bregman_adabreg_fixed
+# Run: python src/train.py experiment=img/bregman_adabreg_fixed datamodule=datasets/mnist
 
 defaults:
-  - /experiment/img/cifar10_bregman_adabreg
+  - /experiment/img/bregman_adabreg
   - _self_
 
-tags: ["img", "cifar10", "Bregman_learning", "Adabreg", "fixed"]
+tags: ["img", "${datamodule.name}", "Bregman_learning", "Adabreg", "fixed"]
 
 _bregman_fixed_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},fixed_lambda}
 _bregman_lambda: ${_bregman_fixed_lambda}

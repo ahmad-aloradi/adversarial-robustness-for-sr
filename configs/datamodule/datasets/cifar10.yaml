@@ -28,8 +28,9 @@ transforms:
       mean: [0.4914, 0.4822, 0.4465]
       std: [0.2470, 0.2435, 0.2616]
 
+name: cifar10 # dataset tag for logging
 num_classes: 10
-in_channels: 3
+max_epochs: 200 # standard literature budget; experiments read this via ${datamodule.max_epochs}
 
 loaders:
   train:

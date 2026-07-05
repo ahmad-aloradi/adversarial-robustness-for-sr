@@ -1,9 +1,11 @@
 """Config + wiring tests for the image-benchmark experiments.
 
-Covers all `configs/experiment/img/*.yaml`: they compose, resolve the fragile
-monitor key, carry the right per-dataset shape, and (for Bregman) wire the
-right optimizer / lambda regime / ResNet-18 pruning groups. A slow MNIST
-`fast_dev_run` exercises the full train loop for dense + both optimizers.
+Covers every `configs/experiment/img/*.yaml` (one file per method) crossed
+with every image dataset config: they compose, resolve the fragile monitor
+key, pull the epoch budget from the dataset, and keep one fixed 3-channel
+backbone. Bregman files additionally wire the right optimizer / lambda
+regime / ResNet-18 pruning groups. A slow MNIST `fast_dev_run` exercises the
+full train loop for dense + both optimizers.
 """
 
 import glob
@@ -15,7 +17,7 @@ import pytest
 from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from hydra.core.hydra_config import HydraConfig
-from omegaconf import open_dict
+from omegaconf import OmegaConf, open_dict
 
 from src.utils import register_custom_resolvers
 
@@ -27,12 +29,12 @@ _ROOT = pyrootutils.setup_root(
 )
 _CONFIGS_DIR = _ROOT / "configs"
 
-# (num_classes, in_channels) keyed by the dataset prefix of the experiment name
-_EXPECT_SHAPE = {
-    "cifar10": (10, 3),
-    "cifar100": (100, 3),
-    "mnist": (10, 1),
-    "tinyimagenet": (200, 3),
+# num_classes keyed by dataset config name (the only per-dataset model knob).
+_DATASETS = {
+    "cifar10": 10,
+    "cifar100": 100,
+    "mnist": 10,
+    "tinyimagenet": 200,
 }
 
 
@@ -78,17 +80,47 @@ def _instantiate_module(exp):
     return hydra.utils.instantiate(cfg.module, _recursive_=False)
 
 
+@pytest.mark.parametrize("dataset", sorted(_DATASETS))
 @pytest.mark.parametrize("exp", _img_experiments())
-def test_img_experiment_composes(exp):
-    cfg = _compose([f"experiment=img/{exp}", "logger=[]"])
+def test_img_experiment_composes(exp, dataset):
+    cfg = _compose(
+        [
+            f"experiment=img/{exp}",
+            f"datamodule=datasets/{dataset}",
+            "logger=[]",
+        ]
+    )
     assert cfg.module._target_ == "src.modules.img.ImageClassification"
     # Most fragile contract: replace resolver -> instantiated metric class.
     assert cfg.callbacks.model_checkpoint.monitor == "valid/MulticlassAccuracy"
-    num_classes, in_channels = _EXPECT_SHAPE[exp.split("_")[0]]
-    assert cfg.datamodule.num_classes == num_classes
-    assert cfg.datamodule.in_channels == in_channels
+    assert cfg.datamodule.num_classes == _DATASETS[dataset]
     assert cfg.module.model.net.num_classes == cfg.datamodule.num_classes
-    assert cfg.module.model.net.in_channels == cfg.datamodule.in_channels
+    # One fixed backbone: 3-channel input regardless of dataset.
+    assert cfg.module.model.net.in_channels == 3
+    # Epoch budget flows from the dataset config.
+    assert cfg.trainer.max_epochs == cfg.datamodule.max_epochs
+    tags = OmegaConf.to_container(cfg.tags, resolve=True)
+    assert dataset in tags
+
+
+def test_mnist_transform_contract():
+    """MNIST transforms pad 28->32 and replicate to 3 channels so it meets the
+    same input contract as CIFAR (no download needed)."""
+    from PIL import Image
+    from torchvision.transforms import Compose
+
+    cfg = _compose(
+        ["experiment=img/dense_sgd", "datamodule=datasets/mnist", "logger=[]"]
+    )
+    for key in ("train", "eval"):
+        tf = Compose(
+            [
+                hydra.utils.instantiate(t)
+                for t in cfg.datamodule.transforms[key]
+            ]
+        )
+        out = tf(Image.new("L", (28, 28)))
+        assert tuple(out.shape) == (3, 32, 32)
 
 
 @pytest.mark.parametrize("exp", _bregman_experiments())
@@ -124,7 +156,7 @@ def _param_group_map(model):
 
 
 def test_configure_optimizers_dense():
-    model = _instantiate_module("cifar10_dense_sgd")
+    model = _instantiate_module("dense_sgd")
     out = model.configure_optimizers()
     assert out["optimizer"].__class__.__name__ == "SGD"
     assert (
@@ -137,8 +169,8 @@ def test_configure_optimizers_dense():
 @pytest.mark.parametrize(
     "exp,optimizer",
     [
-        ("cifar10_bregman_adabreg", "AdaBreg"),
-        ("cifar10_bregman_linbreg", "LinBreg"),
+        ("bregman_adabreg", "AdaBreg"),
+        ("bregman_linbreg", "LinBreg"),
     ],
 )
 def test_configure_optimizers_bregman(exp, optimizer):
@@ -164,12 +196,15 @@ def test_configure_optimizers_bregman(exp, optimizer):
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "exp",
-    ["mnist_dense_sgd", "mnist_bregman_adabreg", "mnist_bregman_linbreg"],
+    ["dense_sgd", "bregman_adabreg", "bregman_linbreg"],
 )
 def test_mnist_fast_dev_run(exp, tmp_path):
     from src.train import train
 
-    cfg = _compose([f"experiment=img/{exp}"], return_hydra_config=True)
+    cfg = _compose(
+        [f"experiment=img/{exp}", "datamodule=datasets/mnist"],
+        return_hydra_config=True,
+    )
     HydraConfig().set_config(cfg)
     with open_dict(cfg):
         cfg.paths.output_dir = str(tmp_path)
