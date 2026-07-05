@@ -65,7 +65,6 @@ BASELINE_METHODS = {"vanilla", "wespeaker"}
 METHOD_ORDER = [
     "adabreg",
     "adabregw",
-    "adabregl2",
     "linbreg",
     "pruning_struct",
     "pruning_unstruct",
@@ -75,7 +74,6 @@ METHOD_ORDER = [
 METHOD_MARKERS = {
     "adabreg": "o",  # circle
     "adabregw": "s",  # square
-    "adabregl2": "^",  # triangle up
     "linbreg": "D",  # diamond
     "pruning_struct": "v",  # triangle down
     "pruning_unstruct": "P",  # plus (filled)

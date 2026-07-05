@@ -147,7 +147,6 @@ METHOD_CLASS_COLORS = {
     # forget about those other methods for now, just make them black so they stand out as "other"
     "proxsgd": "#000000",  # light gray
     "adabregw": "#000000",  # deep navy blue
-    "adabregl2": "#000000",  # muted purple
 }
 
 METHOD_DISPLAY_NAMES = {
@@ -156,7 +155,6 @@ METHOD_DISPLAY_NAMES = {
     "adabreg": "AdaBreg",
     "adabreg_fixed": "AdaBreg (Fixed $\lambda$)",
     "adabregw": "AdaBregW",
-    "adabregl2": "AdaBregL2",
     "pruning_struct": "Str. Prun.",
     "pruning_unstruct": "Unst. Prun.",
     "proxsgd": "ProxSGD",
@@ -266,7 +264,6 @@ LR_COLUMN_RULES = {
     "adabreg":   (r"^lr-AdaBreg/conv_layers$", r"^lr-AdaBreg/linear_layers$"),
     "proxsgd":   (r"^lr-ProxSGD/conv_layers$", r"^lr-ProxSGD/linear_layers$"),
     "adabregw":  (r"^lr-AdaBregW?/conv_layers$", r"^lr-AdaBregW?/linear_layers$"),
-    "adabregl2": (r"^lr-AdaBreg(L2)?/conv_layers$", r"^lr-AdaBreg(L2)?/linear_layers$"),
 }
 
 
@@ -385,7 +382,6 @@ def parse_experiment_name(dirname):
     )
     METHOD_PATTERNS = [
         ("adabregw", "adabregw"),
-        ("adabregl2", "adabregl2"),
         ("adabreg_fixed", "adabreg"),   # must come before adabreg
         ("adabreg", "adabreg"),
         ("linbreg_fixed", "linbreg"),   # must come before linbreg
@@ -785,7 +781,6 @@ EXPERIMENT_ORDER = [
     "linbreg",
     "adabreg",
     "adabregw",
-    "adabregl2",
 ]
 
 

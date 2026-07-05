@@ -147,7 +147,6 @@ METHOD_CLASS_COLORS: Dict[str, str] = {
     "wespeaker": "#9C4F4F",
     "proxsgd": "#000000",
     "adabregw": "#000000",
-    "adabregl2": "#000000",
 }
 
 METHOD_DISPLAY_NAMES: Dict[str, str] = {
@@ -156,7 +155,6 @@ METHOD_DISPLAY_NAMES: Dict[str, str] = {
     "adabreg": "AdaBreg",
     "adabreg_fixed": r"AdaBreg (Fixed $\lambda$)",
     "adabregw": "AdaBregW",
-    "adabregl2": "AdaBregL2",
     "pruning_struct": "Str. Prun.",
     "pruning_unstruct": "Unst. Prun.",
     "proxsgd": "ProxSGD",
@@ -231,7 +229,6 @@ EXPERIMENT_ORDER: List[str] = [
     "linbreg",
     "adabreg",
     "adabregw",
-    "adabregl2",
 ]
 
 
