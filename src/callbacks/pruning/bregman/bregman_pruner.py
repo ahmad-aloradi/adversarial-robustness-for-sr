@@ -18,7 +18,7 @@ from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
 from .activation_stats import ActivationStats
 from .bregman_regularizers import RegL1ColWeighted, RegNone
-from .lambda_scheduler import LambdaScheduler
+from .lambda_scheduler import LambdaScheduler, TargetScheduler
 
 log = utils.get_pylogger(__name__)
 
@@ -45,6 +45,7 @@ class BregmanPruner(Callback):
         verbose: int = 1,
         lambda_scheduler: Optional[LambdaScheduler] = None,
         target_sparsity: Optional[float] = None,
+        target_scheduler: Optional[TargetScheduler] = None,  # ramps the target
         act_update_freq: int = 100,  # batches between activation refreshes
     ):
         """
@@ -52,23 +53,26 @@ class BregmanPruner(Callback):
             sparsity_threshold: Threshold below which a weight is considered zero.
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
             lambda_scheduler: Optional scheduler for dynamic lambda updates.
-            target_sparsity: Sparsity setpoint the lambda controller is driven
-                toward, the value the feasibility check guards, and the target
-                logged each epoch. The sparsity-gated callbacks are configured
-                with the same value independently. Required when a
+            target_sparsity: Final sparsity setpoint: the value the feasibility
+                check guards and the gates key off. Also the fixed controller
+                target when target_scheduler is None. Required when a
                 lambda_scheduler is set.
+            target_scheduler: Optional per-epoch ramp of the controller target
+                (progressive mode). When set, the controller chases its moving
+                target each step while the gates still key off target_sparsity.
             act_update_freq: Batches between activation-stat refreshes for
                 RegL1ColWeighted (Wanda) groups. Per-batch refresh churns
                 the thresholds; ~100 is stable.
         """
         super().__init__()
-        assert act_update_freq >= 1, (
-            f"act_update_freq must be >= 1, got {act_update_freq}"
-        )
+        assert (
+            act_update_freq >= 1
+        ), f"act_update_freq must be >= 1, got {act_update_freq}"
         self.act_update_freq = act_update_freq
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
+        self.target_scheduler = target_scheduler
         if target_sparsity is None:
             self._target_sparsity: Optional[float] = None
         else:
@@ -202,7 +206,7 @@ class BregmanPruner(Callback):
 
         sparsity = self._overall_sparsity()
         pruned_sparsity = self._pruned_sparsity()
-        target = self._target_sparsity
+        target = self._current_target(trainer)
 
         # Inject end-of-epoch sparsity directly into callback_metrics so that
         # ModelCheckpoint filenames and train_log.txt get the true final value
@@ -268,6 +272,13 @@ class BregmanPruner(Callback):
         self, optimizer, trainer: Trainer, is_resuming: bool
     ) -> None:
         """Instantiate and configure the lambda scheduler."""
+        # Progressive mode feeds a moving target to the feedback controller, so
+        # it needs one; fail loud rather than ignoring the ramp.
+        if self.target_scheduler is not None and self.lambda_scheduler is None:
+            raise ValueError(
+                "BregmanPruner.target_scheduler requires a lambda_scheduler; "
+                "the controller is what tracks the ramped target."
+            )
         if self.lambda_scheduler is None:
             return
 
@@ -279,6 +290,21 @@ class BregmanPruner(Callback):
             raise ValueError(
                 "BregmanPruner.target_sparsity is required when a "
                 "lambda_scheduler is set; it is the controller setpoint."
+            )
+
+        if self.target_scheduler is not None:
+            if not hasattr(self.target_scheduler, "target_at"):
+                self.target_scheduler = self.target_scheduler()
+            assert (
+                self.target_scheduler.final_sparsity == self._target_sparsity
+            ), (
+                "target_scheduler.final_sparsity "
+                f"({self.target_scheduler.final_sparsity}) must equal "
+                f"target_sparsity ({self._target_sparsity}); the gates key off "
+                "the latter."
+            )
+            self.target_scheduler.verify_schedule_feasibility(
+                trainer.max_epochs
             )
 
         # Restore state from checkpoint
@@ -301,9 +327,17 @@ class BregmanPruner(Callback):
         )
 
         new_lambda = self.lambda_scheduler.step(
-            current_sparsity, self._target_sparsity, trainer.global_step
+            current_sparsity,
+            self._current_target(trainer),
+            trainer.global_step,
         )
         self._broadcast_lambda(trainer.optimizers[0], new_lambda)
+
+    def _current_target(self, trainer: Trainer) -> Optional[float]:
+        """Controller target now: the epoch's ramp value, else the fixed one."""
+        if self.target_scheduler is None:
+            return self._target_sparsity
+        return self.target_scheduler.target_at(trainer.current_epoch)
 
     def _apply_lambda_to_groups(self, trainer: Trainer) -> None:
         """Apply current scheduler lambda to all regularized groups."""
@@ -355,9 +389,9 @@ class BregmanPruner(Callback):
                 f"expand_per_layer: true on the group config."
             )
             weight = group["params"][0]
-            assert id(weight) in param_to_module, (
-                f"Wanda group '{name}': owning module not found."
-            )
+            assert (
+                id(weight) in param_to_module
+            ), f"Wanda group '{name}': owning module not found."
             mod_name, module = param_to_module[id(weight)]
             group["reg"].col_weights = torch.ones(
                 weight.shape[1], device=weight.device
@@ -374,9 +408,7 @@ class BregmanPruner(Callback):
         )
 
     @torch.no_grad()
-    def _resync_wanda_dual(
-        self, optimizer: torch.optim.Optimizer
-    ) -> None:
+    def _resync_wanda_dual(self, optimizer: torch.optim.Optimizer) -> None:
         """Rebuild the Bregman dual variable after a col_weights refresh.
 
         Bregman stores its iterate as v = θ/δ + ∂J(θ); for the column-weighted
@@ -602,4 +634,3 @@ class BregmanPruner(Callback):
             BregmanPruner._group_regularized(group)
             and BregmanPruner._lambda_scale(group) > 0.0
         )
-

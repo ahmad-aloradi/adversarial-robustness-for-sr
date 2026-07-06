@@ -1,0 +1,25 @@
+# @package _global_
+# Progressive LinBreg: start dense (0% sparse) and ramp the TARGET sparsity up
+# to 99% over 10 epochs in log-space, then hold. The lambda feedback loop tracks
+# the moving target per step; the gates stay closed until the final 99%.
+
+defaults:
+  - sv/sv_bregman_linbreg
+  - _self_
+
+_bregman_target_sparsity: 0.99 # final target (gates + resolver + ramp end)
+_bregman_target_initial: 0.0 # ramp start AND initial weight sparsity
+_bregman_ramp_epochs: 10
+_bregman_schedule_type: constant # log-space ("exponential") ramp
+_bregman_initial_sparsity: ${_bregman_target_initial} # start genuinely dense
+_bregman_lambda: 1e-3 # explicit: skip resolver lookup at 0.99
+
+callbacks:
+  model_pruning:
+    target_scheduler:
+      _target_: src.callbacks.pruning.bregman.lambda_scheduler.TargetScheduler
+      _partial_: true
+      final_sparsity: ${_bregman_target_sparsity}
+      initial_sparsity: ${_bregman_target_initial}
+      epochs_to_ramp: ${_bregman_ramp_epochs}
+      schedule_type: ${_bregman_schedule_type}

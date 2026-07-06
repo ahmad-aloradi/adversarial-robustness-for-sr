@@ -20,7 +20,7 @@ defaults:
 tags: ["img", "${datamodule.name}", "pruning", "ln_structured", "gradual"]
 seed: 42
 
-_pruning_tolerance: 0.01 # convergence band shared by the gates: in-band iff |sparsity - target| <= this
+_pruning_tolerance: 0.001 # convergence band shared by the gates: in-band iff |sparsity - target| <= this
 
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
@@ -50,7 +50,7 @@ callbacks:
     pruning_norm: 1 # Ln norm used to rank structures (L1)
     verbose: 1
     scheduled_pruning: true # ramp sparsity to `amount` over `epochs_to_ramp`
-    epochs_to_ramp: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% of training, matching the SV recipe's ratio
+    epochs_to_ramp: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'} # 50% of training
     schedule_type: constant # constant pruning RATE (log-space interpolation), not a linear sparsity ramp
     tolerance: ${_pruning_tolerance} # monotonicity check band, shared with the gates
   early_stopping:

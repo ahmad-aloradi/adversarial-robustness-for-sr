@@ -894,6 +894,7 @@ def run_sv(transfer_data="false", force="false"):
     # Adaptive Bregman (lambda scheduler), two ordering modes:
     RUN_WANDA_ADAPTIVE_EXPS = False  # adaptive, Wanda ordering
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
+    RUN_PROGRESSIVE_BREGMAN_EXPS = False  # adaptive, target ramps 0 -> final
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
@@ -960,6 +961,22 @@ def run_sv(transfer_data="false", force="false"):
                     "sparsity_rates": [0.99],
                     "dataset_names": ["multi_sv"],
                     # "suffix": "-fixed_target",
+                }
+            )
+
+    # CASE 3 — progressive Bregman: target ramps 0 -> final over the ramp epochs
+    # (ramp config lives in the *_progressive YAMLs, not here).
+    if RUN_PROGRESSIVE_BREGMAN_EXPS:
+        for _exp in (
+            "sv_bregman_adabreg_progressive",
+            "sv_bregman_linbreg_progressive",
+        ):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "sv_models": [ecapa],
+                    "sparsity_rates": [0.99],
+                    "dataset_names": ["multi_sv"],
                 }
             )
 
@@ -1047,6 +1064,292 @@ def run_sv(transfer_data="false", force="false"):
                         extra_overrides=extra_overrides or None,
                         job_name_suffix=suffix,
                     )
+
+
+# Per-dataset SLURM walltime budget — vision jobs (ResNet-18, small images)
+# need far less wall-clock than the SV audio encoders.
+IMG_WALLTIME = {
+    "mnist": "01:30:00",
+    "cifar10": "03:00:00",
+    "cifar100": "05:00:00",
+    "tinyimagenet": "08:00:00",
+}
+EPOCHS_IMG = {
+    "mnist": 150,
+    "cifar10": 250,
+    "cifar100": 250,
+    "tinyimagenet": 200,    
+}
+IMG_BATCH_SIZE = 128
+
+def _submit_img_job(
+    experiment,
+    dataset_name,
+    seed,
+    model_name="resnet18",
+    target_sparsity=None,
+    extra_overrides=None,
+    job_name_suffix="",
+):
+    """Helper function to configure and submit a single image-classification
+    training job.
+
+    Unlike SV, the img task (src/modules/img.py) writes no test_artifacts
+    COMPLETE marker, so there is no "testing already complete" signal to skip
+    on; only job-queue dedup and checkpoint-based resume apply here.
+    """
+    if "bregman" in experiment or "pruning" in experiment:
+        assert (
+            target_sparsity is not None
+        ), "target_sparsity should be set for pruning and bregman experiments"
+    else:
+        assert (
+            target_sparsity is None
+        ), "target_sparsity should be None for baseline experiments"
+
+    ramp_up_experiments = [
+        "pruning_mag_struct",
+        "pruning_mag_unstruct",
+    ]
+    ramp_up_epochs = 80
+    schedule_type = "constant"
+
+    settings = {
+        "script_name": "src/train.py",
+        "cluster": CLUSTER_NAME,
+        "path_project": PATH_PROJECT,
+        "env_name": CONDA_ENV,
+        "data_path": DATA_DIR,
+        "gpu": GPU,
+        "num_nodes": 1,
+        "walltime": IMG_WALLTIME[dataset_name],
+        "num_gpus": 1,
+        "cuda": "12.9.0",
+    }
+
+    # Handling epochs
+    epochs_to_ramp = None
+    max_epochs = EPOCHS_IMG[dataset_name]
+    if experiment in ramp_up_experiments:
+        epochs_to_ramp = ramp_up_epochs
+        max_epochs += epochs_to_ramp
+
+    ramp_str = (
+        f"-ramp{epochs_to_ramp}_{schedule_type}" if epochs_to_ramp else ""
+    )
+    sparsity_str = (
+        f"-sr{int(target_sparsity * 100)}"
+        if target_sparsity is not None
+        else ""
+    )
+    exp_name = f"{experiment}{ramp_str}-{model_name}-{dataset_name}-bs{IMG_BATCH_SIZE}{sparsity_str}{job_name_suffix}"
+    job_name = f"{exp_name}-seed{seed}"  # unique per seed for SLURM dedup
+    name = f"{dataset_name}/{model_name}/{exp_name}/seed_{seed}"  # results saved under their own seed
+
+    settings["job_name"] = job_name
+
+    script_arguments = {
+        "experiment": f"img/{experiment}",
+        "datamodule": f"datasets/{dataset_name}",
+        "module/img_model": model_name,
+        "seed": seed,
+        "logger": "many_loggers",
+        "datamodule.loaders.train.batch_size": IMG_BATCH_SIZE,
+        "paths.log_dir": RESULTS_DIR,
+        "hydra.run.dir": f"{RESULTS_DIR}/train/runs/{name}",
+        "trainer.num_sanity_val_steps": 0,
+        "trainer.max_epochs": max_epochs,
+    }
+
+    if target_sparsity is not None:
+        if "bregman" in experiment:
+            script_arguments["_bregman_target_sparsity"] = target_sparsity
+        elif "pruning" in experiment:
+            script_arguments[
+                "callbacks.model_pruning.amount"
+            ] = target_sparsity
+
+    if epochs_to_ramp:
+        script_arguments.update(
+            {
+                "callbacks.model_pruning.epochs_to_ramp": epochs_to_ramp,
+                "callbacks.model_pruning.schedule_type": schedule_type,
+            }
+        )
+
+    if extra_overrides:
+        script_arguments.update(extra_overrides)
+
+    # Jobs submission logic (mirrors _submit_sv_job)
+    if check_running_pending(job_name):
+        print(f"Skipping {job_name} - already running or pending")
+        return
+
+    run_dir = script_arguments["hydra.run.dir"]
+
+    # If a checkpoint exists, resume from it. This can happen when a job was
+    # previously running and got interrupted.
+    ckpt_dir = os.path.join(run_dir, "checkpoints")
+    latest_last = _find_latest_last_ckpt(ckpt_dir)
+    if latest_last:
+        script_arguments["ckpt_path"] = latest_last
+        latest_name = os.path.basename(latest_last)
+        if latest_name != "last.ckpt":
+            print(
+                f"[warn] {job_name}: last.ckpt is stale — "
+                f"resuming from {latest_name} instead"
+            )
+        print(f"Resuming {job_name} from {latest_name}")
+    elif check_dir_exists(ckpt_dir):
+        raise RuntimeError(
+            f"Checkpoints dir exists but no last*.ckpt found for {job_name}.\n"
+            f"  dir: {ckpt_dir}\n"
+            f"Refusing to start from scratch and overwrite existing checkpoints."
+        )
+
+    bash_script = create_sv_bash_script(
+        settings, script_arguments, transfer_data=False
+    )
+    run_bash_script(bash_script)
+    print(f"Submitted job: {job_name}")
+    time.sleep(0.1)
+
+
+@task
+def run_img():
+    """Generate and submit all image-classification training jobs.
+
+    One fixed backbone across all methods (see img single-model convention)
+    — only the dataset and the compression method vary. Pruning and Bregman
+    experiments sweep over sparsity rates; every experiment sweeps over
+    seeds, each saved under its own `seed_{seed}` subdirectory.
+    """
+    # dataset_names = ["mnist", "cifar10", "cifar100", "tinyimagenet"]
+    dataset_names = ["cifar10", "tinyimagenet"]
+    model_names = ["resnet18"]
+    default_seeds = [42]
+
+    ########################
+    # Switch controls (master switch per group of experiments)
+    ########################
+    RUN_BASELINE_EXPS = True
+    RUN_PRUNING_EXPS = False
+    # Vanilla Bregman: fixed lambda, no scheduler (bregman_*_fixed).
+    RUN_FIXED_BREGMAN_EXPS = False
+    # Adaptive Bregman (lambda scheduler), two ordering modes:
+    RUN_WANDA_ADAPTIVE_EXPS = False  # adaptive, Wanda ordering
+    RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
+    RUN_PROGRESSIVE_BREGMAN_EXPS = True  # adaptive, target ramps 0 -> final
+
+    ########################
+    # Experiment registry: a list of entries (same config may recur with
+    # different overrides).
+    #   required: experiment, dataset_names, sparsity_rates
+    #   optional: extra_overrides, suffix, seeds (defaults to default_seeds)
+    ########################
+    EXPERIMENTS = []
+
+    if RUN_BASELINE_EXPS:
+        EXPERIMENTS.append(
+            {
+                "experiment": "dense_sgd",
+                "dataset_names": dataset_names,
+                "model_name": model_names,
+                "sparsity_rates": [None],
+            }
+        )
+
+    if RUN_PRUNING_EXPS:
+        # for _exp in ("pruning_mag_struct", "pruning_mag_unstruct"):
+        for _exp in ("pruning_mag_unstruct",):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": [0.95],
+                }
+            )
+
+    if RUN_FIXED_BREGMAN_EXPS:
+        for _exp in ("bregman_adabreg_fixed", "bregman_linbreg_fixed"):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": [0.95],
+                }
+            )
+
+    if RUN_WANDA_ADAPTIVE_EXPS:
+        for _exp in ("bregman_adabreg_wanda", "bregman_linbreg_wanda"):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": [0.95],
+                }
+            )
+
+    if RUN_ADAPTIVE_CLASSICAL:
+        for _exp in ("bregman_adabreg", "bregman_linbreg"):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": [0.95],
+                }
+            )
+
+    if RUN_PROGRESSIVE_BREGMAN_EXPS:
+        for _exp in (
+            "bregman_adabreg_progressive",
+            "bregman_linbreg_progressive",
+        ):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": [0.95],
+                }
+            )
+
+    # --- Volume estimation ---
+    total_jobs = sum(
+        len(cfg["dataset_names"])
+        * len(cfg["model_name"])
+        * len(cfg["sparsity_rates"])
+        * len(cfg.get("seeds", default_seeds))
+        for cfg in EXPERIMENTS
+    )
+    print(f"\n{'='*50}")
+    print(f"Job distribution: {total_jobs} total jobs")
+    print(f"{'='*50}\n")
+
+    # --- Submit all experiments ---
+    for cfg in EXPERIMENTS:
+        experiment = cfg["experiment"]
+        extra_overrides = cfg.get("extra_overrides") or None
+        suffix = cfg.get("suffix", "")
+        seeds = cfg.get("seeds", default_seeds)
+
+        for dataset_name in cfg["dataset_names"]:
+            for model_name in cfg["model_name"]:
+                for sparsity in cfg["sparsity_rates"]:
+                    for seed in seeds:
+                        _submit_img_job(
+                            experiment=experiment,
+                            dataset_name=dataset_name,
+                            seed=seed,
+                            model_name=model_name,
+                            target_sparsity=sparsity,
+                            extra_overrides=extra_overrides,
+                            job_name_suffix=suffix,
+                        )
 
 
 def create_eval_bash_script(settings, script_arguments):
