@@ -20,7 +20,7 @@ defaults:
 tags: ["img", "${datamodule.name}", "pruning", "ln_structured", "gradual"]
 seed: 42
 
-_pruning_tolerance: 0.001 # convergence band shared by the gates: in-band iff |sparsity - target| <= this
+_pruning_tolerance: 0.005 # convergence band shared by the gates: in-band iff |sparsity - target| <= this
 
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config

@@ -81,28 +81,17 @@ module:
 
   lr_scheduler:
     scheduler:
-      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-      mode: "max"
-      factor: 0.25
-      min_lr: 1.0e-6
-      patience: 2
-      verbose: True
+      _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+      T_max: ${trainer.max_epochs}
     extras:
-      monitor: ${replace:"valid/__metric__"}
-      interval: "epoch"
+      interval: epoch
       frequency: ${trainer.check_val_every_n_epoch}
 
   model:
-    # torchvision ResNet-18: match by module TYPE, not name. Its downsample
-    # layers are named layerX.0.downsample.0/.1 (no "conv"/"bn" substring), so
-    # a name regex would misroute downsample BatchNorm gammas into the RegL1
-    # fallback and silently L1-shrink them. Stem conv1 and fc head are pruned;
-    # to keep either dense, add its module name to exclude_module_name_patterns
-    # on the relevant group.
     pruning_groups:
       # Prunable convolutions (stem conv1 + all block convs + downsample convs).
       - name: conv_layers
-        layer_types: ["torch.nn.Conv2d"]
+        layer_types: ["torch.nn.Conv2d", "torch.nn.ConvTranspose2d", "torch.nn.Conv1d"]
         param_names: ["weight"]
         optimizer_settings:
           reg:
@@ -128,7 +117,7 @@ module:
 
       # BatchNorm weight+bias — never pruned (catches downsample BN too).
       - name: norm_params
-        layer_types: ["torch.nn.BatchNorm2d"]
+        layer_types: ["torch.nn.BatchNorm2d", "torch.nn.BatchNorm1d"]
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
