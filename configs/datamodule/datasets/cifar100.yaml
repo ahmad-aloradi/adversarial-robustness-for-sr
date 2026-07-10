@@ -7,20 +7,27 @@ dataset:
     train: True
     download: True
   valid_dataset:
+    split: 0.1
+    split_seed: ${seed} # stratified-carve RNG; ties the split to the run seed
+  test_dataset:
     _target_: torchvision.datasets.CIFAR100
     root: ${paths.data_dir}/cifar100
     train: False
     download: True
-  test_dataset: ${.valid_dataset}
 
+augmentation: true # gates transforms.augment (spatial, train-only)
 transforms:
-  train:
-    - { _target_: torchvision.transforms.RandomCrop, size: 32, padding: 4 }
-    - { _target_: torchvision.transforms.RandomHorizontalFlip }
+  base: # ToTensor + Normalize; the core shared by train and eval
     - { _target_: torchvision.transforms.ToTensor }
     - _target_: torchvision.transforms.Normalize
       mean: [0.5071, 0.4865, 0.4409]
       std: [0.2673, 0.2564, 0.2762]
+  augment: # PIL-space, before ToTensor; gated by augmentation
+    - { _target_: torchvision.transforms.RandomCrop, size: 32, padding: 4 }
+    - { _target_: torchvision.transforms.RandomHorizontalFlip }
+    - { _target_: torchvision.transforms.TrivialAugmentWide }
+  augment_post: # tensor-space, after Normalize; gated by augmentation
+    - { _target_: torchvision.transforms.RandomErasing, p: 0.1 } # p=0.1 to 0.5 is standard.
   eval:
     - { _target_: torchvision.transforms.ToTensor }
     - _target_: torchvision.transforms.Normalize
@@ -39,7 +46,7 @@ loaders:
     drop_last: False
     pin_memory: True
   valid:
-    batch_size: 256
+    batch_size: 128
     shuffle: False
     num_workers: 8
     drop_last: False

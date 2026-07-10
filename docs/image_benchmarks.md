@@ -70,8 +70,10 @@ python src/train.py experiment=img/dense_sgd module/img_model=wrn28_10 datamodul
 | TinyImageNet | RandomCrop(64, pad 4) + HFlip | (.4802,.4481,.3975)/(.2770,.2691,.2821) | same, batch 256 | 100 (≈60–65%) |
 
 Eval transforms are ToTensor + Normalize only (plus MNIST's pad/replicate).
-Validation uses the official test split (CIFAR/MNIST literature practice);
-TinyImageNet uses its official val split (test labels are not public).
+Validation is a class-stratified 10% carved from the train set (every class
+appears in both, seeded by `valid_dataset.split_seed`). Test: CIFAR/MNIST use
+the official test split; TinyImageNet has no public test labels, so its labeled
+`val_structured` serves as the test set.
 
 The epoch budget lives in the dataset config (`max_epochs` in
 `configs/datamodule/datasets/<name>.yaml`); experiments read it via
@@ -89,7 +91,8 @@ bash scripts/datasets/prep_tiny_imagenet.sh
 
 TinyImageNet is not a torchvision dataset: the prep downloads the archive and
 builds `val_structured/<wnid>/` from `val_annotations.txt` (train is already
-ImageFolder-shaped) so train and val share one `class_to_idx`.
+ImageFolder-shaped) so train and the `val_structured` test set share one
+`class_to_idx`.
 
 ## Experiments
 

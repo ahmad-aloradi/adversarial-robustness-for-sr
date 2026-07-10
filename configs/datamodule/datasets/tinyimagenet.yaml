@@ -1,30 +1,36 @@
 _target_: src.datamodules.vision_datamodule.VisionDataModule
 
 dataset:
-  # TinyImageNet is not a torchvision download; prep restructures the val split
-  # into val_structured/<wnid>/ so ImageFolder gives matching train/val labels.
+  # test/ is unlabeled; prep-built val_structured/ is the labeled test set, val is carved from train.
   prep_hint: bash scripts/datasets/prep_tiny_imagenet.sh
   train_dataset:
     _target_: torchvision.datasets.ImageFolder
     root: ${paths.data_dir}/tiny-imagenet-200/train
   valid_dataset:
+    split: 0.1 # carved from train — no separate labeled val split exists
+    split_seed: ${seed} # stratified-carve RNG; ties the split to the run seed
+  test_dataset:
     _target_: torchvision.datasets.ImageFolder
     root: ${paths.data_dir}/tiny-imagenet-200/val_structured
-  test_dataset: ${.valid_dataset}
 
+augmentation: true # gates transforms.augment (spatial, train-only)
 transforms:
-  train:
-    - { _target_: torchvision.transforms.RandomCrop, size: 64, padding: 4 }
-    - { _target_: torchvision.transforms.RandomHorizontalFlip }
+  base: # ToTensor + Normalize; the core shared by train and eval
     - { _target_: torchvision.transforms.ToTensor }
     - _target_: torchvision.transforms.Normalize
-      mean: [0.4802, 0.4481, 0.3975]
-      std: [0.2770, 0.2691, 0.2821]
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+  augment: # PIL-space, before ToTensor; gated by augmentation
+    - { _target_: torchvision.transforms.RandomCrop, size: 64, padding: 4 }
+    - { _target_: torchvision.transforms.RandomHorizontalFlip }
+    - { _target_: torchvision.transforms.TrivialAugmentWide }
+  augment_post: # tensor-space, after Normalize; gated by augmentation
+    - { _target_: torchvision.transforms.RandomErasing, p: 0.1 } # p=0.1 to 0.5 is standard.
   eval:
     - { _target_: torchvision.transforms.ToTensor }
     - _target_: torchvision.transforms.Normalize
-      mean: [0.4802, 0.4481, 0.3975]
-      std: [0.2770, 0.2691, 0.2821]
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
 
 name: tinyimagenet # dataset tag for logging
 num_classes: 200
@@ -32,13 +38,13 @@ max_epochs: 100 # standard literature budget; experiments read this via ${datamo
 
 loaders:
   train:
-    batch_size: 256
+    batch_size: 128
     shuffle: True
     num_workers: 8
     drop_last: False
     pin_memory: True
   valid:
-    batch_size: 256
+    batch_size: 128
     shuffle: False
     num_workers: 8
     drop_last: False

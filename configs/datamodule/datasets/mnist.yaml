@@ -7,23 +7,28 @@ dataset:
     train: True
     download: True
   valid_dataset:
+    split: 0.1
+    split_seed: ${seed} # stratified-carve RNG; ties the split to the run seed
+  test_dataset:
     _target_: torchvision.datasets.MNIST
     root: ${paths.data_dir}/mnist
     train: False
     download: True
-  test_dataset: ${.valid_dataset}
 
-# MNIST recipe uses no train augmentation, so train == eval transforms.
+# MNIST recipe uses no train augmentation, so augment is empty and base == eval.
 # Pad 28->32 and replicate grayscale to 3 channels so MNIST meets the same
 # 3x32x32 input contract as CIFAR — the model is identical across datasets.
+augmentation: false # no spatial augment for MNIST
 transforms:
-  train:
+  base: # always applied to train; eval uses transforms.eval
     - { _target_: torchvision.transforms.Pad, padding: 2 }
     - { _target_: torchvision.transforms.Grayscale, num_output_channels: 3 }
     - { _target_: torchvision.transforms.ToTensor }
     - _target_: torchvision.transforms.Normalize
       mean: [0.1307, 0.1307, 0.1307]
       std: [0.3081, 0.3081, 0.3081]
+  augment: [] # no spatial augment for MNIST
+  augment_post: [] # no tensor-space augment for MNIST
   eval:
     - { _target_: torchvision.transforms.Pad, padding: 2 }
     - { _target_: torchvision.transforms.Grayscale, num_output_channels: 3 }
@@ -44,7 +49,7 @@ loaders:
     drop_last: False
     pin_memory: True
   valid:
-    batch_size: 256
+    batch_size: 128
     shuffle: False
     num_workers: 8
     drop_last: False
