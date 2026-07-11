@@ -20,6 +20,10 @@ class LinBreg(torch.optim.Optimizer):
 
     Implementation of the baseline algorithm from "A Bregman Learning Framework
     for Sparse Neural Networks" by Bungert et al.
+
+    Momentum mirrors ``torch.optim.SGD`` exactly (same buffer, dampening and
+    Nesterov formulas); the only difference is that the momentum-adjusted
+    gradient drives the dual variable ``v`` and the weights come from its prox.
     """
 
     def __init__(
@@ -29,14 +33,29 @@ class LinBreg(torch.optim.Optimizer):
         reg: Optional[BregmanRegularizer] = None,
         delta: float = 1.0,
         momentum: float = 0.0,
+        dampening: float = 0.0,  # SGD dampening on the momentum buffer
+        nesterov: bool = False,  # Nesterov look-ahead on the momentum step
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate")
+        if momentum < 0.0:
+            raise ValueError("Invalid momentum value")
+        if nesterov and (momentum <= 0.0 or dampening != 0.0):
+            raise ValueError(
+                "Nesterov momentum requires momentum > 0 and dampening == 0"
+            )
 
         if reg is None:
             reg = RegNone()
 
-        defaults = dict(lr=lr, reg=reg, delta=delta, momentum=momentum)
+        defaults = dict(
+            lr=lr,
+            reg=reg,
+            delta=delta,
+            momentum=momentum,
+            dampening=dampening,
+            nesterov=nesterov,
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -52,6 +71,8 @@ class LinBreg(torch.optim.Optimizer):
             reg = group["reg"]
             step_size = group["lr"]
             momentum = group["momentum"]
+            dampening = group["dampening"]
+            nesterov = group["nesterov"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -68,18 +89,23 @@ class LinBreg(torch.optim.Optimizer):
                 state["step"] += 1
                 sub_grad = state["sub_grad"]
 
-                # Dual update: v^(k+1) = v^(k) − τ∇L(θ^(k))   (v = sub_grad)
-                if momentum > 0.0:
-                    mom_buff = state["momentum_buffer"]
-                    if state["momentum_buffer"] is None:
-                        mom_buff = torch.zeros_like(grad)
+                # SGD momentum on the gradient (see torch.optim.SGD).
+                d_grad = grad
+                if momentum != 0.0:
+                    buf = state["momentum_buffer"]
+                    if buf is None:
+                        # First step seeds the buffer: b_1 = g
+                        buf = torch.clone(grad).detach()
+                        state["momentum_buffer"] = buf
+                    else:
+                        # b_k = μ·b_{k-1} + (1 − dampening)·g
+                        buf.mul_(momentum).add_(grad, alpha=1 - dampening)
 
-                    mom_buff.mul_(momentum)
-                    mom_buff.add_((1 - momentum) * step_size * grad)
-                    state["momentum_buffer"] = mom_buff
-                    sub_grad.add_(-mom_buff)
-                else:
-                    sub_grad.add_(-step_size * grad)
+                    # nesterov: g ← g + μ·b_k ;  plain: g ← b_k
+                    d_grad = grad.add(buf, alpha=momentum) if nesterov else buf
+
+                # Dual update: v^(k+1) = v^(k) − τ·g   (v = sub_grad)
+                sub_grad.add_(d_grad, alpha=-step_size)
 
                 # Primal update (prox): θ^(k+1) = prox(δ·v^(k+1))
                 p.copy_(reg.prox(delta * sub_grad, delta))
