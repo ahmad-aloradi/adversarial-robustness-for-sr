@@ -1213,20 +1213,24 @@ def run_img():
     seeds, each saved under its own `seed_{seed}` subdirectory.
     """
     # dataset_names = ["mnist", "cifar10", "cifar100", "tinyimagenet"]
-    dataset_names = ["cifar10", "tinyimagenet"]
+    dataset_names = ["tinyimagenet"]
     model_names = ["resnet18"]
-    default_seeds = [42]
+    sparsity_rates_sweep = [0.95]
+    default_seeds = [42, 1337, 2026]
+    lambda_factor_k = 0.4  # scales BREGMAN_LAMBDA_CONFIGS' fixed_lambda
 
     ########################
     # Switch controls (master switch per group of experiments)
     ########################
-    RUN_BASELINE_EXPS = True
+    RUN_BASELINE_EXPS = False
     RUN_PRUNING_EXPS = False
     # Vanilla Bregman: fixed lambda, no scheduler (bregman_*_fixed).
     RUN_FIXED_BREGMAN_EXPS = False
     # Adaptive Bregman (lambda scheduler):
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
-    RUN_PROGRESSIVE_BREGMAN_EXPS = True  # adaptive, target ramps 0 -> final
+    RUN_PROGRESSIVE_BREGMAN_EXPS = False  # adaptive, target ramps 0 -> final
+
+    RUN_CONSTANT_LR_EXPS = True  # baseline with constant LR (no scheduler)
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
@@ -1254,7 +1258,7 @@ def run_img():
                     "experiment": _exp,
                     "dataset_names": dataset_names,
                     "model_name": model_names,
-                    "sparsity_rates": [0.95],
+                    "sparsity_rates": sparsity_rates_sweep,
                 }
             )
 
@@ -1265,7 +1269,10 @@ def run_img():
                     "experiment": _exp,
                     "dataset_names": dataset_names,
                     "model_name": model_names,
-                    "sparsity_rates": [0.95],
+                    "sparsity_rates": sparsity_rates_sweep,
+                    "extra_overrides": {
+                        "_bregman_lambda_factor": lambda_factor_k
+                    },
                 }
             )
 
@@ -1276,7 +1283,7 @@ def run_img():
                     "experiment": _exp,
                     "dataset_names": dataset_names,
                     "model_name": model_names,
-                    "sparsity_rates": [0.95],
+                    "sparsity_rates": sparsity_rates_sweep,
                 }
             )
 
@@ -1290,9 +1297,10 @@ def run_img():
                     "experiment": _exp,
                     "dataset_names": dataset_names,
                     "model_name": model_names,
-                    "sparsity_rates": [0.95],
+                    "sparsity_rates": sparsity_rates_sweep,
                 }
             )
+    
 
     # --- Volume estimation ---
     total_jobs = sum(
@@ -1326,6 +1334,22 @@ def run_img():
                             extra_overrides=extra_overrides,
                             job_name_suffix=suffix,
                         )
+    
+    # --- Exception experiments: constant lr ---
+    if RUN_CONSTANT_LR_EXPS:
+        for dataset_name in dataset_names:
+            for model_name in model_names:
+                for _exp in ["dense_sgd", "pruning_mag_unstruct", "bregman_adabreg", 
+                             "bregman_linbreg", "bregman_adabreg_progressive", "bregman_linbreg_progressive"]:
+                    _submit_img_job(
+                        experiment=_exp,
+                        dataset_name=dataset_name,
+                        seed=42,
+                        target_sparsity=sparsity_rates_sweep[0] if _exp != "dense_sgd" else None,
+                        model_name=model_name,
+                        extra_overrides={"module.lr_scheduler": "null", },
+                        job_name_suffix="-constant_lr",
+                    )
 
 
 def create_eval_bash_script(settings, script_arguments):

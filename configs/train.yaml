@@ -56,8 +56,11 @@ expdir: null
 # seed for random number generators in pytorch, numpy and python.random
 seed: 42
 
+# job start timestamp, kept for reference — append /${run_stamp} to name below to enable; do not add to run dirs (breaks viz discovery)
+run_stamp: ${now:%Y-%m-%d_%H-%M-%S}
+
 # name of the run, accessed by loggers
-name: "lightning-template-0.1.0"
+name: ${run_subdir:${oc.select:datamodule.name,null},${hydra:runtime.choices.module/img_model},${oc.select:datamodule.augmentation,null},${hydra:runtime.choices.experiment},${oc.select:_bregman_target_sparsity,${oc.select:callbacks.model_pruning.amount,null}},${oc.select:module.lr_scheduler.scheduler._target_,null}}
 
 # default trainer overrides
 trainer:

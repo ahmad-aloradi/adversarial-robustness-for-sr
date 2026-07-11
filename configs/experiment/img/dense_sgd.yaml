@@ -11,7 +11,7 @@ defaults:
   - override /module: img.yaml
   - override /trainer: gpu.yaml
   - override /callbacks: default.yaml
-  - override /logger: tensorboard.yaml
+  - override /logger: many_loggers.yaml
   - _self_
 
 tags: ["img", "${datamodule.name}", "dense", "sgd"]

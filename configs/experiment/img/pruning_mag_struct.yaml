@@ -14,7 +14,7 @@ defaults:
   - override /callbacks:
       - default.yaml
       - checkpoint_handler.yaml
-  - override /logger: tensorboard.yaml
+  - override /logger: many_loggers.yaml
   - _self_
 
 tags: ["img", "${datamodule.name}", "pruning", "ln_structured", "gradual"]
