@@ -6,7 +6,7 @@ model and allows it to become denser during training. The lambda scheduler
 adjusts regularization strength to drive sparsity toward a target level.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 import torch
 from pytorch_lightning import Callback, LightningModule, Trainer
@@ -16,8 +16,7 @@ from src import utils
 from src.callbacks.pruning.shared_prune_utils import compute_sparsity
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
-from .activation_stats import ActivationStats
-from .bregman_regularizers import RegL1ColWeighted, RegNone
+from .bregman_regularizers import RegNone
 from .lambda_scheduler import LambdaScheduler, TargetScheduler
 
 log = utils.get_pylogger(__name__)
@@ -35,7 +34,6 @@ class BregmanPruner(Callback):
     - Applies initial sparsity to the model (via PruningManager)
     - Optionally updates regularization strength (lambda) per batch via
       LambdaScheduler (fixed-target feedback)
-    - Refreshes activation statistics for RegL1ColWeighted (Wanda) groups
     - Logs sparsity metrics and checkpoints the scheduler state
     """
 
@@ -46,7 +44,6 @@ class BregmanPruner(Callback):
         lambda_scheduler: Optional[LambdaScheduler] = None,
         target_sparsity: Optional[float] = None,
         target_scheduler: Optional[TargetScheduler] = None,  # ramps the target
-        act_update_freq: int = 100,  # batches between activation refreshes
     ):
         """
         Args:
@@ -60,15 +57,8 @@ class BregmanPruner(Callback):
             target_scheduler: Optional per-epoch ramp of the controller target
                 (progressive mode). When set, the controller chases its moving
                 target each step while the gates still key off target_sparsity.
-            act_update_freq: Batches between activation-stat refreshes for
-                RegL1ColWeighted (Wanda) groups. Per-batch refresh churns
-                the thresholds; ~100 is stable.
         """
         super().__init__()
-        assert (
-            act_update_freq >= 1
-        ), f"act_update_freq must be >= 1, got {act_update_freq}"
-        self.act_update_freq = act_update_freq
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
@@ -87,13 +77,6 @@ class BregmanPruner(Callback):
         self._optimizer: Optional[torch.optim.Optimizer] = None
         self._initialized = False
         self._ckpt_scheduler_state: Optional[dict] = None
-
-        # Wanda groups: {group_name: reg}, hooks in _act_stats. Activation
-        # stats are derived state (nothing checkpointed): _act_refresh_pending
-        # forces a refresh on the first batch after every fit start.
-        self._wanda_regs: Dict[str, RegL1ColWeighted] = {}
-        self._act_stats: Optional[ActivationStats] = None
-        self._act_refresh_pending: bool = False
 
     # -------------------------------------------------------------------------
     # Lightning hooks
@@ -129,7 +112,6 @@ class BregmanPruner(Callback):
             self.manager.apply_initial_sparsity()
 
         self._setup_lambda_scheduler(optimizer, trainer, is_resuming)
-        self._setup_activation_stats(optimizer, pl_module)
         self._apply_lambda_to_groups(trainer)
         if is_resuming and self._ckpt_scheduler_state:
             log.info("Restored lambda values to optimizer parameter groups.")
@@ -137,37 +119,6 @@ class BregmanPruner(Callback):
         self._initialized = True
         self._log_configuration(optimizer)
         self._log_group_assignments(pl_module)
-
-    def on_train_batch_start(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        batch: Any,
-        batch_idx: int,
-    ) -> None:
-        """Arm the activation hooks on refresh batches (Wanda groups only)."""
-        if self._act_stats is None:
-            return
-        if (
-            self._act_refresh_pending
-            or trainer.global_step % self.act_update_freq == 0
-        ):
-            self._act_stats.arm()
-
-    def on_before_optimizer_step(
-        self,
-        trainer: Trainer,
-        pl_module: LightningModule,
-        optimizer: torch.optim.Optimizer,
-    ) -> None:
-        """Fold freshly captured activation stats into the Wanda regs, so
-        this batch's prox already thresholds in the new metric."""
-        if self._act_stats is None or not self._act_stats.fresh():
-            return
-        for name, col_weights in self._act_stats.consume().items():
-            self._wanda_regs[name].col_weights = col_weights
-        self._resync_wanda_dual(optimizer)
-        self._act_refresh_pending = False
 
     def on_train_batch_end(
         self,
@@ -257,13 +208,6 @@ class BregmanPruner(Callback):
             checkpoint.get("lambda_scheduler_state"),  # pre-rename compat
         )
 
-    def teardown(
-        self, trainer: Trainer, pl_module: LightningModule, stage: str
-    ) -> None:
-        """Deregister the activation hooks."""
-        if self._act_stats is not None:
-            self._act_stats.remove()
-
     # -------------------------------------------------------------------------
     # Scheduler management
     # -------------------------------------------------------------------------
@@ -351,83 +295,6 @@ class BregmanPruner(Callback):
         for group in optimizer.param_groups:
             if self._group_regularized(group):
                 group["reg"].lamda = lambda_value * self._lambda_scale(group)
-
-    # -------------------------------------------------------------------------
-    # Activation statistics (Wanda ordering)
-    # -------------------------------------------------------------------------
-
-    def _setup_activation_stats(
-        self, optimizer, pl_module: LightningModule
-    ) -> None:
-        """Wire forward hooks for every RegL1ColWeighted (Wanda) group.
-
-        Each such group must hold exactly one weight tensor (the prox has no
-        param identity), produced by ``expand_per_layer: true`` on the group
-        config. col_weights start at ones (so the lazy sub_grad init in the
-        first optimizer step works) and are refreshed from the first batch.
-        """
-        wanda_groups = [
-            g
-            for g in optimizer.param_groups
-            if isinstance(g.get("reg"), RegL1ColWeighted)
-        ]
-        self._wanda_regs = {}
-        self._act_stats = None
-        if not wanda_groups:
-            return
-
-        param_to_module = {
-            id(p): (mod_name, module)
-            for mod_name, module in pl_module.named_modules()
-            for _, p in module.named_parameters(recurse=False)
-        }
-        hooked_modules = {}
-        for group in wanda_groups:
-            name = group["name"]
-            assert len(group["params"]) == 1, (
-                f"Wanda group '{name}' must hold exactly one weight; set "
-                f"expand_per_layer: true on the group config."
-            )
-            weight = group["params"][0]
-            assert (
-                id(weight) in param_to_module
-            ), f"Wanda group '{name}': owning module not found."
-            mod_name, module = param_to_module[id(weight)]
-            group["reg"].col_weights = torch.ones(
-                weight.shape[1], device=weight.device
-            )
-            hooked_modules[name] = module
-            self._wanda_regs[name] = group["reg"]
-
-        self._act_stats = ActivationStats(hooked_modules)
-        self._act_refresh_pending = True
-        log.info(
-            f"BregmanPruner: Wanda ordering active "
-            f"({len(self._wanda_regs)} layers, "
-            f"act_update_freq={self.act_update_freq})."
-        )
-
-    @torch.no_grad()
-    def _resync_wanda_dual(self, optimizer: torch.optim.Optimizer) -> None:
-        """Rebuild the Bregman dual variable after a col_weights refresh.
-
-        Bregman stores its iterate as v = θ/δ + ∂J(θ); for the column-weighted
-        L1 the subgradient baseline in v scales as λ/col_weights. Changing
-        col_weights mid-run would leave v holding the old baseline while the
-        prox subtracts the new threshold, releasing the stale baseline as an
-        exploding weight. Recomputing v from the current θ and the new
-        col_weights restores the invariant and leaves θ = prox(δv) unchanged.
-        """
-        for group in optimizer.param_groups:
-            reg = group.get("reg")
-            if not isinstance(reg, RegL1ColWeighted):
-                continue
-            delta = group["delta"]
-            for p in group["params"]:
-                state = optimizer.state[p]
-                if "sub_grad" not in state:
-                    continue  # first step: the optimizer initializes it itself
-                state["sub_grad"] = p.data / delta + reg.sub_grad(p.data)
 
     # -------------------------------------------------------------------------
     # Sparsity

@@ -85,9 +85,6 @@ class PruningManager:
     2.  Provide these groups to an optimizer with group-specific settings (e.g., regularization).
     3.  Apply initial sparsity to each group according to its configuration.
 
-    A group config may set ``expand_per_layer: true``: it is expanded into
-    one group per matching weight (for regularizers with per-weight state).
-
     Args:
         pl_module (LightningModule): The model containing the parameters.
         group_configs (List[Dict[str, Any]]): A list defining the pruning groups.
@@ -102,15 +99,8 @@ class PruningManager:
         self.processed_groups = self._process_configs()
 
     def _process_configs(self) -> List[Dict[str, Any]]:
-        expanded_configs: List[Dict[str, Any]] = []
-        for config in self._raw_configs:
-            if config.get("expand_per_layer"):
-                expanded_configs.extend(self._expand_per_layer_group(config))
-            else:
-                expanded_configs.append(config)
-
         processed_groups = []
-        for config in expanded_configs:
+        for config in self._raw_configs:
             processed_groups.append(
                 {
                     "params": [],
@@ -158,51 +148,6 @@ class PruningManager:
                     fallback_group["params"].append(param)
 
         return [g for g in processed_groups if g["params"]]
-
-    def _expand_per_layer_group(
-        self, config: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Expand one group config into one config per matching weight."""
-        from .layer_shapes import collect_prunable_layer_shapes
-
-        assert config.get("layer_types"), (
-            f"expand_per_layer group '{config.get('name')}' must declare "
-            "layer_types to define the prunable weight set."
-        )
-        assert list(config.get("param_names", [])) == ["weight"], (
-            f"expand_per_layer group '{config.get('name')}' is defined for "
-            'param_names: ["weight"] only.'
-        )
-        resolved_types = _resolve_layer_types(config["layer_types"])
-        shapes = collect_prunable_layer_shapes(
-            self.pl_module, config, resolved_types
-        )
-        if not shapes:
-            raise ValueError(
-                f"expand_per_layer group '{config.get('name')}' matched no "
-                "prunable weights; check layer_types/module_name_patterns."
-            )
-
-        base_name = config.get("name", "per_layer")
-        expanded: List[Dict[str, Any]] = []
-        for shape in shapes:
-            expanded.append(
-                {
-                    "name": f"{base_name}__{shape.name}",
-                    "param_names": ["weight"],
-                    "layer_types": list(config["layer_types"]),
-                    # Anchored exact match: each config grabs its one weight.
-                    "module_name_patterns": [
-                        "^" + re.escape(shape.name) + "$"
-                    ],
-                    # Shared node; sv.py instantiates a fresh reg per group.
-                    "optimizer_settings": config.get(
-                        "optimizer_settings", {}
-                    ),
-                    "pruning_config": dict(config.get("pruning_config", {})),
-                }
-            )
-        return expanded
 
     def get_optimizer_param_groups(self) -> List[Dict[str, Any]]:
         optimizer_groups = []

@@ -85,44 +85,6 @@ class RegL1Pos(BregmanRegularizer):
         return self.lamda * torch.sign(v)
 
 
-class RegL1ColWeighted(RegL1):
-    """L1 with per-input-column threshold ``lamda / col_weights[j]``.
-
-    Serves exactly one weight tensor of shape (out, in[, k...]).
-    ``col_weights`` is an (in,)-shaped tensor set externally from batch
-    activation statistics; a weight survives the prox iff
-    ``col_weights[j] * |v_ij| > lamda``.
-    """
-
-    def __init__(self, lamda: float = 1.0, delta: float = 1.0):
-        super().__init__(lamda=lamda, delta=delta)
-        self.col_weights = None  # (in,); set by BregmanPruner
-
-    def _column_view(self, x: torch.Tensor) -> torch.Tensor:
-        assert self.col_weights is not None, (
-            "col_weights not set; BregmanPruner._setup_activation_stats "
-            "initializes them at fit start."
-        )
-        assert x.ndim >= 2 and x.shape[1] == self.col_weights.shape[0], (
-            f"weight (out, in[, k...])={tuple(x.shape)} vs col_weights "
-            f"{tuple(self.col_weights.shape)}"
-        )
-        return self.col_weights.view(1, -1, *([1] * (x.ndim - 2)))
-
-    def __call__(self, x: torch.Tensor) -> float:
-        return self.lamda * (x.abs() / self._column_view(x)).sum().item()
-
-    def prox(
-        self, x: torch.Tensor, delta: float = 1.0, lamda: float = None
-    ) -> torch.Tensor:
-        lamda = lamda if lamda is not None else self.lamda
-        thresh = delta * lamda / self._column_view(x)
-        return torch.sign(x) * torch.clamp(x.abs() - thresh, min=0)
-
-    def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
-        return (self.lamda / self._column_view(v)) * torch.sign(v)
-
-
 class RegL1L2(BregmanRegularizer):
     """L1-L2 group sparsity regularizer (group lasso)."""
 
@@ -217,7 +179,6 @@ _REGULARIZERS = {
     "none": RegNone,
     "l1": RegL1,
     "l1_pos": RegL1Pos,
-    "l1_col_weighted": RegL1ColWeighted,
     "l1_l2": RegL1L2,
     "l1_l2_conv": RegL1L2Conv,
     "soft_bernoulli": RegSoftBernoulli,

@@ -891,8 +891,7 @@ def run_sv(transfer_data="false", force="false"):
     RUN_PRUNING_EXPS = False
     # Vanilla Bregman: fixed lambda, no scheduler (sv_bregman_*_fixed).
     RUN_FIXED_BREGMAN_EXPS = False
-    # Adaptive Bregman (lambda scheduler), two ordering modes:
-    RUN_WANDA_ADAPTIVE_EXPS = False  # adaptive, Wanda ordering
+    # Adaptive Bregman (lambda scheduler):
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
     RUN_PROGRESSIVE_BREGMAN_EXPS = False  # adaptive, target ramps 0 -> final
 
@@ -939,18 +938,7 @@ def run_sv(transfer_data="false", force="false"):
                 }
             )
 
-    # CASE 1 — adaptive Bregman, Wanda (activation-weighted) ordering.
-    if RUN_WANDA_ADAPTIVE_EXPS:
-        EXPERIMENTS.append(
-            {
-                "experiment": "sv_bregman_adabreg_wanda",
-                "sv_models": [ecapa, resnet34],
-                "sparsity_rates": [0.90, 0.99],
-                "dataset_names": ["multi_sv"],
-            }
-        )
-
-    # CASE 2 — adaptive Bregman, uniform allocation. Dense start to match the
+    # CASE 1 — adaptive Bregman, uniform allocation. Dense start to match the
     # other cells (base defaults to 0.99 sparse).
     if RUN_ADAPTIVE_CLASSICAL:
         for _exp in ("sv_bregman_adabreg", "sv_bregman_linbreg"):
@@ -964,7 +952,7 @@ def run_sv(transfer_data="false", force="false"):
                 }
             )
 
-    # CASE 3 — progressive Bregman: target ramps 0 -> final over the ramp epochs
+    # CASE 2 — progressive Bregman: target ramps 0 -> final over the ramp epochs
     # (ramp config lives in the *_progressive YAMLs, not here).
     if RUN_PROGRESSIVE_BREGMAN_EXPS:
         for _exp in (
@@ -1236,8 +1224,7 @@ def run_img():
     RUN_PRUNING_EXPS = False
     # Vanilla Bregman: fixed lambda, no scheduler (bregman_*_fixed).
     RUN_FIXED_BREGMAN_EXPS = False
-    # Adaptive Bregman (lambda scheduler), two ordering modes:
-    RUN_WANDA_ADAPTIVE_EXPS = False  # adaptive, Wanda ordering
+    # Adaptive Bregman (lambda scheduler):
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
     RUN_PROGRESSIVE_BREGMAN_EXPS = True  # adaptive, target ramps 0 -> final
 
@@ -1273,17 +1260,6 @@ def run_img():
 
     if RUN_FIXED_BREGMAN_EXPS:
         for _exp in ("bregman_adabreg_fixed", "bregman_linbreg_fixed"):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "dataset_names": dataset_names,
-                    "model_name": model_names,
-                    "sparsity_rates": [0.95],
-                }
-            )
-
-    if RUN_WANDA_ADAPTIVE_EXPS:
-        for _exp in ("bregman_adabreg_wanda", "bregman_linbreg_wanda"):
             EXPERIMENTS.append(
                 {
                     "experiment": _exp,
