@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from typing import Any, Dict
 
 import pytorch_lightning as pl
@@ -6,6 +8,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from src import utils
+from src.callbacks.pruning.shared_prune_utils import compute_sparsity
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
 log = utils.get_pylogger(__name__)
@@ -40,6 +43,11 @@ class ImageClassification(pl.LightningModule):
         self._setup_metrics(metrics)
         self._setup_model_components(model)
         self._setup_training_components(criterion, optimizer, lr_scheduler)
+
+        # Per-epoch snapshots saved to results.json at fit/test end.
+        self._best_val_result = None
+        self._last_val_result = None
+        self._test_result = None
 
     # ------------------------------------------------------------------ #
     #  Setup helpers                                                       #
@@ -132,6 +140,37 @@ class ImageClassification(pl.LightningModule):
         return results
 
     def on_validation_epoch_end(self) -> None:
+        if self.trainer.sanity_checking:
+            self.valid_metric.reset()
+            return
+
+        valid_acc = float(self.valid_metric.compute())
+        # train_metric still holds this epoch's accuracy (validation runs first).
+        train_acc = float(self.train_metric.compute())
+
+        self.valid_metric_best.update(torch.tensor(valid_acc))
+        metric_name = self.valid_metric.__class__.__name__
+        self.log(
+            f"valid/{metric_name}_best",
+            self.valid_metric_best.compute(),
+            **self.logging_params,
+        )
+
+        overall_sparsity, pruned_sparsity = self._compute_sparsities()
+        snapshot = {
+            "epoch": self.current_epoch,
+            "train_accuracy": train_acc,
+            "valid_accuracy": valid_acc,
+            "overall_sparsity": overall_sparsity,
+            "pruned_sparsity": pruned_sparsity,
+        }
+        self._last_val_result = snapshot
+        if (
+            self._best_val_result is None
+            or valid_acc >= self._best_val_result["valid_accuracy"]
+        ):
+            self._best_val_result = snapshot
+
         self.valid_metric.reset()
 
     @torch.inference_mode()
@@ -139,6 +178,60 @@ class ImageClassification(pl.LightningModule):
         results = self.model_step(batch, self.train_criterion)
         self._log_step_metrics(results, batch, "test")
         return results
+
+    def on_test_epoch_end(self) -> None:
+        # Test runs on the best/averaged ckpt (train.py), so this is the best
+        # checkpoint's test accuracy.
+        self._test_result = {
+            "test_accuracy": float(self.test_metric.compute()),
+            "checkpoint_path": self.trainer.ckpt_path,
+        }
+        self.test_metric.reset()
+        self._write_results()
+
+    def on_train_end(self) -> None:
+        self._write_results()
+
+    def _compute_sparsities(self) -> tuple[float, float]:
+        """Whole-model sparsity and the sparsity over the active pruner's
+        target params (matching the logged pruning/sparsity). Without a pruner
+        the two are identical."""
+        from src.callbacks.pruning.bregman.bregman_pruner import BregmanPruner
+        from src.callbacks.pruning.prune import MagnitudePruner
+
+        overall = compute_sparsity(self)
+        pruned = overall
+        for cb in self.trainer.callbacks:
+            if isinstance(cb, MagnitudePruner) and cb._target_params:
+                pruned = compute_sparsity(cb._target_params)
+                break
+            if isinstance(cb, BregmanPruner):
+                pruned = cb._pruned_sparsity()
+                break
+        return overall, pruned
+
+    def _write_results(self) -> None:
+        """Save best/last epoch train/val (plus best-ckpt test) accuracy as
+        results.json in the run directory."""
+        if not self.trainer.is_global_zero:
+            return
+
+        results = {}
+        if self._best_val_result is not None:
+            best = dict(self._best_val_result)
+            if self._test_result is not None:
+                best.update(self._test_result)
+            results["best_checkpoint"] = best
+        if self._last_val_result is not None:
+            results["last_checkpoint"] = self._last_val_result
+        if not results:
+            return
+
+        out_path = Path(self.trainer.default_root_dir) / "results.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(results, f, indent=4)
+        log.info(f"Saved train/val/test results to: {out_path}")
 
     # ------------------------------------------------------------------ #
     #  Optimizer (Bregman-aware — identical contract to sv.py)             #

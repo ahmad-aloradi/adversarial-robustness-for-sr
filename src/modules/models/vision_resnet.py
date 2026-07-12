@@ -8,7 +8,7 @@ maxpool, so the spatial resolution is preserved into `layer1`. Every variant
 below shares this exact stem (conv1 is always a 64-channel 7x7 stride-2 conv
 regardless of depth/width), so the same replacement applies uniformly.
 
-Run standalone to check output shapes:
+Run standalone to compare the stem variants by their pre-pool feature map:
 
     python src/modules/models/vision_resnet.py
 """
@@ -37,7 +37,7 @@ _ARCHS = {
 
 
 def build_resnet(
-    arch: str, num_classes: int, in_channels: int = 3
+    arch: str, num_classes: int, in_channels: int = 3, manual_overrides: bool = True
 ) -> nn.Module:
     """Torchvision ResNet variant with a small-image stem and a fresh head.
 
@@ -61,18 +61,36 @@ def build_resnet(
     ), f"unknown arch {arch!r}, expected one of {sorted(_ARCHS)}"
 
     model = _ARCHS[arch](weights=None, num_classes=num_classes)
-    model.conv1 = nn.Conv2d(
-        in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False
-    )
-    nn.init.kaiming_normal_(
-        model.conv1.weight, mode="fan_out", nonlinearity="relu"
-    )
-    model.maxpool = nn.Identity()
+
+    if manual_overrides:
+        model.conv1 = nn.Conv2d(
+            in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False
+        )
+        nn.init.kaiming_normal_(
+            model.conv1.weight, mode="fan_out", nonlinearity="relu"
+        )
+        model.maxpool = nn.Identity()
     return model
 
 
+def _features_before_pool(net: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """Run stem + all four stages, stopping just before the global pool."""
+    for name, layer in net.named_children():
+        if name == "avgpool":
+            return x
+        x = layer(x)
+    raise AssertionError("avgpool child not found on torchvision ResNet")
+
+
 if __name__ == "__main__":
-    for arch in ("resnet18", "resnet50", "wide_resnet50_2"):
-        net = build_resnet(arch, num_classes=10, in_channels=3)
-        out = net(torch.randn(2, 3, 32, 32))
-        print(f"{arch}: input (2,3,32,32) -> logits {tuple(out.shape)}")
+
+    for x in [torch.randn(2, 3, 64, 64), torch.randn(2, 3, 32, 32)]:
+        for arch in ("resnet18", "resnet50", "wide_resnet50_2"):
+            print(f"\n== {arch}, input {tuple(x.shape)} ==")
+            for overrides in (False, True):
+                net = build_resnet(arch, 10, manual_overrides=overrides).eval()
+                with torch.no_grad():
+                    feat = _features_before_pool(net, x)
+                c, h, w = feat.shape[1:]
+                tag = "override" if overrides else "stock   "
+                print(f"  {tag}: pre-pool {tuple(feat.shape)} = {c}ch x {h*w} spatial")

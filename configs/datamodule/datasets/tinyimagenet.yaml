@@ -34,7 +34,7 @@ transforms:
 
 name: tinyimagenet # dataset tag for logging
 num_classes: 200
-max_epochs: 100 # standard literature budget; experiments read this via ${datamodule.max_epochs}
+max_epochs: 120
 
 loaders:
   train:
