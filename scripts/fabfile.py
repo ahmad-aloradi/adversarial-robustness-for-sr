@@ -486,6 +486,31 @@ def _find_latest_last_ckpt(ckpt_dir):
     return body or None
 
 
+def _find_wandb_run_id(run_dir):
+    """Return the newest wandb run id under ``{run_dir}/wandb``, or None.
+
+    WandbLogger names each run dir ``run-{timestamp}-{id}`` (``offline-run-``
+    when offline); the id is the token after the final ``-``. Passing the newest
+    one as ``logger.wandb.id`` continues that dashboard entry on resume instead
+    of forking a new run.
+
+    None (no wandb dir yet, or no run inside it) just makes wandb start fresh —
+    harmless, so no marker/exit-code paranoia here (unlike _find_latest_last_ckpt,
+    where a false "absent" would overwrite checkpoints). ``2>/dev/null`` is
+    required: Fabric merges stderr into stdout, so a missing dir must stay empty.
+    A real SSH/exec failure still aborts loudly on its own.
+    """
+    wandb_dir = os.path.join(run_dir, "wandb")
+    probe = (
+        f"find {wandb_dir} -maxdepth 1 -type d -name '*run-*' "
+        f"-printf '%T@\\t%p\\n' 2>/dev/null | sort -rn | head -1 | cut -f2-"
+    )
+    newest = str(run(probe, quiet=True)).strip()
+    if not newest:
+        return None
+    return os.path.basename(newest).rsplit("-", 1)[-1]
+
+
 def check_test_artifacts_complete(run_dir):
     """Return True if the run directory contains completed test artifacts.
 
@@ -536,6 +561,17 @@ echo 1
 
     result = run(cmd, quiet=True)
     return result.strip() == "1"
+
+
+def check_img_results_complete(run_dir):
+    """Return True if the img run wrote a results.json with test accuracy.
+
+    src/modules/img.py adds "test_accuracy" only after testing the best
+    checkpoint, so its presence marks a fully finished run.
+    """
+    results_json = os.path.join(run_dir, "results.json")
+    cmd = f'grep -q test_accuracy "{results_json}" 2>/dev/null && echo 1 || echo 0'
+    return run(cmd, quiet=True).strip() == "1"
 
 
 def _remove_completion_markers(test_root):
@@ -825,9 +861,10 @@ def _submit_sv_job(
                 f"resuming from {latest_name} instead"
             )
         print(f"Resuming {job_name} from {latest_name}")
-        if any(lg in logger for lg in ["wandb"]):
-            script_arguments["logger.wandb.id"] = name
-            print(f"Resuming run in wandb dashboard with id: {name}")
+        wandb_id = _find_wandb_run_id(run_dir)
+        if wandb_id:
+            script_arguments["logger.wandb.id"] = wandb_id
+            print(f"Resuming wandb run for {job_name} with id: {wandb_id}")
     elif check_dir_exists(ckpt_dir):
         raise RuntimeError(
             f"Checkpoints dir exists but no last*.ckpt found for {job_name}.\n"
@@ -1057,10 +1094,10 @@ def run_sv(transfer_data="false", force="false"):
 # Per-dataset SLURM walltime budget — vision jobs (ResNet-18, small images)
 # need far less wall-clock than the SV audio encoders.
 IMG_WALLTIME = {
-    "mnist": "01:30:00",
-    "cifar10": "03:00:00",
-    "cifar100": "05:00:00",
-    "tinyimagenet": "08:00:00",
+    "mnist": "03:30:00",
+    "cifar10": "08:00:00",
+    "cifar100": "08:00:00",
+    "tinyimagenet": "24:00:00",
 }
 EPOCHS_IMG = {
     "mnist": 150,
@@ -1082,9 +1119,9 @@ def _submit_img_job(
     """Helper function to configure and submit a single image-classification
     training job.
 
-    Unlike SV, the img task (src/modules/img.py) writes no test_artifacts
-    COMPLETE marker, so there is no "testing already complete" signal to skip
-    on; only job-queue dedup and checkpoint-based resume apply here.
+    A finished run is skipped via its results.json test_accuracy (the img
+    task writes no test_artifacts COMPLETE marker like SV does); otherwise
+    job-queue dedup and checkpoint-based resume apply.
     """
     if "bregman" in experiment or "pruning" in experiment:
         assert (
@@ -1175,6 +1212,10 @@ def _submit_img_job(
 
     run_dir = script_arguments["hydra.run.dir"]
 
+    if check_img_results_complete(run_dir):
+        print(f"Skipping {job_name} - results.json already complete")
+        return
+
     # If a checkpoint exists, resume from it. This can happen when a job was
     # previously running and got interrupted.
     ckpt_dir = os.path.join(run_dir, "checkpoints")
@@ -1188,6 +1229,10 @@ def _submit_img_job(
                 f"resuming from {latest_name} instead"
             )
         print(f"Resuming {job_name} from {latest_name}")
+        wandb_id = _find_wandb_run_id(run_dir)
+        if wandb_id:
+            script_arguments["logger.wandb.id"] = wandb_id
+            print(f"Resuming wandb run for {job_name} with id: {wandb_id}")
     elif check_dir_exists(ckpt_dir):
         raise RuntimeError(
             f"Checkpoints dir exists but no last*.ckpt found for {job_name}.\n"
@@ -1199,6 +1244,7 @@ def _submit_img_job(
         settings, script_arguments, transfer_data=False
     )
     run_bash_script(bash_script)
+
     print(f"Submitted job: {job_name}")
     time.sleep(0.1)
 
@@ -1213,24 +1259,25 @@ def run_img():
     seeds, each saved under its own `seed_{seed}` subdirectory.
     """
     # dataset_names = ["mnist", "cifar10", "cifar100", "tinyimagenet"]
-    dataset_names = ["tinyimagenet"]
-    model_names = ["resnet18"]
-    sparsity_rates_sweep = [0.95]
-    default_seeds = [42, 1337, 2026]
+    dataset_names = ["cifar100"]
+    # model_names = ["wide_resnet50_2"]
+    model_names = ["wrn28_10"]
+    sparsity_rates_sweep = [0.95, 0.99]
+    default_seeds = [42]
     lambda_factor_k = 0.4  # scales BREGMAN_LAMBDA_CONFIGS' fixed_lambda
 
     ########################
     # Switch controls (master switch per group of experiments)
     ########################
-    RUN_BASELINE_EXPS = False
-    RUN_PRUNING_EXPS = False
+    RUN_BASELINE_EXPS = True
+    RUN_PRUNING_EXPS = True
     # Vanilla Bregman: fixed lambda, no scheduler (bregman_*_fixed).
     RUN_FIXED_BREGMAN_EXPS = False
     # Adaptive Bregman (lambda scheduler):
-    RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
+    RUN_ADAPTIVE_CLASSICAL = True  # adaptive, uniform allocation
     RUN_PROGRESSIVE_BREGMAN_EXPS = False  # adaptive, target ramps 0 -> final
 
-    RUN_CONSTANT_LR_EXPS = True  # baseline with constant LR (no scheduler)
+    RUN_CONSTANT_LR_EXPS = False  # baseline with constant LR (no scheduler)
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
