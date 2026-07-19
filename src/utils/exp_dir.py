@@ -38,7 +38,7 @@ log = get_pylogger(__name__)
 # Config groups present in the live repo that did not exist at the time
 # older training snapshots were taken. Mirrored into the metadata snapshot
 # so Hydra can compose the defaults list without MissingConfigException.
-_MIRRORED_GROUPS: tuple[str, ...] = ("quantization",)
+_MIRRORED_GROUPS: tuple[str, ...] = ("quantization", "robustness")
 
 # Idempotency guard. `prepare_argv_for_exp_dir` is called explicitly from
 # each entry point; if it fires twice (e.g. a script imports another

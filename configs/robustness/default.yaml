@@ -1,0 +1,23 @@
+spec: default
+device: cuda # AutoAttack on a full test set is impractical on CPU
+batch_size: null # null = the run's eval batch size; overrides must hit datamodule.loaders.valid.batch_size (test interpolates it)
+loggers: [wandb, csv, tensorboard] # training-run loggers to append robust/* metrics to (subset ok)
+save_samples: 20 # per attack, dump the first N adversarial examples (clean/adv/delta PNGs + samples.json) to {exp_dir}/adv_attacks/<name>/<norm>_e_<eps>; 0 disables
+
+# Read straight from the published {dataset}-C sets — no noise is added here.
+# Every corruption type found on disk is evaluated (19 for CIFAR-10/100-C, 15
+# for Tiny-ImageNet-C), and the per-severity mean is taken over those.
+corruption:
+  severities: [1, 2, 3, 4, 5] # the published severity ladder
+  data_dir: ${paths.data_dir}/${datamodule.name}_c # populated by scripts/datasets/prep_{dataset}_c.sh
+
+attacks:
+  autoattack:
+    name: AutoAttack # torchattacks class name (any class works via the generic adapter)
+    n_examples: null # null = full test set
+    kwargs:
+      norm: Linf
+      eps: ${oc.eval:'8/255'} # standard CIFAR budget in [0,1] pixel space
+      version: standard # APGD-CE + APGD-T + FAB-T + Square
+      n_classes: ${datamodule.num_classes} # targeted stages capped at 9 target classes by the adapter
+      seed: ${seed} # Square attack is stochastic

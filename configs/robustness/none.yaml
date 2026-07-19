@@ -1,0 +1,3 @@
+# Sentinel: robustness eval disabled. scripts/eval_robustness.py checks
+# `robustness.spec in (None, "none")` and refuses to run without a real spec.
+spec: none

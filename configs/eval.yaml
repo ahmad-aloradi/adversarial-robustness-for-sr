@@ -11,8 +11,10 @@ defaults:
   - extras: default.yaml
   - hydra: default.yaml
   - quantization: none
+  - robustness: none
 
 task_name: "eval"
+name: ${task_name} # loggers replayed from a training experiment interpolate ${name}
 predict: False
 
 exp_dir: null

@@ -13,13 +13,20 @@
 # -----------------------------------------------------------------------------
 #   1) pip install -r requirements.txt
 #   2) pip install --no-deps brevitas==0.11.0
-#   3) pip install git+https://github.com/wenet-e2e/wespeaker.git
+#   3) pip install --no-deps torchattacks==3.5.1
+#   4) pip install git+https://github.com/wenet-e2e/wespeaker.git
 #
 # Why brevitas is step 2: brevitas hard-pins `numpy<=1.26.4` in its metadata
 # (still true in 0.12.1), but espnet>=202509 needs `numpy>=2.0` and
 # tensorflow 2.18 needs `numpy<2.1.0`. Brevitas's pin is overly conservative —
 # it runs fine on numpy 2.0.x — so we install it with --no-deps to bypass it.
 # Its only non-stdlib runtime dep is `unfoldnd`, pinned below.
+#
+# Why torchattacks is step 3: it hard-pins `requests~=2.25.1`, which it only
+# uses for two plain `requests.get`/`Session()` calls in its vendored
+# robustbench module — nothing that needs that old API. Installing without
+# deps avoids downgrading `requests` and breaking datasets/tiktoken/docker/
+# sphinx/jupyterlab-server/databricks-sdk, which all need requests>=2.28.
 # =============================================================================
 
 
@@ -34,6 +41,8 @@ lightning==2.4.0
 # --- Vision benchmarks (image classification stack) -------------------------
 # CIFAR-style Wide-ResNet reference implementation (WRN-28-10 etc.).
 pytorchcv==0.0.74
+# torchattacks (AutoAttack etc.) installed separately, --no-deps — see install order above.
+requests==2.32.3
 
 # --- Speaker recognition / audio --------------------------------------------
 speechbrain==1.0.2
