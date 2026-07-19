@@ -19,3 +19,4 @@ module:
     lr: 1e-1
     momentum: 0.9
     nesterov: true
+    dual_leak: 0.0 # >0 = finite-memory dual (per-step forgetting factor)

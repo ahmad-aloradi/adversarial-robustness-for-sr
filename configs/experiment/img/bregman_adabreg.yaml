@@ -78,6 +78,7 @@ module:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
     _partial_: true
     lr: 1e-2
+    dual_leak: 0.0 # >0 = hybrid birth rule (raw-gradient revival evidence)
 
   lr_scheduler:
     scheduler:
