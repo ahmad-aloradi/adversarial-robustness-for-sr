@@ -1100,10 +1100,10 @@ IMG_WALLTIME = {
     "tinyimagenet": "24:00:00",
 }
 EPOCHS_IMG = {
-    "mnist": 150,
-    "cifar10": 250,
-    "cifar100": 250,
-    "tinyimagenet": 200,    
+    "mnist": 200,
+    "cifar10": 350,
+    "cifar100": 350,
+    "tinyimagenet": 300,
 }
 IMG_BATCH_SIZE = 128
 
@@ -1157,7 +1157,7 @@ def _submit_img_job(
     max_epochs = EPOCHS_IMG[dataset_name]
     if experiment in ramp_up_experiments:
         epochs_to_ramp = ramp_up_epochs
-        max_epochs += epochs_to_ramp
+        # max_epochs += epochs_to_ramp
 
     ramp_str = (
         f"-ramp{epochs_to_ramp}_{schedule_type}" if epochs_to_ramp else ""
@@ -1269,15 +1269,17 @@ def run_img():
     ########################
     # Switch controls (master switch per group of experiments)
     ########################
-    RUN_BASELINE_EXPS = True
-    RUN_PRUNING_EXPS = True
+    RUN_BASELINE_EXPS = False
+    RUN_PRUNING_EXPS = False
     # Vanilla Bregman: fixed lambda, no scheduler (bregman_*_fixed).
     RUN_FIXED_BREGMAN_EXPS = False
     # Adaptive Bregman (lambda scheduler):
-    RUN_ADAPTIVE_CLASSICAL = True  # adaptive, uniform allocation
+    RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
     RUN_PROGRESSIVE_BREGMAN_EXPS = False  # adaptive, target ramps 0 -> final
 
+    # Auxiliary experiments
     RUN_CONSTANT_LR_EXPS = False  # baseline with constant LR (no scheduler)
+    INFLATE_CLASSIFIER_HEAD = True  # inflate the classifier head
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
@@ -1347,7 +1349,27 @@ def run_img():
                     "sparsity_rates": sparsity_rates_sweep,
                 }
             )
-    
+
+    if INFLATE_CLASSIFIER_HEAD:
+        for _exp in (
+            "bregman_adabreg",
+            "bregman_linbreg",
+            "pruning_mag_unstruct",
+        ):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "dataset_names": ["tinyimagenet"],
+                    "model_name": ["resnet18"],
+                    "sparsity_rates": [0.99],
+                    "extra_overrides": {
+                        "datamodule.num_classes": 10000,
+                        "logger.wandb.tags": ["inflated_classifier_10k"],
+                    },
+                    "suffix": "-classifier_10k",
+                }
+            )
+
 
     # --- Volume estimation ---
     total_jobs = sum(
