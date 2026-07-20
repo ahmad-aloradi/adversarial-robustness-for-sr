@@ -156,6 +156,7 @@ module:
       # Group 2b: Classifier
       - name: classifier
         layer_types: ["speechbrain.lobes.models.ECAPA_TDNN.Classifier"]
+        param_names: ["weight"] # bias falls through to the unregularized bias_params group
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1

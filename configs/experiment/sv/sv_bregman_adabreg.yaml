@@ -216,6 +216,7 @@ module:
       # Group 2b: Catch classifier by exact module name match
       - name: classifier
         layer_types: ["speechbrain.lobes.models.ECAPA_TDNN.Classifier"]
+        param_names: ["weight"] # bias falls through to the unregularized bias_params group
         module_name_patterns:
           - ".*classifier.*" # Exact match for module named "classifier"
         optimizer_settings:

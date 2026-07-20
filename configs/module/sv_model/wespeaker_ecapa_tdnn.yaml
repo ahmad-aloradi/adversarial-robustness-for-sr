@@ -33,6 +33,7 @@ audio_encoder:
       _args_: [1]
 
 classifier:
-  _target_: speechbrain.lobes.models.ECAPA_TDNN.Classifier
+  _target_: src.modules.models.cosine_classifier.CosineClassifier
   input_size: ${module.model.audio_encoder._args_[0].model_args.embed_dim}
   out_neurons: ${datamodule.num_classes}
+  bias: true # unregularized per-class offset; off-switch for unused classes
