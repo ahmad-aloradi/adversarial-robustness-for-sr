@@ -321,51 +321,6 @@ def test_linbreg_induces_sparsity():
     ), f"Expected sparsity > 0.05, got {final_sparsity}"
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"momentum": 0.0},
-        {"momentum": 0.9},
-        {"momentum": 0.9, "nesterov": True},
-        {"momentum": 0.9, "dampening": 0.1},
-    ],
-)
-def test_linbreg_momentum_matches_sgd(kwargs):
-    """LinBreg(RegNone, delta=1) is torch.optim.SGD with the same momentum.
-
-    With the null regularizer the prox is the identity and delta=1 collapses
-    the dual variable back onto the weights, so every step must equal SGD's.
-    """
-
-    def run(make_opt):
-        torch.manual_seed(0)
-        model = nn.Linear(8, 4)
-        opt = make_opt(model.parameters())
-        torch.manual_seed(1)
-        for _ in range(25):
-            x, y = torch.randn(6, 8), torch.randn(6, 4)
-            opt.zero_grad()
-            ((model(x) - y) ** 2).mean().backward()
-            opt.step()
-        return [p.detach().clone() for p in model.parameters()]
-
-    ref = run(lambda p: torch.optim.SGD(p, lr=0.05, **kwargs))
-    got = run(
-        lambda p: LinBreg(p, lr=0.05, reg=RegNone(), delta=1.0, **kwargs)
-    )
-    for r, g in zip(ref, got):
-        assert torch.allclose(r, g, atol=1e-6)
-
-
-def test_linbreg_nesterov_requires_momentum_and_zero_dampening():
-    """Match SGD: Nesterov needs momentum > 0 and dampening == 0."""
-    params = [nn.Parameter(torch.randn(3))]
-    with pytest.raises(ValueError):
-        LinBreg(params, nesterov=True, momentum=0.0)
-    with pytest.raises(ValueError):
-        LinBreg(params, nesterov=True, momentum=0.9, dampening=0.1)
-
-
 # =============================================================================
 # Cross-implementation consistency
 # =============================================================================

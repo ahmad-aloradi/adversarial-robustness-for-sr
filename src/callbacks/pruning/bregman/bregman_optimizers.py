@@ -24,14 +24,6 @@ class LinBreg(torch.optim.Optimizer):
     Momentum mirrors ``torch.optim.SGD`` exactly (same buffer, dampening and
     Nesterov formulas); the only difference is that the momentum-adjusted
     gradient drives the dual variable ``v`` and the weights come from its prox.
-
-    ``dual_leak`` (gamma) turns the dual into a finite-memory integrator:
-    ``v <- (1 - gamma) * v - lr * g`` on regularized groups. Survival then
-    requires a sustained average gradient above ``gamma * lambda / lr`` instead
-    of an unbounded lifetime sum, so weights whose demand has faded are
-    garbage-collected. ``0.0`` (default) is the classic perfect-memory dual.
-    Unregularized groups (RegNone: biases, norms) never leak — a classifier
-    bias must drift freely to turn never-used classes off.
     """
 
     def __init__(
@@ -43,7 +35,6 @@ class LinBreg(torch.optim.Optimizer):
         momentum: float = 0.0,
         dampening: float = 0.0,  # SGD dampening on the momentum buffer
         nesterov: bool = False,  # Nesterov look-ahead on the momentum step
-        dual_leak: float = 0.0,  # per-step dual forgetting factor (gamma)
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate")
@@ -53,8 +44,6 @@ class LinBreg(torch.optim.Optimizer):
             raise ValueError(
                 "Nesterov momentum requires momentum > 0 and dampening == 0"
             )
-        if not 0.0 <= dual_leak < 1.0:
-            raise ValueError(f"dual_leak must be in [0, 1), got {dual_leak}")
 
         if reg is None:
             reg = RegNone()
@@ -66,7 +55,6 @@ class LinBreg(torch.optim.Optimizer):
             momentum=momentum,
             dampening=dampening,
             nesterov=nesterov,
-            dual_leak=dual_leak,
         )
         super().__init__(params, defaults)
 
@@ -85,7 +73,6 @@ class LinBreg(torch.optim.Optimizer):
             momentum = group["momentum"]
             dampening = group["dampening"]
             nesterov = group["nesterov"]
-            leak = group["dual_leak"] if not isinstance(reg, RegNone) else 0.0
 
             for p in group["params"]:
                 if p.grad is None:
@@ -117,9 +104,7 @@ class LinBreg(torch.optim.Optimizer):
                     # nesterov: g ← g + μ·b_k ;  plain: g ← b_k
                     d_grad = grad.add(buf, alpha=momentum) if nesterov else buf
 
-                # Dual update: v^(k+1) = (1 − γ)·v^(k) − τ·g   (v = sub_grad)
-                if leak > 0.0:
-                    sub_grad.mul_(1.0 - leak)
+                # Dual update: v^(k+1) = v^(k) − τ·g   (v = sub_grad)
                 sub_grad.add_(d_grad, alpha=-step_size)
 
                 # Primal update (prox): θ^(k+1) = prox(δ·v^(k+1))
@@ -150,25 +135,10 @@ class LinBreg(torch.optim.Optimizer):
         return reg_vals
 
 
-# Re-born weights enter just past the prox threshold, so they start tiny.
-BIRTH_MARGIN = 0.01
-
-
 class AdaBreg(torch.optim.Optimizer):
     """Adaptive Bregman optimizer (Adam-style acceleration).
 
     Combines adaptive moment estimation with Bregman iterations.
-
-    ``dual_leak`` (gamma) enables the hybrid birth rule on regularized groups.
-    Adam-preconditioned dual steps are magnitude-blind (any sign-consistent
-    gradient moves at full speed), so a leak inside them cannot separate real
-    demand from a never-ending drip; the revival evidence must be the raw
-    gradient. In hybrid mode, pruned weights stop taking Adam dual steps:
-    their dual decays by ``(1 - gamma)`` and they are re-born only when a
-    gamma-horizon EMA of the raw gradient exceeds
-    ``birth_scale * gamma * lambda / lr`` — the same sustained-demand
-    bar the LinBreg leak implies. ``dual_leak=0.0`` (default) is classic
-    AdaBreg. Unregularized groups (RegNone) are never affected.
     """
 
     def __init__(
@@ -179,28 +149,14 @@ class AdaBreg(torch.optim.Optimizer):
         delta: float = 1.0,
         betas: tuple = (0.9, 0.999),
         eps: float = 1e-8,
-        dual_leak: float = 0.0,  # gamma: enables hybrid birth rule when > 0
-        birth_scale: float = 0.5,  # scales the sustained-demand birth bar
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate")
-        if not 0.0 <= dual_leak < 1.0:
-            raise ValueError(f"dual_leak must be in [0, 1), got {dual_leak}")
-        if birth_scale <= 0.0:
-            raise ValueError(f"birth_scale must be > 0, got {birth_scale}")
 
         if reg is None:
             reg = RegNone()
 
-        defaults = dict(
-            lr=lr,
-            reg=reg,
-            delta=delta,
-            betas=betas,
-            eps=eps,
-            dual_leak=dual_leak,
-            birth_scale=birth_scale,
-        )
+        defaults = dict(lr=lr, reg=reg, delta=delta, betas=betas, eps=eps)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -217,9 +173,6 @@ class AdaBreg(torch.optim.Optimizer):
             lr = group["lr"]
             beta1, beta2 = group["betas"]
             eps = group["eps"]
-            leak = (
-                group["dual_leak"] if not isinstance(reg, RegNone) else 0.0
-            )
 
             for p in group["params"]:
                 if p.grad is None:
@@ -254,43 +207,13 @@ class AdaBreg(torch.optim.Optimizer):
                 )
                 step_size = lr / bias_correction1
 
-                if leak > 0.0:
-                    self._hybrid_dual_update(
-                        p, state, group, grad, exp_avg, denom, step_size
-                    )
-                else:
-                    # Dual update: v^(k+1) = v^(k) − τ·adam_step
-                    sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
+                # Dual update: v^(k+1) = v^(k) − τ·adam_step
+                sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
 
                 # Primal update (prox): θ^(k+1) = prox(δ·v^(k+1))
                 p.copy_(reg.prox(delta * sub_grad, delta))
 
         return loss
-
-    @staticmethod
-    def _hybrid_dual_update(p, state, group, grad, exp_avg, denom, step_size):
-        """Dual step with the birth rule: active weights take the Adam step;
-        pruned weights decay and are re-born only on sustained raw-gradient
-        demand above the bar (see class docstring)."""
-        leak = group["dual_leak"]
-        lamda = group["reg"].lamda
-        assert lamda > 0.0, f"hybrid birth needs reg.lamda > 0, got {lamda}"
-
-        if "grad_ema" not in state:
-            state["grad_ema"] = torch.zeros_like(p)
-        grad_ema = state["grad_ema"]
-        grad_ema.mul_(1.0 - leak).add_(grad, alpha=leak)
-
-        sub_grad = state["sub_grad"]
-        dead = p.data == 0
-        adam_dual = sub_grad - step_size * exp_avg / denom
-        new_dual = torch.where(dead, sub_grad * (1.0 - leak), adam_dual)
-
-        bar = group["birth_scale"] * leak * lamda / group["lr"]
-        born = dead & (grad_ema.abs() > bar)
-        # Dual moves against the gradient; born entries start just past λ.
-        born_dual = -torch.sign(grad_ema) * (lamda * (1.0 + BIRTH_MARGIN))
-        sub_grad.copy_(torch.where(born, born_dual, new_dual))
 
     def initialize_sub_grad(
         self, p: torch.Tensor, reg: BregmanRegularizer, delta: float

@@ -1279,10 +1279,7 @@ def run_img():
 
     # Auxiliary experiments
     RUN_CONSTANT_LR_EXPS = False  # baseline with constant LR (no scheduler)
-    INFLATE_CLASSIFIER_HEAD = False  # inflate the classifier head
-    # Finite-memory Bregman on the inflated head (real-scale POC): the 9800
-    # phantom rows must end fully dead (fc fully_zero_row_frac = 0.98).
-    RUN_LEAKY_BREGMAN_10K = True
+    INFLATE_CLASSIFIER_HEAD = True  # inflate the classifier head
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
@@ -1370,28 +1367,6 @@ def run_img():
                         "logger.wandb.tags": ["inflated_classifier_10k"],
                     },
                     "suffix": "-classifier_10k",
-                }
-            )
-
-    # gamma=1e-3: ~1k-step evidence horizon (~1.3 epochs at bs128).
-    # LinBreg leaks its dual; AdaBreg uses the raw-gradient birth rule.
-    if RUN_LEAKY_BREGMAN_10K:
-        for _exp, _suffix in (
-            ("bregman_linbreg", "-classifier_10k-leaky"),
-            ("bregman_adabreg", "-classifier_10k-hybrid"),
-        ):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "dataset_names": ["tinyimagenet"],
-                    "model_name": ["resnet18"],
-                    "sparsity_rates": [0.99],
-                    "extra_overrides": {
-                        "datamodule.num_classes": 10000,
-                        "module.optimizer.dual_leak": 1e-3,
-                        "logger.wandb.tags": ["leaky_bregman_10k"],
-                    },
-                    "suffix": _suffix,
                 }
             )
 
