@@ -1,18 +1,53 @@
 """Tests for VisionDataModule.
 
-Fast path uses torchvision FakeData (no network) to check transform wiring,
-batch shapes, and that eval loaders don't shuffle. A slow path downloads real
-MNIST to exercise the download branch of ``prepare_data`` and the val split.
+Fast path uses a synthetic labeled dataset (``FakeImages``) to check transform
+wiring, batch shapes, that eval loaders don't shuffle, and that the stratified
+carve puts every class in val. A slow path downloads real MNIST to exercise the
+download branch of ``prepare_data`` and the val split. The stratified split
+needs ``.targets``, which torchvision ``FakeData`` lacks — hence ``FakeImages``.
 """
 
 import pytest
 import torch
 from omegaconf import OmegaConf
+from PIL import Image
 from torch.utils.data import RandomSampler, SequentialSampler
 
 from src.datamodules.vision_datamodule import VisionDataModule
 
 _TOTENSOR = {"_target_": "torchvision.transforms.ToTensor"}
+
+
+class FakeImages(torch.utils.data.Dataset):
+    """Synthetic PIL-image dataset with balanced ``.targets`` for split
+    tests."""
+
+    def __init__(
+        self, size, num_classes, image_size=(3, 32, 32), transform=None
+    ):
+        self.transform = transform
+        self.targets = [
+            i % num_classes for i in range(size)
+        ]  # balanced labels
+        self._wh = (image_size[2], image_size[1])
+
+    def __len__(self):
+        return len(self.targets)
+
+    def __getitem__(self, index):
+        img = Image.new("RGB", self._wh)
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, self.targets[index]
+
+
+def _fake(size=40, num_classes=10):
+    return {
+        "_target_": "tests.test_vision_datamodule.FakeImages",
+        "size": size,
+        "num_classes": num_classes,
+        "image_size": [3, 32, 32],
+    }
 
 
 def _loaders(num_workers=0):
@@ -25,26 +60,27 @@ def _loaders(num_workers=0):
 
 
 def test_fakedata_mechanics():
-    fake = {
-        "_target_": "torchvision.datasets.FakeData",
-        "size": 16,
-        "image_size": [3, 32, 32],
-        "num_classes": 10,
-    }
+    fake = _fake()
     cfg = OmegaConf.create(
         {
             "dataset": {
                 "train_dataset": fake,
-                "valid_dataset": fake,
+                "valid_dataset": {"split": 0.25, "split_seed": 0},
                 "test_dataset": fake,
             },
-            "transforms": {"train": [_TOTENSOR], "eval": [_TOTENSOR]},
+            "augmentation": False,
+            "transforms": {
+                "base": [_TOTENSOR],
+                "augment": [],
+                "augment_post": [],
+                "eval": [_TOTENSOR],
+            },
             "num_classes": 10,
             "loaders": _loaders(),
         }
     )
     dm = VisionDataModule(**cfg)
-    dm.setup()  # FakeData needs no prepare_data/download
+    dm.setup()  # synthetic data needs no prepare_data/download
 
     images, targets = next(iter(dm.train_dataloader()))
     assert images.shape == (4, 3, 32, 32)
@@ -55,6 +91,54 @@ def test_fakedata_mechanics():
     assert isinstance(dm.train_dataloader().sampler, RandomSampler)
     assert isinstance(dm.val_dataloader().sampler, SequentialSampler)
     assert isinstance(dm.test_dataloader().sampler, SequentialSampler)
+
+    # Stratified carve: every class appears in val, and train/val are disjoint.
+    val_labels = {dm.val_data[i][1] for i in range(len(dm.val_data))}
+    assert val_labels == set(range(10))
+    assert set(dm.train_data.indices).isdisjoint(dm.val_data.indices)
+
+
+def test_augmentation_flag_gates_train_transforms():
+    from torchvision.transforms import RandomErasing, RandomHorizontalFlip
+
+    flip = {"_target_": "torchvision.transforms.RandomHorizontalFlip"}
+    erase = {"_target_": "torchvision.transforms.RandomErasing"}
+
+    def _dm(augmentation):
+        fake = _fake()
+        cfg = OmegaConf.create(
+            {
+                "dataset": {
+                    "train_dataset": fake,
+                    "valid_dataset": {"split": 0.25, "split_seed": 0},
+                    "test_dataset": fake,
+                },
+                "augmentation": augmentation,
+                "transforms": {
+                    "base": [_TOTENSOR],
+                    "augment": [flip],  # PIL-space
+                    "augment_post": [erase],  # tensor-space
+                    "eval": [_TOTENSOR],
+                },
+                "num_classes": 10,
+                "loaders": _loaders(),
+            }
+        )
+        dm = VisionDataModule(**cfg)
+        dm.setup()
+        return dm
+
+    # ds is a Subset; its transforms live on the underlying view.
+    _types = lambda ds: [type(t) for t in ds.dataset.transform.transforms]
+
+    on, off = _dm(True), _dm(False)
+    # Both augment lists (PIL-space and tensor-space) are gated by the flag.
+    assert {RandomHorizontalFlip, RandomErasing} <= set(_types(on.train_data))
+    assert not {RandomHorizontalFlip, RandomErasing} & set(
+        _types(off.train_data)
+    )
+    # Val/eval is never augmented.
+    assert not {RandomHorizontalFlip, RandomErasing} & set(_types(on.val_data))
 
 
 @pytest.mark.slow
@@ -75,11 +159,14 @@ def test_mnist_real_download(tmp_path):
         {
             "dataset": {
                 "train_dataset": block(True),
-                "valid_dataset": block(False),
+                "valid_dataset": {"split": 0.1, "split_seed": 0},
                 "test_dataset": block(False),
             },
+            "augmentation": False,
             "transforms": {
-                "train": [_TOTENSOR, normalize],
+                "base": [_TOTENSOR, normalize],
+                "augment": [],
+                "augment_post": [],
                 "eval": [_TOTENSOR, normalize],
             },
             "num_classes": 10,
@@ -90,7 +177,13 @@ def test_mnist_real_download(tmp_path):
     dm.prepare_data()
     dm.setup()
 
-    assert len(dm.val_data) == 10000
+    # Validation is 10% of the 60k train set; the 10k test set stays separate.
+    assert len(dm.train_data) == 54000
+    assert len(dm.val_data) == 6000
+    assert len(dm.test_data) == 10000
+    # Stratified: all 10 digits appear in val.
+    val_labels = {int(dm.val_data[i][1]) for i in range(len(dm.val_data))}
+    assert val_labels == set(range(10))
     images, _ = next(iter(dm.val_dataloader()))
     assert images.shape[1] == 1
     # Normalized MNIST has roughly zero mean, unit-ish scale.

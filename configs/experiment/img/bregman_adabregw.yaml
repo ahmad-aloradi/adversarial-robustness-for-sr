@@ -1,0 +1,20 @@
+# @package _global_
+
+# Adaptive-lambda LinBreg: inherits the AdaBreg parent's ResNet-18
+# pruning_groups + callbacks; swaps only the optimizer and the lambda source.
+# Run: python src/train.py experiment=img/bregman_linbreg datamodule=datasets/cifar100
+
+defaults:
+  - /experiment/img/bregman_adabreg
+  - _self_
+
+tags: ["img", "${datamodule.name}", "Bregman_learning", "AdaBregW"]
+
+_bregman_lambda: ${bregman_lambda:AdaBregW,${_bregman_target_sparsity},initial_lambda}
+
+module:
+  optimizer:
+    _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBregW
+    _partial_: True
+    lr: 1e-2
+    weight_decay: 1e-3
