@@ -466,7 +466,7 @@ class BregmanPruner(Callback):
             )
             if modules:
                 for m in sorted(modules):
-                    log.info(f"    {m}")
+                    log.info(f"    {m} ({type(pl_module.get_submodule(m)).__name__})")
         log.info(40 * "-")
 
     # -------------------------------------------------------------------------
