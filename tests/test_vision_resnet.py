@@ -24,6 +24,42 @@ def test_output_shape(arch):
     assert tuple(out.shape) == (2, 10)
 
 
+def _count_norms(net):
+    bn = sum(isinstance(m, nn.BatchNorm2d) for m in net.modules())
+    ln = sum(isinstance(m, nn.LayerNorm) for m in net.modules())
+    return bn, ln
+
+
+def test_norm_default_is_batchnorm():
+    bn, ln = _count_norms(build_resnet("resnet18", num_classes=10))
+    assert (bn, ln) == (20, 0)
+
+
+def test_norm_ln_last_converts_only_the_head_norm():
+    net = build_resnet("resnet18", num_classes=10, norm="ln_last")
+    assert _count_norms(net) == (19, 1)
+    assert isinstance(net.layer4[1].bn2, nn.LayerNorm)
+
+
+def test_norm_ln_all_converts_every_norm_including_downsample():
+    net = build_resnet("resnet18", num_classes=10, norm="ln_all")
+    assert _count_norms(net) == (0, 20)
+    assert isinstance(net.layer2[0].downsample[1], nn.LayerNorm)
+
+
+@pytest.mark.parametrize("norm", ["ln_last", "ln_all"])
+@pytest.mark.parametrize("size", [32, 64])
+def test_norm_forward_shape_is_resolution_agnostic(norm, size):
+    net = build_resnet("resnet18", num_classes=10, norm=norm).eval()
+    out = net(torch.randn(2, 3, size, size))
+    assert tuple(out.shape) == (2, 10)
+
+
+def test_invalid_norm_raises():
+    with pytest.raises(AssertionError, match="norm must be one of"):
+        build_resnet("resnet18", num_classes=10, norm="layernorm")
+
+
 def test_grayscale_in_channels():
     net = build_resnet("resnet18", num_classes=10, in_channels=1)
     out = net(torch.randn(2, 1, 28, 28))

@@ -13,6 +13,12 @@ Run standalone to compare the stem variants by their pre-pool feature map:
     python src/modules/models/vision_resnet.py
 """
 
+if __name__ == "__main__":
+    # Make the `src.*` import below resolve when running this file directly.
+    import pyrootutils
+
+    pyrootutils.setup_root(__file__, indicator="pyproject.toml", pythonpath=True)
+
 import torch
 import torch.nn as nn
 from torchvision.models import (
@@ -24,6 +30,8 @@ from torchvision.models import (
     wide_resnet50_2,
     wide_resnet101_2,
 )
+
+from src.utils.torch_utils import convert_norm
 
 _ARCHS = {
     "resnet18": resnet18,
@@ -37,7 +45,11 @@ _ARCHS = {
 
 
 def build_resnet(
-    arch: str, num_classes: int, in_channels: int = 3, manual_overrides: bool = True
+    arch: str,
+    num_classes: int,
+    in_channels: int = 3,
+    norm: str = "bn",
+    manual_overrides: bool = True,
 ) -> nn.Module:
     """Torchvision ResNet variant with a small-image stem and a fresh head.
 
@@ -47,6 +59,9 @@ def build_resnet(
         num_classes: number of output classes (fc head width).
         in_channels: input channels — 3 for RGB, 1 for grayscale (the
             benchmark datamodules all emit 3-channel images).
+        norm: "bn" keeps BatchNorm; "ln_last" makes only the last norm layer
+            (`layer4[1].bn2` on ResNet18) a LayerNorm; "ln_all" makes all of
+            them LayerNorm.
 
     Returns the torchvision model whose `conv1` is a 3x3 stride-1 conv over
     `in_channels` and whose `maxpool` is removed.
@@ -70,7 +85,7 @@ def build_resnet(
             model.conv1.weight, mode="fan_out", nonlinearity="relu"
         )
         model.maxpool = nn.Identity()
-    return model
+    return convert_norm(model, norm)
 
 
 def _features_before_pool(net: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -88,7 +103,7 @@ if __name__ == "__main__":
         for arch in ("resnet18", "resnet50", "wide_resnet50_2"):
             print(f"\n== {arch}, input {tuple(x.shape)} ==")
             for overrides in (False, True):
-                net = build_resnet(arch, 10, manual_overrides=overrides).eval()
+                net = build_resnet(arch, 10, manual_overrides=overrides, norm="bn_last").eval()
                 with torch.no_grad():
                     feat = _features_before_pool(net, x)
                 c, h, w = feat.shape[1:]

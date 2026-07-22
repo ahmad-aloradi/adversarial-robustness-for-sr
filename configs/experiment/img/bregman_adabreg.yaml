@@ -115,9 +115,15 @@ module:
           pruning_type: "unstructured"
           sparsity_rate: ${_bregman_initial_sparsity}
 
-      # BatchNorm weight+bias — never pruned (catches downsample BN too).
+      # Norm weight+bias — never pruned (catches downsample BN too).
       - name: norm_params
-        layer_types: ["torch.nn.BatchNorm2d", "torch.nn.BatchNorm1d"]
+        layer_types:
+          [
+            "torch.nn.BatchNorm2d",
+            "torch.nn.BatchNorm1d",
+            "torch.nn.LayerNorm",
+            "torch.nn.GroupNorm"
+          ]
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone

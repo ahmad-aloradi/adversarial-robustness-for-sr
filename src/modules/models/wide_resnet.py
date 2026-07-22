@@ -5,8 +5,8 @@ Zagoruyko & Komodakis, "Wide Residual Networks" (2016). WRN-28-10
 configuration, matching Bungert et al.'s Bregman-learning experiments.
 
 pytorchcv's `CIFARWRN` pools with a fixed 8x8 kernel, hardcoding the
-assumption of a 32x32 input downsampled by its two stride-2 stages. 
-1. We swap that for `AdaptiveAvgPool2d(1)` — identical output to the 
+assumption of a 32x32 input downsampled by its two stride-2 stages.
+1. We swap that for `AdaptiveAvgPool2d(1)` — identical output to the
    fixed kernel on an actual 8x8 feature map, but resolution-agnostic —
    i.e., works on TinyImageNet's 64x64 (16x16 feature map).
 2. MNIST enters at 32x32 too (padded, 3-channel — see its datamodule
@@ -17,9 +17,17 @@ Run standalone to check output shapes:
     python src/modules/models/wide_resnet.py
 """
 
+if __name__ == "__main__":
+    # Make the `src.*` import below resolve when running this file directly.
+    import pyrootutils
+
+    pyrootutils.setup_root(__file__, indicator="pyproject.toml", pythonpath=True)
+
 import torch
 import torch.nn as nn
 from pytorchcv.models.wrn_cifar import get_wrn_cifar
+
+from src.utils.torch_utils import convert_norm
 
 # All benchmark datasets enter at 32x32 (CIFAR, padded MNIST) or 64x64
 # (TinyImageNet).
@@ -40,6 +48,7 @@ def build_wide_resnet(
     widen_factor: int = 10,
     num_classes: int = 10,
     in_channels: int = 3,
+    norm: str = "bn",
 ) -> nn.Module:
     """WRN-`depth`-`widen_factor` (Zagoruyko & Komodakis, 2016).
 
@@ -49,6 +58,9 @@ def build_wide_resnet(
             (the paper's "k"; 10 gives the standard WRN-28-10 CIFAR recipe).
         num_classes: number of output classes (fc head width).
         in_channels: input channels — 3 for RGB, 1 for grayscale.
+        norm: "bn" keeps BatchNorm; "ln_last" makes only the last norm layer
+            (`features.post_activ.bn`, which feeds the head) a LayerNorm;
+            "ln_all" makes all of them LayerNorm.
 
     pytorchcv's reference model pools its last feature map with a fixed 8x8
     kernel, which only matches one input size:
@@ -71,7 +83,7 @@ def build_wide_resnet(
     )
     model.features.final_pool = nn.AdaptiveAvgPool2d(output_size=1)
     model.register_forward_pre_hook(_assert_input_size)
-    return model
+    return convert_norm(model, norm)
 
 
 if __name__ == "__main__":

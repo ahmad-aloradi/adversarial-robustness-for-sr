@@ -5,11 +5,9 @@ defaults:
   - override hydra_logging: colorlog
   - override job_logging: custom  # Changed from colorlog to custom
 
-# output directory, generated dynamically on each run
-# <dataset>/<model>/<augmentation>/<method>-sr<NN>-<scheduler> so methods compare side by side
-# sparsity source: Bregman `_bregman_target_sparsity`, else pruning `model_pruning.amount`, else none
+# output directory = <name>/seed_<seed>; name is built in train.yaml via run_subdir
 run:
-  dir: ${paths.log_dir}/${task_name}/runs/${run_subdir:${oc.select:datamodule.name,null},${hydra:runtime.choices.module/img_model},${oc.select:datamodule.augmentation,null},${hydra:runtime.choices.experiment},${oc.select:_bregman_target_sparsity,${oc.select:callbacks.model_pruning.amount,null}},${oc.select:module.lr_scheduler.scheduler._target_,null}}/seed_${seed}
+  dir: ${paths.log_dir}/${task_name}/runs/${name}/seed_${seed}
 sweep:
-  dir: ${paths.log_dir}/${task_name}/multiruns/${run_subdir:${oc.select:datamodule.name,null},${hydra:runtime.choices.module/img_model},${oc.select:datamodule.augmentation,null},${hydra:runtime.choices.experiment},${oc.select:_bregman_target_sparsity,${oc.select:callbacks.model_pruning.amount,null}},${oc.select:module.lr_scheduler.scheduler._target_,null}}/seed_${seed}
+  dir: ${paths.log_dir}/${task_name}/multiruns/${name}/seed_${seed}
   subdir: ${hydra.job.num}
