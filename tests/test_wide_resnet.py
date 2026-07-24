@@ -9,13 +9,9 @@ routes WRN's Conv2d/BatchNorm2d/Linear parameters correctly.
 import pytest
 import pytorch_lightning as pl
 import torch
-import torch.nn as nn
 
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
-from src.modules.models.wide_resnet import (
-    _SUPPORTED_INPUT_SIZES,
-    build_wide_resnet,
-)
+from src.modules.models.wide_resnet import build_wide_resnet
 
 
 def test_output_shape_cifar10():
@@ -59,24 +55,6 @@ def test_parameter_count_matches_published_wrn28_10():
 def test_invalid_depth_raises():
     with pytest.raises(AssertionError):
         build_wide_resnet(depth=27, widen_factor=10, num_classes=10)
-
-
-def test_norm_ln_last_converts_only_the_head_norm():
-    net = build_wide_resnet(depth=16, widen_factor=2, num_classes=10, norm="ln_last")
-    assert isinstance(net.features.post_activ.bn, nn.LayerNorm)
-    assert sum(isinstance(m, nn.LayerNorm) for m in net.modules()) == 1
-
-
-@pytest.mark.parametrize("size", _SUPPORTED_INPUT_SIZES)
-def test_norm_ln_all_converts_every_norm(size):
-    net = build_wide_resnet(depth=16, widen_factor=2, num_classes=10, norm="ln_all").eval()
-    assert not any(isinstance(m, nn.BatchNorm2d) for m in net.modules())
-    assert tuple(net(torch.randn(2, 3, size, size)).shape) == (2, 10)
-
-
-def test_invalid_norm_raises():
-    with pytest.raises(AssertionError, match="norm must be one of"):
-        build_wide_resnet(num_classes=10, norm="layernorm")
 
 
 def test_invalid_num_classes_raises():

@@ -91,7 +91,8 @@ module:
     pruning_groups:
       # Prunable convolutions (stem conv1 + all block convs + downsample convs).
       - name: conv_layers
-        layer_types: ["torch.nn.Conv2d", "torch.nn.ConvTranspose2d", "torch.nn.Conv1d"]
+        layer_types:
+          ["torch.nn.Conv2d", "torch.nn.ConvTranspose2d", "torch.nn.Conv1d"]
         param_names: ["weight"]
         optimizer_settings:
           reg:
@@ -115,15 +116,9 @@ module:
           pruning_type: "unstructured"
           sparsity_rate: ${_bregman_initial_sparsity}
 
-      # Norm weight+bias — never pruned (catches downsample BN too).
+      # BatchNorm weight+bias — never pruned (catches downsample BN too).
       - name: norm_params
-        layer_types:
-          [
-            "torch.nn.BatchNorm2d",
-            "torch.nn.BatchNorm1d",
-            "torch.nn.LayerNorm",
-            "torch.nn.GroupNorm"
-          ]
+        layer_types: ["torch.nn.BatchNorm2d", "torch.nn.BatchNorm1d"]
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
