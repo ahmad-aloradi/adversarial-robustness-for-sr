@@ -20,6 +20,11 @@ tags:
 _bregman_initial_sparsity: 0.0 # ProxSGD grows sparsity from a dense start
 _bregman_lambda: ${bregman_lambda:ProxSGD,${_bregman_target_sparsity},initial_lambda}
 
+callbacks:
+  model_pruning:
+    lambda_scheduler:
+      cap_beta0: 10 # |Δλ| <= β_k·lr per update; ≈ ProxSGD λ-scale 0.1 / base lr 1e-2
+
 module:
   optimizer:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.ProxSGD

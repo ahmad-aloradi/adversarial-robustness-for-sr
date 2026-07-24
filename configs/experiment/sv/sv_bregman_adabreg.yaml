@@ -63,11 +63,10 @@ callbacks:
       initial_lambda: ${_bregman_lambda}
       acceleration_factor: 1.0
       update_frequency: 50
-      # Near-target band: gentler/less-frequent updates; shares the gates'
-      # tolerance so they stay in lock-step.
-      damping_zone: ${_bregman_tolerance}
+      damping_zone: 0.0 # damping off; the lr-proportional cap rate-limits instead
       damping_acceleration_divisor: 2 # alpha will be x-times smaller in the damping zone
       damping_frequency_multiplier: 4 # f will be x-times less frequent in the damping zone
+      cap_beta0: 100 # |Δλ| <= β_k·lr per update; ≈ one uncapped step at λ0=1, base lr 1e-2
   early_stopping:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
     target_sparsity: ${_bregman_target_sparsity} # patience advances only while in-band around this
