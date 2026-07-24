@@ -14,7 +14,7 @@ defaults:
   - robustness: none
 
 task_name: "eval"
-name: ${task_name} # loggers replayed from a training experiment interpolate ${name}
+name: ${task_name} # output dir stem (hydra run dir = name/seed_N)
 predict: False
 
 exp_dir: null

@@ -22,7 +22,7 @@ CLUSTER_NAME = "alex"  # Options: 'tinygpu', 'alex'
 env.hosts = (
     ["alex.nhr.fau.de"] if CLUSTER_NAME == "alex" else ["tinyx.nhr.fau.de"]
 )
-GPU = "a40"  # Options: 'rtx2080ti', 'rtx3080', 'a100'
+GPU = "a100"  # Options: 'rtx2080ti', 'rtx3080', 'a100'
 
 # Path configuration
 PATH_PROJECT = (
@@ -1107,6 +1107,7 @@ EPOCHS_IMG = {
 }
 IMG_BATCH_SIZE = 128
 
+
 def _submit_img_job(
     experiment,
     dataset_name,
@@ -1119,9 +1120,9 @@ def _submit_img_job(
     """Helper function to configure and submit a single image-classification
     training job.
 
-    A finished run is skipped via its results.json test_accuracy (the img
-    task writes no test_artifacts COMPLETE marker like SV does); otherwise
-    job-queue dedup and checkpoint-based resume apply.
+    A finished run is skipped via its results.json test_accuracy (the img task
+    writes no test_artifacts COMPLETE marker like SV does); otherwise job-queue
+    dedup and checkpoint-based resume apply.
     """
     if "bregman" in experiment or "pruning" in experiment:
         assert (
@@ -1178,6 +1179,7 @@ def _submit_img_job(
         "datamodule": f"datasets/{dataset_name}",
         "module/img_model": model_name,
         "seed": seed,
+        "name": name,
         "logger": "many_loggers",
         "datamodule.loaders.train.batch_size": IMG_BATCH_SIZE,
         "paths.log_dir": RESULTS_DIR,
@@ -1253,14 +1255,13 @@ def _submit_img_job(
 def run_img():
     """Generate and submit all image-classification training jobs.
 
-    One fixed backbone across all methods (see img single-model convention)
-    — only the dataset and the compression method vary. Pruning and Bregman
-    experiments sweep over sparsity rates; every experiment sweeps over
-    seeds, each saved under its own `seed_{seed}` subdirectory.
+    One fixed backbone across all methods (see img single-model convention) —
+    only the dataset and the compression method vary. Pruning and Bregman
+    experiments sweep over sparsity rates; every experiment sweeps over seeds,
+    each saved under its own `seed_{seed}` subdirectory.
     """
     # dataset_names = ["mnist", "cifar10", "cifar100", "tinyimagenet"]
-    dataset_names = ["cifar100"]
-    # model_names = ["wide_resnet50_2"]
+    dataset_names = ["cifar10"]
     model_names = ["wrn28_10"]
     sparsity_rates_sweep = [0.95, 0.99]
     default_seeds = [42]
@@ -1275,11 +1276,13 @@ def run_img():
     RUN_FIXED_BREGMAN_EXPS = False
     # Adaptive Bregman (lambda scheduler):
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
-    RUN_PROGRESSIVE_BREGMAN_EXPS = False  # adaptive, target ramps 0 -> final
 
     # Auxiliary experiments
     RUN_CONSTANT_LR_EXPS = False  # baseline with constant LR (no scheduler)
-    INFLATE_CLASSIFIER_HEAD = True  # inflate the classifier head
+    INFLATE_CLASSIFIER_HEAD = False  # inflate the classifier head
+    RUN_STRIPE_FIX_EXPS = (
+        True  # phantom-stripe fix: AdaBreg eps floor on the 10k head
+    )
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
@@ -1336,30 +1339,16 @@ def run_img():
                 }
             )
 
-    if RUN_PROGRESSIVE_BREGMAN_EXPS:
-        for _exp in (
-            "bregman_adabreg_progressive",
-            "bregman_linbreg_progressive",
-        ):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "dataset_names": dataset_names,
-                    "model_name": model_names,
-                    "sparsity_rates": sparsity_rates_sweep,
-                }
-            )
-
     if INFLATE_CLASSIFIER_HEAD:
         for _exp in (
             "bregman_adabreg",
-            "bregman_linbreg",
-            "pruning_mag_unstruct",
+            # "bregman_linbreg",
+            # "pruning_mag_unstruct",
         ):
             EXPERIMENTS.append(
                 {
                     "experiment": _exp,
-                    "dataset_names": ["tinyimagenet"],
+                    "dataset_names": ["cifar10", "tinyimagenet"],
                     "model_name": ["resnet18"],
                     "sparsity_rates": [0.99],
                     "extra_overrides": {
@@ -1370,6 +1359,22 @@ def run_img():
                 }
             )
 
+    if RUN_STRIPE_FIX_EXPS:
+        # Compare against the striped BN baseline (suffix -classifier_10k).
+        EXPERIMENTS.append(
+            {
+                "experiment": "bregman_adabreg",
+                "dataset_names": ["cifar10"],
+                "model_name": ["resnet18"],
+                "sparsity_rates": [0.99],
+                "extra_overrides": {
+                    "datamodule.num_classes": 10000,
+                    "logger.wandb.tags": ["inflated_classifier_10k"],
+                    "++module.optimizer.eps": 1e-4,
+                },
+                "suffix": "-classifier_10k-epshi",
+            }
+        )
 
     # --- Volume estimation ---
     total_jobs = sum(
@@ -1403,20 +1408,30 @@ def run_img():
                             extra_overrides=extra_overrides,
                             job_name_suffix=suffix,
                         )
-    
+
     # --- Exception experiments: constant lr ---
     if RUN_CONSTANT_LR_EXPS:
         for dataset_name in dataset_names:
             for model_name in model_names:
-                for _exp in ["dense_sgd", "pruning_mag_unstruct", "bregman_adabreg", 
-                             "bregman_linbreg", "bregman_adabreg_progressive", "bregman_linbreg_progressive"]:
+                for _exp in [
+                    "dense_sgd",
+                    "pruning_mag_unstruct",
+                    "bregman_adabreg",
+                    "bregman_linbreg",
+                    "bregman_adabreg_progressive",
+                    "bregman_linbreg_progressive",
+                ]:
                     _submit_img_job(
                         experiment=_exp,
                         dataset_name=dataset_name,
                         seed=42,
-                        target_sparsity=sparsity_rates_sweep[0] if _exp != "dense_sgd" else None,
+                        target_sparsity=sparsity_rates_sweep[0]
+                        if _exp != "dense_sgd"
+                        else None,
                         model_name=model_name,
-                        extra_overrides={"module.lr_scheduler": "null", },
+                        extra_overrides={
+                            "module.lr_scheduler": "null",
+                        },
                         job_name_suffix="-constant_lr",
                     )
 

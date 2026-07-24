@@ -1,9 +1,12 @@
-"""Run-directory naming for the image benchmarks.
+"""Run naming: the output-directory stem and the logger run name.
 
 ``configs/hydra/default.yaml`` calls the ``run_subdir`` resolver so every
 compression method lands under one ``<dataset>/<model>/<augmentation>`` parent
-— comparing methods is then a plain ``ls``.
+— comparing methods is then a plain ``ls``. ``configs/logger/wandb.yaml`` calls
+``run_name`` to label the dashboard entry with that same run directory.
 """
+
+import os
 
 
 def _scheduler_tag(target):
@@ -46,6 +49,28 @@ def run_subdir(dataset, model, augmentation, experiment, sparsity, scheduler):
     return f"{dataset}/{model}/{aug}/{method}{sr}-{_scheduler_tag(scheduler)}"
 
 
+def run_name(output_dir, log_dir):
+    """Name the logger run after its run directory, minus the machine-specific root.
+
+    ``output_dir`` is the resolved ``hydra.run.dir``; only its ``log_dir`` prefix
+    and the constant ``<task>/runs`` head differ between a cluster and a laptop,
+    so dropping both gives one dashboard name per experiment everywhere.
+
+    >>> run_name("/vault/results/train/runs/cifar10/resnet18/no_augmentation/dense_sgd-no_scheduler/seed_42", "/vault/results")
+    'cifar10/resnet18/no_augmentation/dense_sgd-no_scheduler/seed_42'
+    >>> run_name("/home/logs/eval/runs/cnceleb/sv_vanilla-bs256", "/home/logs/eval/runs/cnceleb")
+    'sv_vanilla-bs256'
+    """
+    relative = os.path.relpath(output_dir, log_dir)
+    assert not relative.startswith(
+        ".."
+    ), f"run dir {output_dir!r} must live under log dir {log_dir!r}"
+    parts = relative.split(os.sep)
+    if len(parts) > 2 and parts[1] in ("runs", "multiruns"):
+        parts = parts[2:]
+    return "/".join(parts)
+
+
 if __name__ == "__main__":
     print(
         run_subdir(
@@ -72,3 +97,4 @@ if __name__ == "__main__":
             "torch.optim.lr_scheduler.CosineAnnealingLR",
         )
     )
+    print(run_name("/results/train/runs/cifar10/wrn28_10/dense_sgd/seed_42", "/results"))

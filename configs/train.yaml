@@ -56,10 +56,10 @@ expdir: null
 # seed for random number generators in pytorch, numpy and python.random
 seed: 42
 
-# job start timestamp, kept for reference — append /${run_stamp} to name below to enable; do not add to run dirs (breaks viz discovery)
+# job start timestamp, kept for reference; never put it in the run dir (breaks viz discovery)
 run_stamp: ${now:%Y-%m-%d_%H-%M-%S}
 
-# name of the run, accessed by loggers; also the output dir stem (hydra run/sweep dir = name/seed_N)
+# output dir stem (hydra run/sweep dir = name/seed_N); the wandb run name is derived from that dir
 # format: <dataset>/<model>/<augmentation>/<method>-sr<NN>-<scheduler> so methods compare side by side
 # sparsity source: Bregman `_bregman_target_sparsity`, else pruning `model_pruning.amount`, else none
 name: ${run_subdir:${oc.select:datamodule.name,null},${hydra:runtime.choices.module/img_model},${oc.select:datamodule.augmentation,null},${hydra:runtime.choices.experiment},${oc.select:_bregman_target_sparsity,${oc.select:callbacks.model_pruning.amount,null}},${oc.select:module.lr_scheduler.scheduler._target_,null}}

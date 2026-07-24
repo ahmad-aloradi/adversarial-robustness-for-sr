@@ -493,3 +493,35 @@ def test_lambda_increase_prunes_via_prox_threshold(OptimizerClass):
     assert nonzero_after < nonzero_before, (
         f"Lambda increase should prune weights: before={nonzero_before}, after={nonzero_after}"
     )
+
+
+# =============================================================================
+# eps-floor tests: the phantom-stripe fix is `eps` (docs/bregman_phantom_classes.md)
+# =============================================================================
+
+
+def _dual_movement(eps, steps=50):
+    """Total parameter movement per coordinate under a constant gradient."""
+    p = nn.Parameter(torch.zeros(2))
+    opt = AdaBreg([p], lr=0.01, eps=eps)
+    grad = torch.tensor([1.0, 1e-6])
+    for _ in range(steps):
+        p.grad = grad.clone()
+        opt.step()
+    return p.data.abs()
+
+
+def test_adabreg_default_denom_is_size_blind():
+    """Default contract: coordinates with pushes 6 orders apart move equally."""
+    moved = _dual_movement(eps=1e-8)
+    ratio = moved[1] / moved[0]
+    assert ratio > 0.9, f"Adam denom should be size-blind, ratio={ratio}"
+
+
+def test_adabreg_eps_floor_makes_sub_floor_gradients_proportional():
+    """Raised eps: sub-floor pushes step ~with their size, others full-size."""
+    moved = _dual_movement(eps=1e-3)
+    ratio = moved[1] / moved[0]
+    # Expected ~1e-3: lr*1e-6/1e-3 for the sub-floor coordinate.
+    assert ratio < 1e-2, f"sub-floor steps should shrink, ratio={ratio}"
+    assert moved[0] > 0.1, "above-floor coordinate must keep a full-size step"

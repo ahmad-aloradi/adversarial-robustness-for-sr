@@ -138,7 +138,11 @@ class LinBreg(torch.optim.Optimizer):
 class AdaBreg(torch.optim.Optimizer):
     """Adaptive Bregman optimizer (Adam-style acceleration).
 
-    Combines adaptive moment estimation with Bregman iterations.
+    Combines adaptive moment estimation with Bregman iterations. ``eps`` is
+    the gradient size below which the Adam step degrades to being
+    proportional to the gradient; with an over-sized classifier head, raising
+    it to ~1e-4 stops never-vanishing phantom-class pushes from accumulating
+    (see docs/bregman_phantom_classes.md).
     """
 
     def __init__(

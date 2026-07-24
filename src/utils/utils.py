@@ -378,6 +378,12 @@ def register_custom_resolvers(
 
         OmegaConf.register_new_resolver("run_subdir", run_subdir)
 
+    # register the logger run-name resolver (used in logger/wandb.yaml)
+    if not OmegaConf.has_resolver("run_name"):
+        from src.utils.run_naming import run_name
+
+        OmegaConf.register_new_resolver("run_name", run_name)
+
     # register bregman lambda interpolation resolver
     if not OmegaConf.has_resolver("bregman_lambda"):
         from src.utils.bregman_utils import get_bregman_lambda
