@@ -4,7 +4,7 @@
 # Lambda is still set via _bregman_lambda from the base config.
 
 defaults:
-  - sv/sv_bregman_linbreg
+  - /experiment/sv/sv_bregman_linbreg
   - _self_
 
 _bregman_fixed_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},fixed_lambda}

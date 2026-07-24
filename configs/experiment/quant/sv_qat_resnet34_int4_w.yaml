@@ -9,7 +9,7 @@
 #     callbacks.qat.pretrained_ckpt_path=<path/to/fp32/best_ckpt.pth>
 
 defaults:
-  - /experiment/sv/sv_vanilla
+  - /experiment/sv/sv_dense_adamw
   - override /quantization: int4_w
   - override /callbacks: [default.yaml, qat.yaml]
   - override /module/sv_model: wespeaker_resnet34.yaml

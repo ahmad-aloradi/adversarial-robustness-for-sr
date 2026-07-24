@@ -1,11 +1,12 @@
 # @package _global_
 
-# AdaBreg with decoupled weight decay (AdamW-style).
-# Weight decay is applied after the proximal step, keeping it independent
-# from the subgradient accumulation.
+# AdaBreg with decoupled weight decay (AdamW-style): weight decay is applied
+# after the proximal step, independent of the subgradient accumulation.
+# Inherits the AdaBreg parent; swaps only the optimizer.
+# Run: python src/train.py experiment=sv/sv_bregman_adabregw
 
 defaults:
-  - sv/sv_bregman_adabreg
+  - /experiment/sv/sv_bregman_adabreg
   - _self_
 
 tags:
@@ -15,6 +16,8 @@ tags:
     "sv",
     "AdabregW",
   ]
+
+_bregman_lambda: ${bregman_lambda:AdaBregW,${_bregman_target_sparsity},initial_lambda}
 
 module:
   optimizer:

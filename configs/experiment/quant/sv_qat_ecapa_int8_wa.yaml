@@ -3,7 +3,7 @@
 # QAT example: ECAPA-TDNN at INT8 weight+activation.
 
 defaults:
-  - /experiment/sv/sv_vanilla
+  - /experiment/sv/sv_dense_adamw
   - override /quantization: int8_wa
   - override /callbacks: [default.yaml, qat.yaml]
   - override /module/sv_model: wespeaker_ecapa_tdnn.yaml

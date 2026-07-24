@@ -1,14 +1,13 @@
 # @package _global_
 
+# ProxSGD: minimize loss + lambda*||theta||_1 (penalty method, dense start).
+# Inherits the AdaBreg parent; swaps the optimizer, starts dense
+# (_bregman_initial_sparsity 0.0) and runs without augmentation.
+# Run: python src/train.py experiment=sv/sv_bregman_proxsgd
+
 defaults:
+  - /experiment/sv/sv_bregman_adabreg
   - _self_
-  - /module/sv_model: wespeaker_ecapa_tdnn.yaml
-  - /module/scoring: as_norm
-  - override /callbacks: default.yaml
-  - override /datamodule: datasets/cnceleb.yaml
-  - override /module: sv.yaml
-  - override /trainer: gpu.yaml
-  - override /logger: tensorboard.yaml
 
 tags:
   [
@@ -17,194 +16,14 @@ tags:
     "sv",
     "ProxSGD",
   ]
-seed: 42
 
-# Single source of truth for Bregman lambda values
-_bregman_target_sparsity: 0.9
-_bregman_tolerance: 0.01 # convergence band shared by the gates + scheduler: in-band iff |sparsity - target| <= this
+_bregman_initial_sparsity: 0.0 # ProxSGD grows sparsity from a dense start
 _bregman_lambda: ${bregman_lambda:ProxSGD,${_bregman_target_sparsity},initial_lambda}
 
-trainer:
-  max_epochs: 50
-  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
-  gradient_clip_val: 1.0
-  num_sanity_val_steps: 0
-
-callbacks:
-  model_checkpoint:
-    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
-    target_sparsity: ${_bregman_target_sparsity} # band centre; top-k saved only within tolerance of this
-    tolerance: ${_bregman_tolerance} # in-band half-width: |sparsity - target| <= tolerance
-    sparsity_metric: sparsity # gate signal: `sparsity` = overall whole-model (Bregman); `pruning/sparsity` = pruned groups only (magnitude)
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
-    save_top_k: 5
-    every_n_epochs: 1
-  checkpoint_averaging:
-    _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
-    num_checkpoints: ${callbacks.model_checkpoint.save_top_k}
-    output_filename: averaged_top{num}.ckpt
-  # model_pruning publishes the gate metric at the last batch, so it must come
-  # before the gates that read it (RampValidationGate reads it in the same hook).
-  model_pruning:
-    _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
-    sparsity_threshold: 1e-12
-    verbose: 2
-    target_sparsity: ${_bregman_target_sparsity}
-    lambda_scheduler:
-      _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
-      _partial_: true
-      initial_lambda: ${_bregman_lambda}
-      acceleration_factor: 1.0
-      update_frequency: 50
-      # Near-target band: gentler/less-frequent updates; shares the gates'
-      # tolerance so they stay in lock-step.
-      damping_zone: ${_bregman_tolerance}
-      damping_acceleration_divisor: 2
-      damping_frequency_multiplier: 4
-  early_stopping:
-    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
-    target_sparsity: ${_bregman_target_sparsity} # patience advances only while in-band around this
-    tolerance: ${_bregman_tolerance} # shared in-band half-width
-    sparsity_metric: sparsity # gate signal (see model_checkpoint)
-    check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
-  ramp_validation_gate:
-    _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
-    target_sparsity: ${_bregman_target_sparsity} # validation runs only within tolerance of this
-    tolerance: ${_bregman_tolerance} # shared in-band half-width
-    sparsity_metric: sparsity # gate signal (see model_checkpoint)
-
-datamodule:
-  dataset:
-    segment_duration: 3.0
-    max_duration: 3.0
-    use_pre_segmentation: True
-
-  # Auto-scale only when virtual speakers are enabled
-  num_classes: ${oc.eval:'(${oc.select:module.data_augmentation.augmentations.wav_augmenter.speed_perturb.virtual_speakers,False}) and (${datamodule._base_num_classes} * len(${oc.select:module.data_augmentation.augmentations.wav_augmenter.speed_perturb.speed_factors,[]})) or ${datamodule._base_num_classes}'}
-
-  loaders:
-    train:
-      batch_size: 128
-    valid:
-      batch_size: 128
-    test:
-      batch_size: 8
-    enrollment:
-      batch_size: 8
-
 module:
-  criterion:
-    aam:
-      _target_: speechbrain.nnet.losses.LogSoftmaxWrapper
-      loss_fn:
-        _target_: speechbrain.nnet.losses.AdditiveAngularMargin
-        margin: 0.2
-        scale: 32.0
-
-  lr_scheduler:
-    scheduler:
-      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
-      mode: "max"
-      factor: 0.25
-      min_lr: 1.0e-6
-      patience: 2
-      verbose: True
-    extras:
-      monitor: ${replace:"valid/__metric__"}
-      interval: "epoch"
-      frequency: ${trainer.check_val_every_n_epoch}
-
   optimizer:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.ProxSGD
     _partial_: True
     lr: 1e-2
 
-  data_augmentation: null
-
-  model:
-    pruning_groups:
-      # Group 1: Prunable Convolutional Layers
-      - name: conv_layers
-        layer_types: ["torch.nn.Conv1d", "torch.nn.Conv2d"]
-        param_names: ["weight"]
-        optimizer_settings:
-          reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: ${_bregman_lambda}
-          lambda_scale: 1.0
-        pruning_config:
-          pruning_type: "unstructured"
-          sparsity_rate: 0.0
-
-      # Group 2a: Prunable Linear Layers
-      - name: linear_layers
-        layer_types: ["torch.nn.Linear"]
-        param_names: ["weight"]
-        optimizer_settings:
-          reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: ${_bregman_lambda}
-          lambda_scale: 1.0
-        pruning_config:
-          pruning_type: "unstructured"
-          sparsity_rate: 0.0
-
-      # Group 2b: Classifier
-      - name: classifier
-        layer_types: ["speechbrain.lobes.models.ECAPA_TDNN.Classifier"]
-        param_names: ["weight"] # bias falls through to the unregularized bias_params group
-        optimizer_settings:
-          reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: ${_bregman_lambda}
-          lambda_scale: 1.0
-        pruning_config:
-          pruning_type: "unstructured"
-          sparsity_rate: 0.0
-
-      # Group 3: Pruning-sensitive Layers (Not Pruned!)
-      - name: norm_params
-        layer_types:
-          [
-            "torch.nn.BatchNorm1d",
-            "torch.nn.BatchNorm2d",
-            "torch.nn.LayerNorm",
-            "torch.nn.GroupNorm",
-          ]
-        optimizer_settings:
-          reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
-            lamda: ${_bregman_lambda}
-          lambda_scale: 0.0
-
-      # Group 4: Biases (from any layer type)
-      - name: bias_params
-        param_names: ["bias"]
-        optimizer_settings:
-          reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
-            lamda: ${_bregman_lambda}
-          lambda_scale: 0.0
-
-      # Group 5: Fallback  (i.e., it catches what's left over) (MUST BE LAST)
-      - name: fallback
-        is_fallback: True
-        module_name_patterns: [".*"]
-        param_names: ["weight"]
-        optimizer_settings:
-          reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: ${_bregman_lambda}
-          lambda_scale: 1.0
-        pruning_config:
-          pruning_type: "unstructured"
-          sparsity_rate: 0.0
-
-logger:
-  wandb:
-    tags: ${tags}
-    group: ${oc.eval:"'${datamodule.dataset.data_dir}'.split('/')[-1]"}
+  data_augmentation: null # ProxSGD baseline runs without augmentation
