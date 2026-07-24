@@ -124,9 +124,11 @@ def extract_pruned_layers(
     *,
     include_all: bool = False,
 ) -> List[Dict]:
-    """Walk a Lightning checkpoint and return one record per pruned layer.
+    """Walk a Lightning checkpoint and return one record per prunable layer.
 
-    Handles both representations — pruning-hook attached
+    Every conv/linear weight is reported, whatever its sparsity, so a dense
+    baseline lists the same layers as a pruned run and the two line up
+    layer for layer. Handles both representations — pruning-hook attached
     (``{name}_orig`` + ``{name}_mask`` pairs) and baked-in zeros
     (hook removed via ``prune.remove``).
 
@@ -135,8 +137,8 @@ def extract_pruned_layers(
 
     Args:
         ckpt_path: path to the ``.ckpt`` file.
-        include_all: if True, also include dense layers with no zeros
-            and 1-D BN-scale tensors.
+        include_all: if True, also include 1-D tensors — norm scales and
+            any pruning-hooked 1-D parameter.
 
     Returns:
         List of layer dicts in model topology order.
@@ -191,9 +193,6 @@ def extract_pruned_layers(
         if v.ndim == 0 or (v.ndim < 2 and not include_all):
             continue
         v = v.detach().to(torch.float32)
-        sparsity = (v.abs() < ZERO_TOL).float().mean().item()
-        if sparsity < 0.01 and not include_all:
-            continue
         layers.append(
             dict(
                 name=k,
@@ -770,7 +769,7 @@ def render_layerwise_sparsity_nparams(
     fig = ax.get_figure()
     cb = fig.colorbar(sm, ax=ax, pad=0.02, fraction=0.04)
     cb.set_label(
-        fr"\# parameters ({_fmt_params(min_p)} → {_fmt_params(max_p)})",
+        rf"\# parameters ({_fmt_params(min_p)} → {_fmt_params(max_p)})",
         fontsize=8,
     )
     cb.ax.tick_params(labelsize=7)
