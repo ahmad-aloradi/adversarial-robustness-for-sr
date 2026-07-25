@@ -174,6 +174,8 @@ def _make_bregman_pruner_and_mocks(target_sparsity=0.9, initial_lambda=1e-3):
     scheduler = LambdaScheduler(
         initial_lambda=initial_lambda,
     )
+    # on_fit_start binds in production; these tests enter at on_train_batch_end.
+    scheduler.bind_run(total_steps=1000, base_lr=1e-2)
     pruner = BregmanPruner(
         sparsity_threshold=1e-12,
         verbose=0,
@@ -212,6 +214,7 @@ def test_bregman_pruner_updates_lambda_per_batch():
                 "reg": reg,
                 "lambda_scale": 1.0,
                 "delta": 1.0,
+                "lr": 1e-2,
             }
         ]
     )
@@ -274,6 +277,7 @@ def test_bregman_pruner_propagates_lambda_to_optimizer():
                 "reg": reg,
                 "lambda_scale": 1.0,
                 "delta": 1.0,
+                "lr": 1e-2,
             }
         ]
     )
@@ -326,6 +330,7 @@ def test_bregman_pruner_respects_lambda_scale():
                 "reg": reg,
                 "lambda_scale": lambda_scale,
                 "delta": 1.0,
+                "lr": 1e-2,
             }
         ]
     )
@@ -557,7 +562,11 @@ def test_step_feeds_ramped_target_to_controller():
     pruner._broadcast_lambda = Mock()
 
     trainer = Mock(current_epoch=5, global_step=100)
-    trainer.optimizers = [Mock()]
+    trainer.optimizers = [
+        _make_mock_optimizer(
+            [{"params": [], "reg": RegL1(lamda=0.01), "lr": 1e-2}]
+        )
+    ]
     pruner._step_lambda_scheduler(trainer, overall_sparsity=0.3)
 
     called_target = pruner.lambda_scheduler.step.call_args[0][1]
@@ -574,8 +583,146 @@ def test_setup_lambda_scheduler_rejects_infeasible_ramp():
     pruner = BregmanPruner(
         target_sparsity=0.9,
         lambda_scheduler=LambdaScheduler(),
-        target_scheduler=TargetScheduler(final_sparsity=0.9, epochs_to_ramp=80),
+        target_scheduler=TargetScheduler(
+            final_sparsity=0.9, epochs_to_ramp=80
+        ),
     )
     trainer = Mock(max_epochs=50, ckpt_path=None)
     with pytest.raises(ValueError, match="epochs_to_ramp"):
         pruner._setup_lambda_scheduler(Mock(), trainer, is_resuming=False)
+
+
+# =============================================================================
+# Trust region: |Δλ| <= λ0 · (lr/base_lr) · (1 - k/K), so Σ|Δλ|/lr is finite
+# =============================================================================
+
+
+def _bound_scheduler(initial_lambda=1.0, total_steps=1000, base_lr=0.01):
+    sched = LambdaScheduler(
+        initial_lambda=initial_lambda,
+        acceleration_factor=1.0,
+        update_frequency=1,
+        damping_zone=0.0,
+    )
+    sched.bind_run(total_steps=total_steps, base_lr=base_lr)
+    return sched
+
+
+def test_cap_clamps_increment_in_both_directions():
+    """A large gap moves lambda by exactly the cap, up and down."""
+    up = _bound_scheduler()
+    up.step(0.0, 0.99, current_step=0, lr=0.001)
+    # Uncapped: 1.0 -> 1.99; cap = 1.0 * (0.001/0.01) * 1 = 0.1.
+    assert up.get_lambda() == pytest.approx(1.1)
+
+    down = _bound_scheduler()
+    down.step(0.99, 0.0, current_step=0, lr=0.001)
+    assert down.get_lambda() == pytest.approx(0.9)
+
+
+def test_cap_is_one_initial_lambda_at_base_lr():
+    """The cap carries its scale from lambda0, so it is optimizer-relative."""
+    assert _bound_scheduler(initial_lambda=1.0).cap_at(
+        0, lr=0.01
+    ) == pytest.approx(1.0)
+    assert _bound_scheduler(initial_lambda=0.01).cap_at(
+        0, lr=0.01
+    ) == pytest.approx(0.01)
+
+
+def test_cap_follows_the_live_lr():
+    """An annealed lr shrinks the cap by the same factor, pinning lambda."""
+    sched = _bound_scheduler()
+    sched.step(0.0, 0.99, current_step=0, lr=1e-8)
+    assert sched.get_lambda() == pytest.approx(1.0 + 1e-6)
+
+
+def test_cap_tapers_to_zero_at_the_end_of_the_run():
+    """Lambda is frozen from the last step on — no increment past K."""
+    sched = _bound_scheduler(total_steps=1000)
+    assert sched.cap_at(500, lr=0.01) == pytest.approx(0.5)
+    assert sched.cap_at(1000, lr=0.01) == 0.0
+    sched.step(0.0, 0.99, current_step=1500, lr=0.01)  # past the end
+    assert sched.get_lambda() == pytest.approx(1.0)
+
+
+def test_total_variation_of_lambda_is_bounded():
+    """Σ|Δλ| over the run stays under λ0·(K+1)/2, and lambda ends frozen."""
+    total_steps, base_lr = 200, 0.01
+    sched = _bound_scheduler(total_steps=total_steps, base_lr=base_lr)
+    drift = 0.0
+    previous = sched.get_lambda()
+    for current_step in range(total_steps):
+        lam = sched.step(0.0, 0.99, current_step=current_step, lr=base_lr)
+        drift += abs(lam - previous)
+        previous = lam
+    assert drift <= 1.0 * (total_steps + 1) / 2
+    assert sched.cap_at(total_steps, lr=base_lr) == 0.0
+
+
+def test_cap_requires_lr_and_step():
+    """Fail loud when the run is bound but lr or current_step is missing."""
+    sched = _bound_scheduler()
+    with pytest.raises(AssertionError):
+        sched.step(0.5, 0.9, current_step=1, lr=None)
+    with pytest.raises(AssertionError):
+        sched.step(0.5, 0.9, current_step=None, lr=0.01)
+
+
+def test_setup_binds_trust_region_to_the_run():
+    """The pruner binds the scheduler to the trainer budget and the base lr."""
+    scheduler = LambdaScheduler(initial_lambda=1.0)
+    pruner = BregmanPruner(target_sparsity=0.9, lambda_scheduler=scheduler)
+    optimizer = _make_mock_optimizer(
+        [
+            {
+                "params": [],
+                "reg": RegL1(lamda=1.0),
+                "lambda_scale": 1.0,
+                "lr": 1e-4,  # mid-anneal; the cap must key off initial_lr
+                "initial_lr": 1e-2,
+            }
+        ]
+    )
+    trainer = Mock(
+        max_epochs=50, ckpt_path=None, estimated_stepping_batches=5000
+    )
+    pruner._setup_lambda_scheduler(optimizer, trainer, is_resuming=False)
+
+    assert scheduler.total_steps == 5000
+    assert scheduler.base_lr == pytest.approx(1e-2)
+    assert scheduler.cap_at(0, lr=1e-4) == pytest.approx(0.01)
+
+
+def test_pruner_steps_the_bound_scheduler_with_the_live_lr():
+    """End-to-end: the cap must use the annealed lr, not the base lr."""
+    scheduler = LambdaScheduler(
+        initial_lambda=1.0, acceleration_factor=1.0, damping_zone=0.0
+    )
+    pruner = BregmanPruner(
+        verbose=0, target_sparsity=0.99, lambda_scheduler=scheduler
+    )
+    optimizer = _make_mock_optimizer(
+        [
+            {
+                "params": [],
+                "reg": RegL1(lamda=1.0),
+                "lambda_scale": 1.0,
+                "lr": 1e-4,  # annealed 100x below the base lr
+                "initial_lr": 1e-2,
+            }
+        ]
+    )
+    trainer = Mock(
+        max_epochs=50,
+        ckpt_path=None,
+        estimated_stepping_batches=5000,
+        global_step=0,
+        optimizers=[optimizer],
+    )
+    pruner._setup_lambda_scheduler(optimizer, trainer, is_resuming=False)
+    pruner._step_lambda_scheduler(trainer, overall_sparsity=0.0)
+
+    # Uncapped 1.0 -> 1.99; cap = 1.0 * (1e-4/1e-2) * 1 = 0.01 at the live lr.
+    assert scheduler.get_lambda() == pytest.approx(1.01)
+    assert optimizer.param_groups[0]["reg"].lamda == pytest.approx(1.01)

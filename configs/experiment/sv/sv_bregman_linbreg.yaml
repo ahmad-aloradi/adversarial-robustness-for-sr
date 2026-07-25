@@ -18,11 +18,6 @@ tags:
 
 _bregman_lambda: ${bregman_lambda:LinBreg,${_bregman_target_sparsity},initial_lambda}
 
-callbacks:
-  model_pruning:
-    lambda_scheduler:
-      cap_beta0: 2 # |Δλ| <= β_k·lr per update; ≈ LinBreg λ-scale 0.2 / base lr 1e-1
-
 module:
   optimizer:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg

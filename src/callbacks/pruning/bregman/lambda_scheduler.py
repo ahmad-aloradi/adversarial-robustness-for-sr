@@ -138,9 +138,20 @@ class LambdaScheduler:
     the target, updates are gentler and less frequent; ``damping_zone=0``
     disables damping.
 
+    Once :meth:`bind_run` ties the scheduler to a run, every accepted update is
+    clamped to the trust region ``|Δλ| <= λ0 · (lr/base_lr) · (1 - k/K)``
+    (``k`` = global step, ``K`` = total steps, ``lr`` = live learning rate of
+    the regularized groups). λ then has bounded total variation —
+    ``Σ |Δλ_k| <= λ0 · (K+1)/2`` while ``lr <= base_lr`` — and the increment is
+    exactly 0 from ``K`` on, so λ converges and the tail of training is a
+    fixed-λ Bregman iteration. Unbound, the scheduler is the bare controller.
+
     >>> sched = LambdaScheduler(initial_lambda=1.0)
     >>> sched.step(0.5, target_sparsity=0.9) > 1.0  # below target -> grows
     True
+    >>> sched.bind_run(total_steps=1000, base_lr=0.01)
+    >>> sched.cap_at(500, lr=0.01)  # half the run left, at base lr
+    0.5
     """
 
     def __init__(
@@ -171,18 +182,37 @@ class LambdaScheduler:
             damping_acceleration_divisor > 0.0
         ), f"damping_acceleration_divisor must be > 0.0, got {damping_acceleration_divisor}"
 
+        self.initial_lambda = initial_lambda
         self.lambda_value = initial_lambda
         self.acceleration_factor = acceleration_factor
         self.update_frequency = update_frequency
         self.damping_zone = damping_zone
         self.damping_frequency_multiplier = damping_frequency_multiplier
         self.damping_acceleration_divisor = damping_acceleration_divisor
+        self.total_steps: Optional[int] = None
+        self.base_lr: Optional[float] = None
+
+    def bind_run(self, total_steps: int, base_lr: float) -> None:
+        """Tie the λ trust region to a run; it tapers to 0 at the end."""
+        assert total_steps >= 1, f"total_steps must be >= 1, got {total_steps}"
+        assert base_lr > 0.0, f"base_lr must be > 0.0, got {base_lr}"
+        self.total_steps = total_steps
+        self.base_lr = base_lr
+
+    def cap_at(self, current_step: int, lr: float) -> float:
+        """Largest |Δλ| allowed now: λ0, scaled by the lr and the run left."""
+        return (
+            self.initial_lambda
+            * (lr / self.base_lr)
+            * max(0.0, 1.0 - current_step / self.total_steps)
+        )
 
     def step(
         self,
         current_sparsity: float,
         target_sparsity: float,
         current_step: Optional[int] = None,
+        lr: Optional[float] = None,
     ) -> float:
         """Update lambda from a sparsity reading toward ``target_sparsity``.
 
@@ -192,11 +222,20 @@ class LambdaScheduler:
                 the caller each step (the scheduler holds no target).
             current_step: global training step; gates the update frequency.
                 ``None`` updates every call.
+            lr: live learning rate of the regularized groups; required once
+                :meth:`bind_run` has set the trust region.
 
         Output:
             Current lambda value.
         """
         self._validate_sparsity(current_sparsity)
+        if self.total_steps is not None:
+            assert (
+                current_step is not None
+            ), "bind_run() was called, so step() needs current_step for the taper"
+            assert (
+                lr is not None and lr >= 0.0
+            ), f"bind_run() was called, so step() needs the live lr, got {lr}"
         sparsity = float(current_sparsity)
         target = float(target_sparsity)
 
@@ -223,10 +262,20 @@ class LambdaScheduler:
 
         # lambda_t+1 = lambda_t * (1 + alpha * |epsilon|)^sign(gap)
         gap = target - sparsity
+        proposed = self.lambda_value
         if gap > 0:
-            self.lambda_value *= 1.0 + effective_acceleration * gap
+            proposed *= 1.0 + effective_acceleration * gap
         elif gap < 0:
-            self.lambda_value /= 1.0 + effective_acceleration * (-gap)
+            proposed /= 1.0 + effective_acceleration * (-gap)
+
+        if self.total_steps is None:
+            self.lambda_value = proposed
+        else:
+            # Trust region: Σ|Δλ|/lr stays finite for any LR schedule.
+            cap = self.cap_at(current_step, lr)
+            self.lambda_value += max(
+                -cap, min(cap, proposed - self.lambda_value)
+            )
 
         assert math.isfinite(
             self.lambda_value
@@ -281,14 +330,19 @@ if __name__ == "__main__":
         acceleration_factor=0.25,
         update_frequency=1,
     )
-    measured = 0.5
-    for current_step in range(1, 21):
-        lam = sched.step(measured, target, current_step=current_step)
-        measured = min(target, measured + 0.02)  # model approaches the target
-        if current_step % 5 == 0:
+    sched.bind_run(total_steps=10000, base_lr=1e-2)
+    measured = 0.2
+    for current_step in range(1, 10000):
+        if current_step % 50 == 0:
+            lam = sched.step(
+                measured, target, current_step=current_step, lr=1e-2
+            )
+            measured = min(
+                target, measured + 0.002
+            )  # model approaches the target
             print(
                 f"step {current_step:3d}: sparsity={measured:.3f} "
-                f"lambda={lam:.4f}"
+                f"lambda={lam:.4f} cap={sched.cap_at(current_step, 1e-2):.4f}"
             )
     print(f"final lambda={sched.get_lambda():.4f} target={target}")
 

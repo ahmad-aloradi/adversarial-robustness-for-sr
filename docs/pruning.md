@@ -27,7 +27,7 @@ Located in `src/callbacks/pruning/bregman/bregman_optimizers.py`:
 - **AdaBreg**: Adaptive Bregman iteration optimizer
   - Adam-style adaptive learning rates with Bregman regularization
 
-Both optimizers support **parameter groups** with different regularization strategies. By default we use (and recommend using) **AdaBreg**.
+Both optimizers support **parameter groups** with different regularization strategies.
 
 #### 1.2 Bregman Regularizers
 
@@ -59,11 +59,12 @@ lambda_scheduler:
 The target sparsity lives on the pruner (`model_pruning.target_sparsity`); validation is suppressed until the model reaches its band (see the sparsity-gated callbacks).
 
 **Key Parameters:**
-- `initial_lambda`: Starting regularization strength
-- `target_sparsity`: Set on `BregmanPruner` (`model_pruning.target_sparsity`), not the scheduler; the controller is driven toward it each step (0.0-1.0)
+- `initial_lambda`
+- `target_sparsity`
 - `acceleration_factor`: Controls how aggressively λ adapts (0.0-1.0)
 - `damping_zone`: Near-target band where updates become gentler and less frequent (0.0 disables)
 - `update_frequency`: Steps between λ updates (multiplied inside the damping zone)
+- λ trust region (no knob): `BregmanPruner` binds the scheduler to the run, after which each update obeys `|Δλ| ≤ λ0 · (lr/base_lr) · (1 - step/total_steps)`. `λ0` sets the scale (λ grows at most linearly, one λ0 per update), the lr ratio keeps the cap meaningful under warmup/annealing, and the taper bounds λ's total variation (`Σ|Δλ| ≤ λ0·(K+1)/2`) with the increment exactly 0 from the last step on, so λ converges and the tail of training is a fixed-λ Bregman iteration. Logged per step as `bregman/lambda_cap`
 
 The update is defined as: `λ *= 1+a·gap` if s < target and `λ /= 1+a·|gap|` if sparsity > target.
 

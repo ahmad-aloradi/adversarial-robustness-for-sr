@@ -170,6 +170,7 @@ def _run_mini_bregman_training(
     trainer.lr_scheduler_configs = []
     trainer.limit_val_batches = 1.0
     trainer.num_training_batches = num_batches_per_epoch
+    trainer.estimated_stepping_batches = num_epochs * num_batches_per_epoch
     trainer.callback_metrics = {}  # on_train_epoch_end writes sparsity here
 
     # Initialize pruner
@@ -336,6 +337,7 @@ def _make_pruner_for_fit(target_sparsity):
     trainer.lr_scheduler_configs = []
     trainer.limit_val_batches = 1.0
     trainer.num_training_batches = 20
+    trainer.estimated_stepping_batches = 200
     trainer.callback_metrics = {}
     return pruner, trainer, pl_module
 

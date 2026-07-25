@@ -77,6 +77,7 @@ class BregmanPruner(Callback):
         self._optimizer: Optional[torch.optim.Optimizer] = None
         self._initialized = False
         self._ckpt_scheduler_state: Optional[dict] = None
+        self._last_cap: Optional[float] = None
 
     # -------------------------------------------------------------------------
     # Lightning hooks
@@ -195,9 +196,9 @@ class BregmanPruner(Callback):
     ) -> None:
         """Save scheduler state to checkpoint."""
         if self.lambda_scheduler is not None:
-            checkpoint["bregman_lambda_scheduler_state"] = (
-                self.lambda_scheduler.get_state()
-            )
+            checkpoint[
+                "bregman_lambda_scheduler_state"
+            ] = self.lambda_scheduler.get_state()
 
     def on_load_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict
@@ -251,6 +252,17 @@ class BregmanPruner(Callback):
                 trainer.max_epochs
             )
 
+        # Lightning returns max_steps (-1 by default) for iterable datasets.
+        total_steps = trainer.estimated_stepping_batches
+        if total_steps < 1 or total_steps == float("inf"):
+            raise RuntimeError(
+                "BregmanPruner needs a finite trainer.estimated_stepping_batches "
+                f"to taper the lambda trust region; got {total_steps!r}."
+            )
+        self.lambda_scheduler.bind_run(
+            int(total_steps), self._base_lr(optimizer)
+        )
+
         # Restore state from checkpoint
         if is_resuming and self._ckpt_scheduler_state:
             self.lambda_scheduler.load_state(self._ckpt_scheduler_state)
@@ -270,12 +282,16 @@ class BregmanPruner(Callback):
             else self._pruned_sparsity()
         )
 
+        optimizer = trainer.optimizers[0]
+        lr = self._regularized_group(optimizer)["lr"]
+        self._last_cap = self.lambda_scheduler.cap_at(trainer.global_step, lr)
         new_lambda = self.lambda_scheduler.step(
             current_sparsity,
             self._current_target(trainer),
             trainer.global_step,
+            lr=lr,
         )
-        self._broadcast_lambda(trainer.optimizers[0], new_lambda)
+        self._broadcast_lambda(optimizer, new_lambda)
 
     def _current_target(self, trainer: Trainer) -> Optional[float]:
         """Controller target now: the epoch's ramp value, else the fixed one."""
@@ -380,6 +396,8 @@ class BregmanPruner(Callback):
                 self.lambda_scheduler.get_lambda(),
                 **per_step,
             )
+            # Compare against |Δλ| between steps to see if the cap ever bound.
+            pl_module.log("bregman/lambda_cap", self._last_cap, **per_step)
 
     @rank_zero_only
     def _log_configuration(self, optimizer) -> None:
@@ -466,12 +484,36 @@ class BregmanPruner(Callback):
             )
             if modules:
                 for m in sorted(modules):
-                    log.info(f"    {m} ({type(pl_module.get_submodule(m)).__name__})")
+                    log.info(
+                        f"    {m} ({type(pl_module.get_submodule(m)).__name__})"
+                    )
         log.info(40 * "-")
 
     # -------------------------------------------------------------------------
     # Helpers
     # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _regularized_group(optimizer) -> dict:
+        """First param group carrying a thresholding regularizer.
+
+        Raises rather than letting a bare ``next()`` throw StopIteration, which
+        Lightning's epoch loop catches and turns into a silent early stop.
+        """
+        for group in optimizer.param_groups:
+            if BregmanPruner._group_regularized(group):
+                return group
+        raise ValueError(
+            "BregmanPruner: no param group carries an active regularizer; "
+            "check that pruning_groups assigns RegL1 to at least one group."
+        )
+
+    @staticmethod
+    def _base_lr(optimizer) -> float:
+        """Pre-schedule lr of the regularized groups; `initial_lr` is stamped
+        on the group by any torch LR scheduler wrapping the optimizer."""
+        group = BregmanPruner._regularized_group(optimizer)
+        return group["initial_lr"] if "initial_lr" in group else group["lr"]
 
     @staticmethod
     def _lambda_scale(group: dict) -> float:

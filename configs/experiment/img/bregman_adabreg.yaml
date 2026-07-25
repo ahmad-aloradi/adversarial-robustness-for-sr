@@ -53,9 +53,7 @@ callbacks:
       initial_lambda: ${_bregman_lambda}
       acceleration_factor: 1.0
       update_frequency: 50
-      # Near-target band: gentler/less-frequent updates; shares the gates'
-      # tolerance so they stay in lock-step.
-      damping_zone: ${_bregman_tolerance}
+      damping_zone: 0.0 # damping off; the lr-proportional cap rate-limits instead
       damping_acceleration_divisor: 2 # alpha x-times smaller in the damping zone
       damping_frequency_multiplier: 4 # f x-times less frequent in the damping zone
   early_stopping:
