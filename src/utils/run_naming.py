@@ -52,19 +52,26 @@ def run_subdir(dataset, model, augmentation, experiment, sparsity, scheduler):
 def run_name(output_dir, log_dir):
     """Name the logger run after its run directory, minus the machine-specific root.
 
-    ``output_dir`` is the resolved ``hydra.run.dir``; only its ``log_dir`` prefix
-    and the constant ``<task>/runs`` head differ between a cluster and a laptop,
-    so dropping both gives one dashboard name per experiment everywhere.
+    ``output_dir`` is the resolved ``hydra.run.dir``; under the default layout only
+    its ``log_dir`` prefix and the constant ``<task>/runs`` head differ between a
+    cluster and a laptop, so dropping both gives one dashboard name everywhere. A
+    ``hydra.run.dir`` pointed at another volume escapes ``log_dir``; there fall back
+    to the tail after a ``runs``/``multiruns`` anchor, else the ``<name>/seed`` pair.
 
     >>> run_name("/vault/results/train/runs/cifar10/resnet18/no_augmentation/dense_sgd-no_scheduler/seed_42", "/vault/results")
     'cifar10/resnet18/no_augmentation/dense_sgd-no_scheduler/seed_42'
     >>> run_name("/home/logs/eval/runs/cnceleb/sv_vanilla-bs256", "/home/logs/eval/runs/cnceleb")
     'sv_vanilla-bs256'
+    >>> run_name("/data/results/cifar10/resnet18/bregman_adabreg-sr99-LambdaDecay/seed_42", "/home/proj/logs")
+    'bregman_adabreg-sr99-LambdaDecay/seed_42'
     """
     relative = os.path.relpath(output_dir, log_dir)
-    assert not relative.startswith(
-        ".."
-    ), f"run dir {output_dir!r} must live under log dir {log_dir!r}"
+    if relative.startswith(".."):
+        parts = output_dir.rstrip(os.sep).split(os.sep)
+        for anchor in ("runs", "multiruns"):
+            if anchor in parts:
+                return "/".join(parts[parts.index(anchor) + 1 :])
+        return "/".join(parts[-2:])
     parts = relative.split(os.sep)
     if len(parts) > 2 and parts[1] in ("runs", "multiruns"):
         parts = parts[2:]
