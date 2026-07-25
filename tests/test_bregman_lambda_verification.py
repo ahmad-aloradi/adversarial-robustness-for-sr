@@ -408,48 +408,13 @@ def test_checkpoint_key_backward_compat():
 
 
 # =============================================================================
-# Progressive target ramp (TargetScheduler) integration
+# Controller setpoint
 # =============================================================================
 
 
-def test_current_target_ramps_then_holds():
-    """_current_target follows the ramp, then holds at the final target."""
-    from src.callbacks.pruning.bregman.lambda_scheduler import TargetScheduler
-
-    pruner = BregmanPruner(
-        target_sparsity=0.99,
-        target_scheduler=TargetScheduler(
-            final_sparsity=0.99,
-            initial_sparsity=0.0,
-            epochs_to_ramp=10,
-            schedule_type="linear",
-        ),
-    )
-    assert pruner._current_target(Mock(current_epoch=0)) == 0.0
-    assert pruner._current_target(Mock(current_epoch=10)) == 0.99
-    assert pruner._current_target(Mock(current_epoch=20)) == 0.99  # held
-
-
-def test_current_target_fixed_without_scheduler():
-    """No target_scheduler => the fixed target every epoch."""
-    pruner = BregmanPruner(target_sparsity=0.9)
-    assert pruner._current_target(Mock(current_epoch=0)) == 0.9
-    assert pruner._current_target(Mock(current_epoch=99)) == 0.9
-
-
-def test_step_feeds_ramped_target_to_controller():
-    """The controller receives the epoch's ramped target, not the final one."""
-    from src.callbacks.pruning.bregman.lambda_scheduler import TargetScheduler
-
-    pruner = BregmanPruner(
-        target_sparsity=0.99,
-        target_scheduler=TargetScheduler(
-            final_sparsity=0.99,
-            initial_sparsity=0.0,
-            epochs_to_ramp=10,
-            schedule_type="linear",
-        ),
-    )
+def test_step_feeds_the_fixed_target_to_the_controller():
+    """The controller drives toward target_sparsity, unchanged by the epoch."""
+    pruner = BregmanPruner(target_sparsity=0.99)
     pruner.lambda_scheduler = Mock()
     pruner.lambda_scheduler.step.return_value = 1.0
     pruner._broadcast_lambda = Mock()
@@ -462,27 +427,7 @@ def test_step_feeds_ramped_target_to_controller():
     ]
     pruner._step_lambda_scheduler(trainer, overall_sparsity=0.3)
 
-    called_target = pruner.lambda_scheduler.step.call_args[0][1]
-    assert called_target == pytest.approx(
-        0.495
-    )  # linear midpoint of 0 -> 0.99
-
-
-def test_setup_lambda_scheduler_rejects_infeasible_ramp():
-    """A ramp longer than the training budget must fail loud at setup, not
-    silently truncate and leave the gates closed for the whole run."""
-    from src.callbacks.pruning.bregman.lambda_scheduler import TargetScheduler
-
-    pruner = BregmanPruner(
-        target_sparsity=0.9,
-        lambda_scheduler=LambdaScheduler(),
-        target_scheduler=TargetScheduler(
-            final_sparsity=0.9, epochs_to_ramp=80
-        ),
-    )
-    trainer = Mock(max_epochs=50, ckpt_path=None)
-    with pytest.raises(ValueError, match="epochs_to_ramp"):
-        pruner._setup_lambda_scheduler(Mock(), trainer, is_resuming=False)
+    assert pruner.lambda_scheduler.step.call_args[0][1] == 0.99
 
 
 # =============================================================================

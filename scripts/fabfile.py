@@ -930,7 +930,6 @@ def run_sv(transfer_data="false", force="false"):
     RUN_FIXED_BREGMAN_EXPS = False
     # Adaptive Bregman (lambda scheduler):
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
-    RUN_PROGRESSIVE_BREGMAN_EXPS = False  # adaptive, target ramps 0 -> final
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
@@ -986,22 +985,6 @@ def run_sv(transfer_data="false", force="false"):
                     "sparsity_rates": [0.99],
                     "dataset_names": ["multi_sv"],
                     # "suffix": "-fixed_target",
-                }
-            )
-
-    # CASE 2 — progressive Bregman: target ramps 0 -> final over the ramp epochs
-    # (ramp config lives in the *_progressive YAMLs, not here).
-    if RUN_PROGRESSIVE_BREGMAN_EXPS:
-        for _exp in (
-            "sv_bregman_adabreg_progressive",
-            "sv_bregman_linbreg_progressive",
-        ):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "sv_models": [ecapa],
-                    "sparsity_rates": [0.99],
-                    "dataset_names": ["multi_sv"],
                 }
             )
 
@@ -1418,8 +1401,6 @@ def run_img():
                     "pruning_mag_unstruct",
                     "bregman_adabreg",
                     "bregman_linbreg",
-                    "bregman_adabreg_progressive",
-                    "bregman_linbreg_progressive",
                 ]:
                     _submit_img_job(
                         experiment=_exp,

@@ -46,7 +46,7 @@ Each regularizer implements:
 
 Located in `src/callbacks/pruning/bregman/lambda_scheduler.py`:
 
-A feedback controller that adjusts the regularization strength $\lambda$ to drive sparsity toward a target **supplied by `BregmanPruner` each step** ($\lambda$ rises when measured sparsity is below the target, falls when above). The scheduler holds no target of its own, so fixed and progressive targets both work unchanged.
+A feedback controller that adjusts the regularization strength $\lambda$ to drive sparsity toward a target **supplied by `BregmanPruner` each step** ($\lambda$ rises when measured sparsity is below the target, falls when above). The scheduler holds no target of its own.
 
 ```python
 lambda_scheduler:
@@ -68,16 +68,6 @@ The target sparsity lives on the pruner (`model_pruning.target_sparsity`); valid
 The update is defined as: `λ *= 1+a·gap` if s < target and `λ /= 1+a·|gap|` if sparsity > target.
 
 **Note**: Depending on many factors (Bregman optimizer type, `lr` value, `lr_scheduler`, etc.), the target sparsity is not guaranteed to be reached. There is a balancing act between the contribution of the optimzier and regularizer terms in the weights updates.
-
-#### 1.3b Progressive target ramp
-
-`TargetScheduler` (same file) ramps the controller's target from `initial_sparsity` up to `final_sparsity` over `epochs_to_ramp` epochs (log-space by default, `schedule_type: linear` for a straight line), then holds. It is independent of `LambdaScheduler` — it only computes the moving target each epoch, which the feedback loop tracks. The gates and feasibility check still key off the final `target_sparsity`, so validation opens only once the model reaches the final band.
-
-Set it under `model_pruning.target_scheduler` and start the weights dense (`initial_sparsity` = ramp start). Run:
-
-```bash
-python src/train.py experiment=img/bregman_adabreg_progressive
-```
 
 #### 1.4 Pruning Manager
 

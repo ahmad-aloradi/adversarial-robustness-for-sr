@@ -18,7 +18,7 @@ from src.callbacks.pruning.utils.pruning_manager import PruningManager
 from src.utils.trainer_utils import total_training_steps
 
 from .bregman_regularizers import RegNone
-from .lambda_scheduler import LambdaScheduler, TargetScheduler
+from .lambda_scheduler import LambdaScheduler
 
 log = utils.get_pylogger(__name__)
 
@@ -44,26 +44,20 @@ class BregmanPruner(Callback):
         verbose: int = 1,
         lambda_scheduler: Optional[LambdaScheduler] = None,
         target_sparsity: Optional[float] = None,
-        target_scheduler: Optional[TargetScheduler] = None,  # ramps the target
     ):
         """
         Args:
             sparsity_threshold: Threshold below which a weight is considered zero.
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
             lambda_scheduler: Optional scheduler for dynamic lambda updates.
-            target_sparsity: Final sparsity setpoint: the value the feasibility
-                check guards and the gates key off. Also the fixed controller
-                target when target_scheduler is None. Required when a
-                lambda_scheduler is set.
-            target_scheduler: Optional per-epoch ramp of the controller target
-                (progressive mode). When set, the controller chases its moving
-                target each step while the gates still key off target_sparsity.
+            target_sparsity: Sparsity setpoint: the value the gates key off and
+                the controller drives toward. Required when a lambda_scheduler
+                is set.
         """
         super().__init__()
         self.sparsity_threshold = sparsity_threshold
         self.verbose = verbose
         self.lambda_scheduler = lambda_scheduler
-        self.target_scheduler = target_scheduler
         if target_sparsity is None:
             self._target_sparsity: Optional[float] = None
         else:
@@ -158,7 +152,7 @@ class BregmanPruner(Callback):
 
         sparsity = self._overall_sparsity()
         pruned_sparsity = self._pruned_sparsity()
-        target = self._current_target(trainer)
+        target = self._target_sparsity
 
         # Inject end-of-epoch sparsity directly into callback_metrics so that
         # ModelCheckpoint filenames and train_log.txt get the true final value
@@ -217,13 +211,6 @@ class BregmanPruner(Callback):
         self, optimizer, trainer: Trainer, is_resuming: bool
     ) -> None:
         """Instantiate and configure the lambda scheduler."""
-        # Progressive mode feeds a moving target to the feedback controller, so
-        # it needs one; fail loud rather than ignoring the ramp.
-        if self.target_scheduler is not None and self.lambda_scheduler is None:
-            raise ValueError(
-                "BregmanPruner.target_scheduler requires a lambda_scheduler; "
-                "the controller is what tracks the ramped target."
-            )
         if self.lambda_scheduler is None:
             return
 
@@ -235,21 +222,6 @@ class BregmanPruner(Callback):
             raise ValueError(
                 "BregmanPruner.target_sparsity is required when a "
                 "lambda_scheduler is set; it is the controller setpoint."
-            )
-
-        if self.target_scheduler is not None:
-            if not hasattr(self.target_scheduler, "target_at"):
-                self.target_scheduler = self.target_scheduler()
-            assert (
-                self.target_scheduler.final_sparsity == self._target_sparsity
-            ), (
-                "target_scheduler.final_sparsity "
-                f"({self.target_scheduler.final_sparsity}) must equal "
-                f"target_sparsity ({self._target_sparsity}); the gates key off "
-                "the latter."
-            )
-            self.target_scheduler.verify_schedule_feasibility(
-                trainer.max_epochs
             )
 
         group = self._regularized_group(optimizer)
@@ -282,17 +254,11 @@ class BregmanPruner(Callback):
         lr = self._regularized_group(optimizer)["lr"]
         new_lambda = self.lambda_scheduler.step(
             current_sparsity,
-            self._current_target(trainer),
+            self._target_sparsity,
             trainer.global_step,
             lr=lr,
         )
         self._broadcast_lambda(optimizer, new_lambda)
-
-    def _current_target(self, trainer: Trainer) -> Optional[float]:
-        """Controller target now: the epoch's ramp value, else the fixed one."""
-        if self.target_scheduler is None:
-            return self._target_sparsity
-        return self.target_scheduler.target_at(trainer.current_epoch)
 
     def _apply_lambda_to_groups(self, trainer: Trainer) -> None:
         """Apply current scheduler lambda to all regularized groups."""
