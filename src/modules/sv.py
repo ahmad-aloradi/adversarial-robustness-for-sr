@@ -30,6 +30,7 @@ from src.modules.scoring import (
     aggregate_embeddings,
     build_scoring_pipeline,
 )
+from src.utils.trainer_utils import total_training_steps
 
 log = utils.get_pylogger(__name__)
 
@@ -576,13 +577,10 @@ class SpeakerVerification(pl.LightningModule):
                 f"WarmupExponentialLR with interval='step' requires "
                 f"trainer.max_epochs to be a positive int; got {max_epochs!r}."
             )
-        total = self.trainer.estimated_stepping_batches
-        if not total or total == float("inf"):
-            raise RuntimeError(
-                f"WarmupExponentialLR with interval='step' requires finite "
-                f"trainer.estimated_stepping_batches; got {total!r}."
-            )
-        return {"steps_per_epoch": max(1, int(total) // max_epochs)}
+        total = total_training_steps(
+            self.trainer, "WarmupExponentialLR with interval='step'"
+        )
+        return {"steps_per_epoch": max(1, total // max_epochs)}
 
     # Dev and eval utils
     def _get_test_artifacts_dir(self, test_filename: str) -> Path:

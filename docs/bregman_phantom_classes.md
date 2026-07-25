@@ -181,7 +181,7 @@ reclaimable inefficiency, not a broken method.
 
 A second cost is controller stability: thousands of near-identical weights sit
 barely above one global `λ` and switch on and off as a block, so sparsity
-overshoots and rebounds. This is why the `λ` controller has a damping zone.
+overshoots and rebounds. The λ trust region rate-limits that swing.
 
 ## 6. The fix, verified at scale
 

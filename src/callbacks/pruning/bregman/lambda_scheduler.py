@@ -133,10 +133,9 @@ class TargetScheduler:
 class LambdaScheduler:
     """Lambda adapter for sparsity-controlled Bregman Learning.
 
-    Each :meth:`step` updates ``lambda`` to achieve a target sparsity: it increases when
-    sparsity is below it, decreases when above. Within ``damping_zone`` of
-    the target, updates are gentler and less frequent; ``damping_zone=0``
-    disables damping.
+    Each :meth:`step` updates ``lambda`` to achieve a target sparsity: it
+    increases when sparsity is below it, decreases when above, every
+    ``update_frequency`` steps.
 
     Once :meth:`bind_run` ties the scheduler to a run, every accepted update is
     clamped to the trust region ``|Δλ| <= λ0 · (lr/base_lr) · (1 - k/K)``
@@ -159,9 +158,6 @@ class LambdaScheduler:
         initial_lambda: float = 1e-3,
         acceleration_factor: float = 0.25,
         update_frequency: int = 1,
-        damping_zone: float = 0.1,
-        damping_frequency_multiplier: int = 10,
-        damping_acceleration_divisor: float = 5.0,
     ):
         assert (
             acceleration_factor >= 0.0
@@ -172,25 +168,14 @@ class LambdaScheduler:
         assert (
             update_frequency >= 1
         ), f"update_frequency must be >= 1, got {update_frequency}"
-        assert (
-            damping_zone >= 0.0
-        ), f"damping_zone must be >= 0.0, got {damping_zone}"
-        assert damping_frequency_multiplier >= 1 and isinstance(
-            damping_frequency_multiplier, int
-        ), f"Frequency factor must be >= 1 and integer, got {damping_frequency_multiplier}"
-        assert (
-            damping_acceleration_divisor > 0.0
-        ), f"damping_acceleration_divisor must be > 0.0, got {damping_acceleration_divisor}"
 
         self.initial_lambda = initial_lambda
         self.lambda_value = initial_lambda
         self.acceleration_factor = acceleration_factor
         self.update_frequency = update_frequency
-        self.damping_zone = damping_zone
-        self.damping_frequency_multiplier = damping_frequency_multiplier
-        self.damping_acceleration_divisor = damping_acceleration_divisor
         self.total_steps: Optional[int] = None
         self.base_lr: Optional[float] = None
+        self.last_cap = math.inf  # trust region as of the last step() call
 
     def bind_run(self, total_steps: int, base_lr: float) -> None:
         """Tie the λ trust region to a run; it tapers to 0 at the end."""
@@ -199,8 +184,18 @@ class LambdaScheduler:
         self.total_steps = total_steps
         self.base_lr = base_lr
 
-    def cap_at(self, current_step: int, lr: float) -> float:
-        """Largest |Δλ| allowed now: λ0, scaled by the lr and the run left."""
+    def cap_at(
+        self, current_step: Optional[int], lr: Optional[float]
+    ) -> float:
+        """Largest |Δλ| allowed now: λ0, scaled by the lr and the run left.
+
+        Infinite until :meth:`bind_run` ties the scheduler to a run.
+        """
+        if self.total_steps is None:
+            return math.inf
+        assert (
+            current_step is not None and lr is not None and lr >= 0.0
+        ), f"a bound scheduler needs current_step and the live lr, got {current_step}, {lr}"
         return (
             self.initial_lambda
             * (lr / self.base_lr)
@@ -229,53 +224,25 @@ class LambdaScheduler:
             Current lambda value.
         """
         self._validate_sparsity(current_sparsity)
-        if self.total_steps is not None:
-            assert (
-                current_step is not None
-            ), "bind_run() was called, so step() needs current_step for the taper"
-            assert (
-                lr is not None and lr >= 0.0
-            ), f"bind_run() was called, so step() needs the live lr, got {lr}"
-        sparsity = float(current_sparsity)
-        target = float(target_sparsity)
-
-        in_damping_zone = (
-            self.damping_zone > 0.0
-            and abs(sparsity - target) < self.damping_zone
-        )
-        effective_frequency = (
-            self.update_frequency * self.damping_frequency_multiplier
-            if in_damping_zone
-            else self.update_frequency
-        )
-        effective_acceleration = (
-            self.acceleration_factor / self.damping_acceleration_divisor
-            if in_damping_zone
-            else self.acceleration_factor
-        )
-
+        target = float(target_sparsity)  # coerce before the gate: fail early
+        self.last_cap = self.cap_at(current_step, lr)
         if (
             current_step is not None
-            and current_step % effective_frequency != 0
+            and current_step % self.update_frequency != 0
         ):
             return self.lambda_value
 
-        # lambda_t+1 = lambda_t * (1 + alpha * |epsilon|)^sign(gap)
-        gap = target - sparsity
-        proposed = self.lambda_value
-        if gap > 0:
-            proposed *= 1.0 + effective_acceleration * gap
-        elif gap < 0:
-            proposed /= 1.0 + effective_acceleration * (-gap)
-
-        if self.total_steps is None:
-            self.lambda_value = proposed
-        else:
-            # Trust region: Σ|Δλ|/lr stays finite for any LR schedule.
-            cap = self.cap_at(current_step, lr)
-            self.lambda_value += max(
-                -cap, min(cap, proposed - self.lambda_value)
-            )
+        # lambda_t+1 = lambda_t * (1 + alpha * |gap|)^sign(gap)
+        gap = target - float(current_sparsity)
+        factor = 1.0 + self.acceleration_factor * abs(gap)
+        proposed = (
+            self.lambda_value * factor
+            if gap >= 0
+            else self.lambda_value / factor
+        )
+        self.lambda_value += max(
+            -self.last_cap, min(self.last_cap, proposed - self.lambda_value)
+        )
 
         assert math.isfinite(
             self.lambda_value
@@ -298,25 +265,12 @@ class LambdaScheduler:
         return self.lambda_value
 
     def get_state(self) -> dict:
-        """Get scheduler state for checkpointing."""
-        return {
-            "lambda_value": self.lambda_value,
-            "acceleration_factor": self.acceleration_factor,
-            "damping_zone": self.damping_zone,
-        }
+        """Checkpoint state: lambda is the only value that evolves."""
+        return {"lambda_value": self.lambda_value}
 
     def load_state(self, state: dict) -> None:
-        """Restore scheduler state from a checkpoint.
-
-        ``lambda_value`` is the evolving state and must be present; the damping
-        knobs are reconstructed from config but restored here too so a
-        checkpoint is self-consistent.
-        """
+        """Restore lambda from a checkpoint; the rest comes from config."""
         self.lambda_value = state["lambda_value"]
-        self.acceleration_factor = state.get(
-            "acceleration_factor", self.acceleration_factor
-        )
-        self.damping_zone = state.get("damping_zone", self.damping_zone)
         log.info(
             f"LambdaScheduler state restored. lambda={self.lambda_value:.4f}"
         )

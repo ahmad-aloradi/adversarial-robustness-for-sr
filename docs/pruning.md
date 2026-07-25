@@ -53,7 +53,7 @@ lambda_scheduler:
   _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
   initial_lambda: 1e-2
   acceleration_factor: 1.0
-  damping_zone: 0.01         # near-target band: gentler/less-frequent updates (1%)
+  update_frequency: 50       # steps between λ updates
 ```
 
 The target sparsity lives on the pruner (`model_pruning.target_sparsity`); validation is suppressed until the model reaches its band (see the sparsity-gated callbacks).
@@ -61,9 +61,8 @@ The target sparsity lives on the pruner (`model_pruning.target_sparsity`); valid
 **Key Parameters:**
 - `initial_lambda`
 - `target_sparsity`
-- `acceleration_factor`: Controls how aggressively λ adapts (0.0-1.0)
-- `damping_zone`: Near-target band where updates become gentler and less frequent (0.0 disables)
-- `update_frequency`: Steps between λ updates (multiplied inside the damping zone)
+- `acceleration_factor`: Controls how aggressively λ adapts; any value >= 0, shipped configs use 1.0
+- `update_frequency`: Steps between λ updates
 - λ trust region (no knob): `BregmanPruner` binds the scheduler to the run, after which each update obeys `|Δλ| ≤ λ0 · (lr/base_lr) · (1 - step/total_steps)`. `λ0` sets the scale (λ grows at most linearly, one λ0 per update), the lr ratio keeps the cap meaningful under warmup/annealing, and the taper bounds λ's total variation (`Σ|Δλ| ≤ λ0·(K+1)/2`) with the increment exactly 0 from the last step on, so λ converges and the tail of training is a fixed-λ Bregman iteration. Logged per step as `bregman/lambda_cap`
 
 The update is defined as: `λ *= 1+a·gap` if s < target and `λ /= 1+a·|gap|` if sparsity > target.
@@ -77,7 +76,7 @@ The update is defined as: `λ *= 1+a·gap` if s < target and `λ /= 1+a·|gap|` 
 Set it under `model_pruning.target_scheduler` and start the weights dense (`initial_sparsity` = ramp start). Run:
 
 ```bash
-python src/train.py experiment=sv/sv_bregman_adabreg_progressive
+python src/train.py experiment=img/bregman_adabreg_progressive
 ```
 
 #### 1.4 Pruning Manager
@@ -97,16 +96,6 @@ Orchestrates the entire Bregman learning process:
 - Synchronizes optimizer parameter groups
 - Handles checkpoint save/load
 
-#### 1.6 Wanda ordering (activation-weighted L1)
-
-`RegL1ColWeighted` weights the L1 threshold per input column: weight `(i,j)` survives the prox iff `a_hat_j·|v_ij| > λ`, where `a_hat_j` is the std of the layer's input channel j from a recent training batch (geometric mean 1 over live channels), clamped to `[1/MAX_RATIO, MAX_RATIO]`. A constant channel — e.g. fed by a fully pruned upstream row — clamps to the `1/MAX_RATIO` floor: its consumer columns get the strongest (but bounded) threshold. The bound keeps the Bregman dual, which carries a `λ/a_hat` baseline, inside fp32's usable range.
-
-Stats come from forward hooks, refreshed every `act_update_freq` batches (per-batch refresh churns the thresholds). They are derived state: nothing is checkpointed; a resumed run re-derives them from its first batch. Wanda groups need `expand_per_layer: true` (one group per weight — each group's regularizer holds that layer's column weights). The AAM classifier keeps plain `RegL1`: it L2-normalizes both weight and embedding, so activation scale carries no signal there.
-
-```bash
-python src/train.py +experiment=sv/sv_bregman_adabreg_wanda
-```
-
 ### Usage Example
 
 See `configs/experiment/sv/sv_bregman_adabreg.yaml` for a complete configuration:
@@ -116,7 +105,6 @@ callbacks:
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-12
-    collect_metrics: true
     verbose: 2
     target_sparsity: 0.9        # controller setpoint + gate band centre
     lambda_scheduler:
@@ -124,7 +112,7 @@ callbacks:
       _partial_: true
       initial_lambda: 1e-2
       acceleration_factor: 1.0
-      damping_zone: 0.01
+      update_frequency: 50
 
 module:
   optimizer:
