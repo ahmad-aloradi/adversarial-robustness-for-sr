@@ -21,13 +21,12 @@ The Bregman learning framework implements sparsity-inducing optimization during 
 
 Located in `src/callbacks/pruning/bregman/bregman_optimizers.py`:
 
-- **LinBreg**: Linear Bregman iteration optimizer
-  - Momentum-based variant of standard gradient descent
+- **LinBreg**: Linear Bregman iteration — momentum-based variant of gradient descent
+- **AdaBreg**: Adaptive Bregman iteration — Adam-style per-parameter step sizes
+- **AdaBregW**: AdaBreg plus decoupled weight decay
+- **ProxSGD**: Proximal SGD baseline (thresholds the weights, not the dual)
 
-- **AdaBreg**: Adaptive Bregman iteration optimizer
-  - Adam-style adaptive learning rates with Bregman regularization
-
-Both optimizers support **parameter groups** with different regularization strategies.
+All of them support **parameter groups** with different regularization strategies.
 
 #### 1.2 Bregman Regularizers
 
@@ -46,7 +45,7 @@ Each regularizer implements:
 
 Located in `src/callbacks/pruning/bregman/lambda_scheduler.py`:
 
-A feedback controller that adjusts the regularization strength $\lambda$ to drive sparsity toward a target **supplied by `BregmanPruner` each step** ($\lambda$ rises when measured sparsity is below the target, falls when above). The scheduler holds no target of its own.
+A feedback controller on the regularization strength $\lambda$: it raises $\lambda$ while the model is less sparse than the target and lowers it when sparser. `BregmanPruner` hands it the setpoint once, at fit start.
 
 ```python
 lambda_scheduler:
@@ -58,20 +57,24 @@ lambda_scheduler:
 
 The target sparsity lives on the pruner (`model_pruning.target_sparsity`); validation is suppressed until the model reaches its band (see the sparsity-gated callbacks).
 
+λ steers on the sparsity of the regularized groups (`WHICH_SPARSITY_PERCENTAGE` in `bregman_pruner.py`, default `pruned`), so `target_sparsity: 0.9` means the same thing as the magnitude pruner's `amount: 0.9`. The gates must band that same quantity — the configs point all three at `${_bregman_sparsity_metric}` (`bregman/pruned_sparsity`). Switching the constant to `overall` means switching that variable to `sparsity`.
+
 **Key Parameters:**
 - `initial_lambda`
-- `target_sparsity`
 - `acceleration_factor`: Controls how aggressively λ adapts; any value >= 0, shipped configs use 1.0
 - `update_frequency`: Steps between λ updates
-- λ trust region (no knob): `BregmanPruner` binds the scheduler to the run, after which each update obeys `|Δλ| ≤ λ0 · (lr/base_lr) · (1 - step/total_steps)`. `λ0` sets the scale (λ grows at most linearly, one λ0 per update), the lr ratio keeps the cap meaningful under warmup/annealing, and the taper bounds λ's total variation (`Σ|Δλ| ≤ λ0·(K+1)/2`) with the increment exactly 0 from the last step on, so λ converges and the tail of training is a fixed-λ Bregman iteration. Logged per step as `bregman/lambda_cap`
 
-The update is defined as: `λ *= 1+a·gap` if s < target and `λ /= 1+a·|gap|` if sparsity > target.
+**The λ update.** `λ *= 1 + a·gap` if sparsity is below target, `λ /= 1 + a·|gap|` if above (`gap = target − sparsity`). The move is a fraction of the live λ, so the controller behaves the same at any λ scale and λ can reach any setpoint from any `initial_lambda`.
+
+`a` comes from `effective_acceleration_factor(step)`: it holds at `acceleration_factor` for the first `hold_steps · update_frequency` steps, then decays as `acceleration_factor / (steps past the hold)^p`. All the λ tapering lives in that one method.
+
+- Metrics: `bregman/global_lambda` (live λ), `bregman/lambda_delta` (applied `Δλ`, zero between updates), `bregman/lambda_delta_over_lambda` (the relative move `±a·gap`)
 
 **Note**: Depending on many factors (Bregman optimizer type, `lr` value, `lr_scheduler`, etc.), the target sparsity is not guaranteed to be reached. There is a balancing act between the contribution of the optimzier and regularizer terms in the weights updates.
 
 #### 1.4 Pruning Manager
 
-Located in `src/callbacks/pruning/bregman/utils/pruning_manager.py`:
+Located in `src/callbacks/pruning/utils/pruning_manager.py`:
 
 Manages parameter groups and applies structured/unstructured pruning based on sparsity thresholds (for the algorithm's initalization). The fine0grained control of initilization might be later deprecated and hardcode untructured pruning as it could be an overkill.
 
@@ -80,27 +83,29 @@ Manages parameter groups and applies structured/unstructured pruning based on sp
 Located in `src/callbacks/pruning/bregman/bregman_pruner.py`:
 
 Orchestrates the entire Bregman learning process:
-- Initializes pruning manager
-- Steps the lambda scheduler
-- Logs sparsity metrics
-- Synchronizes optimizer parameter groups
-- Handles checkpoint save/load
+- Applies the initial sparsity via the pruning manager
+- Refuses at fit start an `overall`-steered `target_sparsity` above the prunable fraction, which the gates could never reach
+- Steps the lambda scheduler each batch and broadcasts `λ · lambda_scale` to the groups
+- Publishes `sparsity` (whole-model) and `bregman/pruned_sparsity` (regularized groups) for the gates and the run artifacts
+- Handles checkpoint save/load of the scheduler state
+
+Everything the callback writes out — the per-step metric series and the fit-start configuration/group dumps — lives in `bregman_report.py`; the "is this group actively regularized" predicates live in `bregman_regularizers.py`. Neither affects training.
 
 ### Usage Example
 
-See `configs/experiment/sv/sv_bregman_adabreg.yaml` for a complete configuration:
+`configs/experiment/sv/sv_bregman_adabreg.yaml` (SV) and `configs/experiment/img/bregman_adabreg.yaml` (image) are the canonical recipes. Both declare the target once and reuse it for the controller and the gates:
 
 ```yaml
 callbacks:
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
+    target_sparsity: ${_bregman_target_sparsity} # setpoint + gate band centre, over the regularized groups
     sparsity_threshold: 1e-12
     verbose: 2
-    target_sparsity: 0.9        # controller setpoint + gate band centre
-    lambda_scheduler:
+    lambda_scheduler: # null for a fixed lambda (the *_fixed variants)
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
-      initial_lambda: 1e-2
+      initial_lambda: ${_bregman_lambda}
       acceleration_factor: 1.0
       update_frequency: 50
 
@@ -108,46 +113,31 @@ module:
   optimizer:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
     _partial_: true
-    lr: 1e-4
+    lr: 1e-2
 
   model:
     pruning_groups:
-      # Group 1: Convolutional layers with group sparsity
       - name: conv_layers
         layer_types: ["torch.nn.Conv1d", "torch.nn.Conv2d"]
         param_names: ["weight"]
-        module_name_patterns: ['.*conv.*']
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1e-2
+            lamda: ${_bregman_lambda}
           lambda_scale: 1.0
         pruning_config:
           pruning_type: "unstructured"
-          sparsity_rate: 0.99
+          sparsity_rate: ${_bregman_initial_sparsity}
 
-      # Group 2: Linear layers with L1 sparsity
-      - name: linear_layers
-        layer_types: ["torch.nn.Linear"]
-        param_names: ["weight"]
-        optimizer_settings:
-          reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
-            lamda: 1e-2
-          lambda_scale: 1.0
-        pruning_config:
-          pruning_type: "unstructured"
-          sparsity_rate: 0.99
-
-      # Group 3: Protected layers (no pruning)
-      - name: norm_params
-        layer_types: ['torch.nn.BatchNorm1d', 'torch.nn.BatchNorm2d', 'torch.nn.LayerNorm']
-        module_name_patterns: ['.*norm.*']
+      - name: norm_params # kept dense: RegNone + scale 0
+        layer_types: ["torch.nn.BatchNorm1d", "torch.nn.BatchNorm2d", "torch.nn.LayerNorm"]
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone
           lambda_scale: 0.0
 ```
+
+Every regularized group must set `lambda_scale`, and the last group must be the `is_fallback: True` catch-all. See the config itself for the full group list (linear, classifier, bias, fallback).
 
 ### Training Workflow
 
@@ -333,7 +323,7 @@ Ensures weights are never "un-pruned" during training.
 ### Bregman Learning
 
 **Issue**: Sparsity not reaching target
-- **Solution**: Increase `acceleration_factor`
+- **Solution**: Increase `acceleration_factor`, or lower `update_frequency` so λ updates more often
 
 **Issue**: Training unstable
 - **Solution**: Decrease `initial_lambda` or try using a different regularizer (e.g., `RegL1L2` instead of `RegL1`)
@@ -359,21 +349,24 @@ Ensures weights are never "un-pruned" during training.
 ```
 src/callbacks/pruning/
 ├── bregman/
-│   ├── bregman_optimizers.py      # LinBreg, AdaBreg optimizers
+│   ├── bregman_optimizers.py      # LinBreg, AdaBreg, AdaBregW, ProxSGD
 │   ├── bregman_regularizers.py    # L1, L1L2, etc. regularizers
 │   ├── bregman_pruner.py          # Main Bregman callback
-│   ├── lambda_scheduler.py        # Adaptive λ scheduling
-│   └── utils/
-│       └── pruning_manager.py     # Parameter group management
+│   └── lambda_scheduler.py        # Adaptive λ controller
+├── utils/
+│   ├── pruning_manager.py         # Parameter group management
+│   └── sparsity_applier.py        # Initial sparsity per group
 ├── prune.py                        # MagnitudePruner callback
 ├── parameter_manager.py            # Parameter selection for magnitude pruning
 ├── scheduler.py                    # Sparsity scheduling
+├── sparsity_gating.py              # Gated checkpoint/early-stop/validation
 └── checkpoint_handler.py           # Checkpoint compatibility
 
 scripts/
 └── make_pruning_permanent.py      # Post-training weight fusion
 
 configs/experiment/sv/
-├── sv_bregman_adabreg.yaml        # Bregman learning config (using adabreg)
-└── sv_pruning_magnitude.yaml      # Magnitude pruning config (if exists)
+├── sv_bregman_adabreg.yaml        # Bregman parent (adaptive λ, AdaBreg)
+├── sv_bregman_adabreg_fixed.yaml  # Same recipe, fixed λ
+└── sv_pruning_mag_unstruct.yaml   # Magnitude pruning
 ```

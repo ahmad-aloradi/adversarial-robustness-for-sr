@@ -21,7 +21,7 @@ Usage examples:
     # SV training curves
     python scripts/visualize.py \\
         --base_dirs logs/train/runs \\
-        --experiments "sv_bregman_adabreg-*-sr90" "sv_vanilla-*" \\
+        --experiments "sv_bregman_adabreg-*-sr90" "sv_dense_adamw-*" \\
         --metrics train_loss valid_loss sparsity \\
         --output results/figures/
 
@@ -689,7 +689,7 @@ def load_fixed_lambda(exp_dir):
     path = os.path.join(exp_dir, "config_tree.log")
     if not os.path.exists(path):
         raise FileNotFoundError(f"Expected config_tree.log not found in {exp_dir}")
-    
+
     with open(path) as f:
         lines = f.readlines()
     for i, line in enumerate(lines):
@@ -697,7 +697,7 @@ def load_fixed_lambda(exp_dir):
             m = re.search(r"[\d.]+", lines[i + 1])
             if m:
                 return float(m.group())
-    
+
     raise ValueError(f"_bregman_lambda value not found in config_tree.log of {exp_dir}")
 
 

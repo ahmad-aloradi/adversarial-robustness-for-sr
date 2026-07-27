@@ -23,11 +23,19 @@ def test_pruned_sparsity_measures_regularized_groups():
     w_sparse = nn.Parameter(torch.tensor([0.0, 0.0, 1.0, 1.0]))  # 50% zero
     w_dense = nn.Parameter(torch.tensor([1.0, 2.0, 3.0, 4.0]))  # 0% zero
 
-    pruner = BregmanPruner()
+    pruner = BregmanPruner(target_sparsity=0.9)
     pruner._optimizer = _make_optimizer(
         [
-            {"params": [w_sparse], "reg": RegL1(lamda=0.1), "lambda_scale": 1.0},
-            {"params": [w_dense], "reg": RegL1(lamda=0.1), "lambda_scale": 1.0},
+            {
+                "params": [w_sparse],
+                "reg": RegL1(lamda=0.1),
+                "lambda_scale": 1.0,
+            },
+            {
+                "params": [w_dense],
+                "reg": RegL1(lamda=0.1),
+                "lambda_scale": 1.0,
+            },
         ]
     )
 
@@ -40,7 +48,7 @@ def test_pruned_sparsity_excludes_unregularized_groups():
     w_reg = nn.Parameter(torch.tensor([0.0, 1.0, 2.0, 3.0]))  # 25% zero
     bias = nn.Parameter(torch.zeros(4))  # all zero, but unregularized
 
-    pruner = BregmanPruner()
+    pruner = BregmanPruner(target_sparsity=0.9)
     pruner._optimizer = _make_optimizer(
         [
             {"params": [w_reg], "reg": RegL1(lamda=0.1), "lambda_scale": 1.0},
@@ -56,7 +64,7 @@ def test_pruned_sparsity_zero_when_no_regularized_groups():
     """No active regularizer -> empty set -> 0.0 (compute_sparsity guard)."""
     bias = nn.Parameter(torch.zeros(4))
 
-    pruner = BregmanPruner()
+    pruner = BregmanPruner(target_sparsity=0.9)
     pruner._optimizer = _make_optimizer(
         [{"params": [bias], "reg": RegNone(lamda=0.1), "lambda_scale": 0.0}]
     )
@@ -66,6 +74,6 @@ def test_pruned_sparsity_zero_when_no_regularized_groups():
 
 def test_pruned_sparsity_asserts_when_uninitialized():
     """Calling before on_fit_start stored the optimizer is a hard error."""
-    pruner = BregmanPruner()
+    pruner = BregmanPruner(target_sparsity=0.9)
     with pytest.raises(AssertionError):
         pruner._pruned_sparsity()

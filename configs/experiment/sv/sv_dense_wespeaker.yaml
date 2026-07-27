@@ -1,15 +1,9 @@
 # @package _global_
 
 # WeSpeaker-style training configuration for CNCeleb.
-# Matches WeSpeaker's ECAPA-TDNN_GLOB_c512 recipe:
 # https://github.com/wenet-e2e/wespeaker/tree/master/examples/cnceleb/v2
-# Schedule parameters scale with max_epochs (WeSpeaker 150-epoch proportions):
-# LR warmup 4%, LR decay to 0.00005, augmentation via the shared group.
-# Target: EER <= 8.5% on CNCeleb eval (WeSpeaker reference: 7.879%).
-#
 # Usage:
-#   python train.py experiment=sv/sv_wespeaker datamodule=datasets/cnceleb
-#   python train.py experiment=sv/sv_wespeaker trainer.max_epochs=50
+#   python src/train.py experiment=sv/sv_dense_wespeaker
 
 defaults:
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
@@ -30,8 +24,8 @@ tags:
 seed: 42
 
 trainer:
-  max_epochs: 50 # Change this to adjust training length (all schedules auto-scale)
-  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% minimum
+  max_epochs: 40 # Change this to adjust training length (all schedules auto-scale)
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.8)'} # 80% minimum
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 

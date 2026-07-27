@@ -7,6 +7,7 @@ replicating the implementations from the `TimRoith/BregmanLearning` repository.
 Each regularizer is initialized with a base strength `lamda`. The `delta` parameter
 is passed to the `prox` method during optimization steps.
 """
+
 import math
 
 import torch
@@ -208,3 +209,26 @@ def get_regularizer(name: str, **kwargs) -> BregmanRegularizer:
         )
 
     return _REGULARIZERS[name](**kwargs)
+
+
+# --- Param-group vocabulary: what "actively regularized" means for a group ---
+
+
+def thresholds_weights(group: dict) -> bool:
+    """The group's regularizer thresholds weights; RegNone does not."""
+    return not isinstance(group["reg"], RegNone)
+
+
+def lambda_scale(group: dict) -> float:
+    """lambda_scale of a param group; a missing key is a config bug."""
+    if "lambda_scale" not in group:
+        raise KeyError(
+            f"Group '{group.get('name')}' has no lambda_scale; every "
+            "Bregman group must set optimizer_settings.lambda_scale."
+        )
+    return group["lambda_scale"]
+
+
+def is_regularized(group: dict) -> bool:
+    """An actively pruning group: thresholding, with lambda_scale > 0."""
+    return thresholds_weights(group) and lambda_scale(group) > 0.0

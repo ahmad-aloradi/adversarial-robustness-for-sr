@@ -13,7 +13,7 @@ base_root='/data/aloradad/results'  # /data/aloradad/results logs/train/runs
 source=csv # train_log --> epoch-mean (always present); csv --> batch-step
 summary_reduce=max # per-seed accuracy = best epoch (matches selected ckpt)
 
-datasets=('tinyimagenet') #('cifar10' 'tinyimagenet')
+datasets=('cifar10') #('cifar10' 'tinyimagenet')
 models=('resnet18') # ('resnet18' 'wrn28_10') resnet18 | wrn28_10
 augmentation='augmentation' # 'augmentation' | 'no_augmentation'
 scheduler='*' # one LR-scheduler tag: -CosineAnnealing | -ReduceLROnPlateau | -no_scheduler
@@ -88,7 +88,8 @@ for dataset in "${datasets[@]}"; do
         # inflated head — magnitude is kept as the no-stripe control.
         if [ "$head_anatomy" = true ]; then
             head_experiments=(
-                "*classifier_10k*"
+                # "*classifier_10k*"
+                "bregman_adabreg-resnet18-cifar10-bs128-sr95-classifier_10k-LambdaDecayAuto"
             )
 
             python scripts/visualize_structured_vs_unstructured.py \

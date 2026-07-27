@@ -9,7 +9,6 @@ works correctly together in abbreviated training loops:
 - Scheduled target mode works end-to-end
 """
 
-import logging
 from unittest.mock import Mock
 
 import pytest
@@ -17,6 +16,7 @@ import torch
 import torch.nn as nn
 from pytorch_lightning import LightningModule
 
+from src.callbacks.pruning.bregman import bregman_pruner as bp
 from src.callbacks.pruning.bregman.bregman_optimizers import AdaBreg
 from src.callbacks.pruning.bregman.bregman_pruner import BregmanPruner
 from src.callbacks.pruning.bregman.bregman_regularizers import RegL1
@@ -342,11 +342,20 @@ def _make_pruner_for_fit(target_sparsity):
     return pruner, trainer, pl_module
 
 
-def test_target_above_overall_ceiling_raises():
-    """A target above the prunable fraction can never reopen validation."""
+def test_target_above_overall_ceiling_raises(monkeypatch):
+    """Steering on overall, a target above the prunable fraction is refused."""
+    monkeypatch.setattr(bp, "WHICH_SPARSITY_PERCENTAGE", "overall")
     pruner, trainer, pl_module = _make_pruner_for_fit(target_sparsity=0.99)
     with pytest.raises(AssertionError, match="ceiling"):
         pruner.on_fit_start(trainer, pl_module)
+
+
+def test_pruned_steering_has_no_overall_ceiling(monkeypatch):
+    """The regularized groups can reach 1.0, so no ceiling applies to them."""
+    monkeypatch.setattr(bp, "WHICH_SPARSITY_PERCENTAGE", "pruned")
+    pruner, trainer, pl_module = _make_pruner_for_fit(target_sparsity=0.99)
+    pruner.on_fit_start(trainer, pl_module)
+    assert pruner._target_sparsity == 0.99
 
 
 def test_feasible_target_passes_fit_start():
@@ -354,14 +363,3 @@ def test_feasible_target_passes_fit_start():
     pruner, trainer, pl_module = _make_pruner_for_fit(target_sparsity=0.7)
     pruner.on_fit_start(trainer, pl_module)
     assert pruner._target_sparsity == 0.7
-
-
-def test_pruned_steering_warns_against_overall_gate(monkeypatch, caplog):
-    """Steering on a non-overall metric while gating on overall is flagged."""
-    from src.callbacks.pruning.bregman import bregman_pruner as bp
-
-    monkeypatch.setattr(bp, "WHICH_SPARSITY_PERCENTAGE", "pruned")
-    pruner, trainer, pl_module = _make_pruner_for_fit(target_sparsity=0.7)
-    with caplog.at_level(logging.WARNING):
-        pruner.on_fit_start(trainer, pl_module)
-    assert any("validation band" in r.message for r in caplog.records)

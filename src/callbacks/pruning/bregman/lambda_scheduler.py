@@ -7,26 +7,24 @@ log = utils.get_pylogger(__name__)
 
 
 class LambdaScheduler:
-    """Lambda adapter for sparsity-controlled Bregman Learning.
+    """Feedback controller for the Bregman regularization strength λ.
 
-    Each :meth:`step` updates ``lambda`` to achieve a target sparsity: it
-    increases when sparsity is below it, decreases when above, every
-    ``update_frequency`` steps.
+    :meth:`step` raises λ while the model is less sparse than
+    ``target_sparsity`` and lowers it when sparser, once every
+    ``update_frequency`` steps. The move is relative — ``Δλ/λ`` is ``+α·gap``
+    while the model is short of the target and the reciprocal once past it —
+    so the controller behaves the same at any λ scale and λ can reach any
+    setpoint from any start.
 
-    Once :meth:`bind_run` ties the scheduler to a run, every accepted update is
-    clamped to the trust region ``|Δλ| <= λ0 · (lr/base_lr) · (1 - k/K)``
-    (``k`` = global step, ``K`` = total steps, ``lr`` = live learning rate of
-    the regularized groups). λ then has bounded total variation —
-    ``Σ |Δλ_k| <= λ0 · (K+1)/2`` while ``lr <= base_lr`` — and the increment is
-    exactly 0 from ``K`` on, so λ converges and the tail of training is a
-    fixed-λ Bregman iteration. Unbound, the scheduler is the bare controller.
+    The factor ``α`` comes from :meth:`effective_acceleration_factor`, which
+    reads the global optimizer step, so it can taper over the run.
 
     >>> sched = LambdaScheduler(initial_lambda=1.0)
-    >>> sched.step(0.5, target_sparsity=0.9) > 1.0  # below target -> grows
+    >>> sched.target_sparsity = 0.9  # BregmanPruner sets this at fit start
+    >>> sched.step(0.5, current_step=0) > 1.0  # below target -> grows
     True
-    >>> sched.bind_run(total_steps=1000, base_lr=0.01)
-    >>> sched.cap_at(500, lr=0.01)  # half the run left, at base lr
-    0.5
+    >>> sched.effective_acceleration_factor(10)  # constant for now
+    0.25
     """
 
     def __init__(
@@ -36,97 +34,44 @@ class LambdaScheduler:
         update_frequency: int = 1,
     ):
         assert (
-            acceleration_factor >= 0.0
-        ), f"acceleration_factor must be >= 0.0, got {acceleration_factor}"
-        assert (
             initial_lambda > 0.0
         ), f"initial_lambda must be > 0.0, got {initial_lambda}"
+        assert (
+            acceleration_factor >= 0.0
+        ), f"acceleration_factor must be >= 0.0, got {acceleration_factor}"
         assert (
             update_frequency >= 1
         ), f"update_frequency must be >= 1, got {update_frequency}"
 
-        self.initial_lambda = initial_lambda
         self.lambda_value = initial_lambda
         self.acceleration_factor = acceleration_factor
         self.update_frequency = update_frequency
-        self.total_steps: Optional[int] = None
-        self.base_lr: Optional[float] = None
-        self.last_cap = math.inf  # trust region as of the last step() call
+        self.target_sparsity: Optional[float] = None  # set at fit start
+        self.last_delta = 0.0  # Δλ the last step() applied
+        self.last_delta_over_lambda = 0.0  # Δλ/λ the last step() applied
 
-    def bind_run(self, total_steps: int, base_lr: float) -> None:
-        """Tie the λ trust region to a run; it tapers to 0 at the end."""
-        assert total_steps >= 1, f"total_steps must be >= 1, got {total_steps}"
-        assert base_lr > 0.0, f"base_lr must be > 0.0, got {base_lr}"
-        self.total_steps = total_steps
-        self.base_lr = base_lr
+    def effective_acceleration_factor(self, num_steps: int) -> float:
+        """The factor scaling the relative λ. `num_steps` is the number of optimizer steps."""
+        p = 1.0
+        warmup_updates = 1e3
+        num_updates = num_steps // self.update_frequency
 
-    def cap_at(
-        self, current_step: Optional[int], lr: Optional[float]
-    ) -> float:
-        """Largest |Δλ| allowed now: λ0, scaled by the lr and the run left.
+        if num_updates > warmup_updates:
+            return self.acceleration_factor / max(1, num_updates - warmup_updates) ** p
+        else:
+            return self.acceleration_factor
 
-        Infinite until :meth:`bind_run` ties the scheduler to a run.
-        """
-        if self.total_steps is None:
-            return math.inf
-        assert (
-            current_step is not None and lr is not None and lr >= 0.0
-        ), f"a bound scheduler needs current_step and the live lr, got {current_step}, {lr}"
-        return (
-            self.initial_lambda
-            * (lr / self.base_lr)
-            * max(0.0, 1.0 - current_step / self.total_steps)
-        )
-
-    def step(
-        self,
-        current_sparsity: float,
-        target_sparsity: float,
-        current_step: Optional[int] = None,
-        lr: Optional[float] = None,
-    ) -> float:
-        """Update lambda from a sparsity reading toward ``target_sparsity``.
+    def step(self, current_sparsity: float, current_step: int) -> float:
+        """Move λ one update toward ``target_sparsity``.
 
         Inputs:
             current_sparsity: measured model sparsity in [0, 1].
-            target_sparsity: setpoint the controller drives toward; supplied by
-                the caller each step (the scheduler holds no target).
-            current_step: global training step; gates the update frequency.
-                ``None`` updates every call.
-            lr: live learning rate of the regularized groups; required once
-                :meth:`bind_run` has set the trust region.
+            current_step: global step; updates land on multiples of
+                ``update_frequency``.
 
         Output:
             Current lambda value.
         """
-        self._validate_sparsity(current_sparsity)
-        target = float(target_sparsity)  # coerce before the gate: fail early
-        self.last_cap = self.cap_at(current_step, lr)
-        if (
-            current_step is not None
-            and current_step % self.update_frequency != 0
-        ):
-            return self.lambda_value
-
-        # lambda_t+1 = lambda_t * (1 + alpha * |gap|)^sign(gap)
-        gap = target - float(current_sparsity)
-        factor = 1.0 + self.acceleration_factor * abs(gap)
-        proposed = (
-            self.lambda_value * factor
-            if gap >= 0
-            else self.lambda_value / factor
-        )
-        self.lambda_value += max(
-            -self.last_cap, min(self.last_cap, proposed - self.lambda_value)
-        )
-
-        assert math.isfinite(
-            self.lambda_value
-        ), f"lambda_value became non-finite: {self.lambda_value}"
-        return self.lambda_value
-
-    def _validate_sparsity(self, current_sparsity: float) -> None:
-        """Validate a sparsity reading: a finite float in [0.0, 1.0]."""
         if not math.isfinite(current_sparsity):
             raise ValueError(
                 f"Sparsity must be finite, got {current_sparsity}"
@@ -135,13 +80,38 @@ class LambdaScheduler:
             raise ValueError(
                 f"Sparsity must be in [0.0, 1.0], got {current_sparsity}"
             )
+        assert (
+            self.target_sparsity is not None
+        ), "target_sparsity must be set before the first lambda update"
+
+        # Zero between updates so the logged series sums exactly.
+        self.last_delta = 0.0
+        self.last_delta_over_lambda = 0.0
+        if current_step % self.update_frequency != 0:
+            return self.lambda_value
+
+        # lambda_t+1 = lambda_t * (1 + alpha * |gap|)^sign(gap)
+        alpha = self.effective_acceleration_factor(current_step)
+        gap = self.target_sparsity - float(current_sparsity)
+        factor = 1.0 + alpha * abs(gap)
+        delta = self.lambda_value * (
+            factor - 1.0 if gap >= 0 else 1.0 / factor - 1.0
+        )
+        self.last_delta_over_lambda = delta / self.lambda_value
+        self.lambda_value += delta
+        self.last_delta = delta
+
+        assert math.isfinite(
+            self.lambda_value
+        ), f"lambda_value became non-finite: {self.lambda_value}"
+        return self.lambda_value
 
     def get_lambda(self) -> float:
         """Get current lambda value."""
         return self.lambda_value
 
     def get_state(self) -> dict:
-        """Checkpoint state: lambda is the only value that evolves."""
+        """Checkpoint state: the live lambda."""
         return {"lambda_value": self.lambda_value}
 
     def load_state(self, state: dict) -> None:
@@ -153,25 +123,20 @@ class LambdaScheduler:
 
 
 if __name__ == "__main__":
-    # Smoke: drive toward a fixed target 0.9; lambda climbs while sparsity lags.
-    target = 0.9
+    # Smoke: sparsity lags the target, so lambda climbs until the gap closes.
     sched = LambdaScheduler(
         initial_lambda=1.0,
-        acceleration_factor=0.25,
-        update_frequency=1,
+        acceleration_factor=1.0,
+        update_frequency=50,
     )
-    sched.bind_run(total_steps=10000, base_lr=1e-2)
+    sched.target_sparsity = 0.9
     measured = 0.2
-    for current_step in range(1, 10000):
-        if current_step % 50 == 0:
-            lam = sched.step(
-                measured, target, current_step=current_step, lr=1e-2
-            )
-            measured = min(
-                target, measured + 0.002
-            )  # model approaches the target
-            print(
-                f"step {current_step:3d}: sparsity={measured:.3f} "
-                f"lambda={lam:.4f} cap={sched.cap_at(current_step, 1e-2):.4f}"
-            )
-    print(f"final lambda={sched.get_lambda():.4f} target={target}")
+    for current_step in range(0, 1000, 50):
+        lam = sched.step(measured, current_step)
+        measured = min(0.9, measured + 0.05)  # model approaches the target
+        print(
+            f"step {current_step:4d}: sparsity={measured:.3f} "
+            f"lambda={lam:.4f} dlambda={sched.last_delta:.4f} "
+            f"dlambda/lambda={sched.last_delta_over_lambda:.4f}"
+        )
+    print(f"final lambda={sched.get_lambda():.4f}")

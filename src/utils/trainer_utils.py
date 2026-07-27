@@ -28,4 +28,4 @@ if __name__ == "__main__":
     from unittest.mock import Mock
 
     trainer = Mock(estimated_stepping_batches=1234)
-    print(total_training_steps(trainer, "the lambda trust region"))
+    print(total_training_steps(trainer, "the LR warmup schedule"))

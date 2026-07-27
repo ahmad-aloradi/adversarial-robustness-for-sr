@@ -26,18 +26,23 @@ from src.callbacks.pruning.bregman.lambda_scheduler import LambdaScheduler
 # =============================================================================
 
 
+def _controller(initial_lambda=1e-3, target_sparsity=0.9, **kwargs):
+    """A scheduler bound to a run, as on_fit_start leaves it."""
+    sched = LambdaScheduler(initial_lambda=initial_lambda, **kwargs)
+    sched.target_sparsity = target_sparsity
+    return sched
+
+
 def test_lambda_update_frequency():
     """Lambda updates exactly once per call to step()."""
-    scheduler = LambdaScheduler(
-        initial_lambda=1e-3,
-    )
+    scheduler = _controller()
 
     lambda_values = []
 
     # Call step 300 times with gradually increasing sparsity
     for i in range(300):
         sparsity = 0.5 + (0.4 * i / 299)  # 0.5 -> 0.9
-        scheduler.step(sparsity, 0.9)
+        scheduler.step(sparsity, current_step=i)
         lambda_values.append(scheduler.get_lambda())
 
     # Assert: one update per call
@@ -49,16 +54,14 @@ def test_lambda_update_frequency():
 
 def test_lambda_increases_below_target():
     """Lambda increases when sparsity is below target."""
-    scheduler = LambdaScheduler(
-        initial_lambda=1e-3,
-    )
+    scheduler = _controller()
 
     initial_lambda = scheduler.get_lambda()
     lambda_values = [initial_lambda]
 
     # Call step multiple times with sparsity well below target
-    for _ in range(20):
-        scheduler.step(0.5, 0.9)
+    for step in range(20):
+        scheduler.step(0.5, current_step=step)
         lambda_values.append(scheduler.get_lambda())
 
     # Assert: lambda increases monotonically
@@ -73,16 +76,14 @@ def test_lambda_increases_below_target():
 
 def test_lambda_decreases_above_target():
     """Lambda decreases when sparsity is above target."""
-    scheduler = LambdaScheduler(
-        initial_lambda=1e-3,
-    )
+    scheduler = _controller(target_sparsity=0.5)
 
     initial_lambda = scheduler.get_lambda()
     lambda_values = [initial_lambda]
 
     # Call step multiple times with sparsity well above target
-    for _ in range(20):
-        scheduler.step(0.8, 0.5)
+    for step in range(20):
+        scheduler.step(0.8, current_step=step)
         lambda_values.append(scheduler.get_lambda())
 
     # Assert: lambda decreases monotonically
@@ -97,14 +98,12 @@ def test_lambda_decreases_above_target():
 
 def test_lambda_stable_at_target():
     """Lambda does not change when sparsity equals target."""
-    scheduler = LambdaScheduler(
-        initial_lambda=1e-3,
-    )
+    scheduler = _controller()
 
     initial_lambda = scheduler.get_lambda()
 
     # Call step with sparsity exactly at target
-    scheduler.step(0.9, 0.9)
+    scheduler.step(0.9, current_step=0)
 
     # Assert: lambda unchanged (sparsity_difference == 0)
     assert scheduler.get_lambda() == initial_lambda
@@ -117,48 +116,42 @@ def test_lambda_stays_positive():
     when below target and dividing when above (never <= 0).
     """
     # Far below target: lambda grows but stays finite over a bounded run.
-    up = LambdaScheduler(
-        initial_lambda=1e-3,
+    up = _controller(
         acceleration_factor=2.0,  # aggressive, would overflow a naive 1+a*gap
     )
-    for _ in range(50):
-        up.step(0.1, 0.9)
+    for step in range(50):
+        up.step(0.1, current_step=step)
     assert up.get_lambda() > 0.0 and math.isfinite(up.get_lambda())
 
     # Far above target: lambda shrinks geometrically but never reaches 0.
-    down = LambdaScheduler(
-        initial_lambda=1e-3,
-        acceleration_factor=2.0,
-    )
-    for _ in range(50):
-        down.step(0.99, 0.1)
+    down = _controller(target_sparsity=0.1, acceleration_factor=2.0)
+    for step in range(50):
+        down.step(0.99, current_step=step)
     assert down.get_lambda() > 0.0 and math.isfinite(down.get_lambda())
 
 
 def test_validation_rejects_invalid_sparsity():
     """Scheduler rejects invalid sparsity values."""
-    scheduler = LambdaScheduler(
-        initial_lambda=1e-3,
-    )
+    scheduler = _controller()
 
     # Assert: sparsity < 0 raises ValueError
     with pytest.raises(ValueError, match="must be in \\[0.0, 1.0\\]"):
-        scheduler.step(-0.1, 0.9)
+        scheduler.step(-0.1, current_step=0)
 
     # Assert: sparsity > 1 raises ValueError
     with pytest.raises(ValueError, match="must be in \\[0.0, 1.0\\]"):
-        scheduler.step(1.5, 0.9)
+        scheduler.step(1.5, current_step=0)
 
     # Assert: 0.0 is valid (model can start dense)
-    scheduler.step(0.0, 0.9)
+    scheduler.step(0.0, current_step=0)
 
     # Assert: NaN raises ValueError
     with pytest.raises(ValueError, match="must be finite"):
-        scheduler.step(float("nan"), 0.9)
+        scheduler.step(float("nan"), current_step=0)
 
     # Assert: Inf raises ValueError
     with pytest.raises(ValueError, match="must be finite"):
-        scheduler.step(float("inf"), 0.9)
+        scheduler.step(float("inf"), current_step=0)
 
 
 # =============================================================================
@@ -168,11 +161,10 @@ def test_validation_rejects_invalid_sparsity():
 
 def _make_bregman_pruner_and_mocks(target_sparsity=0.9, initial_lambda=1e-3):
     """Create a BregmanPruner with lambda scheduler and mock trainer."""
-    scheduler = LambdaScheduler(
-        initial_lambda=initial_lambda,
-    )
     # on_fit_start binds in production; these tests enter at on_train_batch_end.
-    scheduler.bind_run(total_steps=1000, base_lr=1e-2)
+    scheduler = _controller(
+        initial_lambda=initial_lambda, target_sparsity=target_sparsity
+    )
     pruner = BregmanPruner(
         sparsity_threshold=1e-12,
         verbose=0,
@@ -360,11 +352,11 @@ def test_bregman_pruner_respects_lambda_scale():
 
 def test_lambda_updates_only_every_update_frequency_steps():
     """Lambda moves on steps divisible by update_frequency, not in between."""
-    scheduler = LambdaScheduler(
+    scheduler = _controller(
         initial_lambda=1.0, acceleration_factor=1.0, update_frequency=10
     )
 
-    values = [scheduler.step(0.85, 0.9, current_step=s) for s in range(100)]
+    values = [scheduler.step(0.85, s) for s in range(100)]
 
     distinct = len(set(values))
     assert distinct == 10, f"Expected an update every 10 steps, got {distinct}"
@@ -372,8 +364,8 @@ def test_lambda_updates_only_every_update_frequency_steps():
 
 def test_checkpoint_round_trip_restores_lambda():
     """lambda_value is the only state a checkpoint has to carry."""
-    scheduler = LambdaScheduler(initial_lambda=1.0)
-    scheduler.step(0.5, 0.9)
+    scheduler = _controller(initial_lambda=1.0)
+    scheduler.step(0.5, current_step=0)
 
     restored = LambdaScheduler(initial_lambda=0.5)
     restored.load_state(scheduler.get_state())
@@ -412,139 +404,134 @@ def test_checkpoint_key_backward_compat():
 # =============================================================================
 
 
-def test_step_feeds_the_fixed_target_to_the_controller():
-    """The controller drives toward target_sparsity, unchanged by the epoch."""
+def test_step_feeds_the_measured_sparsity_and_the_global_step():
+    """The controller sees the gate metric and the step, in that order."""
     pruner = BregmanPruner(target_sparsity=0.99)
     pruner.lambda_scheduler = Mock()
     pruner.lambda_scheduler.step.return_value = 1.0
     pruner._broadcast_lambda = Mock()
 
     trainer = Mock(current_epoch=5, global_step=100)
-    trainer.optimizers = [
-        _make_mock_optimizer(
-            [{"params": [], "reg": RegL1(lamda=0.01), "lr": 1e-2}]
-        )
-    ]
-    pruner._step_lambda_scheduler(trainer, overall_sparsity=0.3)
-
-    assert pruner.lambda_scheduler.step.call_args[0][1] == 0.99
-
-
-# =============================================================================
-# Trust region: |Δλ| <= λ0 · (lr/base_lr) · (1 - k/K), so Σ|Δλ|/lr is finite
-# =============================================================================
-
-
-def _bound_scheduler(initial_lambda=1.0, total_steps=1000, base_lr=0.01):
-    sched = LambdaScheduler(
-        initial_lambda=initial_lambda,
-        acceleration_factor=1.0,
-        update_frequency=1,
-    )
-    sched.bind_run(total_steps=total_steps, base_lr=base_lr)
-    return sched
-
-
-def test_cap_clamps_increment_in_both_directions():
-    """A large gap moves lambda by exactly the cap, up and down."""
-    up = _bound_scheduler()
-    up.step(0.0, 0.99, current_step=0, lr=0.001)
-    # Uncapped: 1.0 -> 1.99; cap = 1.0 * (0.001/0.01) * 1 = 0.1.
-    assert up.get_lambda() == pytest.approx(1.1)
-
-    down = _bound_scheduler()
-    down.step(0.99, 0.0, current_step=0, lr=0.001)
-    assert down.get_lambda() == pytest.approx(0.9)
-
-
-def test_cap_is_one_initial_lambda_at_base_lr():
-    """The cap carries its scale from lambda0, so it is optimizer-relative."""
-    assert _bound_scheduler(initial_lambda=1.0).cap_at(
-        0, lr=0.01
-    ) == pytest.approx(1.0)
-    assert _bound_scheduler(initial_lambda=0.01).cap_at(
-        0, lr=0.01
-    ) == pytest.approx(0.01)
-
-
-def test_cap_follows_the_live_lr():
-    """An annealed lr shrinks the cap by the same factor, pinning lambda."""
-    sched = _bound_scheduler()
-    sched.step(0.0, 0.99, current_step=0, lr=1e-8)
-    assert sched.get_lambda() == pytest.approx(1.0 + 1e-6)
-
-
-def test_cap_tapers_to_zero_at_the_end_of_the_run():
-    """Lambda is frozen from the last step on — no increment past K."""
-    sched = _bound_scheduler(total_steps=1000)
-    assert sched.cap_at(500, lr=0.01) == pytest.approx(0.5)
-    assert sched.cap_at(1000, lr=0.01) == 0.0
-    sched.step(0.0, 0.99, current_step=1500, lr=0.01)  # past the end
-    assert sched.get_lambda() == pytest.approx(1.0)
-
-
-def test_total_variation_of_lambda_is_bounded():
-    """Σ|Δλ| over the run stays under λ0·(K+1)/2, and lambda ends frozen."""
-    total_steps, base_lr = 200, 0.01
-    sched = _bound_scheduler(total_steps=total_steps, base_lr=base_lr)
-    drift = 0.0
-    previous = sched.get_lambda()
-    for current_step in range(total_steps):
-        lam = sched.step(0.0, 0.99, current_step=current_step, lr=base_lr)
-        drift += abs(lam - previous)
-        previous = lam
-    assert drift <= 1.0 * (total_steps + 1) / 2
-    assert sched.cap_at(total_steps, lr=base_lr) == 0.0
-
-
-def test_last_cap_tracks_the_cap_the_step_saw():
-    """The logged cap is the one step() clamped with; infinite while
-    unbound."""
-    unbound = LambdaScheduler(initial_lambda=1.0)
-    unbound.step(0.5, 0.9)
-    assert unbound.last_cap == math.inf
-
-    sched = _bound_scheduler(total_steps=1000, base_lr=0.01)
-    sched.step(0.0, 0.99, current_step=500, lr=0.005)
-    assert sched.last_cap == pytest.approx(sched.cap_at(500, lr=0.005))
-
-
-def test_cap_requires_lr_and_step():
-    """Fail loud when the run is bound but lr or current_step is missing."""
-    sched = _bound_scheduler()
-    with pytest.raises(AssertionError):
-        sched.step(0.5, 0.9, current_step=1, lr=None)
-    with pytest.raises(AssertionError):
-        sched.step(0.5, 0.9, current_step=None, lr=0.01)
-
-
-def test_setup_binds_trust_region_to_the_run():
-    """The pruner binds the scheduler to the trainer budget and the base lr."""
-    scheduler = LambdaScheduler(initial_lambda=1.0)
-    pruner = BregmanPruner(target_sparsity=0.9, lambda_scheduler=scheduler)
-    optimizer = _make_mock_optimizer(
+    pruner._optimizer = _make_mock_optimizer(
         [
             {
                 "params": [],
-                "reg": RegL1(lamda=1.0),
+                "reg": RegL1(lamda=0.01),
                 "lambda_scale": 1.0,
-                "lr": 1e-4,  # mid-anneal; the cap must key off initial_lr
-                "initial_lr": 1e-2,
+                "lr": 1e-4,
             }
         ]
     )
-    trainer = Mock(
-        max_epochs=50, ckpt_path=None, estimated_stepping_batches=5000
+    pruner._step_lambda_scheduler(trainer, current_sparsity=0.3)
+
+    assert pruner.lambda_scheduler.step.call_args[0] == (0.3, 100)
+
+
+# =============================================================================
+# The relative lambda move and its acceleration factor
+# =============================================================================
+
+
+def test_relative_step_reads_the_gap():
+    """dlambda/lambda is acceleration_factor * gap and nothing else."""
+    sched = _controller(
+        initial_lambda=1.0, target_sparsity=0.9, acceleration_factor=0.5
     )
-    pruner._setup_lambda_scheduler(optimizer, trainer, is_resuming=False)
-
-    assert scheduler.total_steps == 5000
-    assert scheduler.base_lr == pytest.approx(1e-2)
-    assert scheduler.cap_at(0, lr=1e-4) == pytest.approx(0.01)
+    sched.step(0.5, current_step=0)  # gap = 0.4
+    assert sched.last_delta_over_lambda == pytest.approx(0.5 * 0.4)
+    assert sched.last_delta == pytest.approx(0.2)
 
 
-def test_pruner_steps_the_bound_scheduler_with_the_live_lr():
-    """End-to-end: the cap must use the annealed lr, not the base lr."""
+def test_effective_acceleration_factor_holds_before_the_warmup():
+    """Inside the hold window the hook returns the configured factor."""
+    sched = _controller(acceleration_factor=0.75, update_frequency=50)
+    assert sched.effective_acceleration_factor(0) == 0.75
+    assert sched.effective_acceleration_factor(5000) == 0.75
+
+
+def test_effective_acceleration_factor_decays_after_the_warmup():
+    """Past the hold window the factor only falls, never rises."""
+    sched = _controller(acceleration_factor=1.0, update_frequency=50)
+    warmup = 1000 * 50  # warmup_updates * update_frequency, in global steps
+    decayed = [
+        sched.effective_acceleration_factor(warmup + n)
+        for n in (100, 1000, 10000)
+    ]
+    assert decayed == sorted(decayed, reverse=True)
+    assert all(0.0 < a < 1.0 for a in decayed)
+
+
+def test_step_reads_the_factor_through_the_hook():
+    """step() takes alpha from the hook, so overriding it steers lambda."""
+
+    class DecayingScheduler(LambdaScheduler):
+        def effective_acceleration_factor(self, num_updates):
+            return self.acceleration_factor / (1 + num_updates)
+
+    sched = DecayingScheduler(
+        initial_lambda=1.0, acceleration_factor=1.0, update_frequency=10
+    )
+    sched.target_sparsity = 0.9
+
+    sched.step(0.4, current_step=0)  # alpha = 1.0
+    assert sched.last_delta_over_lambda == pytest.approx(0.5)
+
+    sched.step(0.4, current_step=10)  # alpha = 1/11
+    assert sched.last_delta_over_lambda == pytest.approx(0.5 / 11)
+
+
+def test_the_hook_sees_the_global_step():
+    """The hook reads the optimizer step, and only on update steps."""
+    seen = []
+
+    class RecordingScheduler(LambdaScheduler):
+        def effective_acceleration_factor(self, num_updates):
+            seen.append(num_updates)
+            return self.acceleration_factor
+
+    sched = RecordingScheduler(initial_lambda=1.0, update_frequency=10)
+    sched.target_sparsity = 0.9
+    for current_step in range(30):
+        sched.step(0.5, current_step)
+
+    assert seen == [0, 10, 20]
+
+
+def test_lambda_is_reproduced_after_a_resume():
+    """lambda is the only state, so a resumed run tracks a fresh one."""
+    fresh = _controller(initial_lambda=1.0)
+    for current_step in range(10):
+        fresh.step(0.0, current_step=current_step)
+
+    interrupted = _controller(initial_lambda=1.0)
+    for current_step in range(5):
+        interrupted.step(0.0, current_step=current_step)
+    resumed = _controller(initial_lambda=1.0)
+    resumed.load_state(interrupted.get_state())
+    for current_step in range(5, 10):
+        resumed.step(0.0, current_step=current_step)
+
+    assert resumed.get_lambda() == pytest.approx(fresh.get_lambda())
+
+
+def test_step_without_a_setpoint_is_refused():
+    """A scheduler with no target_sparsity must not run."""
+    sched = LambdaScheduler(initial_lambda=1.0)
+    with pytest.raises(AssertionError, match="target_sparsity must be set"):
+        sched.step(0.5, current_step=0)
+
+
+def test_setup_binds_the_target_sparsity():
+    """Fit start hands the pruner's setpoint to the controller."""
+    scheduler = LambdaScheduler(initial_lambda=1.0)
+    pruner = BregmanPruner(target_sparsity=0.9, lambda_scheduler=scheduler)
+    pruner._setup_lambda_scheduler(is_resuming=False)
+
+    assert scheduler.target_sparsity == pytest.approx(0.9)
+
+
+def test_pruner_steps_the_scheduler_and_broadcasts_lambda():
+    """End-to-end: one step moves lambda and lands it on the param groups."""
     scheduler = LambdaScheduler(initial_lambda=1.0, acceleration_factor=1.0)
     pruner = BregmanPruner(
         verbose=0, target_sparsity=0.99, lambda_scheduler=scheduler
@@ -555,21 +542,15 @@ def test_pruner_steps_the_bound_scheduler_with_the_live_lr():
                 "params": [],
                 "reg": RegL1(lamda=1.0),
                 "lambda_scale": 1.0,
-                "lr": 1e-4,  # annealed 100x below the base lr
-                "initial_lr": 1e-2,
+                "lr": 1e-4,
             }
         ]
     )
-    trainer = Mock(
-        max_epochs=50,
-        ckpt_path=None,
-        estimated_stepping_batches=5000,
-        global_step=0,
-        optimizers=[optimizer],
-    )
-    pruner._setup_lambda_scheduler(optimizer, trainer, is_resuming=False)
-    pruner._step_lambda_scheduler(trainer, overall_sparsity=0.0)
+    trainer = Mock(max_epochs=50, ckpt_path=None, global_step=0)
+    pruner._optimizer = optimizer
+    pruner._setup_lambda_scheduler(is_resuming=False)
+    pruner._step_lambda_scheduler(trainer, current_sparsity=0.0)
 
-    # Uncapped 1.0 -> 1.99; cap = 1.0 * (1e-4/1e-2) * 1 = 0.01 at the live lr.
-    assert scheduler.get_lambda() == pytest.approx(1.01)
-    assert optimizer.param_groups[0]["reg"].lamda == pytest.approx(1.01)
+    # gap = 0.99 at alpha = 1.0, so lambda nearly doubles.
+    assert scheduler.get_lambda() == pytest.approx(1.99)
+    assert optimizer.param_groups[0]["reg"].lamda == pytest.approx(1.99)

@@ -30,11 +30,12 @@ seed: 42
 _bregman_target_sparsity: 0.9 # target sparsity the feedback loop drives toward
 _bregman_tolerance: 0.01 # convergence band shared by the gates + scheduler: in-band iff |sparsity - target| <= this
 _bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
+_bregman_sparsity_metric: bregman/pruned_sparsity # gate signal: the metric lambda steers on (regularized groups); `sparsity` is whole-model
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
 
 trainer:
-  max_epochs: 50
-  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'}
+  max_epochs: 40
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.8)'}
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 
@@ -43,7 +44,7 @@ callbacks:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
     target_sparsity: ${_bregman_target_sparsity} # band centre; top-k saved only within tolerance of this
     tolerance: ${_bregman_tolerance} # in-band half-width: |sparsity - target| <= tolerance
-    sparsity_metric: sparsity # gate signal: `sparsity` = overall whole-model (Bregman); `pruning/sparsity` = pruned groups only (magnitude)
+    sparsity_metric: ${_bregman_sparsity_metric}
     mode: max
     monitor: ${replace:"valid/__metric__"}
     save_top_k: 5
@@ -67,7 +68,7 @@ callbacks:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
     target_sparsity: ${_bregman_target_sparsity} # patience advances only while in-band around this
     tolerance: ${_bregman_tolerance} # shared in-band half-width
-    sparsity_metric: sparsity # gate signal (see model_checkpoint)
+    sparsity_metric: ${_bregman_sparsity_metric}
     check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
     mode: max
     monitor: ${replace:"valid/__metric__"}
@@ -76,7 +77,7 @@ callbacks:
     _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
     target_sparsity: ${_bregman_target_sparsity} # validation runs only within tolerance of this
     tolerance: ${_bregman_tolerance} # shared in-band half-width
-    sparsity_metric: sparsity # gate signal (see model_checkpoint)
+    sparsity_metric: ${_bregman_sparsity_metric}
 
 datamodule:
   dataset:
@@ -176,8 +177,6 @@ module:
             "torch.nn.LayerNorm",
             "torch.nn.GroupNorm",
           ]
-        module_name_patterns:
-          [".*gn.*", ".*ln.*", ".*bn.*", ".*norm.*", ".*pos_enc.*", ".*head.*"]
         optimizer_settings:
           reg:
             _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegNone

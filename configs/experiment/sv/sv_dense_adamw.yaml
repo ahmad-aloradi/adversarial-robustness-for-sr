@@ -1,7 +1,8 @@
 # @package _global_
 
-# to execute this experiment run:
-# python train.py experiment=example
+# Dense AdamW baseline on VoxCeleb: no sparsity, no compression. Parent of the
+# QAT experiments, which add only the quantization callback and bit spec.
+# Run: python src/train.py experiment=sv/sv_dense_adamw
 
 defaults:
   - /module/sv_model: wespeaker_ecapa_tdnn.yaml
@@ -12,15 +13,12 @@ defaults:
   - override /trainer: gpu.yaml
   - override /logger: tensorboard.yaml
 
-# all parameters below will be merged with parameters from default configurations set above
-# this allows you to overwrite only specified parameters
-
 tags: ['${oc.eval:''"${datamodule.dataset.data_dir}".split("/")[-1]''}', "sv"]
 seed: 42
 
 trainer:
-  max_epochs: 50 # Change this to adjust training length (all schedules auto-scale)
-  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.2)'} # 20% minimum
+  max_epochs: 40 # Change this to adjust training length (all schedules auto-scale)
+  min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.8)'} # 80% minimum
   gradient_clip_val: 1.0
   num_sanity_val_steps: 0
 

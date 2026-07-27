@@ -29,11 +29,12 @@ def _scheduler_tag(target):
 
 
 def run_subdir(dataset, model, augmentation, experiment, sparsity, scheduler):
-    """Build ``<dataset>/<model>/<aug>/<method>[-srNN]-<scheduler>`` for the run dir.
+    """Build the ``<dataset>/<model>/<aug>/<method>`` stem for the run dir.
 
-    Each argument is a config interpolation; ``None`` (a field absent on a
-    non-image task, or no target sparsity on a dense baseline) becomes a
-    neutral tag or is dropped so the path never fails to resolve.
+    The method token carries ``[-srNN]`` and the scheduler tag. Each argument
+    is a config interpolation; ``None`` (a field absent on a non-image task, or
+    no target sparsity on a dense baseline) becomes a neutral tag or is dropped
+    so the path never fails to resolve.
 
     >>> run_subdir("cifar10", "resnet18", True,
     ...            "img/pruning_mag_struct", 0.9,
@@ -50,7 +51,7 @@ def run_subdir(dataset, model, augmentation, experiment, sparsity, scheduler):
 
 
 def run_name(output_dir, log_dir):
-    """Name the logger run after its run directory, minus the machine-specific root.
+    """Name the logger run after its run directory, minus the machine root.
 
     ``output_dir`` is the resolved ``hydra.run.dir``; under the default layout only
     its ``log_dir`` prefix and the constant ``<task>/runs`` head differ between a
@@ -64,13 +65,17 @@ def run_name(output_dir, log_dir):
     'sv_vanilla-bs256'
     >>> run_name("/data/results/cifar10/resnet18/bregman_adabreg-sr99-LambdaDecay/seed_42", "/home/proj/logs")
     'bregman_adabreg-sr99-LambdaDecay/seed_42'
+    >>> run_name("/runs/train/runs/mnist/resnet18/dense_sgd/seed_1", "/home/logs")
+    'mnist/resnet18/dense_sgd/seed_1'
     """
     relative = os.path.relpath(output_dir, log_dir)
     if relative.startswith(".."):
         parts = output_dir.rstrip(os.sep).split(os.sep)
         for anchor in ("runs", "multiruns"):
             if anchor in parts:
-                return "/".join(parts[parts.index(anchor) + 1 :])
+                # Scan from the right: a results root may itself contain "runs".
+                last = len(parts) - 1 - parts[::-1].index(anchor)
+                return "/".join(parts[last + 1 :])
         return "/".join(parts[-2:])
     parts = relative.split(os.sep)
     if len(parts) > 2 and parts[1] in ("runs", "multiruns"):
@@ -104,4 +109,9 @@ if __name__ == "__main__":
             "torch.optim.lr_scheduler.CosineAnnealingLR",
         )
     )
-    print(run_name("/results/train/runs/cifar10/wrn28_10/dense_sgd/seed_42", "/results"))
+    print(
+        run_name(
+            "/results/train/runs/cifar10/wrn28_10/dense_sgd/seed_42",
+            "/results",
+        )
+    )

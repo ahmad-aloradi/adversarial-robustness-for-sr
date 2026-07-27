@@ -818,9 +818,6 @@ def _submit_sv_job(
             script_arguments[
                 "callbacks.model_pruning.amount"
             ] = target_sparsity
-            script_arguments[
-                "callbacks.model_pruning.final_amount"
-            ] = target_sparsity
 
     if extra_overrides:
         script_arguments.update(extra_overrides)
@@ -941,7 +938,7 @@ def run_sv(transfer_data="false", force="false"):
 
     # Baselines: no sparsity target, swept over default models/datasets.
     if RUN_BASELINE_EXPS:
-        for _exp in ("sv_wespeaker", "sv_vanilla"):
+        for _exp in ("sv_dense_wespeaker", "sv_dense_adamw"):
             EXPERIMENTS.append(
                 {
                     "experiment": _exp,

@@ -2,6 +2,7 @@
 
 # Fixed-lambda AdaBreg: no lambda scheduler, static regularization.
 # Lambda is still set via _bregman_lambda from the base config.
+# Run: python src/train.py experiment=sv/sv_bregman_adabreg_fixed
 
 defaults:
   - /experiment/sv/sv_bregman_adabreg
@@ -13,8 +14,8 @@ _bregman_lambda: ${_bregman_fixed_lambda}
 callbacks:
   model_pruning:
     lambda_scheduler: null
-  # Fixed lambda has no ramp, so don't gate validation on sparsity: tolerance
-  # 1.0 spans all sparsities -> gates never suppress (ramp variants keep 0.01).
+  # Sparsity is whatever the static lambda reaches, so don't gate on it:
+  # tolerance 1.0 spans all sparsities -> the gates never suppress.
   model_checkpoint:
     tolerance: 1.0
   early_stopping:

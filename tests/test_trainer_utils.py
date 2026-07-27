@@ -32,8 +32,8 @@ def test_rejects_max_steps_sentinel():
 
 def test_error_names_the_caller():
     """The message says which feature needed the budget."""
-    with pytest.raises(RuntimeError, match="The lambda trust region"):
+    with pytest.raises(RuntimeError, match="WarmupExponentialLR"):
         total_training_steps(
             Mock(estimated_stepping_batches=float("inf")),
-            "The lambda trust region",
+            "WarmupExponentialLR with interval='step'",
         )
