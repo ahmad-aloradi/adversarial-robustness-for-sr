@@ -81,10 +81,6 @@ class LambdaScheduler:
         Output:
             Current lambda value.
         """
-        if not math.isfinite(current_sparsity):
-            raise ValueError(
-                f"Sparsity must be finite, got {current_sparsity}"
-            )
         if not 0.0 <= current_sparsity <= 1.0:
             raise ValueError(
                 f"Sparsity must be in [0.0, 1.0], got {current_sparsity}"
@@ -93,10 +89,12 @@ class LambdaScheduler:
         # Zero between updates so the logged series sums exactly.
         self.last_delta = 0.0
         self.last_delta_over_lambda = 0.0
+
+        # Update λ only every ``update_frequency`` steps.
         if current_step % self.update_frequency != 0:
             return self.lambda_value
 
-        # lambda_t+1 = lambda_t * (1 + alpha * |gap|)^sign(gap)
+        # λ_t+1 = λ_t * (1 + α * |gap|)^sign(gap); gap := target - current
         gap = self.target_sparsity - float(current_sparsity)
         alpha = self.update_alpha(gap)
         factor = 1.0 + alpha * abs(gap)
@@ -107,7 +105,7 @@ class LambdaScheduler:
         self.lambda_value += delta
         self.last_delta = delta
 
-        assert math.isfinite(self.lambda_value), f"lambda is infinite: {self.lambda_value}"
+        assert math.isfinite(self.lambda_value), f"Infinite λ: {self.lambda_value}"
         return self.lambda_value
 
     def get_lambda(self) -> float:

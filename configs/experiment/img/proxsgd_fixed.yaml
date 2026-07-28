@@ -1,0 +1,35 @@
+# @package _global_
+
+# ProxSGD: minimize loss + lambda*||theta||_1 (penalty method, dense start).
+# Inherits the AdaBreg parent; swaps the optimizer, starts dense
+# (_bregman_initial_sparsity 0.0) and runs without augmentation.
+# Run: python src/train.py experiment=sv/sv_bregman_proxsgd
+
+defaults:
+  - /experiment/img/bregman_adabreg
+  - _self_
+
+tags: ["img", "${datamodule.name}", "Bregman_learning", "ProxSGD"]
+
+
+_bregman_initial_sparsity: 0.99 # ProxSGD grows sparsity from a dense start
+_bregman_lambda: ${bregman_lambda:ProxSGD,${_bregman_target_sparsity},initial_lambda}
+
+module:
+  optimizer:
+    _target_: src.callbacks.pruning.bregman.bregman_optimizers.ProxSGD
+    _partial_: True
+    lr: 1e-1
+    momentum: 0.9
+    nesterov: true
+
+callbacks:
+  model_pruning:
+    lambda_scheduler: null
+  # Sparsity is whatever the static lambda reaches, so don't gate on it: tolerance 1.0 spans all sparsities.
+  model_checkpoint:
+    tolerance: 1.0
+  early_stopping:
+    tolerance: 1.0
+  ramp_validation_gate:
+    tolerance: 1.0

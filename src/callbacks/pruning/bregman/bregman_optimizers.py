@@ -343,6 +343,9 @@ class ProxSGD(torch.optim.Optimizer):
         params,
         lr: float = 1e-3,
         reg: Optional[BregmanRegularizer] = None,
+        momentum: float = 0.0,
+        dampening: float = 0.0,  # SGD dampening on the momentum buffer
+        nesterov: bool = False,  # Nesterov look-ahead on the momentum step
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate")
@@ -350,7 +353,7 @@ class ProxSGD(torch.optim.Optimizer):
         if reg is None:
             reg = RegNone()
 
-        defaults = dict(lr=lr, reg=reg)
+        defaults = dict(lr=lr, reg=reg, momentum=momentum, dampening=dampening, nesterov=nesterov)
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -364,6 +367,9 @@ class ProxSGD(torch.optim.Optimizer):
         for group in self.param_groups:
             reg = group["reg"]
             step_size = group["lr"]
+            momentum = group["momentum"]
+            dampening = group["dampening"]
+            nesterov = group["nesterov"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -374,11 +380,28 @@ class ProxSGD(torch.optim.Optimizer):
 
                 if len(state) == 0:
                     state["step"] = 0
+                    state["momentum_buffer"] = None
+
+                # SGD momentum on the gradient (see torch.optim.SGD).
+                d_grad = grad
+                if momentum != 0.0:
+                    buf = state["momentum_buffer"]
+                    if buf is None:
+                        # First step seeds the buffer: b_1 = g
+                        buf = torch.clone(grad).detach()
+                        state["momentum_buffer"] = buf
+                    else:
+                        # b_k = μ·b_{k-1} + (1 − dampening)·g
+                        buf.mul_(momentum).add_(grad, alpha=1 - dampening)
+
+                    # nesterov: g ← g + μ·b_k ;  plain: g ← b_k
+                    d_grad = grad.add(buf, alpha=momentum) if nesterov else buf
 
                 # Gradient step
-                p.add_(-step_size * grad)
+                p.add_(d_grad, alpha=-step_size)
+
                 # Proximal step
-                p.copy_(reg.prox(p.data, step_size))
+                p.data = reg.prox(p.data, step_size)
 
         return loss
 

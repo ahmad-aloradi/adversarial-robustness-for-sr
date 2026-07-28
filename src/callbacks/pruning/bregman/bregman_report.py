@@ -49,10 +49,10 @@ def log_step_metrics(
     rank_identical = {**per_step, "sync_dist": False, "prog_bar": False}
     pl_module.log_dict(
         {
-            "bregman/lambda_delta": sched.last_delta,
-            "bregman/lambda_delta_over_lambda": sched.last_delta_over_lambda,
-            "bregman/lambda_gap": sched.gap,
-            "bregman/lambda_crossings": float(sched.crossings),
+            "bregman/delta_lambda": sched.last_delta,
+            "bregman/delta_lambda_over_lambda": sched.last_delta_over_lambda,
+            "bregman/sparsity_diff": sched.gap,
+            "bregman/sparsity_crossings": float(sched.crossings),
             "bregman/alpha": sched.alpha,
         },
         **rank_identical,
