@@ -20,7 +20,7 @@ defaults:
 tags: ["img", "${datamodule.name}", "pruning", "ln_structured", "gradual"]
 seed: 42
 
-_pruning_tolerance: 0.005 # convergence band shared by the gates: in-band iff |sparsity - target| <= this
+_pruning_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1-this)*target <= sparsity <= (1+this)*target
 
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
@@ -34,7 +34,7 @@ callbacks:
   model_checkpoint:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
     target_sparsity: ${callbacks.model_pruning.amount} # band centre = pruning rate; top-k saved only within tolerance of this
-    tolerance: ${_pruning_tolerance} # in-band half-width: |sparsity - target| <= tolerance
+    tolerance: ${_pruning_tolerance} # in-band half-width, as a fraction of the target
     sparsity_metric: "pruning/sparsity" # gate signal: pruned params only (the pruning rate); `sparsity` would be overall whole-model
     mode: max
     monitor: ${replace:"valid/__metric__"}
@@ -56,7 +56,7 @@ callbacks:
   early_stopping:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
     target_sparsity: ${callbacks.model_pruning.amount} # patience advances only while in-band around this
-    tolerance: ${_pruning_tolerance} # shared in-band half-width
+    tolerance: ${_pruning_tolerance} # shared band half-width, as a fraction of the target
     sparsity_metric: "pruning/sparsity" # gate signal (see model_checkpoint)
     check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
     mode: max
@@ -65,7 +65,7 @@ callbacks:
   ramp_validation_gate:
     _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
     target_sparsity: ${callbacks.model_pruning.amount} # validation runs only within tolerance of this
-    tolerance: ${_pruning_tolerance} # shared in-band half-width
+    tolerance: ${_pruning_tolerance} # shared band half-width, as a fraction of the target
     sparsity_metric: "pruning/sparsity" # gate signal (see model_checkpoint)
 
 module:

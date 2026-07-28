@@ -206,13 +206,12 @@ class BregmanPruner(Callback):
         if not hasattr(self.lambda_scheduler, "step"):
             self.lambda_scheduler = self.lambda_scheduler()
 
-        self.lambda_scheduler.target_sparsity = self._target_sparsity
-
         if is_resuming and self._ckpt_scheduler_state:
             self.lambda_scheduler.load_state(self._ckpt_scheduler_state)
 
         log.info(
-            f"Lambda scheduler active: target_sparsity={self._target_sparsity}, "
+            "Lambda scheduler active: "
+            f"target_sparsity={self.lambda_scheduler.target_sparsity}, "
             f"initial_lambda={self.lambda_scheduler.get_lambda():.4f}"
         )
 

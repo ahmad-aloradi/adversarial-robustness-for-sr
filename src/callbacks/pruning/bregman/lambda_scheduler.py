@@ -1,5 +1,4 @@
 import math
-from typing import Optional
 
 from src import utils
 
@@ -16,50 +15,60 @@ class LambdaScheduler:
     so the controller behaves the same at any λ scale and λ can reach any
     setpoint from any start.
 
-    The factor ``α`` comes from :meth:`effective_acceleration_factor`, which
-    reads the global optimizer step, so it can taper over the run.
+    The step size ``α`` starts at ``alpha_0`` and decays by ``gamma`` on every
+    overshoot, so λ settles instead of ringing (see :meth:`update_alpha`).
 
-    >>> sched = LambdaScheduler(initial_lambda=1.0)
-    >>> sched.target_sparsity = 0.9  # BregmanPruner sets this at fit start
+    >>> sched = LambdaScheduler(0.9, initial_sparsity=0.5, initial_lambda=1.0)
     >>> sched.step(0.5, current_step=0) > 1.0  # below target -> grows
     True
-    >>> sched.effective_acceleration_factor(10)  # constant for now
-    0.25
+    >>> sched.update_alpha(-0.1) < 0.25  # gap flipped sign -> α decays
+    True
     """
 
     def __init__(
         self,
+        target_sparsity: float,
+        initial_sparsity: float,
         initial_lambda: float = 1e-3,
-        acceleration_factor: float = 0.25,
+        alpha_0: float = 0.25,
+        gamma: float = 0.95,
         update_frequency: int = 1,
     ):
         assert (
+            0.0 <= target_sparsity <= 1.0
+        ), f"target_sparsity must be in [0.0, 1.0], got {target_sparsity}"
+        assert (
+            0.0 <= initial_sparsity <= 1.0
+        ), f"initial_sparsity must be in [0.0, 1.0], got {initial_sparsity}"
+        assert (
             initial_lambda > 0.0
         ), f"initial_lambda must be > 0.0, got {initial_lambda}"
-        assert (
-            acceleration_factor >= 0.0
-        ), f"acceleration_factor must be >= 0.0, got {acceleration_factor}"
+        assert alpha_0 >= 0.0, f"alpha_0 must be >= 0.0, got {alpha_0}"
+        assert 0.0 < gamma < 1.0, f"gamma must be in (0.0, 1.0), got {gamma}"
         assert (
             update_frequency >= 1
         ), f"update_frequency must be >= 1, got {update_frequency}"
 
         self.lambda_value = initial_lambda
-        self.acceleration_factor = acceleration_factor
+        self.target_sparsity = target_sparsity
+        self.alpha_0 = alpha_0
+        self.gamma = gamma
         self.update_frequency = update_frequency
-        self.target_sparsity: Optional[float] = None  # set at fit start
+
         self.last_delta = 0.0  # Δλ the last step() applied
         self.last_delta_over_lambda = 0.0  # Δλ/λ the last step() applied
+        self.alpha = alpha_0  # α the last update scaled by
+        self.crossings = 0  # updates whose gap flipped sign
+        self.gap = target_sparsity - initial_sparsity
+        self.prev_gap = self.gap
 
-    def effective_acceleration_factor(self, num_steps: int) -> float:
-        """The factor scaling the relative λ. `num_steps` is the number of optimizer steps."""
-        p = 1.0
-        warmup_updates = 1e3
-        num_updates = num_steps // self.update_frequency
-
-        if num_updates > warmup_updates:
-            return self.acceleration_factor / max(1, num_updates - warmup_updates) ** p
-        else:
-            return self.acceleration_factor
+    def update_alpha(self, gap: float) -> float:
+        """Record ``gap`` and set α to ``alpha_0 · gamma**crossings``"""
+        self.prev_gap, self.gap = self.gap, gap
+        if self.gap * self.prev_gap < 0.0:
+            self.crossings += 1
+        self.alpha = self.alpha_0 * self.gamma**self.crossings
+        return self.alpha
 
     def step(self, current_sparsity: float, current_step: int) -> float:
         """Move λ one update toward ``target_sparsity``.
@@ -80,9 +89,6 @@ class LambdaScheduler:
             raise ValueError(
                 f"Sparsity must be in [0.0, 1.0], got {current_sparsity}"
             )
-        assert (
-            self.target_sparsity is not None
-        ), "target_sparsity must be set before the first lambda update"
 
         # Zero between updates so the logged series sums exactly.
         self.last_delta = 0.0
@@ -91,8 +97,8 @@ class LambdaScheduler:
             return self.lambda_value
 
         # lambda_t+1 = lambda_t * (1 + alpha * |gap|)^sign(gap)
-        alpha = self.effective_acceleration_factor(current_step)
         gap = self.target_sparsity - float(current_sparsity)
+        alpha = self.update_alpha(gap)
         factor = 1.0 + alpha * abs(gap)
         delta = self.lambda_value * (
             factor - 1.0 if gap >= 0 else 1.0 / factor - 1.0
@@ -101,9 +107,7 @@ class LambdaScheduler:
         self.lambda_value += delta
         self.last_delta = delta
 
-        assert math.isfinite(
-            self.lambda_value
-        ), f"lambda_value became non-finite: {self.lambda_value}"
+        assert math.isfinite(self.lambda_value), f"lambda is infinite: {self.lambda_value}"
         return self.lambda_value
 
     def get_lambda(self) -> float:
@@ -111,12 +115,23 @@ class LambdaScheduler:
         return self.lambda_value
 
     def get_state(self) -> dict:
-        """Checkpoint state: the live lambda."""
-        return {"lambda_value": self.lambda_value}
+        """Checkpoint state: the live lambda and the α decay bookkeeping."""
+        return {
+            "lambda_value": self.lambda_value,
+            "alpha": self.alpha,
+            "crossings": self.crossings,
+            "gap": self.gap,
+            "prev_gap": self.prev_gap,
+        }
 
     def load_state(self, state: dict) -> None:
-        """Restore lambda from a checkpoint; the rest comes from config."""
+        """Restore lambda and the α decay bookkeeping; rest comes from
+        config."""
         self.lambda_value = state["lambda_value"]
+        self.alpha = state["alpha"]
+        self.crossings = state["crossings"]
+        self.gap = state["gap"]
+        self.prev_gap = state["prev_gap"]
         log.info(
             f"LambdaScheduler state restored. lambda={self.lambda_value:.4f}"
         )
@@ -125,18 +140,19 @@ class LambdaScheduler:
 if __name__ == "__main__":
     # Smoke: sparsity lags the target, so lambda climbs until the gap closes.
     sched = LambdaScheduler(
+        target_sparsity=0.9,
+        initial_sparsity=0.2,
         initial_lambda=1.0,
-        acceleration_factor=1.0,
+        alpha_0=1.0,
         update_frequency=50,
     )
-    sched.target_sparsity = 0.9
     measured = 0.2
     for current_step in range(0, 1000, 50):
         lam = sched.step(measured, current_step)
         measured = min(0.9, measured + 0.05)  # model approaches the target
         print(
             f"step {current_step:4d}: sparsity={measured:.3f} "
-            f"lambda={lam:.4f} dlambda={sched.last_delta:.4f} "
-            f"dlambda/lambda={sched.last_delta_over_lambda:.4f}"
+            f"lambda={lam:.4f} gap={sched.gap:+.3f} alpha={sched.alpha:.4f} "
+            f"crossings={sched.crossings} dlambda={sched.last_delta:.4f}"
         )
     print(f"final lambda={sched.get_lambda():.4f}")

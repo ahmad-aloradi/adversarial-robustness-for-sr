@@ -20,7 +20,7 @@ seed: 42
 
 # Single source of truth for Bregman sparsity targets and lambda values.
 _bregman_target_sparsity: 0.9 # target sparsity the feedback loop drives toward
-_bregman_tolerance: 0.01 # convergence band shared by the gates + scheduler: in-band iff |sparsity - target| <= this
+_bregman_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1-this)*target <= sparsity <= (1+this)*target
 _bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
 _bregman_sparsity_metric: bregman/pruned_sparsity # gate signal: the metric lambda steers on (regularized groups); `sparsity` is whole-model
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
@@ -37,7 +37,7 @@ callbacks:
   model_checkpoint:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
     target_sparsity: ${_bregman_target_sparsity} # band centre; top-k saved only within tolerance of this
-    tolerance: ${_bregman_tolerance} # in-band half-width: |sparsity - target| <= tolerance
+    tolerance: ${_bregman_tolerance} # in-band half-width, as a fraction of the target
     sparsity_metric: ${_bregman_sparsity_metric}
     mode: max
     monitor: ${replace:"valid/__metric__"}
@@ -51,13 +51,15 @@ callbacks:
     lambda_scheduler:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
+      target_sparsity: ${_bregman_target_sparsity} # setpoint λ drives toward
+      initial_sparsity: ${_bregman_initial_sparsity} # seeds the starting gap
       initial_lambda: ${_bregman_lambda}
-      acceleration_factor: 1.0
+      alpha_0: 1.0
       update_frequency: 50
   early_stopping:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
     target_sparsity: ${_bregman_target_sparsity} # patience advances only while in-band around this
-    tolerance: ${_bregman_tolerance} # shared in-band half-width
+    tolerance: ${_bregman_tolerance} # shared band half-width, as a fraction of the target
     sparsity_metric: ${_bregman_sparsity_metric}
     check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
     mode: max
@@ -66,7 +68,7 @@ callbacks:
   ramp_validation_gate:
     _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
     target_sparsity: ${_bregman_target_sparsity} # validation runs only within tolerance of this
-    tolerance: ${_bregman_tolerance} # shared in-band half-width
+    tolerance: ${_bregman_tolerance} # shared band half-width, as a fraction of the target
     sparsity_metric: ${_bregman_sparsity_metric}
 
 module:

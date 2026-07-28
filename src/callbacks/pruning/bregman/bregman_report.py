@@ -50,8 +50,10 @@ def log_step_metrics(
     pl_module.log_dict(
         {
             "bregman/lambda_delta": sched.last_delta,
-            # The relative move ±acceleration_factor * gap, so it reads the gap.
             "bregman/lambda_delta_over_lambda": sched.last_delta_over_lambda,
+            "bregman/lambda_gap": sched.gap,
+            "bregman/lambda_crossings": float(sched.crossings),
+            "bregman/alpha": sched.alpha,
         },
         **rank_identical,
     )

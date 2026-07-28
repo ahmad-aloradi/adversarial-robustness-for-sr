@@ -620,31 +620,6 @@ def _get_job_routing(dataset_name, sparsity=None):
     return cluster, gpu
 
 
-# ResNet overshoots with the ECAPA-TDNN default of 1.0; gentler value here.
-RESNET_ACCELERATION_FACTOR = 0.25
-
-
-def _bregman_has_lambda_scheduler(experiment):
-    # Fixed-lambda variants (sv_bregman_*_fixed) set lambda_scheduler=null.
-    return "bregman" in experiment and not experiment.endswith("_fixed")
-
-
-def _acceleration_factor_for(experiment, sv_model):
-    """ResNet override for the Bregman lambda acceleration_factor, else None.
-
-    Only adaptive Bregman (lambda scheduler) carries an acceleration_factor to
-    override; vanilla fixed-lambda variants set lambda_scheduler=null, so they
-    are excluded via _bregman_has_lambda_scheduler.
-    """
-    if (
-        "resnet" in sv_model
-        and _bregman_has_lambda_scheduler(experiment)
-        and "adabreg" in experiment
-    ):
-        return RESNET_ACCELERATION_FACTOR
-    return None
-
-
 def _submit_sv_job(
     # hparams
     experiment,
@@ -821,13 +796,6 @@ def _submit_sv_job(
 
     if extra_overrides:
         script_arguments.update(extra_overrides)
-
-    # ResNet always wins on acceleration_factor; applied after extra_overrides.
-    accel = _acceleration_factor_for(experiment, sv_model)
-    if accel is not None:
-        script_arguments[
-            "callbacks.model_pruning.lambda_scheduler.acceleration_factor"
-        ] = accel
 
     # Jobs submission logic
     if check_running_pending(job_name):
@@ -1012,26 +980,6 @@ def run_sv(transfer_data="false", force="false"):
             f"  {cname}: {total} jobs ({pct:.0f}%) [{gpu_breakdown}]{marker}"
         )
     print(f"{'='*50}\n")
-
-    # --- Bregman acceleration_factor per encoder ---
-    accel_rows = {}
-    for cfg in EXPERIMENTS:
-        experiment = cfg["experiment"]
-        if not _bregman_has_lambda_scheduler(experiment):
-            continue
-        for sv_model in cfg["sv_models"]:
-            override = _acceleration_factor_for(experiment, sv_model)
-            accel_rows[(experiment, sv_model)] = (
-                f"{override} (override)"
-                if override is not None
-                else "1.0 (YAML default)"
-            )
-    if accel_rows:
-        print(f"{'='*50}")
-        print("Bregman lambda acceleration_factor:")
-        for (experiment, sv_model), shown in sorted(accel_rows.items()):
-            print(f"  {experiment} / {sv_model:<26} -> {shown}")
-        print(f"{'='*50}\n")
 
     # --- Submit all experiments (only for current cluster) ---
     for cfg in EXPERIMENTS:

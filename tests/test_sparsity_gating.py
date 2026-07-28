@@ -2,8 +2,8 @@
 
 Mirrors the band logic proven in the standalone POC: top-k checkpointing,
 early stopping, and the validation forward pass open only when the injected
-sparsity is within tolerance of the target. The pruners publish the sparsity
-metric; here it is driven directly via a mocked callback_metrics dict.
+sparsity is within tolerance, as a fraction of the target. The pruners publish
+the sparsity metric; here it is driven via a mocked callback_metrics dict.
 """
 
 from unittest.mock import MagicMock, patch
@@ -36,8 +36,9 @@ def test_in_band_within_tolerance():
 
 
 def test_in_band_at_exact_boundary():
-    # |0.91 - 0.90| == 0.01 must count as in band (+1e-9 absorbs rounding).
-    assert sparsity_in_band(_trainer(0.91), 0.90, 0.01)
+    # the upper edge (1 + 0.01) * 0.90 must count as in band.
+    assert sparsity_in_band(_trainer(0.909), 0.90, 0.01)
+    assert not sparsity_in_band(_trainer(0.91), 0.90, 0.01)
 
 
 def test_out_of_band_beyond_tolerance():

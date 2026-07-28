@@ -148,6 +148,8 @@ def _run_mini_bregman_training(
 
     # Create lambda scheduler
     scheduler = LambdaScheduler(
+        target_sparsity=target_sparsity,
+        initial_sparsity=initial_sparsity,
         initial_lambda=0.1,
     )
 
@@ -323,7 +325,11 @@ def _make_pruner_for_fit(target_sparsity):
         model, {"lr": 0.01, "lambda": 0.5, "initial_sparsity": 0.0}
     )
     optimizer = pl_module.configure_optimizers()
-    scheduler = LambdaScheduler(initial_lambda=0.1)
+    scheduler = LambdaScheduler(
+        target_sparsity=target_sparsity,
+        initial_sparsity=0.0,
+        initial_lambda=0.1,
+    )
     pruner = BregmanPruner(
         verbose=0,
         lambda_scheduler=scheduler,

@@ -1,8 +1,8 @@
 """Lightning-native sparsity gating for pruning runs.
 
 A sparsity ramp must not select on off-target epochs: an epoch whose sparsity
-is outside ``tolerance`` of the target should not win a ``save_top_k`` slot,
-trip early stopping, or (optionally) even spend the validation forward pass.
+falls outside ``tolerance`` as a fraction of the target should not win a
+``save_top_k`` slot, trip early stopping, or even spend the validation pass.
 
 Three self-contained pieces, each gating on the sparsity the pruner injects
 into ``trainer.callback_metrics`` at the epoch's last training batch:
@@ -36,7 +36,10 @@ def sparsity_in_band(
     tolerance: float,
     metric_key: str = "sparsity",
 ) -> bool:
-    """True when the injected sparsity is within ``tolerance`` of the target.
+    """True when the sparsity is within a ``tolerance`` relative difference.
+
+    In band iff ``(1 - tolerance) * target <= sparsity <= (1 + tolerance) *
+    target``, so the band is the same fraction of the target at any target.
 
     The pruner must have injected ``metric_key`` into ``callback_metrics``; a
     missing key is a wiring bug (fail loud rather than silently pass/skip).
@@ -47,9 +50,9 @@ def sparsity_in_band(
             "the pruner must inject it each epoch."
         )
     current = float(trainer.callback_metrics[metric_key])
-    # 1e-6 absorbs float32 representation error at the band edge (the logged
-    # sparsity metric is float32); negligible vs a typical tolerance of 1e-2.
-    return abs(current - target_sparsity) <= tolerance + 1e-6
+    low = (1 - tolerance) * target_sparsity - 1e-6
+    high = (1 + tolerance) * target_sparsity + 1e-6
+    return low <= current <= high
 
 
 class SparsityGatedModelCheckpoint(ModelCheckpoint):
@@ -174,21 +177,21 @@ class RampValidationGate(Callback):
         if suppress != self._suppressed:  # log transitions only
             self._suppressed = suppress
             logger.info(
-                "Validation %s (sparsity gate, target %.2f%% ± %.1f%%)",
+                "Validation %s (sparsity gate, band %.2f%%-%.2f%%)",
                 "suppressed" if suppress else "restored",
-                self.target_sparsity * 100,
-                self.tolerance * 100,
+                (1 - self.tolerance) * self.target_sparsity * 100,
+                (1 + self.tolerance) * self.target_sparsity * 100,
             )
 
 
 if __name__ == "__main__":
     from types import SimpleNamespace
 
-    fake = SimpleNamespace(callback_metrics={"sparsity": torch.tensor(0.895)})
+    fake = SimpleNamespace(callback_metrics={"sparsity": torch.tensor(0.897)})
     print(
-        "in band (0.895 vs 0.90 ± 0.01):", sparsity_in_band(fake, 0.90, 0.01)
+        "in band (0.897 vs 0.90 ± 0.5%):", sparsity_in_band(fake, 0.90, 0.005)
     )
     fake.callback_metrics["sparsity"] = torch.tensor(0.80)
     print(
-        "in band (0.80 vs 0.90 ± 0.01): ", sparsity_in_band(fake, 0.90, 0.01)
+        "in band (0.80 vs 0.90 ± 0.5%): ", sparsity_in_band(fake, 0.90, 0.005)
     )

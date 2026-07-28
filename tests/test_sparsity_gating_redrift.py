@@ -19,7 +19,7 @@ from src.callbacks.pruning.sparsity_gating import (
     SparsityGatedModelCheckpoint,
 )
 
-TARGET, TOL = 0.9, 0.01
+TARGET, TOL = 0.9, 0.02  # relative band: 0.882 <= sparsity <= 0.918
 # in-band only at epochs 2,3 and 5,6; off-target (re-drift) at 4.
 SEQ = [0.5, 0.92, 0.89, 0.91, 0.5, 0.9, 0.895]
 IN_BAND = {2, 3, 5, 6}

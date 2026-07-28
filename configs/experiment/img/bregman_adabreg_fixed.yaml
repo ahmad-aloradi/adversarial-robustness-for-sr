@@ -16,10 +16,10 @@ _bregman_lambda: ${oc.eval:'${_bregman_fixed_lambda} * ${_bregman_lambda_factor}
 callbacks:
   model_pruning:
     lambda_scheduler: null
-  # Set to 1.0 for no gating
+  # Sparsity is whatever the static lambda reaches, so don't gate on it: tolerance 1.0 spans all sparsities.
   model_checkpoint:
-    tolerance: 0.05
+    tolerance: 1.0
   early_stopping:
-    tolerance: 0.05
+    tolerance: 1.0
   ramp_validation_gate:
-    tolerance: 0.05
+    tolerance: 1.0

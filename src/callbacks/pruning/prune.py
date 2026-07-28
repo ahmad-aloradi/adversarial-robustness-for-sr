@@ -193,7 +193,7 @@ class MagnitudePruner(Callback):
         # 3. Apply Pruning
         # We enforce the target if we are below it OR if we need to clean up Identity artifacts (resumption).
         # We check monotonicity to prevent accidental un-pruning.
-        if current_sparsity > (target_amount + self.tolerance):
+        if current_sparsity > target_amount * (1 + self.tolerance):
             raise RuntimeError(
                 f"Pruning Error: Current sparsity ({current_sparsity:.4f}) > "
                 f"target ({target_amount:.4f}). Cannot un-prune weights."

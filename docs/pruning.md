@@ -45,32 +45,27 @@ Each regularizer implements:
 
 Located in `src/callbacks/pruning/bregman/lambda_scheduler.py`:
 
-A feedback controller on the regularization strength $\lambda$: it raises $\lambda$ while the model is less sparse than the target and lowers it when sparser. `BregmanPruner` hands it the setpoint once, at fit start.
+A feedback controller on the regularization strength λ. It carries its own setpoint from config; `BregmanPruner` only steps it every `update_frequency` steps.
 
 ```python
 lambda_scheduler:
   _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
+  target_sparsity: 0.9       # setpoint λ drives toward
+  initial_sparsity: 0.99     # where the run starts, so the opening gap is known
   initial_lambda: 1e-2
-  acceleration_factor: 1.0
+  alpha_0: 1.0               # the step size before any decay
   update_frequency: 50       # steps between λ updates
 ```
 
-The target sparsity lives on the pruner (`model_pruning.target_sparsity`); validation is suppressed until the model reaches its band (see the sparsity-gated callbacks).
+**The update.** With `gap = target − sparsity`, λ is multiplied by `1 + α·|gap|` while the model is short of the target and divided by it once past. The move is relative, so the controller behaves the same at any λ scale and reaches any setpoint from any `initial_lambda`.
 
-λ steers on the sparsity of the regularized groups (`WHICH_SPARSITY_PERCENTAGE` in `bregman_pruner.py`, default `pruned`), so `target_sparsity: 0.9` means the same thing as the magnitude pruner's `amount: 0.9`. The gates must band that same quantity — the configs point all three at `${_bregman_sparsity_metric}` (`bregman/pruned_sparsity`). Switching the constant to `overall` means switching that variable to `sparsity`.
+**The step size.** `α = alpha_0 · gamma^C`, where `C` counts the updates whose gap changed sign. Each overshoot shrinks the steps, so λ settles instead of ringing and α tends to zero over a long run. A gap that shrinks, grows or hovers keeps its sign and leaves α alone. `gamma` defaults to 0.95 and is a constructor argument only — not yet wired to a config key.
 
-**Key Parameters:**
-- `initial_lambda`
-- `acceleration_factor`: Controls how aggressively λ adapts; any value >= 0, shipped configs use 1.0
-- `update_frequency`: Steps between λ updates
+λ steers on the sparsity of the regularized groups (`WHICH_SPARSITY_PERCENTAGE` in `bregman_pruner.py`, default `pruned`), so `target_sparsity: 0.9` means the same thing as the magnitude pruner's `amount: 0.9` — switching that constant to `overall` means pointing `_bregman_sparsity_metric` at `sparsity` instead.
 
-**The λ update.** `λ *= 1 + a·gap` if sparsity is below target, `λ /= 1 + a·|gap|` if above (`gap = target − sparsity`). The move is a fraction of the live λ, so the controller behaves the same at any λ scale and λ can reach any setpoint from any `initial_lambda`.
+Metrics: `bregman/global_lambda` (live λ), `bregman/lambda_delta` (applied `Δλ`, zero between updates), `bregman/lambda_delta_over_lambda` (the relative move), `bregman/lambda_gap` (`target − sparsity` at the last update), `bregman/lambda_crossings` (`C`), `bregman/alpha` (the α of the last update).
 
-`a` comes from `effective_acceleration_factor(step)`: it holds at `acceleration_factor` for the first `hold_steps · update_frequency` steps, then decays as `acceleration_factor / (steps past the hold)^p`. All the λ tapering lives in that one method.
-
-- Metrics: `bregman/global_lambda` (live λ), `bregman/lambda_delta` (applied `Δλ`, zero between updates), `bregman/lambda_delta_over_lambda` (the relative move `±a·gap`)
-
-**Note**: Depending on many factors (Bregman optimizer type, `lr` value, `lr_scheduler`, etc.), the target sparsity is not guaranteed to be reached. There is a balancing act between the contribution of the optimzier and regularizer terms in the weights updates.
+**Note**: the target is not guaranteed to be reached. The optimizer term and the regularizer term pull against each other in the weight update, so the Bregman optimizer, `lr`, and the LR schedule all move the reachable sparsity.
 
 #### 1.4 Pruning Manager
 
@@ -106,7 +101,9 @@ callbacks:
       _target_: src.callbacks.pruning.bregman.lambda_scheduler.LambdaScheduler
       _partial_: true
       initial_lambda: ${_bregman_lambda}
-      acceleration_factor: 1.0
+      target_sparsity: 0.9
+      initial_sparsity: 0.99
+      alpha_0: 1.0
       update_frequency: 50
 
 module:
@@ -249,9 +246,7 @@ Both goals ensure seamless loading of pruned checkpoints into unpruned models:
    - Verify sparsity jump is monotonic
 
 2. **Epoch End** (`on_train_epoch_end`):
-   - Log sparsity metrics
-   - Manage metric trackers (Early Stopping, Model Checkpoint)
-   - Reset trackers during ramp-up phase to avoid premature stopping
+   - Publish `pruning/sparsity` (pruned params) and `sparsity` (whole model) for the gates
 
 3. **Training End** (`on_train_end`):
    - Optionally make pruning permanent (fuse masks into weights)
@@ -267,40 +262,28 @@ Both goals ensure seamless loading of pruned checkpoints into unpruned models:
    - Scheduler continues from saved state
    - Sparsity maintained or increased (never decreased)
 
-### Advanced Features
+### Sparsity Enforcement
 
-#### Metric Tracker Management
+- `on_train_epoch_start` refuses to prune when the measured sparsity already exceeds `amount * (1 + tolerance)`.
+- `_verify_sparsity_jump` refuses a re-prune that drops sparsity by more than 5 points from above 0.1.
 
-The pruner manages PyTorch Lightning EarlyStopping and ModelCheckpoint callbacks during the ramping phase:
+---
 
-```python
-def _manage_metric_trackers(self, trainer, current_sparsity):
-    target_reached = current_sparsity >= (self.final_amount - 1e-4)
+## 3. Sparsity Gating
 
-    if not target_reached:
-        # Disable trackers during ramp-up
-        for callback in trainer.callbacks:
-            if isinstance(callback, (EarlyStopping, ModelCheckpoint)):
-                # Reset internal state, reduce save_top_k
-    else:
-        # Re-enable trackers once target is reached
-```
+Located in `src/callbacks/pruning/sparsity_gating.py`, shared by both stacks. Off-target epochs must not be selected on, so three callbacks read the sparsity the pruner publishes each epoch and gate on it:
 
-This effectively treats the ramping up phase as a warmup phase and only starts tracking the metrics for early stopping after the warup phase is finished. It also disables saving the `best.ckpt` before reaching the target sparsity
+| Callback | Out of band |
+|---|---|
+| `SparsityGatedModelCheckpoint` | skips top-k saving; `last.ckpt` keeps saving, so resume is intact |
+| `SparsityGatedEarlyStopping` | skips the check, so patience never accrues on an off-target metric |
+| `RampValidationGate` | zeroes `limit_val_batches`, skipping the validation pass |
 
-#### Monotonic Sparsity Enforcement
+**The band is relative:** in band iff `(1 - tolerance) * target <= sparsity <= (1 + tolerance) * target`. The shipped recipes use `tolerance: 0.005` (0.5%), declared once as `_bregman_tolerance` / `_pruning_tolerance` and shared by all three.
 
-```python
-def _verify_sparsity_jump(self, old_sparsity, new_sparsity, applied_amount):
-    if old_sparsity > 0.1 and new_sparsity < old_sparsity - 0.05:
-        raise RuntimeError(
-            f"Pruning Error: Current sparsity ({old_sparsity:.4f}) > "
-            f"new sparsity ({new_sparsity:.4f}). Cannot un-prune weights."
-        )
-```
+`tolerance: 1.0` spans every sparsity, which disables a gate. Only the `*_fixed` recipes use it, and they use it on all three: a static λ reaches whatever sparsity it reaches, so there is no setpoint to band around. Every adaptive-λ and magnitude-pruning recipe stays banded on all three gates, so an off-target epoch never becomes the evaluated model.
 
-Ensures weights are never "un-pruned" during training.
-
+Point all three at the same metric as the pruner steers on: `bregman/pruned_sparsity` (Bregman) or `pruning/sparsity` (magnitude); `sparsity` is whole-model.
 
 ---
 
@@ -323,7 +306,7 @@ Ensures weights are never "un-pruned" during training.
 ### Bregman Learning
 
 **Issue**: Sparsity not reaching target
-- **Solution**: Increase `acceleration_factor`, or lower `update_frequency` so λ updates more often
+- **Solution**: Increase `alpha_0`, or lower `update_frequency` so λ updates more often
 
 **Issue**: Training unstable
 - **Solution**: Decrease `initial_lambda` or try using a different regularizer (e.g., `RegL1L2` instead of `RegL1`)
@@ -359,6 +342,7 @@ src/callbacks/pruning/
 ├── prune.py                        # MagnitudePruner callback
 ├── parameter_manager.py            # Parameter selection for magnitude pruning
 ├── scheduler.py                    # Sparsity scheduling
+├── shared_prune_utils.py           # compute_sparsity, shared by both stacks
 ├── sparsity_gating.py              # Gated checkpoint/early-stop/validation
 └── checkpoint_handler.py           # Checkpoint compatibility
 

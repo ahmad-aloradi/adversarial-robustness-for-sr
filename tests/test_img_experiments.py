@@ -132,11 +132,12 @@ def test_bregman_wiring(exp):
     gates = ("model_checkpoint", "early_stopping", "ramp_validation_gate")
     scheduler = cfg.callbacks.model_pruning.lambda_scheduler
     if "fixed" in exp:
+        # Static lambda -> sparsity is uncontrolled, so nothing gates on it.
         assert scheduler is None
-        assert all(1.0 >= cfg.callbacks[g].tolerance >= 0.01 for g in gates)
+        assert all(cfg.callbacks[g].tolerance == 1.0 for g in gates)
     else:
         assert scheduler is not None
-        assert all(cfg.callbacks[g].tolerance == 0.01 for g in gates)
+        assert all(cfg.callbacks[g].tolerance == 0.005 for g in gates)
 
 
 def _param_group_map(model):
