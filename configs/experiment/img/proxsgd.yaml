@@ -12,7 +12,7 @@ defaults:
 tags: ["img", "${datamodule.name}", "Bregman_learning", "ProxSGD"]
 
 
-_bregman_initial_sparsity: 0.99 # ProxSGD grows sparsity from a dense start
+_bregman_initial_sparsity: 0.0 # ProxSGD grows sparsity from a dense start
 _bregman_lambda: ${bregman_lambda:ProxSGD,${_bregman_target_sparsity},initial_lambda}
 
 module:

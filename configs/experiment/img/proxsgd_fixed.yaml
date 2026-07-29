@@ -1,27 +1,17 @@
 # @package _global_
 
-# ProxSGD: minimize loss + lambda*||theta||_1 (penalty method, dense start).
-# Inherits the AdaBreg parent; swaps the optimizer, starts dense
-# (_bregman_initial_sparsity 0.0) and runs without augmentation.
-# Run: python src/train.py experiment=sv/sv_bregman_proxsgd
+# Fixed-lambda ProxSGD: no scheduler, static regularization.
+# Run: python src/train.py experiment=img/proxsgd_fixed datamodule=datasets/cifar100
 
 defaults:
-  - /experiment/img/bregman_adabreg
+  - /experiment/img/proxsgd
   - _self_
 
-tags: ["img", "${datamodule.name}", "Bregman_learning", "ProxSGD"]
+tags: ["img", "${datamodule.name}", "Bregman_learning", "ProxSGD", "fixed"]
 
-
-_bregman_initial_sparsity: 0.99 # ProxSGD grows sparsity from a dense start
-_bregman_lambda: ${bregman_lambda:ProxSGD,${_bregman_target_sparsity},initial_lambda}
-
-module:
-  optimizer:
-    _target_: src.callbacks.pruning.bregman.bregman_optimizers.ProxSGD
-    _partial_: True
-    lr: 1e-1
-    momentum: 0.9
-    nesterov: true
+_bregman_fixed_lambda: ${bregman_lambda:ProxSGD,${_bregman_target_sparsity},fixed_lambda}
+_bregman_lambda_factor: 1 # scales _bregman_fixed_lambda; override for lambda sweeps
+_bregman_lambda: ${oc.eval:'${_bregman_fixed_lambda} * ${_bregman_lambda_factor}'}
 
 callbacks:
   model_pruning:

@@ -28,26 +28,43 @@ def _scheduler_tag(target):
     return name[:-2] if name.endswith("LR") and len(name) > 2 else name
 
 
-def run_subdir(dataset, model, augmentation, experiment, sparsity, scheduler):
+def run_subdir(
+    dataset,
+    model,
+    augmentation,
+    experiment,
+    sparsity,
+    initial_sparsity,
+    scheduler,
+):
     """Build the ``<dataset>/<model>/<aug>/<method>`` stem for the run dir.
 
-    The method token carries ``[-srNN]`` and the scheduler tag. Each argument
-    is a config interpolation; ``None`` (a field absent on a non-image task, or
-    no target sparsity on a dense baseline) becomes a neutral tag or is dropped
-    so the path never fails to resolve.
+    The method token carries ``[-isrNN][-srNN]`` — the sparsity the run starts
+    at, then the one it targets — and the scheduler tag. Each argument is a
+    config interpolation; ``None`` (a field absent on a non-image task, no
+    target sparsity on a dense baseline, no initial sparsity outside Bregman)
+    becomes a neutral tag or is dropped so the path never fails to resolve.
 
     >>> run_subdir("cifar10", "resnet18", True,
-    ...            "img/pruning_mag_struct", 0.9,
+    ...            "img/pruning_mag_struct", 0.9, None,
     ...            "torch.optim.lr_scheduler.CosineAnnealingLR")
     'cifar10/resnet18/augmentation/pruning_mag_struct-sr90-CosineAnnealing'
-    >>> run_subdir("mnist", "resnet18", False, "img/dense_sgd", None, None)
+    >>> run_subdir("cifar10", "resnet18", False,
+    ...            "img/bregman_adabreg", 0.9, 0.99, None)
+    'cifar10/resnet18/no_augmentation/bregman_adabreg-isr99-sr90-no_scheduler'
+    >>> run_subdir("mnist", "resnet18", False, "img/dense_sgd", None, None, None)
     'mnist/resnet18/no_augmentation/dense_sgd-no_scheduler'
     """
 
     aug = "augmentation" if augmentation else "no_augmentation"
     method = (experiment or "no_experiment").rsplit("/", 1)[-1].split(".")[0]
+    isr = (
+        f"-isr{int(round(initial_sparsity * 100))}"
+        if initial_sparsity is not None
+        else ""
+    )
     sr = f"-sr{int(round(sparsity * 100))}" if sparsity is not None else ""
-    return f"{dataset}/{model}/{aug}/{method}{sr}-{_scheduler_tag(scheduler)}"
+    return f"{dataset}/{model}/{aug}/{method}{isr}{sr}-{_scheduler_tag(scheduler)}"
 
 
 def run_name(output_dir, log_dir):
@@ -86,7 +103,13 @@ def run_name(output_dir, log_dir):
 if __name__ == "__main__":
     print(
         run_subdir(
-            "cifar10", "resnet18", False, "img/bregman_adabreg.yaml", 0.9, None
+            "cifar10",
+            "resnet18",
+            False,
+            "img/bregman_adabreg.yaml",
+            0.9,
+            0.99,
+            None,
         )
     )
     print(
@@ -95,6 +118,7 @@ if __name__ == "__main__":
             "wrn28_10",
             True,
             "img/dense_sgd",
+            None,
             None,
             "torch.optim.lr_scheduler.ReduceLROnPlateau",
         )
@@ -106,6 +130,7 @@ if __name__ == "__main__":
             True,
             "img/pruning_mag_struct",
             0.8,
+            None,
             "torch.optim.lr_scheduler.CosineAnnealingLR",
         )
     )
