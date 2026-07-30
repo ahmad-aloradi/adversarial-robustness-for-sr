@@ -63,7 +63,8 @@ run_stamp: ${now:%Y-%m-%d_%H-%M-%S}
 # format: <dataset>/<model>/<augmentation>/<method>-isr<NN>-sr<NN>-<scheduler> so methods compare side by side
 # sparsity source: Bregman `_bregman_target_sparsity`, else pruning `model_pruning.amount`, else none
 # isr<NN> is the Bregman starting sparsity `_bregman_initial_sparsity`; dropped where that key is absent
-name: ${run_subdir:${oc.select:datamodule.name,null},${hydra:runtime.choices.module/img_model},${oc.select:datamodule.augmentation,null},${hydra:runtime.choices.experiment},${oc.select:_bregman_target_sparsity,${oc.select:callbacks.model_pruning.amount,null}},${oc.select:_bregman_initial_sparsity,null},${oc.select:module.lr_scheduler.scheduler._target_,null}}
+# *_fixed experiments swap sr<NN> for lam<value>: their sparsity is whatever the static `_bregman_lambda` reaches
+name: ${run_subdir:${oc.select:datamodule.name,null},${hydra:runtime.choices.module/img_model},${oc.select:datamodule.augmentation,null},${hydra:runtime.choices.experiment},${oc.select:_bregman_target_sparsity,${oc.select:callbacks.model_pruning.amount,null}},${oc.select:_bregman_initial_sparsity,null},${oc.select:_bregman_lambda,null},${oc.select:module.lr_scheduler.scheduler._target_,null}}
 
 # default trainer overrides
 trainer:
