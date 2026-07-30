@@ -24,29 +24,29 @@ BREGMAN_LAMBDA_CONFIGS = {
         },
         0.99: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
-            "fixed_lambda": 18.0,
+            "fixed_lambda": 20.0,
         },
     },
     "LinBreg": {
         0.5: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
-            "fixed_lambda": 0.001,
+            "fixed_lambda": 0.05,
         },
         0.7: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
-            "fixed_lambda": 0.005,
+            "fixed_lambda": 0.1,
         },
         0.9: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
-            "fixed_lambda": 0.025,
+            "fixed_lambda": 0.15,
         },
         0.95: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
-            "fixed_lambda": 0.05,
+            "fixed_lambda": 0.2,
         },
         0.99: {
             "initial_lambda": INIT_LAMBDA_LINBERG,
-            "fixed_lambda": 0.2,
+            "fixed_lambda": 0.5,
         },
     },
     "ProxSGD": {
