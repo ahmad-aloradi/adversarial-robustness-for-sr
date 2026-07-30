@@ -10,10 +10,22 @@ The tasks in this file perform two high-level chores:
 
 import datetime
 import os
+import sys
 import time
 
 from fabric.api import cd, env, run, task
 from fabric.contrib.project import rsync_project
+
+# Share the run-name tokens with src/utils/run_naming.py so the launcher and
+# `python src/train.py` cannot drift on how a run directory is spelled.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.utils.bregman_utils import get_bregman_lambda  # noqa: E402
+from src.utils.run_naming import (  # noqa: E402
+    initial_sparsity_token,
+    is_fixed_lambda,
+    lambda_token,
+    sparsity_token,
+)
 
 # Cluster configuration
 env.user = "dsnf101h"  # 'iwal021h'
@@ -58,6 +70,33 @@ SV_DATASETS = {
 dataset = "cnceleb"  # "cnceleb" or "multi_sv"
 SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, f"train/runs/{dataset}/*")
 SYNC_DIR_LOCAL = f"/dataHDD/ahmad/comfort26_sem/{dataset}"
+
+
+def fixed_lambda_for(experiment, target_sparsity, extra_overrides):
+    """Static lambda a ``*_fixed`` experiment holds, or None when it isn't one.
+
+    Mirrors the configs — BREGMAN_LAMBDA_CONFIGS' ``fixed_lambda`` column scaled
+    by ``_bregman_lambda_factor`` — so the launcher spells ``-lam<value>``
+    exactly as ``python src/train.py`` would.
+    """
+    if not is_fixed_lambda(experiment):
+        return None
+    assert (
+        target_sparsity is not None
+    ), f"{experiment} needs a target sparsity to look its fixed lambda up"
+    optimizers = {
+        "adabregw": "AdaBregW",
+        "adabreg": "AdaBreg",
+        "linbreg": "LinBreg",
+        "proxsgd": "ProxSGD",
+    }
+    matches = [name for key, name in optimizers.items() if key in experiment]
+    assert matches, f"no Bregman optimizer named in {experiment}"
+    factor = (extra_overrides or {}).get("_bregman_lambda_factor", 1)
+    return (
+        get_bregman_lambda(matches[0], target_sparsity, "fixed_lambda")
+        * factor
+    )
 
 
 def timestamp():
@@ -630,6 +669,7 @@ def _submit_sv_job(
     apply_augmentation=False,
     batch_size_base=128,
     target_sparsity=None,
+    initial_sparsity=None,  # Bregman starting sparsity; None keeps the config's own value
     log_every_n_steps=1,
     # other options
     gpu_device=GPU,
@@ -686,6 +726,10 @@ def _submit_sv_job(
             target_sparsity is None
         ), "target_sparsity should be None for baseline experiments"
 
+    assert (
+        initial_sparsity is None or "bregman" in experiment
+    ), "initial_sparsity is a Bregman-only knob (_bregman_initial_sparsity)"
+
     # skip when model type and experiment type disagree
     if is_pretrained != is_onetime:
         if is_pretrained:
@@ -722,18 +766,23 @@ def _submit_sv_job(
     ramp_str = (
         f"-ramp{epochs_to_ramp}_{schedule_type}" if epochs_to_ramp else ""
     )
-    sparsity_str = (
-        f"-sr{int(target_sparsity * 100)}"
-        if target_sparsity is not None
-        else ""
+    fixed_lambda = fixed_lambda_for(
+        experiment, target_sparsity, extra_overrides
     )
+    # A fixed-lambda run lands wherever lambda takes it, so name it by lambda.
+    sparsity_str = (
+        lambda_token(fixed_lambda)
+        if fixed_lambda is not None
+        else sparsity_token(target_sparsity)
+    )
+    init_sparsity_str = initial_sparsity_token(initial_sparsity)
     num_ckpt_avg_str = f"-avg{num_ckpt_avg}" if num_ckpt_avg > 1 else ""
 
     job_name = (
         f"{experiment}{ramp_str}-{sv_model}-{os.path.basename(dataset_name)}"
         f"-virt-{virtual_spks}-bs{batch_size}-vad{apply_vad}"
         f"{num_ckpt_avg_str}-ep{max_epochs}-aug{apply_augmentation}"
-        f"{sparsity_str}{job_name_suffix}"
+        f"{init_sparsity_str}{sparsity_str}{job_name_suffix}"
     )
 
     settings = settings.copy()
@@ -793,6 +842,9 @@ def _submit_sv_job(
             script_arguments[
                 "callbacks.model_pruning.amount"
             ] = target_sparsity
+
+    if initial_sparsity is not None:
+        script_arguments["_bregman_initial_sparsity"] = initial_sparsity
 
     if extra_overrides:
         script_arguments.update(extra_overrides)
@@ -900,7 +952,8 @@ def run_sv(transfer_data="false", force="false"):
     # Experiment registry: a list of entries (same config may recur with
     # different overrides).
     #   required: experiment, sv_models, dataset_names, sparsity_rates
-    #   optional: extra_overrides, suffix, per_model
+    #   optional: extra_overrides, suffix, per_model,
+    #             initial_sparsities (defaults to the config's own value)
     ########################
     EXPERIMENTS = []
 
@@ -959,10 +1012,11 @@ def run_sv(transfer_data="false", force="false"):
         "tinygpu": {"v100": 0, "a100": 0},
     }
     for cfg in EXPERIMENTS:
+        n_init = len(cfg.get("initial_sparsities", [None]))
         for dataset_name in cfg["dataset_names"]:
             for sparsity in cfg["sparsity_rates"]:
                 cluster, gpu = _get_job_routing(dataset_name, sparsity)
-                job_counts[cluster][gpu] += len(cfg["sv_models"])
+                job_counts[cluster][gpu] += len(cfg["sv_models"]) * n_init
 
     total_jobs = sum(sum(gpus.values()) for gpus in job_counts.values())
     print(f"\n{'='*50}")
@@ -987,6 +1041,7 @@ def run_sv(transfer_data="false", force="false"):
         base_overrides = dict(cfg.get("extra_overrides") or {})
         base_suffix = cfg.get("suffix", "")
         per_model_cfg = cfg.get("per_model", {})
+        initial_sparsities = cfg.get("initial_sparsities", [None])
 
         for sv_model in cfg["sv_models"]:
             pm = per_model_cfg.get(sv_model, {})
@@ -1004,19 +1059,21 @@ def run_sv(transfer_data="false", force="false"):
                             f"Skipping {experiment} with {sv_model} on {dataset_name} - routed to {cluster} cluster"
                         )
                         continue
-                    _submit_sv_job(
-                        experiment=experiment,
-                        sv_model=sv_model,
-                        dataset_name=dataset_name,
-                        batch_size_base=batch_sizes[sv_model],
-                        transfer_data_bool=transfer_data_bool,
-                        max_epochs=base_max_epochs[dataset_name],
-                        target_sparsity=sparsity,
-                        gpu_device=gpu,
-                        force_retest=force_retest,
-                        extra_overrides=extra_overrides or None,
-                        job_name_suffix=suffix,
-                    )
+                    for initial_sparsity in initial_sparsities:
+                        _submit_sv_job(
+                            experiment=experiment,
+                            sv_model=sv_model,
+                            dataset_name=dataset_name,
+                            batch_size_base=batch_sizes[sv_model],
+                            transfer_data_bool=transfer_data_bool,
+                            max_epochs=base_max_epochs[dataset_name],
+                            target_sparsity=sparsity,
+                            initial_sparsity=initial_sparsity,
+                            gpu_device=gpu,
+                            force_retest=force_retest,
+                            extra_overrides=extra_overrides or None,
+                            job_name_suffix=suffix,
+                        )
 
 
 # Per-dataset SLURM walltime budget — vision jobs (ResNet-18, small images)
@@ -1042,6 +1099,7 @@ def _submit_img_job(
     seed,
     model_name="resnet18",
     target_sparsity=None,
+    initial_sparsity=None,  # Bregman starting sparsity; None keeps the config's own value
     extra_overrides=None,
     job_name_suffix="",
 ):
@@ -1060,6 +1118,10 @@ def _submit_img_job(
         assert (
             target_sparsity is None
         ), "target_sparsity should be None for baseline experiments"
+
+    assert (
+        initial_sparsity is None or "bregman" in experiment
+    ), "initial_sparsity is a Bregman-only knob (_bregman_initial_sparsity)"
 
     ramp_up_experiments = [
         "pruning_mag_struct",
@@ -1091,12 +1153,17 @@ def _submit_img_job(
     ramp_str = (
         f"-ramp{epochs_to_ramp}_{schedule_type}" if epochs_to_ramp else ""
     )
-    sparsity_str = (
-        f"-sr{int(target_sparsity * 100)}"
-        if target_sparsity is not None
-        else ""
+    fixed_lambda = fixed_lambda_for(
+        experiment, target_sparsity, extra_overrides
     )
-    exp_name = f"{experiment}{ramp_str}-{model_name}-{dataset_name}-bs{IMG_BATCH_SIZE}{sparsity_str}{job_name_suffix}"
+    # A fixed-lambda run lands wherever lambda takes it, so name it by lambda.
+    sparsity_str = (
+        lambda_token(fixed_lambda)
+        if fixed_lambda is not None
+        else sparsity_token(target_sparsity)
+    )
+    init_sparsity_str = initial_sparsity_token(initial_sparsity)
+    exp_name = f"{experiment}{ramp_str}-{model_name}-{dataset_name}-bs{IMG_BATCH_SIZE}{init_sparsity_str}{sparsity_str}{job_name_suffix}"
     job_name = f"{exp_name}-seed{seed}"  # unique per seed for SLURM dedup
     name = f"{dataset_name}/{model_name}/{exp_name}/seed_{seed}"  # results saved under their own seed
 
@@ -1123,6 +1190,9 @@ def _submit_img_job(
             script_arguments[
                 "callbacks.model_pruning.amount"
             ] = target_sparsity
+
+    if initial_sparsity is not None:
+        script_arguments["_bregman_initial_sparsity"] = initial_sparsity
 
     if epochs_to_ramp:
         script_arguments.update(
@@ -1189,11 +1259,13 @@ def run_img():
     each saved under its own `seed_{seed}` subdirectory.
     """
     # dataset_names = ["mnist", "cifar10", "cifar100", "tinyimagenet"]
-    dataset_names = ["cifar10"]
-    model_names = ["wrn28_10"]
+    dataset_names = ["cifar100"]
+    model_names = ["resnet18"]
     sparsity_rates_sweep = [0.95, 0.99]
     default_seeds = [42]
     lambda_factor_k = 0.4  # scales BREGMAN_LAMBDA_CONFIGS' fixed_lambda
+    # Bregman starting sparsity sweep; 0.0 is a dense start, 0.99 the config default
+    initial_sparsity_sweep = [0.0, 0.5, 0.99]
 
     ########################
     # Switch controls (master switch per group of experiments)
@@ -1205,18 +1277,21 @@ def run_img():
     # Adaptive Bregman (lambda scheduler):
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
 
+    # Initial-sparsity sweeps: same starting points, two ways of setting lambda.
+    RUN_INIT_SPARSITY_FIXED_LAMBDA = True  # static lambda, sparsity floats
+    RUN_INIT_SPARSITY_FIXED_TARGET = False  # adaptive lambda, sparsity pinned
+
     # Auxiliary experiments
     RUN_CONSTANT_LR_EXPS = False  # baseline with constant LR (no scheduler)
     INFLATE_CLASSIFIER_HEAD = False  # inflate the classifier head
-    RUN_STRIPE_FIX_EXPS = (
-        True  # phantom-stripe fix: AdaBreg eps floor on the 10k head
-    )
+    RUN_STRIPE_FIX_EXPS = False
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
     # different overrides).
     #   required: experiment, dataset_names, sparsity_rates
-    #   optional: extra_overrides, suffix, seeds (defaults to default_seeds)
+    #   optional: extra_overrides, suffix, seeds (defaults to default_seeds),
+    #             initial_sparsities (defaults to the config's own value)
     ########################
     EXPERIMENTS = []
 
@@ -1267,6 +1342,35 @@ def run_img():
                 }
             )
 
+    # Static lambda, so sparsity is the outcome; target_sparsity only picks lambda.
+    if RUN_INIT_SPARSITY_FIXED_LAMBDA:
+        for _exp in ("bregman_linbreg_fixed","bregman_adabreg_fixed"):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": sparsity_rates_sweep,
+                    "initial_sparsities": initial_sparsity_sweep,
+                    # "extra_overrides": {
+                    #     "_bregman_lambda_factor": lambda_factor_k
+                    # },
+                }
+            )
+
+    # Adaptive lambda pins the final sparsity at the target; only the start s0 varies.
+    if RUN_INIT_SPARSITY_FIXED_TARGET:
+        for _exp in ("bregman_linbreg", "bregman_adabreg"):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": sparsity_rates_sweep,
+                    "initial_sparsities": initial_sparsity_sweep,
+                }
+            )
+
     if INFLATE_CLASSIFIER_HEAD:
         for _exp in (
             "bregman_adabreg",
@@ -1309,6 +1413,7 @@ def run_img():
         len(cfg["dataset_names"])
         * len(cfg["model_name"])
         * len(cfg["sparsity_rates"])
+        * len(cfg.get("initial_sparsities", [None]))
         * len(cfg.get("seeds", default_seeds))
         for cfg in EXPERIMENTS
     )
@@ -1322,20 +1427,23 @@ def run_img():
         extra_overrides = cfg.get("extra_overrides") or None
         suffix = cfg.get("suffix", "")
         seeds = cfg.get("seeds", default_seeds)
+        initial_sparsities = cfg.get("initial_sparsities", [None])
 
         for dataset_name in cfg["dataset_names"]:
             for model_name in cfg["model_name"]:
                 for sparsity in cfg["sparsity_rates"]:
-                    for seed in seeds:
-                        _submit_img_job(
-                            experiment=experiment,
-                            dataset_name=dataset_name,
-                            seed=seed,
-                            model_name=model_name,
-                            target_sparsity=sparsity,
-                            extra_overrides=extra_overrides,
-                            job_name_suffix=suffix,
-                        )
+                    for initial_sparsity in initial_sparsities:
+                        for seed in seeds:
+                            _submit_img_job(
+                                experiment=experiment,
+                                dataset_name=dataset_name,
+                                seed=seed,
+                                model_name=model_name,
+                                target_sparsity=sparsity,
+                                initial_sparsity=initial_sparsity,
+                                extra_overrides=extra_overrides,
+                                job_name_suffix=suffix,
+                            )
 
     # --- Exception experiments: constant lr ---
     if RUN_CONSTANT_LR_EXPS:

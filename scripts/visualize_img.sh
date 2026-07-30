@@ -3,9 +3,10 @@
 # summary (mean±std) + sparsity curves, per dataset/backbone/augmentation.
 #
 # Run layout: <base_root>/<dataset>/<model>/<augmentation>/<exp>/seed_<N>
-# where <exp> = <method>[-sr<NN>]-<scheduler>. Pinning the augmentation dir and
-# the scheduler tag keeps each figure to one comparable set; visualize.py reads
-# dataset/model/augmentation from the path, so patterns only match <exp>.
+# where <exp> = <method>[-isr<NN>][-sr<NN>|-lam<V>]-<scheduler>. Pinning the
+# augmentation dir and the scheduler tag keeps each figure to one comparable set;
+# visualize.py reads dataset/model/augmentation from the path, so patterns only
+# match <exp>.
 
 export PYTHONPATH="$HOME/adversarial-robustness-for-sr"
 
@@ -17,11 +18,12 @@ datasets=('cifar10') #('cifar10' 'tinyimagenet')
 models=('resnet18') # ('resnet18' 'wrn28_10') resnet18 | wrn28_10
 augmentation='augmentation' # 'augmentation' | 'no_augmentation'
 scheduler='*' # one LR-scheduler tag: -CosineAnnealing | -ReduceLROnPlateau | -no_scheduler
-sparsity_rate='sr[8-9][8-9]' # sr75 sr90 sr95 sr99
-suffix="10k-" # *, classifier_10k
+sparsity_rate='-sr[8-9][8-9]' # target token; the leading dash keeps -isr99 out
+fixed_lambda='-lam*' # fixed-lambda runs carry their lambda, not a target
+suffix="*" # *, classifier_10k
 head_anatomy_data_dir=data # local dataset root for the pooled-feature forward pass
 
-struct_unstruct=false
+struct_unstruct=true
 head_anatomy=true # explain the head stripe; inflated-head runs only
 
 
@@ -51,13 +53,16 @@ for dataset in "${datasets[@]}"; do
 
         echo -e "$str"
         # Dense baseline + pruning + Bregman, all on one scheduler and sparsity
-        # sweep. Exact method tokens exclude the fixed/progressive/wanda variants.
+        # sweep. The fixed-lambda runs need their own patterns: they are named by
+        # the lambda they hold, so no target token selects them.
         experiments=(
             "dense_sgd${scheduler}"
-            "pruning_mag_unstruct*${sparsity_rate}*${scheduler}*${suffix}"
-            "pruning_mag_struct*${sparsity_rate}*${scheduler}*${suffix}"
-            "bregman_adabreg*${sparsity_rate}*${scheduler}*${suffix}"
-            "bregman_linbreg*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_mag_unstruct*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_mag_struct*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
+            "bregman_adabreg*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
+            "bregman_linbreg*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
+            "bregman_adabreg_fixed*${model}-${dataset}*${fixed_lambda}"
+            "bregman_linbreg_fixed*${model}-${dataset}*${fixed_lambda}"
         )
 
         python scripts/visualize.py \
@@ -88,8 +93,7 @@ for dataset in "${datasets[@]}"; do
         # inflated head — magnitude is kept as the no-stripe control.
         if [ "$head_anatomy" = true ]; then
             head_experiments=(
-                # "*classifier_10k*"
-                "bregman_adabreg-resnet18-cifar10-bs128-sr95-classifier_10k-LambdaDecayAuto"
+                "*classifier_10k*"
             )
 
             python scripts/visualize_structured_vs_unstructured.py \

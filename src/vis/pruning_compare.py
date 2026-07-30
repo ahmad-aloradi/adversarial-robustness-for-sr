@@ -50,6 +50,7 @@ from src.vis.common import (
     panel_models,
     ylim_for_rate,
 )
+from src.vis.encoding import clear_sweep_styles
 
 log = logging.getLogger(__name__)
 
@@ -1107,9 +1108,8 @@ def render_layerwise_panel(
 
     legend_handles: "OrderedDict[str, Tuple[Any, Dict]]" = OrderedDict()
     for s in members:
-        info_local = {
-            k: v for k, v in s["info"].items() if k != "_gradient_color"
-        }
+        info_local = dict(s["info"])
+        clear_sweep_styles([(None, info_local)])
         color, marker, ls = get_style(info_local)
         if rate_linestyles is not None:
             ls = rate_linestyles.get(info_local.get("sparsity"), ls)

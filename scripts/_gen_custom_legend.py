@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """One-off legend generator: same content as
 ``train_multiclassaccuracy_legend.pdf`` but with the AdamW/SGD baselines
-removed and fixed-lambda runs labelled '(fixed)' instead of '(λ=...)'.
+removed, for LaTeX figures that share one legend across panels.
+
+Selects on the method token only. Selecting on ``-sr<NN>`` would silently drop
+the fixed-lambda runs, whose names carry ``-lam<value>`` instead.
 
 Run from repo root:
     python scripts/_gen_custom_legend.py
@@ -14,66 +17,62 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from visualize import (  # noqa: E402
-    METHOD_DISPLAY_NAMES,
+    DENSE_METHOD_CLASSES,
     discover_experiments,
     experiment_sort_key,
     export_standalone_legend,
     get_style,
+    make_label,
     setup_matplotlib,
 )
 
+BASE_DIRS = ["/data/aloradad/results/cnceleb"]
+MODEL = "ecapa_tdnn"
+DATASET = "cnceleb"
+METHODS = ("adabreg", "linbreg", "adabreg_fixed", "linbreg_fixed")
 
-def make_label_fixed_token(info):
-    """Like ``visualize.make_label`` but renders fixed-lambda runs as
-    ``Method (fixed)`` instead of ``Method (λ=value)``."""
-    name = METHOD_DISPLAY_NAMES.get(info["method_class"], info["method_class"])
-    if info.get("variant") == "fixed":
-        return f"{name} (fixed)"
-    if info["sparsity"] is not None:
-        pct = r"\%" if plt.rcParams.get("text.usetex") else "%"
-        return f"{name} {info['sparsity']}{pct}"
-    return name
+OUT_PATH = (
+    "results/cross_exp_comparison/convergence_curves/ecapa_tdnn/cnceleb/"
+    "train_multiclassaccuracy_legend_nobaseline.pdf"
+)
 
 
 def main():
-    base_dirs = ["/data/aloradad/results/cnceleb"]
     patterns = [
-        "sv_bregman_*adabreg-wespeaker*ecapa_tdnn*cnceleb*sr[7-9][0-9]*",
-        "sv_bregman_*linbreg-wespeaker*ecapa_tdnn*cnceleb*sr[7-9][0-9]*",
-        "sv_bregman_*breg_fixed-wespeaker*ecapa_tdnn*cnceleb*sr[7-9][0-9]*",
+        f"sv_bregman_*{m}-wespeaker*{MODEL}*{DATASET}*" for m in METHODS
     ]
 
     setup_matplotlib(font_size=16)
-    experiments = discover_experiments(base_dirs, patterns)
-    # Drop baselines just in case any pattern accidentally caught them.
+    experiments = discover_experiments(BASE_DIRS, patterns)
     experiments = [
-        (d, info) for d, info in experiments
-        if info["method_class"] not in ("vanilla", "wespeaker")
+        (d, info)
+        for d, info in experiments
+        if info["method_class"] not in DENSE_METHOD_CLASSES
     ]
     experiments.sort(key=lambda item: experiment_sort_key(item[1]))
 
     handles, labels, seen = [], [], set()
     for _, info in experiments:
-        label = make_label_fixed_token(info)
+        label = make_label(info)
         if label in seen:
             continue
         seen.add(label)
         color, marker, ls = get_style(info)
-        h, = plt.plot(
-            [0, 1], [0, 1],
-            color=color, marker=marker, linestyle=ls,
-            markersize=4, linewidth=1.3,
+        (h,) = plt.plot(
+            [0, 1],
+            [0, 1],
+            color=color,
+            marker=marker,
+            linestyle=ls,
+            markersize=4,
+            linewidth=1.3,
         )
         handles.append(h)
         labels.append(label)
     plt.close("all")
 
-    out_path = (
-        "results/cross_exp_comparison/convergence_curves/ecapa_tdnn/cnceleb/"
-        "train_multiclassaccuracy_legend_nobaseline.pdf"
-    )
     ncol = min(5, len(labels))
-    export_standalone_legend(handles, labels, out_path, ncol, font_size=16)
+    export_standalone_legend(handles, labels, OUT_PATH, ncol, font_size=16)
 
 
 if __name__ == "__main__":

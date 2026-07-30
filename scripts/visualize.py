@@ -8,14 +8,20 @@ Two directory layouts are handled transparently:
     * SV:    <base>/<exp>
     * Image: <base>/<dataset>/<model>/<augmentation>/<exp>/seed_<N>
 
-Image ``<exp>`` names are either ``<method>[-sr<NN>]-<scheduler>`` (dataset,
-model, augmentation read from the parent dirs) or the fabfile shape
-``<method>-<model>-<dataset>-bs<NN>[-sr<NN>][-<suffix>]`` (dataset/model
-embedded in the name). Seeds repeat across
-``seed_<N>`` subdirs; all seeds of one experiment are grouped, curves show the
-mean with a ±1 std band, and the accuracy summary reports mean ± std across
+Image ``<exp>`` names are either ``<method>[-isr<NN>][-sr<NN>|-lam<V>]-<scheduler>``
+(dataset, model, augmentation read from the parent dirs) or the fabfile shape
+``<method>-<model>-<dataset>-bs<NN>[-isr<NN>][-sr<NN>|-lam<V>][-<suffix>]``
+(dataset/model embedded in the name). A fixed-lambda run carries ``-lam<V>``
+instead of a target, so its sparsity level is read from its best checkpoint.
+Bar charts group by method tier — dense, sparse baselines, fixed lambda,
+adaptive lambda — rather than by sparsity level. Seeds repeat
+across ``seed_<N>`` subdirs; all seeds of one experiment are grouped, curves show
+the mean with a ±1 std band, and the accuracy summary reports mean ± std across
 seeds (single-seed runs render plainly). Glob patterns match ``<exp>`` in
 either layout.
+
+Labels and styling come from ``src/vis/encoding.py`` — one contract, so this
+script and every sibling renderer describe a run identically.
 
 Usage examples:
     # SV training curves
@@ -35,17 +41,64 @@ Usage examples:
 
 import argparse
 import glob
+import json
 import os
 import re
+import sys
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-SHOW_ALPHA = False
-SHOW_f = False
-AUTO_RESCALE_METRICS =  ("sparsity", "bregman/sparsity")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The visual-encoding contract lives in one module so every figure agrees; this
+# script owns name parsing, data loading and the plots. Re-exported because the
+# sibling scripts import these names from here.
+from src.vis.encoding import (  # noqa: E402,F401
+    ALPHA_SYM,
+    BREGMAN_METHOD_CLASSES,
+    DENSE_METHOD_CLASSES,
+    EXPERIMENT_ORDER,
+    F_SYM,
+    INIT_SPARSITY_SYM,
+    LAMBDA_SYM,
+    METHOD_CLASS_COLORS,
+    METHOD_DISPLAY_NAMES,
+    METHOD_MARKERS,
+    SHOW_ALPHA,
+    SPARSITY_LINESTYLES,
+    SPARSITY_MARKERS,
+    SPARSITY_SYM,
+    SWEEP_LINESTYLES,
+    SWEEP_MARKERS,
+    TIER_ADAPTIVE,
+    TIER_DENSE,
+    TIER_FIXED,
+    TIER_LABELS,
+    TIER_SPARSE_BASELINE,
+    VARIANT_COLOR_ADJUSTMENTS,
+    VARIANT_DISPLAY_NAMES,
+    VARIANT_LINESTYLES,
+    VARIANT_MARKERS,
+    SHOW_f,
+    _adjust_color,
+    _sweep_members,
+    _variant_display_parts,
+    assign_label_visibility,
+    assign_sweep_styles,
+    clear_sweep_styles,
+    experiment_sort_key,
+    get_style,
+    is_dense,
+    is_fixed_lambda,
+    make_label,
+    method_tier,
+    pct_sym,
+    sweep_param,
+)
+
+AUTO_RESCALE_METRICS = ("sparsity", "bregman/sparsity")
 
 # ---------------------------------------------------------------------------
 # 1. LaTeX-style rendering setup
@@ -131,8 +184,8 @@ def setup_matplotlib(font_size=10):
 def export_standalone_legend(
     handles, labels, output_path, ncol, font_size=10, frameon=True
 ):
-    """Save a tightly-cropped, legend-only PDF using the same handles/labels
-    as the inline legend so side-by-side LaTeX figures can share one legend."""
+    """Save a tightly-cropped, legend-only PDF using the same handles/labels as
+    the inline legend so side-by-side LaTeX figures can share one legend."""
     setup_matplotlib(font_size)
     fig = plt.figure(figsize=(0.01, 0.01))
     leg = fig.legend(
@@ -147,84 +200,16 @@ def export_standalone_legend(
     fig.canvas.draw()
     bbox = leg.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    fig.savefig(output_path, format="pdf", bbox_inches=bbox.expanded(1.05, 1.10))
+    fig.savefig(
+        output_path, format="pdf", bbox_inches=bbox.expanded(1.05, 1.10)
+    )
     plt.close(fig)
     print(f"Saved: {output_path}")
 
 
 # ---------------------------------------------------------------------------
-# 2. Visual encoding — consistent across all plots
+# 2. Metric metadata — which plots a metric supports and how it is labelled
 # ---------------------------------------------------------------------------
-
-# Method class → color.  Bregman = cool tones, Pruning = warm tones, Baselines = neutral.
-METHOD_CLASS_COLORS = {
-    "linbreg": "#1f77b4",  # deep blue
-    "adabreg": "#2A662B",  # vibrant cyan
-    "pruning_struct": "#ed8d61",  # strong red
-    "pruning_unstruct": "#ff7f0e",  # bright orange
-    "vanilla": "#61291e",  # distinct brown (baseline)
-    "wespeaker": "#9C4F4F",  # dark charcoal
-    "dense": "#7f7f7f",  # neutral grey — image dense (SGD) baseline
-    # forget about those other methods for now, just make them black so they stand out as "other"
-    "proxsgd": "#000000",  # light gray
-    "adabregw": "#000000",  # deep navy blue
-}
-
-METHOD_DISPLAY_NAMES = {
-    "linbreg": "LinBreg",
-    "linbreg_fixed": "LinBreg (Fixed $\lambda$)",
-    "adabreg": "AdaBreg",
-    "adabreg_fixed": "AdaBreg (Fixed $\lambda$)",
-    "adabregw": "AdaBregW",
-    "pruning_struct": "Str. Prun.",
-    "pruning_unstruct": "Unst. Prun.",
-    "proxsgd": "ProxSGD",
-    "vanilla": "AdamW",
-    "wespeaker": "SGD",
-    "dense": "Dense",
-}
-
-# Sparsity → marker shape  (consistent everywhere)
-SPARSITY_MARKERS = {
-    None: "s",  # square  — dense / baseline
-    0: "s",
-    50: "D",  # diamond
-    75: "^",  # triangle up
-    90: "v",  # triangle down
-    95: "o",  # circle
-    99: "x",  # x-mark
-}
-
-# Variant → marker shape override.  Fixed-lambda runs land at an uncontrolled
-# sparsity, so their marker should not encode a sparsity level.
-VARIANT_MARKERS = {
-    "fixed": "*",  # star — visually distinct from every sparsity marker
-}
-
-# Sparsity → line dash pattern
-SPARSITY_LINESTYLES = {
-    None: "-",
-    0: "-",
-    50: (0, (5, 3)),
-    75: (0, (3, 1, 1, 1)),
-    90: "--",
-    95: ":",
-    99: (0, (1, 1)),
-}
-
-# Variant → line dash pattern (used in sweep mode to keep same-alpha curves
-# from different variants visually distinct).
-VARIANT_LINESTYLES = {
-    None: "-",
-    "regl1_conv": "-", #(0, (5, 2)),
-    "poor_init": (0, (3, 1, 1, 1)),
-    "rescale_prox": (0, (1, 1)),
-    "rescale_prox_v2": (0, (3, 1, 1, 1, 1, 1)),
-    "subgrad_corr_v2": (0, (5, 1, 1, 1)),
-    "subgrad_corr_v3": (0, (5, 2, 1, 2)),
-    "subgrad_corr_v4": (0, (1, 2, 5, 2)),
-    "fixed": "-", #(0, (4, 2, 1, 2, 1, 2)),
-}
 
 # Axis labels for known metric names
 METRIC_LABELS = {
@@ -285,12 +270,15 @@ METRIC_LOG_SCALE = {
 # For Bregman methods we assume conv_layers is a proxy for the shared lr,
 # and verify it matches linear_layers per-experiment before using it.
 LR_COLUMN_RULES = {
-    "vanilla":   (r"^lr-(AdamW|Adam|SGD)$", None),
+    "vanilla": (r"^lr-(AdamW|Adam|SGD)$", None),
     "wespeaker": (r"^lr-SGD$", None),
-    "linbreg":   (r"^lr-LinBreg/conv_layers$", r"^lr-LinBreg/linear_layers$"),
-    "adabreg":   (r"^lr-AdaBreg/conv_layers$", r"^lr-AdaBreg/linear_layers$"),
-    "proxsgd":   (r"^lr-ProxSGD/conv_layers$", r"^lr-ProxSGD/linear_layers$"),
-    "adabregw":  (r"^lr-AdaBregW?/conv_layers$", r"^lr-AdaBregW?/linear_layers$"),
+    "linbreg": (r"^lr-LinBreg/conv_layers$", r"^lr-LinBreg/linear_layers$"),
+    "adabreg": (r"^lr-AdaBreg/conv_layers$", r"^lr-AdaBreg/linear_layers$"),
+    "proxsgd": (r"^lr-ProxSGD/conv_layers$", r"^lr-ProxSGD/linear_layers$"),
+    "adabregw": (
+        r"^lr-AdaBregW?/conv_layers$",
+        r"^lr-AdaBregW?/linear_layers$",
+    ),
 }
 
 
@@ -298,13 +286,11 @@ def resolve_lr_column(df, info):
     """Resolve the virtual 'lr' metric to an actual column in df.
 
     For Bregman methods we use conv_layers as a proxy and verify it equals
-    linear_layers (they share the same scheduler group). Returns (col, None)
-    on success or (None, reason) if no suitable column is found.
+    linear_layers (they share the same scheduler group). Returns (col, None) on
+    success or (None, reason) if no suitable column is found.
     """
     method = info.get("method_class", "vanilla")
-    preferred, verify = LR_COLUMN_RULES.get(
-        method, LR_COLUMN_RULES["vanilla"]
-    )
+    preferred, verify = LR_COLUMN_RULES.get(method, LR_COLUMN_RULES["vanilla"])
     pref_cols = [c for c in df.columns if re.match(preferred, c)]
     if not pref_cols:
         # Fallback: any lr-* column
@@ -365,6 +351,10 @@ METHOD_PATTERNS = [
     ("dense_sgd", "dense", None),
 ]
 
+# The name tags that are never a scheduler: sparsity target, starting sparsity,
+# static lambda (see src/utils/run_naming.py).
+SPARSITY_TAG_RE = re.compile(r"^(i?sr\d+|lam[\d.eE+-]+)$")
+
 
 def _classify_method(token, info):
     """Set method_class / method_variant / optimizer from a method token via
@@ -378,7 +368,9 @@ def _classify_method(token, info):
             break
     else:
         info["method_class"] = (
-            "wespeaker" if token.replace("sv_", "") == "wespeaker" else "vanilla"
+            "wespeaker"
+            if token.replace("sv_", "") == "wespeaker"
+            else "vanilla"
         )
     # Dense baseline encodes its optimizer, e.g. "dense_sgd" -> SGD.
     if info["method_class"] == "dense":
@@ -390,41 +382,65 @@ def _classify_method(token, info):
 def _parse_image_name(name, info):
     """Image run name — two layouts, told apart by the ``-bs<NN>`` batch tag.
 
-    * run_subdir ``<method>[-sr<NN>]-<scheduler>``: dataset/model come from the
-      parent dirs (:func:`_path_metadata`); ``-sr<NN>`` precedes the scheduler.
-    * fabfile ``<method>-<model>-<dataset>-bs<NN>[-sr<NN>][-<suffix>]``:
+    * run_subdir ``<method>[-isr<NN>][-sr<NN>|-lam<V>]-<scheduler>``: dataset and
+      model come from the parent dirs (:func:`_path_metadata`); the sparsity tags
+      precede the scheduler.
+    * fabfile ``<method>-<model>-<dataset>-bs<NN>[-isr<NN>][-sr<NN>|-lam<V>][-<suffix>]``:
       dataset/model are embedded here (the curated tree has no augmentation dir
-      to read them from); ``-sr<NN>`` sits mid-name and there is no scheduler.
+      to read them from); the sparsity tags sit mid-name, no scheduler.
 
-    Method-flavor variants (fixed/progressive) live in the method token either
-    way, so nothing after ``-sr<NN>`` is a variant.
+    ``isr`` is the starting sparsity, ``sr`` the target. A fixed-lambda run
+    carries ``-lam<V>`` in place of ``-sr<NN>`` — its sparsity is an outcome of
+    that lambda, so only the realized value (resolved from the run dir) is
+    meaningful. Method-flavor variants (fixed/progressive) live in the method
+    token either way, so nothing after the sparsity tag is a variant.
     """
     m_bs = re.search(r"-bs\d+", name)
-    if m_bs:  # fabfile layout: batch tag splits <method>-<model>-<dataset> from the rest
+    if (
+        m_bs
+    ):  # fabfile layout: batch tag splits <method>-<model>-<dataset> from the rest
         head = name[: m_bs.start()].split("-")
         if len(head) >= 3:
             info["dataset"] = head[-1]
             info["model"] = head[-2]
             head = head[:-2]
-        m = re.search(r"-sr(\d+)", name[m_bs.end():])
+        tail = name[m_bs.end() :]
+        m_isr = re.search(r"-isr(\d+)", tail)
+        if m_isr:
+            info["initial_sparsity"] = int(m_isr.group(1))
+        m_lam = re.search(r"-lam([\d.eE+-]+)", tail)
+        if m_lam:
+            info["fixed_lambda"] = float(m_lam.group(1))
+        m = re.search(r"-sr(\d+)", tail)
         if m:
             info["sparsity"] = int(m.group(1))
         _classify_method("-".join(head), info)
         return
 
     method, sep, sched = name.rpartition("-")
-    if sep:  # trailing scheduler tag: CosineAnnealing, no_scheduler, …
+    # Trailing scheduler tag: CosineAnnealing, no_scheduler, … A sparsity or
+    # lambda tag in that slot means the name simply has no scheduler.
+    if sep and not SPARSITY_TAG_RE.match(sched):
         info["scheduler"] = sched
         name = method
     m = re.search(r"-sr(\d+)$", name)
     if m:
         info["sparsity"] = int(m.group(1))
         name = name[: m.start()]
+    m_lam = re.search(r"-lam([\d.eE+-]+)$", name)
+    if m_lam:
+        info["fixed_lambda"] = float(m_lam.group(1))
+        name = name[: m_lam.start()]
+    m_isr = re.search(r"-isr(\d+)$", name)
+    if m_isr:
+        info["initial_sparsity"] = int(m_isr.group(1))
+        name = name[: m_isr.start()]
     _classify_method(name, info)
 
 
 def _parse_sv_name(name, info):
-    """SV run name ``sv_<method>-wespeaker_<backbone>-<dataset>-…-sr<NN>[-variant]``.
+    """SV run name
+    ``sv_<method>-wespeaker_<backbone>-<dataset>-…-sr<NN>[-variant]``.
 
     alpha/f/regl suffixes are stripped first so they don't leak into ``variant``.
     """
@@ -438,6 +454,16 @@ def _parse_sv_name(name, info):
         name = name[: m_alpha.start()]
     name = re.sub(r"-regl[12]\w*$", "", name)  # drop reg-style suffix
 
+    m_isr = re.search(r"-isr(\d+)", name)
+    if m_isr:
+        info["initial_sparsity"] = int(m_isr.group(1))
+
+    m_lam = re.search(r"-lam([\d.eE+-]+)(?:-(.+))?$", name)
+    if m_lam:
+        info["fixed_lambda"] = float(m_lam.group(1))
+        if m_lam.group(2):
+            info["variant"] = m_lam.group(2)
+
     m = re.search(r"-(sr|sparsity)(\d+)(?:-(.+))?$", name)
     if m:
         info["sparsity"] = int(m.group(2))
@@ -447,7 +473,7 @@ def _parse_sv_name(name, info):
     m_model = re.search(r"-(wespeaker_\w+)-", name)
     info["model"] = m_model.group(1) if m_model else "unknown"
     if m_model:
-        m_ds = re.match(r"([^-]+)-bs\d+", name[m_model.end():])
+        m_ds = re.match(r"([^-]+)-bs\d+", name[m_model.end() :])
         if m_ds:
             info["dataset"] = m_ds.group(1)
 
@@ -458,16 +484,22 @@ def parse_experiment_name(dirname):
     """Parse a run-directory name into a styling/label metadata dict.
 
     Two name shapes:
-      * SV:    ``sv_<method>-wespeaker_<backbone>-<dataset>-…-sr<NN>[-variant]``
-      * Image: ``<method>[-sr<NN>]-<scheduler>`` or the fabfile shape
-               ``<method>-<model>-<dataset>-bs<NN>[-sr<NN>][-<suffix>]``
+      * SV:    ``sv_<method>-wespeaker_<backbone>-…[-isr<NN>][-sr<NN>|-lam<V>][-variant]``
+      * Image: ``<method>[-isr<NN>][-sr<NN>|-lam<V>]-<scheduler>`` or the fabfile
+               shape ``<method>-<model>-<dataset>-bs<NN>[-isr<NN>][-sr<NN>|-lam<V>][-<suffix>]``
                (see :func:`_parse_image_name`).
 
     ``alpha``/``f`` default to 1.0/50 when absent so SV sweep runs still sort.
+    A fixed-lambda run sets ``fixed_lambda`` and leaves ``sparsity`` None — the
+    name has no target, so its level comes from the best checkpoint instead
+    (filled by :func:`discover_experiments` or :func:`resolve_sparsity_level`).
     """
     info = {
         "dirname": dirname,
         "sparsity": None,
+        "best_ckpt_sparsity": None,
+        "initial_sparsity": None,
+        "fixed_lambda": None,
         "variant": None,
         "method_variant": None,
         "dataset": None,
@@ -484,199 +516,44 @@ def parse_experiment_name(dirname):
     return info
 
 
-VARIANT_DISPLAY_NAMES = {
-    "poor_init": "poor init",
-    "fixed": "Fixed $\lambda$",
-    "progressive": "Prog.",
-    "regl1_conv": "",
-    "constant_lr": "Const. lr",
-    "RoP": "RoP",
-    "rescale_prox": "Rescale Prox.",
-    "rescale_prox_v2": "Rescale Prox. V2",
-    "rescale_prox_V2": "SubGrad Corr.",
-    "subgrad_corr_v2": "SubGrad Corr. V2",
-    "subgrad_corr_v3": "SubGrad Corr. V3",
-    "subgrad_corr_v4": "SubGrad Corr. V4",
-}
+def read_best_ckpt_sparsity(run_dir):
+    """Sparsity (fraction 0–1) at this run's best checkpoint, or None.
 
-
-def _variant_display_parts(info):
-    """Distinct variant display strings for info, method flavor (e.g.
-    progressive/fixed) first, then any ad hoc suffix tag (e.g.
-    constant_lr) — so a run tagged with both keeps both in its label instead
-    of the suffix tag silently overwriting the method flavor."""
-    parts = []
-    for token in (info.get("method_variant"), info.get("variant")):
-        if not token or token in parts:
-            continue
-        parts.append(token)
-    return [VARIANT_DISPLAY_NAMES.get(p, p) for p in parts if VARIANT_DISPLAY_NAMES.get(p, p)]
-
-
-# Variant color adjustments: (hue_shift, saturation_shift, lightness_shift)
-# Hue rotates the color wheel (0-1 wraps), saturation/lightness are additive.
-# This keeps variants visually related to their base method but clearly distinct.
-VARIANT_COLOR_ADJUSTMENTS = {
-    "poor_init": (-0.08, -0.15, -0.12),       # shift hue toward red, desaturate, darken
-    "rescale_prox": (0.10, 0.05, 0.15),        # shift hue toward cyan, slightly brighter
-    "rescale_prox_v2": (0.10, 0.05, 0.15),     # shift hue toward cyan, slightly brighter
-    "rescale_prox_V2": (0.18, -0.10, -0.05),   # shift hue further, slightly muted
-    "subgrad_corr_v2": (0.18, -0.10, -0.05),   # shift hue further, slightly muted,
-    "subgrad_corr_v3": (0.36, -0.20, -0.1),   # shift hue further, slightly muted,
-    "subgrad_corr_v4": (-0.18, 0.10, 0.05),
-    "fixed": (0.12, -0.0, 0.18),              # shift hue toward purple, slightly darker
-    "progressive": (0.05, 0.0, -0.12),        # slightly darker sibling of the base method
-}
-
-
-def _adjust_color(hex_color, hue_shift, sat_shift, light_shift):
-    """Adjust a hex color in HLS space: shift hue, saturation, and lightness."""
-    import colorsys
-
-    hex_color = hex_color.lstrip("#")
-    r, g, b = (int(hex_color[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
-    h, l, s = colorsys.rgb_to_hls(r, g, b)
-    h = (h + hue_shift) % 1.0
-    s = max(0.0, min(1.0, s + sat_shift))
-    l = max(0.05, min(0.95, l + light_shift))
-    r, g, b = colorsys.hls_to_rgb(h, l, s)
-    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
-
-
-def make_label(info, *, fixed_as_token: bool = True):
-    """Create a concise, consistent legend label.
-
-    Fixed-λ runs render as ``Method (fixed)`` by default to keep cross-model
-    legends compact for paper figures. Pass ``fixed_as_token=False`` to render
-    ``Method (λ=value)`` with the numeric λ instead.
+    Read from ``results.json``, which records the epoch the monitor selected —
+    the same checkpoint the reported accuracy comes from. The last epoch's
+    sparsity would describe a different set of weights. Runs that never wrote
+    the file (dense baselines, older runs) return None.
     """
-    name = METHOD_DISPLAY_NAMES.get(info["method_class"], info["method_class"])
-    if info.get("variant") == "fixed" and info.get("fixed_lambda") is not None:
-        if fixed_as_token:
-            return f"{name} (fixed)"
-        lam = info["fixed_lambda"]
-        lam_sym = r"$\lambda$" if plt.rcParams.get("text.usetex") else "λ"
-        return f"{name} ({lam_sym}={lam:g})"
-    if info["sparsity"] is not None:
-        pct = r"\%" if plt.rcParams.get("text.usetex") else "%"
-        label = f"{name} {info['sparsity']}{pct}"
-    else:
-        label = name
-    parts = _variant_display_parts(info)
-    if parts:
-        label += " (" + ", ".join(parts) + ")"
-    extras = []
-    if info.get("_show_alpha"):
-        sym = r"$\alpha$" if plt.rcParams.get("text.usetex") else "α"
-        extras.append(f"{sym}={info['alpha']:g}")
-    if info.get("_show_f"):
-        sym = r"$f$" if plt.rcParams.get("text.usetex") else "f"
-        extras.append(f"{sym}={info['f']}")
-    if extras:
-        label += " " + ", ".join(extras)
-    return label
+    path = os.path.join(run_dir, "results.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)["best_checkpoint"]["overall_sparsity"]
 
 
-def get_style(info):
-    """Return (color, marker, linestyle) tuple — deterministic from
-    metadata.
+def resolve_sparsity_level(df):
+    """Fill each sparse row's ``sparsity`` (percent) from its realized value.
 
-    In sweep mode (gradient color set), variant drives linestyle so that
-    same-alpha curves from different variants remain visually distinct
-    even though they share a color.
+    A ``-lam<V>`` name carries no target, yet labels and the trend x-axis key on
+    ``sparsity``. Rounding to the nearest percent keeps the marker and hatch
+    tables resolving. Dense rows keep a null sparsity — that is what marks them
+    dense. Sparse rows with no realized value are warned about and drop out of
+    sparsity-keyed plots.
     """
-    color = info.get("_gradient_color")
-    if color is not None:
-        variant = info.get("variant")
-        marker = VARIANT_MARKERS.get(variant, SPARSITY_MARKERS.get(info["sparsity"], "x"))
-        ls = VARIANT_LINESTYLES.get(variant, "-")
-    else:
-        color = METHOD_CLASS_COLORS.get(info["method_class"], "#333333")
-        variant = info.get("variant")
-        if variant:
-            adj = VARIANT_COLOR_ADJUSTMENTS.get(variant)
-            if adj:
-                color = _adjust_color(color, *adj)
-        # Fixed-lambda runs land at an uncontrolled sparsity, so encoding
-        # marker/linestyle by sparsity target is misleading. Route through
-        # VARIANT_MARKERS / VARIANT_LINESTYLES["fixed"] instead.
-        if variant == "fixed":
-            marker = VARIANT_MARKERS.get("fixed", SPARSITY_MARKERS.get(info["sparsity"], "x"))
-            ls = VARIANT_LINESTYLES.get("fixed", SPARSITY_LINESTYLES.get(info["sparsity"], "-"))
-        else:
-            marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
-            ls = SPARSITY_LINESTYLES.get(info["sparsity"], "-")
-    return color, marker, ls
-
-
-def assign_gradient_colors(experiments):
-    """Within each (method_class, sparsity), gradient-color by whichever of
-    {alpha, f} varies. Color is keyed off the swept value (not the rank
-    among experiments) so two runs with the same alpha share a color
-    regardless of variant — variants are then distinguished by linestyle
-    in :func:`get_style`. This avoids both color collisions across
-    variants and silent overwrites.
-    """
-    from collections import defaultdict
-
-    groups = defaultdict(list)
-    for _, info in experiments:
-        # Fixed-lambda runs use default alpha/f (1.0/50) and aren't part of any
-        # sweep; pooling them with non-fixed runs at the same sparsity creates a
-        # spurious 2-point "sweep" that maps the fixed run to the darkest end of
-        # the gradient (visually black) and overrides VARIANT_COLOR_ADJUSTMENTS
-        # ["fixed"] in get_style. Skip them so they keep their fixed-variant color.
-        if info.get("variant") == "fixed":
-            continue
-        groups[(info["method_class"], info.get("sparsity"))].append(info)
-
-    for (method, _), members in groups.items():
-        if len(members) < 2:
-            continue
-        param = None
-        for cand in ("alpha", "f"):
-            vals = {m.get(cand) for m in members if m.get(cand) is not None}
-            if len(vals) >= 2:
-                param = cand
-                break
-        if param is None:
-            continue
-        unique_vals = sorted(
-            {m[param] for m in members if m.get(param) is not None}
+    dense = df["method_class"].isin(DENSE_METHOD_CLASSES)
+    missing = df["sparsity"].isna() & ~dense
+    df.loc[missing, "sparsity"] = (
+        pd.to_numeric(df.loc[missing, "actual_sparsity"], errors="coerce")
+        * 100
+    ).round()
+    unresolved = int((df["sparsity"].isna() & ~dense).sum())
+    if unresolved:
+        print(
+            f"  [warn] {unresolved} sparse rows have neither a target nor a "
+            "realized sparsity; pass --base_dirs or they drop out of "
+            "sparsity-keyed plots"
         )
-        n = len(unique_vals)
-        if n < 2:
-            continue
-        base = METHOD_CLASS_COLORS.get(method, "#333333")
-        for info in members:
-            v = info.get(param)
-            if v is None:
-                continue
-            t = unique_vals.index(v) / (n - 1)
-            info["_gradient_color"] = _adjust_color(base, 0, 0, 0.30 - 0.55 * t)
-
-
-def assign_label_visibility(experiments):
-    """Set `_show_alpha`/`_show_f` per info based on whether the field
-    takes >=2 distinct values across the full matched set. None counts
-    as a distinct value (mixed presence is still variation). Only
-    Bregman methods carry alpha/f — they are Bregman-only hyperparameters,
-    so dense baselines and pruning runs never get them stamped on the
-    label even when alpha varies elsewhere in the matched set.
-    """
-    if not experiments:
-        return
-    infos = [info for _, info in experiments]
-    show_alpha = len({i.get("alpha") for i in infos}) >= 2
-    show_f = len({i.get("f") for i in infos}) >= 2
-    for info in infos:
-        is_bregman = "breg" in info.get("method_class")
-        info["_show_alpha"] = (
-            show_alpha and info.get("alpha") is not None and is_bregman and SHOW_ALPHA
-        )
-        info["_show_f"] = (
-            show_f and info.get("f") is not None and is_bregman and SHOW_f
-        )
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -688,7 +565,9 @@ def load_fixed_lambda(exp_dir):
     """Extract _bregman_lambda from config_tree.log, or None if not found."""
     path = os.path.join(exp_dir, "config_tree.log")
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Expected config_tree.log not found in {exp_dir}")
+        raise FileNotFoundError(
+            f"Expected config_tree.log not found in {exp_dir}"
+        )
 
     with open(path) as f:
         lines = f.readlines()
@@ -698,26 +577,31 @@ def load_fixed_lambda(exp_dir):
             if m:
                 return float(m.group())
 
-    raise ValueError(f"_bregman_lambda value not found in config_tree.log of {exp_dir}")
+    raise ValueError(
+        f"_bregman_lambda value not found in config_tree.log of {exp_dir}"
+    )
 
 
 def info_from_csv_row(exp_name, base_dirs=None):
     """Build an info dict for a CSV-leaderboard row.
 
-    Mirrors what :func:`discover_experiments` does for a single dirname:
-    parses the name and, when ``variant=='fixed'`` and ``base_dirs`` are
-    provided, locates the experiment directory and loads the fixed lambda
-    from ``config_tree.log``. Used by CSV-based downstream scripts so they
-    produce labels identical to the directory-based pipeline.
+    Mirrors what :func:`discover_experiments` does for a single dirname: parses
+    the name and, for a ``variant=='fixed'`` run with ``base_dirs`` given, reads
+    the fixed lambda from ``config_tree.log``. A ``-lam<V>`` name already
+    supplies it, so the log is only a fallback for older names. Used by
+    CSV-based scripts so they label identically to the directory pipeline.
     """
     info = parse_experiment_name(exp_name)
-    if info.get("variant") == "fixed" and base_dirs:
+    if is_fixed_lambda(info) and base_dirs:
         for bd in base_dirs:
             full = os.path.join(bd, exp_name)
             if os.path.isdir(full) and os.path.exists(
                 os.path.join(full, "config_tree.log")
             ):
-                info["fixed_lambda"] = load_fixed_lambda(full)
+                # Only overwrite what the -lam token gave us if the log has a value.
+                info["fixed_lambda"] = (
+                    load_fixed_lambda(full) or info["fixed_lambda"]
+                )
                 break
     return info
 
@@ -726,7 +610,9 @@ def load_train_log(exp_dir):
     """Load epoch-level metrics from train_log.txt → DataFrame."""
     path = os.path.join(exp_dir, "train_log.txt")
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Expected train_log.txt not found in {exp_dir}")
+        raise FileNotFoundError(
+            f"Expected train_log.txt not found in {exp_dir}"
+        )
 
     rows = []
     with open(path) as f:
@@ -794,8 +680,8 @@ def load_csv_metrics(exp_dir):
     if "step" in df.columns:
         df = (
             df.sort_values(["step", "__version__"])
-              .groupby("step", as_index=False)
-              .last()
+            .groupby("step", as_index=False)
+            .last()
         )
         if len(dfs) > 1:
             _warn_on_version_discontinuity(df, exp_dir)
@@ -817,7 +703,8 @@ def _warn_on_version_discontinuity(df, exp_dir, window=5, rel_tol=0.5):
         return
     sdf = df.sort_values("step").reset_index(drop=True)
     boundary_idxs = [
-        i for i in range(1, len(sdf))
+        i
+        for i in range(1, len(sdf))
         if sdf.loc[i, "__version__"] > sdf.loc[i - 1, "__version__"]
     ]
     if not boundary_idxs:
@@ -825,7 +712,8 @@ def _warn_on_version_discontinuity(df, exp_dir, window=5, rel_tol=0.5):
 
     skip = {"step", "epoch", "__version__"}
     metric_cols = [
-        c for c in sdf.columns
+        c
+        for c in sdf.columns
         if c not in skip and pd.api.types.is_numeric_dtype(sdf[c])
     ]
 
@@ -835,8 +723,8 @@ def _warn_on_version_discontinuity(df, exp_dir, window=5, rel_tol=0.5):
         boundary_step = int(sdf.loc[b, "step"])
         flagged = []
         for c in metric_cols:
-            before = sdf.iloc[max(0, b - window):b][c].dropna()
-            after = sdf.iloc[b:b + window][c].dropna()
+            before = sdf.iloc[max(0, b - window) : b][c].dropna()
+            after = sdf.iloc[b : b + window][c].dropna()
             if len(before) < 2 or len(after) < 2:
                 continue
             a, z = float(before.mean()), float(after.mean())
@@ -857,56 +745,18 @@ def _warn_on_version_discontinuity(df, exp_dir, window=5, rel_tol=0.5):
             print(f"    ... and {len(flagged) - 8} more")
 
 
-# Logical legend grouping (not alphabetical). Used wherever experiments need
-# to be sorted in a way that matches how readers expect the legend to read:
-#   Group 0: dense baselines (AdamW / SGD)
-#   Group 1: pruning (structured, then unstructured)
-#   Group 2: fixed-lambda Bregman runs
-#   Group 3: adaptive Bregman runs, by sparsity sweep
-EXPERIMENT_ORDER = [
-    "dense",
-    "vanilla",
-    "wespeaker",
-    "pruning_struct",
-    "pruning_unstruct",
-    "linbreg",
-    "adabreg",
-    "adabregw",
-]
-
-
-def experiment_sort_key(info):
-    """Sort key turning an experiment ``info`` dict into a tuple ordered by
-    the logical legend groups above. Reused by downstream scripts so they
-    can re-sort their own legend handles to match this script's ordering.
-    """
-    mc = info.get("method_class", "")
-    variant = info.get("variant")
-    if mc in ("dense", "vanilla", "wespeaker"):
-        group = 0
-    elif mc in ("pruning_struct", "pruning_unstruct"):
-        group = 1
-    elif variant == "fixed":
-        group = 2
-    else:
-        group = 3
-    return (
-        group,
-        EXPERIMENT_ORDER.index(mc) if mc in EXPERIMENT_ORDER else 99,
-        info.get("sparsity") or -1,
-        info.get("variant") or "",
-        info["alpha"] if info.get("alpha") is not None else -1.0,
-        info["f"] if info.get("f") is not None else -1,
-    )
-
-
 # A run directory holds the training artifacts directly. Presence of either
 # marker is enough to treat a directory as a leaf run (and stop descending).
 RUN_ARTIFACT_MARKERS = ("config_tree.log", "train_log.txt")
 
 # Artifact subdirs that never contain a nested run — pruned while walking.
 _WALK_SKIP_DIRS = {
-    "checkpoints", "csv", "metadata", "tensorboard", "test_artifacts", ".hydra",
+    "checkpoints",
+    "csv",
+    "metadata",
+    "tensorboard",
+    "test_artifacts",
+    ".hydra",
 }
 
 # Per-seed run dirs are named "seed_<N>" (see scripts/fabfile.py:run_img).
@@ -932,13 +782,14 @@ def _find_run_dirs(base_dir):
             yield root
             continue
         dirs[:] = [
-            d for d in dirs
+            d
+            for d in dirs
             if d not in _WALK_SKIP_DIRS and not d.endswith("_artifacts")
         ]
 
 
 def _path_metadata(exp_dir):
-    """dataset/model/augmentation from an image run's parent dirs.
+    """Dataset/model/augmentation from an image run's parent dirs.
 
     Image layout: ``<dataset>/<model>/<augmentation>/<exp>[/seed_<N>]``. The
     augmentation dir has a fixed name, so anchor on it — this works no matter
@@ -1006,12 +857,23 @@ def discover_experiments(base_dirs, patterns):
         info["seeds"] = [s for s, _ in pairs]
         info["seed_dirs"] = [d for _, d in pairs]
         rep = info["seed_dirs"][0]
-        if info.get("variant") == "fixed":
-            info["fixed_lambda"] = load_fixed_lambda(rep)
+        # Only overwrite what the -lam token already gave us if the log has a value.
+        if is_fixed_lambda(info):
+            info["fixed_lambda"] = (
+                load_fixed_lambda(rep) or info["fixed_lambda"]
+            )
+        info["best_ckpt_sparsity"] = read_best_ckpt_sparsity(rep)
+        # A fixed-lambda name carries no target, so where it landed is its level.
+        if (
+            info["sparsity"] is None
+            and not is_dense(info)
+            and info["best_ckpt_sparsity"] is not None
+        ):
+            info["sparsity"] = round(info["best_ckpt_sparsity"] * 100)
         matched.append((rep, info))
 
     matched.sort(key=lambda item: experiment_sort_key(item[1]))
-    assign_gradient_colors(matched)
+    assign_sweep_styles(matched)
     assign_label_visibility(matched)
     return matched
 
@@ -1196,8 +1058,12 @@ def plot_training_curves(
             # Shade ±1 std across seeds (only when >1 seed contributed).
             if std is not None:
                 ax.fill_between(
-                    x, mean - std, mean + std,
-                    color=color, alpha=0.18, linewidth=0,
+                    x,
+                    mean - std,
+                    mean + std,
+                    color=color,
+                    alpha=0.18,
+                    linewidth=0,
                 )
 
     # Axis formatting
@@ -1209,13 +1075,17 @@ def plot_training_curves(
             ax.set_yscale("log")
         elif metric in ("sparsity", "bregman/sparsity"):
             from matplotlib.ticker import FixedLocator
+
             ax.set_ylim(0.7, 1.005)
-            ax.yaxis.set_major_locator(FixedLocator([0.75, 0.80, 0.85, 0.90, 0.95, 0.99]))
+            ax.yaxis.set_major_locator(
+                FixedLocator([0.75, 0.80, 0.85, 0.90, 0.95, 0.99])
+            )
         else:
             _auto_ylim(ax, metric)
     axes[-1].set_xlabel("Epoch" if source == "train_log" else "iteration [K]")
     if source == "train_log":
         from matplotlib.ticker import MaxNLocator
+
         for ax in axes:
             ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
@@ -1230,7 +1100,7 @@ def plot_training_curves(
 
     if handles:
         # ncol = min(5, len(labels))
-        ncol = min(3 , len(labels))
+        ncol = min(3, len(labels))
         if legend_mode == "inline":
             fig.legend(
                 handles,
@@ -1303,8 +1173,8 @@ def plot_bar_comparison(
     fig_height=3.0,
     epoch=-1,
 ):
-    """Grouped bar chart comparing a metric (last epoch), grouped by
-    sparsity."""
+    """Grouped bar chart comparing a metric (last epoch), grouped by method
+    tier."""
     from collections import OrderedDict
 
     setup_matplotlib(font_size)
@@ -1321,19 +1191,11 @@ def plot_bar_comparison(
         print(f"No data for metric '{metric}'")
         return
 
-    # Group by sparsity
+    # Group by tier; entries already arrive in experiment_sort_key order, which
+    # orders each tier internally (lambda for fixed-lambda runs, else sparsity).
     groups = OrderedDict()
     for info, val in entries:
-        sp = info["sparsity"]
-        groups.setdefault(sp, []).append((info, val))
-
-    # Sort: None/0 (baselines) first, then ascending sparsity
-    def _sp_key(sp):
-        if sp is None or sp == 0:
-            return -1
-        return sp
-
-    sorted_keys = sorted(groups.keys(), key=_sp_key)
+        groups.setdefault(method_tier(info), []).append((info, val))
 
     # Build bar positions with intra-group and inter-group gaps
     bar_width = 0.6
@@ -1342,13 +1204,12 @@ def plot_bar_comparison(
 
     x_positions = []
     bar_infos = []  # (info, value) per bar
-    group_centers = []  # (center_x, sparsity_label) per group
+    group_centers = []  # (center_x, tier_label) per group
     pos = 0.0
 
-    for sp in sorted_keys:
-        group = groups[sp]
+    for tier in sorted(groups):
         group_xs = []
-        for info, val in group:
+        for info, val in groups[tier]:
             x_positions.append(pos)
             bar_infos.append((info, val))
             group_xs.append(pos)
@@ -1356,18 +1217,13 @@ def plot_bar_comparison(
         # Remove trailing intra_gap, add group_gap
         pos -= intra_gap
         center = (group_xs[0] + group_xs[-1]) / 2
-        if sp is None or sp == 0:
-            sp_label = "Dense"
-        else:
-            pct = r"\%" if plt.rcParams.get("text.usetex") else "%"
-            sp_label = f"{sp}{pct}"
-        group_centers.append((center, sp_label))
+        group_centers.append((center, TIER_LABELS[tier]))
         pos += group_gap * bar_width
 
     x_positions = np.array(x_positions)
     values = np.array([v for _, v in bar_infos])
     colors = [get_style(info)[0] for info, _ in bar_infos]
-    tick_labels = [method_display_name(info) for info, _ in bar_infos]
+    tick_labels = [make_label(info) for info, _ in bar_infos]
 
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     bars = ax.bar(
@@ -1394,12 +1250,12 @@ def plot_bar_comparison(
             fontsize=font_size - 2,
         )
 
-    # Sparsity group labels below x-axis
-    for cx, sp_label in group_centers:
+    # Tier labels below x-axis
+    for cx, tier_label in group_centers:
         ax.text(
             cx,
             -0.12,
-            sp_label,
+            tier_label,
             transform=ax.get_xaxis_transform(),
             ha="center",
             va="top",
@@ -1440,21 +1296,6 @@ def per_seed_metric(seed_dirs, metric, source, reduce="max"):
     return vals
 
 
-def method_display_name(info):
-    """Short method name for a bar/axis tick, including all variant tags
-    (e.g. "AdaBreg (Prog., Const. lr)") so runs differing only by variant
-    stay distinct. The dense baseline shows its optimizer (e.g. SGD) since
-    the group header already reads 'Dense'."""
-    if info["method_class"] == "dense" and info.get("optimizer"):
-        name = info["optimizer"].upper()
-    else:
-        name = METHOD_DISPLAY_NAMES.get(info["method_class"], info["method_class"])
-    parts = _variant_display_parts(info)
-    if parts:
-        name += " (" + ", ".join(parts) + ")"
-    return name
-
-
 def plot_accuracy_summary(
     experiments,
     metric,
@@ -1465,8 +1306,8 @@ def plot_accuracy_summary(
     fig_width=5.5,
     fig_height=3.0,
 ):
-    """Grouped bar chart of a scalar metric per experiment, grouped by sparsity,
-    with cross-seed mean and ±1 std error bars.
+    """Grouped bar chart of a scalar metric per experiment, grouped by method
+    tier, with cross-seed mean and ±1 std error bars.
 
     Writes a companion ``<output>.csv`` with per-experiment n_seeds / mean / std
     and the raw per-seed values. Single-seed experiments render a plain bar (no
@@ -1492,44 +1333,43 @@ def plot_accuracy_summary(
         print(f"No data for metric '{metric}'")
         return
 
-    # Group by sparsity; baselines (None/0) first, then ascending.
+    # Group by tier; entries already arrive in experiment_sort_key order, which
+    # orders each tier internally (lambda for fixed-lambda runs, else sparsity).
     groups = OrderedDict()
     for e in entries:
-        groups.setdefault(e[0]["sparsity"], []).append(e)
-    sorted_keys = sorted(
-        groups.keys(), key=lambda sp: -1 if (sp is None or sp == 0) else sp
-    )
+        groups.setdefault(method_tier(e[0]), []).append(e)
 
     bar_width, intra_gap, group_gap = 0.6, 0.15, 1.5
     x_positions, bars_meta, group_centers = [], [], []
     pos = 0.0
-    for sp in sorted_keys:
+    for tier in sorted(groups):
         group_xs = []
-        for e in groups[sp]:
+        for e in groups[tier]:
             x_positions.append(pos)
             bars_meta.append(e)
             group_xs.append(pos)
             pos += bar_width + intra_gap
         pos -= intra_gap
         center = (group_xs[0] + group_xs[-1]) / 2
-        if sp is None or sp == 0:
-            sp_label = "Dense"
-        else:
-            pct = r"\%" if plt.rcParams.get("text.usetex") else "%"
-            sp_label = f"{sp}{pct}"
-        group_centers.append((center, sp_label))
+        group_centers.append((center, TIER_LABELS[tier]))
         pos += group_gap * bar_width
 
     x_positions = np.array(x_positions)
     means = np.array([m for _, m, _, _ in bars_meta])
     stds = np.array([s for _, _, s, _ in bars_meta])
     colors = [get_style(info)[0] for info, _, _, _ in bars_meta]
-    tick_labels = [method_display_name(info) for info, _, _, _ in bars_meta]
+    tick_labels = [make_label(info) for info, _, _, _ in bars_meta]
 
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     ax.bar(
-        x_positions, means, yerr=stds, capsize=2.5,
-        color=colors, edgecolor="white", linewidth=0.5, width=bar_width,
+        x_positions,
+        means,
+        yerr=stds,
+        capsize=2.5,
+        color=colors,
+        edgecolor="white",
+        linewidth=0.5,
+        width=bar_width,
         error_kw={"elinewidth": 0.8},
     )
     ax.set_xticks(x_positions)
@@ -1551,10 +1391,16 @@ def plot_accuracy_summary(
         bb = lbl.get_window_extent().transformed(to_axes)
         labels_bottom = min(labels_bottom, bb.y0)
     group_y = labels_bottom - 0.04
-    for cx, sp_label in group_centers:
+    for cx, tier_label in group_centers:
         ax.text(
-            cx, group_y, sp_label, transform=ax.get_xaxis_transform(),
-            ha="center", va="top", fontweight="bold", fontsize=font_size,
+            cx,
+            group_y,
+            tier_label,
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="top",
+            fontweight="bold",
+            fontsize=font_size,
         )
 
     # Zoom y-axis when accuracies are clustered near the top.

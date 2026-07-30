@@ -27,18 +27,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FixedLocator
 from visualize import (
-    METHOD_CLASS_COLORS,
-    VARIANT_COLOR_ADJUSTMENTS,
-    _adjust_color,
+    DENSE_METHOD_CLASSES,
+    SHOW_ALPHA,
+    SHOW_f,
     assign_label_visibility,
+    assign_sweep_styles,
+    get_style,
     info_from_csv_row,
+    is_dense,
     load_csv_metrics,
     make_label,
+    resolve_sparsity_level,
     setup_matplotlib,
 )
-
-SHOW_ALPHA = False
-SHOW_f = False
 
 # ---------------------------------------------------------------------------
 # Dataset / protocol parsing
@@ -109,23 +110,6 @@ HATCH_COLOR = "#3F3E3E"
 GROUP_GAP = 0.9
 
 
-def _gradient_color(method_class, variant, value, sorted_values):
-    """Lightness gradient over a swept hyperparameter (e.g. alpha).
-
-    Variant color adjustment is applied first so bars from different variants
-    of the same method remain visually distinct even at the same sweep value.
-    """
-    base = METHOD_CLASS_COLORS.get(method_class, "#333333")
-    adj = VARIANT_COLOR_ADJUSTMENTS.get(variant)
-    if adj:
-        base = _adjust_color(base, *adj)
-    if value is None or len(sorted_values) < 2:
-        return base
-    rank = sorted_values.index(value)
-    t = rank / (len(sorted_values) - 1)
-    return _adjust_color(base, 0, 0, 0.30 - 0.55 * t)
-
-
 # ---------------------------------------------------------------------------
 # Actual-sparsity resolution
 #
@@ -182,9 +166,9 @@ def resolve_actual_sparsity(exp_name, base_dirs, info, fixed_lambda_test_ckpt):
     Everything else (including fixed-lambda runs tested from the best ckpt):
     parse the sr value out of the test ckpt path in train.log.
     """
-    if not base_dirs or info.get("sparsity") is None:
-        return None
     is_fixed = info.get("variant") == "fixed"
+    if not base_dirs or is_dense(info):
+        return None
     for bd in base_dirs:
         exp_dir = os.path.join(bd, exp_name)
         if not os.path.isdir(exp_dir):
@@ -257,11 +241,11 @@ def _protocol_sort_key(p):
 def _build_units(sub):
     """Enumerate (method, variant, sweep_value, sparsity) bars for a slice.
 
-    Lifted out of plot_metric_for_dataset so figure sizing can scale with
-    the actual bar count instead of just n_protocols.
+    Lifted out of plot_metric_for_dataset so figure sizing can scale with the
+    actual bar count instead of just n_protocols.
     """
     sweep_param = None
-    for cand in ("alpha", "f"):
+    for cand in ("initial_sparsity", "fixed_lambda", "alpha", "f"):
         if cand in sub.columns and sub[cand].dropna().nunique() >= 2:
             sweep_param = cand
             break
@@ -279,9 +263,7 @@ def _build_units(sub):
     pairs = sorted(
         pairs,
         key=lambda mv: (
-            _method_sort_key(
-                mv[0], None if mv[1] == "__none__" else mv[1]
-            ),
+            _method_sort_key(mv[0], None if mv[1] == "__none__" else mv[1]),
             mv[1],
         ),
     )
@@ -305,6 +287,54 @@ def _build_units(sub):
             else:
                 units.append((method, var_key, None, sp))
     return units, sweep_param
+
+
+def _unit_rows(sub, units, sweep_param):
+    """The leaderboard rows behind each unit, in unit order."""
+    rows = []
+    for method, var_key, sweep_val, sp in units:
+        cond = (sub["method_class"] == method) & (
+            sub["variant"].fillna("__none__") == var_key
+        )
+        cond &= sub["sparsity"].isna() if sp is None else sub["sparsity"] == sp
+        if sweep_param and sweep_val is not None:
+            cond &= sub[sweep_param] == sweep_val
+        rows.append(sub[cond])
+    return rows
+
+
+def _unit_infos(units, unit_rows, sweep_param):
+    """One info dict per unit, styled and label-gated as a set.
+
+    Sparsity is stripped because the per-bar tick already carries it, so
+    ``make_label`` contributes only the method and what varies within it.
+    """
+    infos = []
+    for (method, var_key, sweep_val, _), rows in zip(units, unit_rows):
+        if rows.empty:
+            info = {
+                "method_class": method,
+                "sparsity": None,
+                "variant": None if var_key == "__none__" else var_key,
+                "alpha": None,
+                "f": None,
+                "initial_sparsity": None,
+                "fixed_lambda": None,
+            }
+            # SHOW_ALPHA/SHOW_f gate alpha/f display; the others always show.
+            if sweep_param in ("initial_sparsity", "fixed_lambda"):
+                info[sweep_param] = sweep_val
+            elif sweep_param == "alpha" and SHOW_ALPHA:
+                info["alpha"] = sweep_val
+            elif sweep_param == "f" and SHOW_f:
+                info["f"] = sweep_val
+        else:
+            info = dict(rows["info"].iloc[0])
+            info["sparsity"] = None
+        infos.append(info)
+    assign_label_visibility([(None, info) for info in infos])
+    assign_sweep_styles([(None, info) for info in infos])
+    return infos
 
 
 def _unit_x_positions(units, gap=GROUP_GAP):
@@ -380,9 +410,9 @@ def plot_metric_for_dataset(
     axes = axes[0]
 
     # Sparsity buckets present anywhere in the figure — drives the legend.
-    # Dense (NaN) is listed first so its legend entry leads.
+    # Dense is listed first so its legend entry leads.
     sparsity_levels = sorted(df["sparsity"].dropna().unique().tolist())
-    has_dense = df["sparsity"].isna().any()
+    has_dense = df["method_class"].isin(DENSE_METHOD_CLASSES).any()
     sparsity_buckets = ([None] if has_dense else []) + sparsity_levels
 
     # Fixed y-axis: always 0–20% with ticks at 0/5/10/15/20 so figures
@@ -427,51 +457,25 @@ def plot_metric_for_dataset(
             ax.set_title(protocol, fontsize=font_size + 6, pad=6)
 
         n_units = len(units)
-        # Per-(method, variant) sorted sweep values, used for gradient ranking
-        sweep_value_lookup = {}
-        for method, var_key, _, _ in units:
-            k = (method, var_key)
-            if k not in sweep_value_lookup:
-                vrows = sub[
-                    (sub["method_class"] == method)
-                    & (sub["variant"].fillna("__none__") == var_key)
-                ]
-                sweep_value_lookup[k] = (
-                    sorted(vrows[sweep_param].dropna().unique().tolist())
-                    if sweep_param
-                    else []
-                )
+        # One resolution of rows → infos per protocol, shared by the bar colors
+        # and the labels below, so the two can never disagree about a unit.
+        unit_rows = _unit_rows(sub, units, sweep_param)
+        unit_infos = _unit_infos(units, unit_rows, sweep_param)
 
-        # Resolve value, color, hatch, and realized sparsity per unit
         bar_width = 0.7
         x = _unit_x_positions(units)
         vals = np.zeros(n_units)
         colors = ["#cccccc"] * n_units
         hatches = [""] * n_units
         actual_sps = [None] * n_units  # realized sparsity (0–1) or None
-        for i, (method, var_key, sweep_val, sp) in enumerate(units):
-            sparsity_match = (
-                sub["sparsity"].isna() if sp is None else (sub["sparsity"] == sp)
-            )
-            cond = (
-                (sub["method_class"] == method)
-                & sparsity_match
-                & (sub["variant"].fillna("__none__") == var_key)
-            )
-            if sweep_param and sweep_val is not None:
-                cond &= sub[sweep_param] == sweep_val
-            row = sub[cond]
-            if len(row) > 0:
-                vals[i] = float(row[metric].values[0]) * 100.0
-                actual_variant = var_key if var_key != "__none__" else None
-                colors[i] = _gradient_color(
-                    method,
-                    actual_variant,
-                    sweep_val,
-                    sweep_value_lookup.get((method, var_key), []),
-                )
-                if "actual_sparsity" in row.columns:
-                    asp = row["actual_sparsity"].values[0]
+        for i, ((_, _, _, sp), rows, info) in enumerate(
+            zip(units, unit_rows, unit_infos)
+        ):
+            if not rows.empty:
+                vals[i] = float(rows[metric].values[0]) * 100.0
+                colors[i] = get_style(info)[0]
+                if "actual_sparsity" in rows.columns:
+                    asp = rows["actual_sparsity"].values[0]
                     if pd.notna(asp):
                         actual_sps[i] = float(asp)
             hatches[i] = "" if sp is None else SPARSITY_HATCHES.get(sp, "")
@@ -590,50 +594,22 @@ def plot_metric_for_dataset(
         pct_str_tick = r"\%" if use_latex_x else "%"
         bar_tick_labels = []
         for (_, var_key, _, sp), asp in zip(units, actual_sps):
-            if sp is None:
-                bar_tick_labels.append("")
-                continue
             is_fixed = var_key == "fixed"
             force_actual = is_fixed
             want_actual = force_actual or sparsity_label == "actual"
             if want_actual and asp is not None:
                 bar_tick_labels.append(f"{asp * 100:.1f}{pct_str_tick}")
+            elif sp is None:  # dense baseline — no sparsity to print
+                bar_tick_labels.append("")
             else:
                 bar_tick_labels.append(f"{int(sp)}{pct_str_tick}")
 
-        # Build per-unit info with sparsity stripped — the per-bar tick
-        # already shows it, so make_label only contributes method/variant.
-        unit_infos = []
-        for method, var_key, sweep_val, sp in units:
-            cond = (
-                (sub["method_class"] == method)
-                & (sub["variant"].fillna("__none__") == var_key)
-            )
-            if sp is None:
-                cond &= sub["sparsity"].isna()
-            else:
-                cond &= sub["sparsity"] == sp
-            if sweep_param and sweep_val is not None:
-                cond &= sub[sweep_param] == sweep_val
-            matching = sub[cond]
-            if matching.empty:
-                info = {
-                    "method_class": method,
-                    "sparsity": None,
-                    "variant": None if var_key == "__none__" else var_key,
-                    "alpha": sweep_val if sweep_param == "alpha" and SHOW_ALPHA else None,
-                    "f": sweep_val if sweep_param == "f" and SHOW_f else None,
-                }
-            else:
-                info = dict(matching["info"].iloc[0])
-                info["sparsity"] = None
-            unit_infos.append(info)
-
-        assign_label_visibility([(None, info) for info in unit_infos])
         group_labels = [make_label(info) for info in unit_infos]
 
         ax.set_xticks(x)
-        ax.set_xticklabels(bar_tick_labels, rotation=0, ha="center", fontsize=font_size)
+        ax.set_xticklabels(
+            bar_tick_labels, rotation=0, ha="center", fontsize=font_size
+        )
         ax.set_ylim(0, y_cap)
         ax.tick_params(axis="x", which="both", length=0)
         ax.tick_params(axis="y", labelsize=font_size + 6)
@@ -710,7 +686,12 @@ def plot_metric_for_dataset(
         if ax_idx == 0:
             pct = r"\%" if plt.rcParams.get("text.usetex") else "%"
             metric_label = metric.replace("_raw", "").replace("_norm", "")
-            ax.set_ylabel(f"{metric_label} [{pct}]", fontsize=font_size + 6 if len(protocols) == 1 else font_size + 8)
+            ax.set_ylabel(
+                f"{metric_label} [{pct}]",
+                fontsize=font_size + 6
+                if len(protocols) == 1
+                else font_size + 8,
+            )
 
     # Legend: neutral gray patches distinguished by hatch pattern
     from matplotlib.patches import Patch
@@ -778,9 +759,9 @@ def main():
         nargs="+",
         default=None,
         help=(
-            "Optional experiment root dir(s); used only to resolve "
-            "_bregman_lambda from config_tree.log so that fixed-lambda runs "
-            "are labeled e.g. 'AdaBreg (λ=1e-3)' instead of '[fixed]'."
+            "Optional experiment root dir(s), used to resolve each run's "
+            "realized sparsity and its _bregman_lambda. Without them, "
+            "fixed-lambda runs have no sparsity level to be grouped at."
         ),
     )
     parser.add_argument(
@@ -868,7 +849,7 @@ def main():
         )
     df = df.drop_duplicates(subset=["dataset", "exp"], keep="first")
 
-    # Parse experiment names to get method_class, sparsity, alpha, f, variant.
+    # Parse names into method_class, sparsity, initial_sparsity, alpha, f, variant.
     # Use info_from_csv_row so fixed-lambda runs pick up _bregman_lambda from
     # config_tree.log when --base_dirs is provided. The scalar columns are
     # kept for downstream pandas filtering; the full info dict lives in the
@@ -879,6 +860,8 @@ def main():
     df["sparsity"] = parsed.apply(lambda x: x["sparsity"])
     df["alpha"] = parsed.apply(lambda x: x.get("alpha"))
     df["f"] = parsed.apply(lambda x: x.get("f"))
+    df["initial_sparsity"] = parsed.apply(lambda x: x.get("initial_sparsity"))
+    df["fixed_lambda"] = parsed.apply(lambda x: x.get("fixed_lambda"))
     df["variant"] = parsed.apply(lambda x: x.get("variant"))
 
     # Realized sparsity per run (best ckpt's sr, or last logged for
@@ -891,6 +874,7 @@ def main():
         ),
         axis=1,
     )
+    resolve_sparsity_level(df)
 
     # Parse dataset column into (dataset_name, protocol) — raises on unknown
     dp = df["dataset"].apply(parse_dataset_protocol)
@@ -903,7 +887,7 @@ def main():
     # Ensure all metric columns are numeric. Norm-cohort variants are
     # intentionally ignored: the bar charts only plot the raw metric.
     base_metrics = ["EER", "minDCF"]
-    SCORES = 'norm' # 'norm' 'raw'
+    SCORES = "norm"  # 'norm' 'raw'
     for base in base_metrics:
         for col in [base, f"{base}_{SCORES}"]:
             if col in df.columns:
@@ -939,7 +923,9 @@ def main():
                     protocols,
                     col,
                     out_path,
-                    font_size=args.font_size + 3 if len(protocols) > 1 else args.font_size,
+                    font_size=args.font_size + 3
+                    if len(protocols) > 1
+                    else args.font_size,
                     sparsity_label=args.sparsity_label,
                     fixed_lambda_test_ckpt=args.fixed_lambda_test_ckpt,
                 )

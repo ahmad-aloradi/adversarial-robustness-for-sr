@@ -28,6 +28,7 @@ import pandas as pd
 # Reuse shared utilities from visualize.py + visualize_common.py
 sys.path.insert(0, os.path.dirname(__file__))
 from visualize import (
+    clear_sweep_styles,
     discover_experiments,
     export_standalone_legend,
     make_label,
@@ -205,7 +206,7 @@ def plot_sparsity_comparison(all_data, output_path, legend_mode="inline"):
     """
     FSIZE = 16
     in_percent = True
-    
+
     sparse_data = [
         item for item in all_data if item[3].get("sparsity") is not None
     ]
@@ -335,15 +336,14 @@ def main():
     cross_model = len(distinct_models) > 1
     if cross_model:
         print(f"\nCross-model mode: {sorted(distinct_models)}")
-        # Strip gradient colors assigned by discover_experiments. In cross-model
+        # Strip the sweep styling assigned by discover_experiments. In cross-model
         # mode, alpha/f differences across backbones are config artifacts (e.g.
         # ResNet uses regl1_conv-alpha0.25-f50, ECAPA uses defaults), not a
         # deliberate sweep. The gradient misfires — AdaBreg's already-dark green
         # base clamps to near-black on the darker side, while LinBreg's brighter
         # blue stays recognizable, producing inconsistent shading across methods.
         # Marker + linestyle encode the model instead; color stays method-driven.
-        for _, info in experiments:
-            info.pop("_gradient_color", None)
+        clear_sweep_styles(experiments)
 
     # Per-experiment plots + collect data for comparison
     comparison_data = []

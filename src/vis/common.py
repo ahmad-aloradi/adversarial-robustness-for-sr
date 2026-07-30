@@ -1,6 +1,8 @@
-"""Shared matplotlib configuration, style constants, and layout helpers.
+"""Shared matplotlib configuration, backbone registry, and layout helpers.
 
-Used by all renderer modules under ``src/vis/``.
+Used by all renderer modules under ``src/vis/``. Colors, markers and legend text
+come from :mod:`src.vis.encoding` and are re-exported here, so every figure
+labels and styles a run identically whichever renderer draws it.
 
 Examples
 --------
@@ -15,6 +17,22 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
+
+from src.vis.encoding import (  # noqa: F401
+    EXPERIMENT_ORDER,
+    METHOD_CLASS_COLORS,
+    METHOD_DISPLAY_NAMES,
+    SPARSITY_LINESTYLES,
+    SPARSITY_MARKERS,
+    VARIANT_COLOR_ADJUSTMENTS,
+    VARIANT_DISPLAY_NAMES,
+    VARIANT_LINESTYLES,
+    VARIANT_MARKERS,
+    _adjust_color,
+    experiment_sort_key,
+    get_style,
+    make_label,
+)
 
 # ---------------------------------------------------------------------------
 # rcParams — only permitted module-level state in src/vis/
@@ -65,9 +83,7 @@ def setup_matplotlib(font_size: int = 10) -> None:
     """
     use_latex = _latex_available()
     if not use_latex:
-        print(
-            "Note: LaTeX not available; using mathtext fallback (serif)."
-        )
+        print("Note: LaTeX not available; using mathtext fallback (serif).")
     plt.rcParams.update(
         {
             "text.usetex": use_latex,
@@ -123,257 +139,13 @@ def export_standalone_legend(
         handletextpad=0.3,
     )
     fig.canvas.draw()
-    bbox = leg.get_window_extent().transformed(
-        fig.dpi_scale_trans.inverted()
-    )
+    bbox = leg.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(
         output_path, format="pdf", bbox_inches=bbox.expanded(1.05, 1.10)
     )
     plt.close(fig)
     print(f"Saved: {output_path}")
-
-
-# ---------------------------------------------------------------------------
-# Style constants
-# ---------------------------------------------------------------------------
-
-METHOD_CLASS_COLORS: Dict[str, str] = {
-    "linbreg": "#1f77b4",
-    "adabreg": "#2A662B",
-    "pruning_struct": "#ed8d61",
-    "pruning_unstruct": "#ff7f0e",
-    "vanilla": "#61291e",
-    "wespeaker": "#9C4F4F",
-    "proxsgd": "#000000",
-    "adabregw": "#000000",
-}
-
-METHOD_DISPLAY_NAMES: Dict[str, str] = {
-    "linbreg": "LinBreg",
-    "linbreg_fixed": r"LinBreg (Fixed $\lambda$)",
-    "adabreg": "AdaBreg",
-    "adabreg_fixed": r"AdaBreg (Fixed $\lambda$)",
-    "adabregw": "AdaBregW",
-    "pruning_struct": "Str. Prun.",
-    "pruning_unstruct": "Unst. Prun.",
-    "proxsgd": "ProxSGD",
-    "vanilla": "AdamW",
-    "wespeaker": "SGD",
-}
-
-SPARSITY_MARKERS: Dict[Optional[int], str] = {
-    None: "s",
-    0: "s",
-    50: "D",
-    75: "^",
-    90: "v",
-    95: "o",
-    99: "x",
-}
-
-VARIANT_MARKERS: Dict[str, str] = {
-    "fixed": "*",
-}
-
-SPARSITY_LINESTYLES: Dict[Optional[int], Any] = {
-    None: "-",
-    0: "-",
-    50: (0, (5, 3)),
-    75: (0, (3, 1, 1, 1)),
-    90: "--",
-    95: ":",
-    99: (0, (1, 1)),
-}
-
-VARIANT_LINESTYLES: Dict[Optional[str], Any] = {
-    None: "-",
-    "regl1_conv": "-",
-    "poor_init": (0, (3, 1, 1, 1)),
-    "rescale_prox": (0, (1, 1)),
-    "rescale_prox_v2": (0, (3, 1, 1, 1, 1, 1)),
-    "subgrad_corr_v2": (0, (5, 1, 1, 1)),
-    "subgrad_corr_v3": (0, (5, 2, 1, 2)),
-    "subgrad_corr_v4": (0, (1, 2, 5, 2)),
-    "fixed": "-",
-}
-
-VARIANT_DISPLAY_NAMES: Dict[str, str] = {
-    "poor_init": "poor init",
-    "fixed": r"Fixed $\lambda$",
-    "regl1_conv": "",
-    "rescale_prox": "Rescale Prox.",
-    "rescale_prox_v2": "Rescale Prox. V2",
-    "rescale_prox_V2": "SubGrad Corr.",
-    "subgrad_corr_v2": "SubGrad Corr. V2",
-    "subgrad_corr_v3": "SubGrad Corr. V3",
-    "subgrad_corr_v4": "SubGrad Corr. V4",
-}
-
-VARIANT_COLOR_ADJUSTMENTS: Dict[str, Tuple[float, float, float]] = {
-    "poor_init": (-0.08, -0.15, -0.12),
-    "rescale_prox": (0.10, 0.05, 0.15),
-    "rescale_prox_v2": (0.10, 0.05, 0.15),
-    "rescale_prox_V2": (0.18, -0.10, -0.05),
-    "subgrad_corr_v2": (0.18, -0.10, -0.05),
-    "subgrad_corr_v3": (0.36, -0.20, -0.1),
-    "subgrad_corr_v4": (-0.18, 0.10, 0.05),
-    "fixed": (0.12, -0.0, 0.18),
-}
-
-EXPERIMENT_ORDER: List[str] = [
-    "vanilla",
-    "wespeaker",
-    "pruning_struct",
-    "pruning_unstruct",
-    "linbreg",
-    "adabreg",
-    "adabregw",
-]
-
-
-def _adjust_color(
-    hex_color: str,
-    hue_shift: float,
-    sat_shift: float,
-    light_shift: float,
-) -> str:
-    """Adjust a hex color in HLS space.
-
-    Args:
-        hex_color: RGB hex string, e.g. ``"#1f77b4"``.
-        hue_shift: additive hue shift in [0, 1].
-        sat_shift: additive saturation shift.
-        light_shift: additive lightness shift.
-
-    Returns:
-        Adjusted RGB hex string.
-    """
-    import colorsys
-
-    hex_color = hex_color.lstrip("#")
-    r, g, b = (int(hex_color[i: i + 2], 16) / 255.0 for i in (0, 2, 4))
-    h, l, s = colorsys.rgb_to_hls(r, g, b)
-    h = (h + hue_shift) % 1.0
-    s = max(0.0, min(1.0, s + sat_shift))
-    l = max(0.05, min(0.95, l + light_shift))
-    r, g, b = colorsys.hls_to_rgb(h, l, s)
-    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
-
-
-def get_style(
-    info: Dict[str, Any],
-) -> Tuple[str, str, Any]:
-    """Return ``(color, marker, linestyle)`` for an experiment info dict.
-
-    Args:
-        info: experiment metadata dict from ``parse_experiment_name``.
-
-    Returns:
-        Tuple of (hex color, marker string, linestyle).
-    """
-    color = info.get("_gradient_color")
-    if color is not None:
-        variant = info.get("variant")
-        marker = VARIANT_MARKERS.get(
-            variant, SPARSITY_MARKERS.get(info.get("sparsity"), "x")
-        )
-        ls = VARIANT_LINESTYLES.get(variant, "-")
-    else:
-        color = METHOD_CLASS_COLORS.get(
-            info.get("method_class", ""), "#333333"
-        )
-        variant = info.get("variant")
-        if variant:
-            adj = VARIANT_COLOR_ADJUSTMENTS.get(variant)
-            if adj:
-                color = _adjust_color(color, *adj)
-        if variant == "fixed":
-            marker = VARIANT_MARKERS.get(
-                "fixed",
-                SPARSITY_MARKERS.get(info.get("sparsity"), "x"),
-            )
-            ls = VARIANT_LINESTYLES.get(
-                "fixed",
-                SPARSITY_LINESTYLES.get(info.get("sparsity"), "-"),
-            )
-        else:
-            marker = SPARSITY_MARKERS.get(info.get("sparsity"), "x")
-            ls = SPARSITY_LINESTYLES.get(info.get("sparsity"), "-")
-    return color, marker, ls
-
-
-def make_label(
-    info: Dict[str, Any],
-    *,
-    fixed_as_token: bool = True,
-) -> str:
-    """Create a concise legend label from experiment metadata.
-
-    Args:
-        info: experiment metadata dict.
-        fixed_as_token: if True, render fixed-λ runs as ``"Method (fixed)"``
-            instead of showing the numeric λ value.
-
-    Returns:
-        Human-readable label string.
-    """
-    name = METHOD_DISPLAY_NAMES.get(
-        info.get("method_class", ""), info.get("method_class", "")
-    )
-    if (
-        info.get("variant") == "fixed"
-        and info.get("fixed_lambda") is not None
-    ):
-        if fixed_as_token:
-            return f"{name} (fixed)"
-        lam = info["fixed_lambda"]
-        lam_sym = (
-            r"$\lambda$" if plt.rcParams.get("text.usetex") else "λ"
-        )
-        return f"{name} ({lam_sym}={lam:g})"
-    if info.get("sparsity") is not None:
-        pct = r"\%" if plt.rcParams.get("text.usetex") else "%"
-        label = f"{name} {info['sparsity']}{pct}"
-    else:
-        label = name
-    if info.get("variant"):
-        if info["variant"] in VARIANT_DISPLAY_NAMES:
-            variant = VARIANT_DISPLAY_NAMES[info["variant"]]
-        else:
-            variant = info["variant"]
-        if variant:
-            label += f" ({variant})"
-    return label
-
-
-def experiment_sort_key(info: Dict[str, Any]) -> Tuple:
-    """Sort key for consistent legend ordering across all plots.
-
-    Args:
-        info: experiment metadata dict.
-
-    Returns:
-        Comparable tuple used as a sort key.
-    """
-    mc = info.get("method_class", "")
-    variant = info.get("variant")
-    if mc in ("vanilla", "wespeaker"):
-        group = 0
-    elif mc in ("pruning_struct", "pruning_unstruct"):
-        group = 1
-    elif variant == "fixed":
-        group = 2
-    else:
-        group = 3
-    return (
-        group,
-        EXPERIMENT_ORDER.index(mc) if mc in EXPERIMENT_ORDER else 99,
-        info.get("sparsity") or -1,
-        info.get("variant") or "",
-        info.get("alpha") if info.get("alpha") is not None else -1.0,
-        info.get("f") if info.get("f") is not None else -1,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -467,9 +239,7 @@ def ylim_for_rate(
         return (lo * 100.0, hi * 100.0)
     if scale == "fraction":
         return (lo, hi)
-    raise ValueError(
-        f"scale must be 'fraction' or 'percent', got {scale!r}"
-    )
+    raise ValueError(f"scale must be 'fraction' or 'percent', got {scale!r}")
 
 
 def layerwise_figsize(n_panels: int) -> Tuple[float, float]:
