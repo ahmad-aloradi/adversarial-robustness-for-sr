@@ -19,8 +19,8 @@ class ImageClassification(pl.LightningModule):
     standard benchmarks (CIFAR-10/100, MNIST, TinyImageNet) with ResNet-18.
 
     A plain per-image classifier: each batch is a torchvision
-    ``(images, targets)`` tuple, scored with CrossEntropyLoss and top-1
-    accuracy. Pruning/Bregman is orthogonal — it is wired only through
+    ``(images, targets)`` tuple, scored with CrossEntropyLoss and top-1 /
+    top-5 accuracy. Pruning/Bregman is orthogonal — it is wired only through
     ``configure_optimizers`` (identical to ``sv.py``), so the same
     ``pruning_groups`` config drives both tasks.
     """
@@ -57,6 +57,9 @@ class ImageClassification(pl.LightningModule):
         self.train_metric = instantiate(metrics.train)
         self.valid_metric = instantiate(metrics.valid)
         self.test_metric = instantiate(metrics.test)
+        self.train_metric_top5 = instantiate(metrics.train_top5)
+        self.valid_metric_top5 = instantiate(metrics.valid_top5)
+        self.test_metric_top5 = instantiate(metrics.test_top5)
         self.valid_metric_best = instantiate(metrics.valid_best)
 
     def _setup_model_components(self, model: DictConfig) -> None:
@@ -105,11 +108,18 @@ class ImageClassification(pl.LightningModule):
             logged_dict, batch_size=batch_size, **self.logging_params
         )
 
+        logits = results["outputs"]["logits"]
         metric = getattr(self, f"{stage}_metric")
-        computed_metric = metric(results["outputs"]["logits"], targets)
+        metric_top5 = getattr(self, f"{stage}_metric_top5")
         self.log(
             f"{stage}/{metric.__class__.__name__}",
-            computed_metric,
+            metric(logits, targets),
+            batch_size=batch_size,
+            **self.logging_params,
+        )
+        self.log(
+            f"{stage}/{metric.__class__.__name__}_top5",
+            metric_top5(logits, targets),
             batch_size=batch_size,
             **self.logging_params,
         )
@@ -130,6 +140,7 @@ class ImageClassification(pl.LightningModule):
 
     def on_train_epoch_end(self) -> None:
         self.train_metric.reset()
+        self.train_metric_top5.reset()
 
     @torch.inference_mode()
     def validation_step(
@@ -142,11 +153,14 @@ class ImageClassification(pl.LightningModule):
     def on_validation_epoch_end(self) -> None:
         if self.trainer.sanity_checking:
             self.valid_metric.reset()
+            self.valid_metric_top5.reset()
             return
 
         valid_acc = float(self.valid_metric.compute())
+        valid_acc_top5 = float(self.valid_metric_top5.compute())
         # train_metric still holds this epoch's accuracy (validation runs first).
         train_acc = float(self.train_metric.compute())
+        train_acc_top5 = float(self.train_metric_top5.compute())
 
         self.valid_metric_best.update(torch.tensor(valid_acc))
         metric_name = self.valid_metric.__class__.__name__
@@ -160,7 +174,9 @@ class ImageClassification(pl.LightningModule):
         snapshot = {
             "epoch": self.current_epoch,
             "train_accuracy": train_acc,
+            "train_accuracy_top5": train_acc_top5,
             "valid_accuracy": valid_acc,
+            "valid_accuracy_top5": valid_acc_top5,
             "overall_sparsity": overall_sparsity,
             "pruned_sparsity": pruned_sparsity,
         }
@@ -172,6 +188,7 @@ class ImageClassification(pl.LightningModule):
             self._best_val_result = snapshot
 
         self.valid_metric.reset()
+        self.valid_metric_top5.reset()
 
     @torch.inference_mode()
     def test_step(self, batch, batch_idx: int) -> Dict[str, torch.Tensor]:
@@ -184,9 +201,11 @@ class ImageClassification(pl.LightningModule):
         # checkpoint's test accuracy.
         self._test_result = {
             "test_accuracy": float(self.test_metric.compute()),
+            "test_accuracy_top5": float(self.test_metric_top5.compute()),
             "checkpoint_path": self.trainer.ckpt_path,
         }
         self.test_metric.reset()
+        self.test_metric_top5.reset()
         self._write_results()
 
     def on_train_end(self) -> None:

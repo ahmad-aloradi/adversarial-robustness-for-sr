@@ -217,6 +217,8 @@ METRIC_LABELS = {
     "valid_loss": "Valid. Loss",
     "train/MulticlassAccuracy": "Train Accuracy",
     "valid/MulticlassAccuracy": "Valid. Accuracy",
+    "train/MulticlassAccuracy_top5": "Train Top-5 Accuracy",
+    "valid/MulticlassAccuracy_top5": "Valid. Top-5 Accuracy",
     "sparsity": r"$\mathsf{s}(\theta)$",
     "bregman/sparsity": r"$\mathsf{s}(\theta)$",
     "bregman/global_lambda": r"$\lambda$",
@@ -228,9 +230,22 @@ METRIC_LABELS = {
 
 # stage → metrics in that stage
 METRIC_STAGES = {
-    "train": ["train_loss", "train/MulticlassAccuracy"],
-    "valid": ["valid_loss", "valid/MulticlassAccuracy"],
-    "test": ["EER", "minDCF", "test/MulticlassAccuracy"],
+    "train": [
+        "train_loss",
+        "train/MulticlassAccuracy",
+        "train/MulticlassAccuracy_top5",
+    ],
+    "valid": [
+        "valid_loss",
+        "valid/MulticlassAccuracy",
+        "valid/MulticlassAccuracy_top5",
+    ],
+    "test": [
+        "EER",
+        "minDCF",
+        "test/MulticlassAccuracy",
+        "test/MulticlassAccuracy_top5",
+    ],
     "internal": ["sparsity", "bregman/global_lambda", "bregman/sparsity"],
     "schedule": ["lr", "train/margin"],
 }
@@ -244,9 +259,12 @@ METRIC_PLOT_TYPES = {
     # cross-seed mean±std summary bar.
     "train/MulticlassAccuracy": {"curves", "summary"},
     "valid/MulticlassAccuracy": {"curves", "summary"},
+    "train/MulticlassAccuracy_top5": {"curves", "summary"},
+    "valid/MulticlassAccuracy_top5": {"curves", "summary"},
     # Test accuracy is a single post-training scalar, not a curve — a "curve"
     # of one point can't distinguish variants (see cross-seed summary bar).
     "test/MulticlassAccuracy": {"summary"},
+    "test/MulticlassAccuracy_top5": {"summary"},
     # Internal / regularizer metrics — curves only
     "sparsity": {"curves"},
     "bregman/global_lambda": {"curves"},

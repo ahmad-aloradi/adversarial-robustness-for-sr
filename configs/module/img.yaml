@@ -12,21 +12,38 @@ criterion:
   # the class name, not "partial".
   loss: ${module.criterion.train_criterion}
 
+# `train`/`valid`/`test` are top-1 (the monitored headline metric via
+# `__metric__`); the `*_top5` siblings are logged alongside them.
 metrics:
   train:
     _target_: torchmetrics.Accuracy
     task: multiclass
     num_classes: ${datamodule.num_classes}
+  train_top5:
+    _target_: torchmetrics.Accuracy
+    task: multiclass
+    num_classes: ${datamodule.num_classes}
+    top_k: 5
   valid:
     _target_: torchmetrics.Accuracy
     task: multiclass
     num_classes: ${datamodule.num_classes}
+  valid_top5:
+    _target_: torchmetrics.Accuracy
+    task: multiclass
+    num_classes: ${datamodule.num_classes}
+    top_k: 5
   valid_best:
     _target_: torchmetrics.MaxMetric
   test:
     _target_: torchmetrics.Accuracy
     task: multiclass
     num_classes: ${datamodule.num_classes}
+  test_top5:
+    _target_: torchmetrics.Accuracy
+    task: multiclass
+    num_classes: ${datamodule.num_classes}
+    top_k: 5
 
 ### optimizer and lr_scheduler (set per experiment; `???` blocks stale kwargs
 ### from leaking across scheduler swaps, e.g. cosine T_max -> ReduceLROnPlateau)

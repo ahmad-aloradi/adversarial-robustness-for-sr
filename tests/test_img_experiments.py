@@ -14,6 +14,7 @@ from pathlib import Path
 import hydra
 import pyrootutils
 import pytest
+import torch
 from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from hydra.core.hydra_config import HydraConfig
@@ -150,6 +151,21 @@ def _param_group_map(model):
         name: id_to_group.get(id(param))
         for name, param in model.named_parameters()
     }
+
+
+def test_top5_metrics_tracked():
+    """Top-1 stays the monitored metric; top-5 runs alongside it per stage."""
+    model = _instantiate_module("dense_sgd")
+    for stage in ("train", "valid", "test"):
+        assert getattr(model, f"{stage}_metric").top_k == 1
+        assert getattr(model, f"{stage}_metric_top5").top_k == 5
+
+    # Target ranked 2nd: wrong at top-1, correct within top-5.
+    logits = torch.zeros(1, 10)
+    logits[0, 3], logits[0, 7] = 2.0, 1.0
+    targets = torch.tensor([7])
+    assert float(model.valid_metric(logits, targets)) == 0.0
+    assert float(model.valid_metric_top5(logits, targets)) == 1.0
 
 
 def test_configure_optimizers_dense():

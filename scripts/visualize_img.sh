@@ -68,7 +68,7 @@ for dataset in "${datasets[@]}"; do
         python scripts/visualize.py \
             --base_dirs "$base_dir" \
             --experiments "${experiments[@]}" \
-            --metrics 'test/MulticlassAccuracy' 'valid/MulticlassAccuracy' 'train/MulticlassAccuracy' "sparsity" "bregman/global_lambda" "bregman/sparsity" \
+            --metrics 'test/MulticlassAccuracy' 'valid/MulticlassAccuracy' 'train/MulticlassAccuracy' 'test/MulticlassAccuracy_top5' 'valid/MulticlassAccuracy_top5' 'train/MulticlassAccuracy_top5' "sparsity" "bregman/global_lambda" "bregman/sparsity" \
             --source "$source" \
             --summary-reduce "$summary_reduce" \
             --output "results/img/${dataset}/${model}/${augmentation}"/numerical
