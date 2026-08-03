@@ -20,7 +20,7 @@ dataset:
 # 3x32x32 input contract as CIFAR — the model is identical across datasets.
 augmentation: false # no spatial augment for MNIST
 transforms:
-  base: # always applied to train; eval uses transforms.eval
+  base: # only read when augmentation is on; MNIST trains on the eval pipeline
     - { _target_: torchvision.transforms.Pad, padding: 2 }
     - { _target_: torchvision.transforms.Grayscale, num_output_channels: 3 }
     - { _target_: torchvision.transforms.ToTensor }

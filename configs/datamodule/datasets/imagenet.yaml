@@ -1,0 +1,54 @@
+_target_: src.datamodules.vision_datamodule.VisionDataModule
+
+dataset:
+  # val/ is the labeled ILSVRC test set; val for model selection is carved from train.
+  prep_hint: bash scripts/datasets/prep_imagenet.sh
+  train_dataset:
+    _target_: torchvision.datasets.ImageFolder
+    root: ${paths.data_dir}/imagenet/train
+  valid_dataset:
+    split: 0.02 # 26k images; 0.1 as on the small datasets would carve off 128k
+    split_seed: ${seed} # stratified-carve RNG; ties the split to the run seed
+  test_dataset:
+    _target_: torchvision.datasets.ImageFolder
+    root: ${paths.data_dir}/imagenet/val
+
+augmentation: true # gates transforms.augment (spatial, train-only)
+transforms:
+  base: # ToTensor + Normalize; tail of the augmented train pipeline
+    - { _target_: torchvision.transforms.ToTensor }
+    - _target_: torchvision.transforms.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+  augment: # PIL-space, before ToTensor; gated by augmentation
+    - { _target_: torchvision.transforms.RandomResizedCrop, size: 224 }
+    - { _target_: torchvision.transforms.RandomHorizontalFlip }
+    - { _target_: torchvision.transforms.TrivialAugmentWide }
+  augment_post: # tensor-space, after Normalize; gated by augmentation
+    - { _target_: torchvision.transforms.RandomErasing, p: 0.1 } # p=0.1 to 0.5 is standard.
+  eval: # standard ILSVRC eval crop: shorter side to 256, then centre 224
+    - { _target_: torchvision.transforms.Resize, size: 256 }
+    - { _target_: torchvision.transforms.CenterCrop, size: 224 }
+    - { _target_: torchvision.transforms.ToTensor }
+    - _target_: torchvision.transforms.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
+name: imagenet # dataset tag for logging; also picks the ResNet stem
+num_classes: 1000
+max_epochs: 90 # standard literature budget; experiments read this via ${datamodule.max_epochs}
+
+loaders:
+  train:
+    batch_size: 256
+    shuffle: True
+    num_workers: 16
+    drop_last: False
+    pin_memory: True
+  valid:
+    batch_size: 256
+    shuffle: False
+    num_workers: 16
+    drop_last: False
+    pin_memory: True
+  test: ${.valid}

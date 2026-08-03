@@ -36,6 +36,7 @@ _DATASETS = {
     "cifar100": 100,
     "mnist": 10,
     "tinyimagenet": 200,
+    "imagenet": 1000,
 }
 
 
@@ -113,9 +114,8 @@ def test_mnist_transform_contract():
     cfg = _compose(
         ["experiment=img/dense_sgd", "datamodule=datasets/mnist", "logger=[]"]
     )
-    tf = cfg.datamodule.transforms
-    train_specs = list(tf.augment) + list(tf.base)
-    for specs in (train_specs, tf.eval):
+    datamodule = hydra.utils.instantiate(cfg.datamodule, _recursive_=False)
+    for specs in (datamodule._train_specs(), cfg.datamodule.transforms.eval):
         pipe = Compose([hydra.utils.instantiate(t) for t in specs])
         out = pipe(Image.new("L", (28, 28)))
         assert tuple(out.shape) == (3, 32, 32)

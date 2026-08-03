@@ -1,12 +1,13 @@
-"""Generic datamodule for CIFAR-10/100, MNIST, and TinyImageNet.
+"""Generic datamodule for CIFAR-10/100, MNIST, TinyImageNet, and ImageNet-1k.
 
 Train pipeline when ``augmentation`` is true: ``transforms.augment`` (PIL-space)
 then ``transforms.base`` (ToTensor + Normalize) then ``transforms.augment_post``
-(tensor-space); when false, ``base`` alone. Eval uses ``transforms.eval``.
+(tensor-space); when false, ``transforms.eval``. Eval uses ``transforms.eval``.
 Validation is a class-stratified ``valid_dataset.split`` fraction of the train
 set (seed ``valid_dataset.split_seed``); the test set is separate.
 """
 
+import copy
 from pathlib import Path
 from typing import Optional
 
@@ -15,7 +16,7 @@ import torch
 from hydra.utils import instantiate
 from pytorch_lightning import LightningDataModule
 from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torchvision.transforms import Compose
 
 from src import utils
@@ -61,10 +62,12 @@ class VisionDataModule(LightningDataModule):
                     f"{root} not found. Run: {self.hparams.dataset.prep_hint}"
                 )
 
+    def _compose(self, specs):
+        return Compose([instantiate(t) for t in specs])
+
     def _build_split(self, split_key: str, specs):
-        transform = Compose([instantiate(t) for t in specs])
         return instantiate(
-            self.hparams.dataset[split_key], transform=transform
+            self.hparams.dataset[split_key], transform=self._compose(specs)
         )
 
     def _train_specs(self):
@@ -72,12 +75,15 @@ class VisionDataModule(LightningDataModule):
         if self.hparams.augmentation:
             # augment (PIL-space) before ToTensor; augment_post (tensor-space) after
             return list(t.augment) + list(t.base) + list(t.augment_post)
-        return list(t.base)
+        # un-augmented train takes the eval pipeline, so its geometry matches test time
+        return list(t.eval)
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage in ("fit", None):
             train_view = self._build_split("train_dataset", self._train_specs())
-            val_view = self._build_split("train_dataset", self.hparams.transforms.eval)
+            # a copy avoids a second scan of ImageNet's 1.28M files
+            val_view = copy.copy(train_view)
+            val_view.transform = self._compose(self.hparams.transforms.eval)
 
             targets = np.asarray(train_view.targets)
             assert len(targets) == len(train_view), "dataset .targets length mismatch"
@@ -88,8 +94,8 @@ class VisionDataModule(LightningDataModule):
                 stratify=targets,
                 random_state=self.hparams.dataset.valid_dataset.split_seed,
             )
-            self.train_data = torch.utils.data.Subset(train_view, train_idx.tolist())
-            self.val_data = torch.utils.data.Subset(val_view, valid_idx.tolist())
+            self.train_data = Subset(train_view, train_idx.tolist())
+            self.val_data = Subset(val_view, valid_idx.tolist())
 
             log.info(f"train/val split: {len(self.train_data)}, {len(self.val_data)}")
 
