@@ -7,10 +7,9 @@ everything the model keeps** (9.4% on TinyImageNet), paid for by the
 convolutions. Cause, in one line: the spare rows push forever, the push lands on
 the one scale parameter that is untaxed, shared by all spare rows, and visible
 to the head — and AdaBreg's step size ignores how small the push is. The fix
-is one config line — raising Adam's `eps` to 1e-4 — verified at scale in §6:
+is one config line — raising Adam's `eps` to 1e-4 — verified at scale in §5:
 every phantom row dies and accuracy *rises* 0.49. Every number below is
-measured from checkpoints, per-epoch logs, or the toy in §3; §8 reproduces
-them.
+measured from checkpoints or per-epoch logs; §7 reproduces them.
 
 ## 1. Setup and end state
 
@@ -114,37 +113,7 @@ Both ingredients are necessary:
 Phantoms without the size-blind step: nothing moves. The size-blind step
 without phantoms: mild drift. Together: the stripe.
 
-## 3. Toy proof
-
-`poc_phantom_stripe.py` strips the system to its skeleton — frozen non-negative
-features, a free per-channel affine `z = s·x + t` in front of a 10-real +
-990-phantom head, Bregman-thresholded head weights at a 99% target — and
-changes **only how steps are sized**. 8,000 steps; every condition reaches
-train accuracy 1.0.
-
-| condition | dual step | free-param step | max `t` (init 0) | phantoms alive | share in one column |
-|---|---|---|--:|--:|--:|
-| AdaBreg | Adam | Adam | 5.00 | 514 / 990 | **1.00** |
-| half-fix | Adam | plain SGD | 2.07 | 452 / 990 | **1.00** |
-| eps-abs | Adam, eps 1e-3 | Adam, eps 1e-3 | 0.58 | **159** / 990 | 0.99 |
-| LinBreg | plain | plain SGD | 0.04 | 239 / 990 | 0.03 |
-
-- The AdaBreg row reproduces the whole phenotype: affine blow-up, phantoms
-  alive, every surviving phantom weight in one shared column, all negative. The
-  winning column's raw feature ranks 62nd of 64 — the toy, like the real run,
-  **manufactures** its channel (`t` grown 0 → 2.8) rather than picking a
-  naturally large one.
-- The half-fix separates the two symptoms: proportional steps on the free
-  parameters stop the blow-up (`t` freezes after the early, genuinely needed
-  phase) but the size-blind *dual* still herds every survivor into one shared
-  column. Taming the norm layer alone is half a fix.
-- Raising `eps` tames both with one knob: no blow-up, 84% of phantoms dead —
-  the shipped fix, verified at scale in §6.
-- LinBreg is the clean control: free parameters at init, no shared column (its
-  leftover survivors are scattered — 3% modal share; fewer die than in the real
-  run only because the toy is 17× shorter).
-
-## 4. The stripe was never necessary
+## 3. The stripe was never necessary
 
 The head bias is free and never pruned. Zero the stripe column, then give every
 phantom row one bias shift fitted to minimize cross-entropy (2,560 test
@@ -165,7 +134,7 @@ bias. Zeroing the stripe with no compensation at all changes nothing at
 inference — accuracy identical, phantoms win 0 / 2,560 on cifar10, all-LN, and
 TinyImageNet — because real classes outscore phantoms by ~30 either way.
 
-## 5. What it costs
+## 4. What it costs
 
 | cifar10, sr99 | conv kept | head kept | of which phantom | total kept |
 |---|--:|--:|--:|--:|
@@ -183,7 +152,7 @@ A second cost is controller stability: thousands of near-identical weights sit
 barely above one global `λ` and switch on and off as a block, so sparsity
 overshoots and rebounds.
 
-## 6. The fix, verified at scale
+## 5. The fix, verified at scale
 
 Raise Adam's `eps` from 1e-8 to 1e-4: `++module.optimizer.eps=1e-4`, no code
 change (`RUN_STRIPE_FIX_EXPS` in `scripts/fabfile.py` holds the recipe). `eps`
@@ -213,7 +182,7 @@ whole feature scale is sane again (single seed; TinyImageNet, which carries
 9.4%, is not yet re-run).
 
 Two alternatives were piloted as optimizer knobs and removed again after these
-runs; their step rules survive in the §3 toy:
+runs:
 
 - **Per-tensor denominator** (one scalar Adam denominator per tensor,
   NovoGrad-shaped): kills the stripe the same way, but strips per-coordinate
@@ -221,9 +190,8 @@ runs; their step rules survive in the §3 toy:
 - **Relative eps floor** (`denom += mean(√v)` per tensor): fails at scale. In
   a head that is 99.9% phantom coordinates the floor is computed from the very
   pushes it should suppress and shrinks with them, while the stripe coordinate
-  sits *above* the tensor mean and keeps full-rate steps. Outcome is the
-  half-fix phenotype: norms tamed (`β` 7.8), stripe fully intact. The toy
-  over-ranked it — its head is only 94% phantoms and 17× shorter.
+  sits *above* the tensor mean and keeps full-rate steps. Outcome: norms tamed
+  (`β` 7.8), stripe fully intact.
 
 Still useful regardless of optimizer:
 
@@ -234,8 +202,7 @@ Still useful regardless of optimizer:
   unchanged to four decimals, no real class uses the column — but the conv
   budget it displaced during training is not refunded.
 - Taming only the free parameters (plain-SGD group, or decay on norm affine
-  and bias) stops the blow-up but not the waste — the toy's half-fix keeps the
-  full shared column.
+  and bias) stops the blow-up but not the waste — the shared column survives.
 
 Ruled out by measurement:
 
@@ -261,7 +228,7 @@ Set aside by argument, not measurement:
 - **Sign-momentum steps (Lion)** — a pure sign update is maximally size-blind
   and would sharpen the pathology.
 
-## 7. The bias-less SV head
+## 6. The bias-less SV head
 
 Carried over from the SV runs, not re-measured here. The cosine SV head has no
 bias, and fails the other way: an all-zero row still scores cosine 0, which
@@ -273,26 +240,27 @@ the bias. LinBreg's other stripes there are real feature selection, not this
 defect: 106 of 192 columns on VoxCeleb ECAPA, each shared by hundreds of real
 speakers.
 
-## 8. Reproduce
+## 7. Reproduce
+
+The striped baseline, the `eps` fix and AdaBregW all survive on TinyImageNet;
+the cifar10 runs behind the tables above are archived under `old_exps/`, and
+its AdaBreg baseline is no longer on disk.
 
 ```bash
-# per-run anatomy JSONs, heatmaps, feature plots
+# per-run anatomy JSONs, heatmaps, feature plots — baseline vs eps fix vs AdaBregW
 python scripts/visualize_structured_vs_unstructured.py \
-    --base_dirs /data/aloradad/results/cifar10/resnet18 \
-    --experiments 'bregman_*sr99*classifier_10k*' 'pruning_mag_unstruct*sr99*classifier_10k' \
+    --base_dirs /data/aloradad/results/tinyimagenet/resnet18/old_exps \
+                /data/aloradad/results/tinyimagenet/resnet18 \
+    --experiments 'bregman_adabreg*sr99-classifier_10k*' 'pruning_mag_unstruct*sr99-classifier_10k' \
     --head_anatomy --activations --data_dir data \
-    --output results/img/cifar10/resnet18/augmentation/head_anatomy
+    --output results/img/tinyimagenet/resnet18/head_anatomy
 
 # one run on its own
 python src/vis/head_anatomy.py <run_dir>/seed_42
-
-# the toy in §3 (CPU, under a minute)
-python poc_phantom_stripe.py
 ```
 
 - `head_anatomy.json` — every checkpoint-level scalar quoted above.
 - `weight_norms.csv` in each run dir — the per-epoch trajectories in §2.
-- The 10-class control lives in `older_exps/bregman_adabreg-*-sr99-RoP`.
 - Reading the mask heatmap: bright = survived; rows are classes, columns are
   input features. A bright vertical line is one feature kept across many
   classes.
