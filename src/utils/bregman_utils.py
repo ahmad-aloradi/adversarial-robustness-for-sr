@@ -52,23 +52,23 @@ BREGMAN_LAMBDA_CONFIGS = {
     "ProxSGD": {
         0.5: {
             "initial_lambda": INIT_LAMBDA_PROXSGD,
-            "fixed_lambda": 0.001,
+            "fixed_lambda": 0.0001,
         },
         0.7: {
             "initial_lambda": INIT_LAMBDA_PROXSGD,
-            "fixed_lambda": 0.005,
+            "fixed_lambda": 0.00005,
         },
         0.9: {
             "initial_lambda": INIT_LAMBDA_PROXSGD,
-            "fixed_lambda": 0.01,
+            "fixed_lambda": 0.0001,
         },
         0.95: {
             "initial_lambda": INIT_LAMBDA_PROXSGD,
-            "fixed_lambda": 0.05,
+            "fixed_lambda": 0.0005,
         },
         0.99: {
             "initial_lambda": INIT_LAMBDA_PROXSGD,
-            "fixed_lambda": 0.1,
+            "fixed_lambda": 0.001,
         },
     },
 }
