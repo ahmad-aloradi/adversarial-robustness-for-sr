@@ -23,10 +23,22 @@ Located in `src/callbacks/pruning/bregman/bregman_optimizers.py`:
 
 - **LinBreg**: Linear Bregman iteration — momentum-based variant of gradient descent
 - **AdaBreg**: Adaptive Bregman iteration — Adam-style per-parameter step sizes
-- **AdaBregW**: AdaBreg plus decoupled weight decay
 - **ProxSGD**: Proximal SGD baseline (thresholds the weights, not the dual)
 
 All of them support **parameter groups** with different regularization strategies.
+
+`LinBreg` and `AdaBreg` take `weight_decay` (μ), an L2 term added to the gradient
+before the dual update: `v ← v − τ·(∇L(w) + μ·w)`. It defaults to `0.0`, which is
+the published algorithm. Two facts decide where it goes and what it is for:
+
+| Fact | Consequence |
+|---|---|
+| The prox rederives `w` from `v` every step | μ must enter `v`; a post-prox `p.mul_(1 - lr·μ)` is overwritten and never accumulates |
+| On the support `w = δv − δλ·sign(v)` — a translation, not a contraction | The L1 prox picks the support but cannot bound `‖w‖`; μ is the only norm control |
+| `w` is exactly `0` off the support | `μ·w` reaches survivors only, with no masking needed |
+
+Set it when comparing against a baseline that carries weight decay (RigL, dense
+SGD and magnitude pruning all use `5e-4`); leave it at `0.0` to reproduce the paper.
 
 #### 1.2 Bregman Regularizers
 
@@ -61,7 +73,7 @@ lambda_scheduler:
 
 **The step size.** `α = alpha_0 · gamma^C`, where `C` counts the updates whose gap changed sign. Each overshoot shrinks the steps, so λ settles instead of ringing and α tends to zero over a long run. A gap that shrinks, grows or hovers keeps its sign and leaves α alone. `gamma` defaults to 0.95 and is a constructor argument only — not yet wired to a config key.
 
-λ steers on the sparsity of the regularized groups (`WHICH_SPARSITY_PERCENTAGE` in `bregman_pruner.py`, default `pruned`), so `target_sparsity: 0.9` means the same thing as the magnitude pruner's `amount: 0.9` — switching that constant to `overall` means pointing `_bregman_sparsity_metric` at `sparsity` instead.
+λ steers on the sparsity of every weight tensor — all but norms and biases (`WHICH_SPARSITY_PERCENTAGE` in `bregman_pruner.py`, default `pruned`), so `target_sparsity: 0.9` means the same thing as the magnitude pruner's `amount: 0.9` and RigL's. A group left unregularized (the stem at `prune_first_layer: false`) sits in that denominator at full size with no zeros. Switching the constant to `overall` means pointing `_bregman_sparsity_metric` at `sparsity` instead.
 
 Metrics: `bregman/global_lambda` (live λ), `bregman/lambda_delta` (applied `Δλ`, zero between updates), `bregman/lambda_delta_over_lambda` (the relative move), `bregman/lambda_gap` (`target − sparsity` at the last update), `bregman/lambda_crossings` (`C`), `bregman/alpha` (the α of the last update).
 
@@ -81,7 +93,7 @@ Orchestrates the entire Bregman learning process:
 - Applies the initial sparsity via the pruning manager
 - Refuses at fit start an `overall`-steered `target_sparsity` above the prunable fraction, which the gates could never reach
 - Steps the lambda scheduler each batch and broadcasts `λ · lambda_scale` to the groups
-- Publishes `sparsity` (whole-model) and `bregman/pruned_sparsity` (regularized groups) for the gates and the run artifacts
+- Publishes `sparsity` (whole-model) and `bregman/pruned_sparsity` (all weight tensors, norms and biases aside) for the gates and the run artifacts
 - Handles checkpoint save/load of the scheduler state
 
 Everything the callback writes out — the per-step metric series and the fit-start configuration/group dumps — lives in `bregman_report.py`; the "is this group actively regularized" predicates live in `bregman_regularizers.py`. Neither affects training.
@@ -94,7 +106,7 @@ Everything the callback writes out — the per-step metric series and the fit-st
 callbacks:
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
-    target_sparsity: ${_bregman_target_sparsity} # setpoint + gate band centre, over the regularized groups
+    target_sparsity: ${_bregman_target_sparsity} # setpoint + gate band centre, over all weight tensors
     sparsity_threshold: 1e-12
     verbose: 2
     lambda_scheduler: # null for a fixed lambda (the *_fixed variants)
@@ -246,7 +258,7 @@ Both goals ensure seamless loading of pruned checkpoints into unpruned models:
    - Verify sparsity jump is monotonic
 
 2. **Epoch End** (`on_train_epoch_end`):
-   - Publish `pruning/sparsity` (pruned params) and `sparsity` (whole model) for the gates
+   - Publish `pruning/sparsity` (all weight tensors, norms and biases aside) and `sparsity` (whole model) for the gates
 
 3. **Training End** (`on_train_end`):
    - Optionally make pruning permanent (fuse masks into weights)
@@ -266,6 +278,21 @@ Both goals ensure seamless loading of pruned checkpoints into unpruned models:
 
 - `on_train_epoch_start` refuses to prune when the measured sparsity already exceeds `amount * (1 + tolerance)`.
 - `_verify_sparsity_jump` refuses a re-prune that drops sparsity by more than 5 points from above 0.1.
+
+---
+
+## The stem: `prune_first_layer`
+
+`prune_first_layer: false` (the default) holds the model's first weight tensor dense — RigL's rule on CIFAR and at 99 % everywhere. All four stacks take the flag and resolve the stem through one selector, `parameter_manager.stem_weight`, so they hold the *same* tensor dense and the benchmark rows stay comparable:
+
+| Stack | Key | Where it lands |
+| --- | --- | --- |
+| magnitude, DST, STR | `callbacks.model_pruning.prune_first_layer` | dropped from the target list |
+| Bregman | `module.model.prune_first_layer` | a synthesized `first_dense` optimizer group |
+
+`stem_weight` reads the module walk, not a layer-type list and not a filtered target list: the first module with a trainable `weight` Parameter that is not a norm layer. So a custom encoder stem counts, and a stem below `min_param_elements` costs only itself. img recipes set `false`, SV recipes set `true` (stem sparsity is part of what the SV study measures).
+
+The held-dense tensor stays in the reported denominator at full size, spending its share of the budget — which is how RigL accounts for a dense first layer, and why `pool_sparsity` scales the target the callback actually applies.
 
 ---
 
@@ -332,7 +359,7 @@ Point all three at the same metric as the pruner steers on: `bregman/pruned_spar
 ```
 src/callbacks/pruning/
 ├── bregman/
-│   ├── bregman_optimizers.py      # LinBreg, AdaBreg, AdaBregW, ProxSGD
+│   ├── bregman_optimizers.py      # LinBreg, AdaBreg, ProxSGD
 │   ├── bregman_regularizers.py    # L1, L1L2, etc. regularizers
 │   ├── bregman_pruner.py          # Main Bregman callback
 │   └── lambda_scheduler.py        # Adaptive λ controller

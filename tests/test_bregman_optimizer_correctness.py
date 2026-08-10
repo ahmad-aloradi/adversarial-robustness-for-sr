@@ -10,7 +10,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.callbacks.pruning.bregman.bregman_optimizers import AdaBreg, LinBreg
+from src.callbacks.pruning.bregman.bregman_optimizers import (
+    AdaBreg,
+    LinBreg,
+    ProxSGD,
+)
 from src.callbacks.pruning.bregman.bregman_regularizers import (
     RegL1,
     RegL1L2Conv,
@@ -413,7 +417,9 @@ def test_lambda_change_preserves_subgradients(OptimizerClass):
     new_lambda = 1.2
     delta = 1.0
     reg = RegL1(lamda=old_lambda)
-    optimizer = OptimizerClass(model.parameters(), lr=0.01, reg=reg, delta=delta)
+    optimizer = OptimizerClass(
+        model.parameters(), lr=0.01, reg=reg, delta=delta
+    )
 
     # Train a few steps to populate optimizer state and drift subgradients
     for _ in range(30):
@@ -438,9 +444,9 @@ def test_lambda_change_preserves_subgradients(OptimizerClass):
     # Subgradients must be unchanged
     for p, v_before in subgrads_before.items():
         v_after = optimizer.state[p]["sub_grad"]
-        assert torch.equal(v_before, v_after), (
-            "Subgradients must not change when lambda is updated"
-        )
+        assert torch.equal(
+            v_before, v_after
+        ), "Subgradients must not change when lambda is updated"
 
 
 @pytest.mark.parametrize("OptimizerClass", [LinBreg, AdaBreg])
@@ -456,7 +462,9 @@ def test_lambda_increase_prunes_via_prox_threshold(OptimizerClass):
 
     delta = 1.0
     reg = RegL1(lamda=0.1)
-    optimizer = OptimizerClass(model.parameters(), lr=0.01, reg=reg, delta=delta)
+    optimizer = OptimizerClass(
+        model.parameters(), lr=0.01, reg=reg, delta=delta
+    )
 
     # Train to get a model with some weights near zero
     for _ in range(50):
@@ -486,13 +494,11 @@ def test_lambda_increase_prunes_via_prox_threshold(OptimizerClass):
     optimizer.step()
 
     # Count non-zero weights after — should have fewer (more pruned)
-    nonzero_after = sum(
-        (p.data != 0).sum().item() for p in model.parameters()
-    )
+    nonzero_after = sum((p.data != 0).sum().item() for p in model.parameters())
 
-    assert nonzero_after < nonzero_before, (
-        f"Lambda increase should prune weights: before={nonzero_before}, after={nonzero_after}"
-    )
+    assert (
+        nonzero_after < nonzero_before
+    ), f"Lambda increase should prune weights: before={nonzero_before}, after={nonzero_after}"
 
 
 # =============================================================================
@@ -525,3 +531,80 @@ def test_adabreg_eps_floor_makes_sub_floor_gradients_proportional():
     # Expected ~1e-3: lr*1e-6/1e-3 for the sub-floor coordinate.
     assert ratio < 1e-2, f"sub-floor steps should shrink, ratio={ratio}"
     assert moved[0] > 0.1, "above-floor coordinate must keep a full-size step"
+
+
+# =============================================================================
+# mu: L2 on the surviving weights, applied in the dual
+# =============================================================================
+
+
+@pytest.mark.parametrize("OptimizerClass", [LinBreg, AdaBreg, ProxSGD])
+def test_mu_defaults_to_off(OptimizerClass):
+    """The default must leave every existing run bit-identical."""
+
+    def run(**kwargs):
+        torch.manual_seed(0)
+        layer = nn.Linear(16, 8)
+        opt = OptimizerClass(
+            layer.parameters(), lr=1e-2, reg=RegL1(lamda=0.05), **kwargs
+        )
+        torch.manual_seed(1)
+        for _ in range(20):
+            x, y = torch.randn(4, 16), torch.randn(4, 8)
+            opt.zero_grad()
+            ((layer(x) - y) ** 2).mean().backward()
+            opt.step()
+        return layer.weight.detach().clone()
+
+    assert torch.equal(run(), run(weight_decay=0.0))
+    assert not torch.equal(run(), run(weight_decay=1e-1))
+
+
+@pytest.mark.parametrize("OptimizerClass", [LinBreg, AdaBreg, ProxSGD])
+def test_mu_shrinks_the_surviving_weights(OptimizerClass):
+    """mu is the norm control the L1 prox cannot give: the prox translates the
+    dual by a constant, so it bounds nothing."""
+
+    def run(weight_decay):
+        torch.manual_seed(0)
+        layer = nn.Linear(16, 8)
+        opt = OptimizerClass(
+            layer.parameters(),
+            lr=1e-2,
+            reg=RegL1(lamda=0.05),
+            weight_decay=weight_decay,
+        )
+        torch.manual_seed(1)
+        for _ in range(200):
+            x, y = torch.randn(4, 16), torch.randn(4, 8)
+            opt.zero_grad()
+            ((layer(x) - y) ** 2).mean().backward()
+            opt.step()
+        survivors = layer.weight.detach()[layer.weight.detach() != 0.0]
+        return float(survivors.abs().sum())
+
+    assert run(1e-1) < run(0.0)
+
+
+def test_mu_adds_nothing_to_the_dual_where_the_weight_is_zero():
+    """P is exactly 0 off the support, so ``mu * p`` contributes nothing and
+    the pruned coordinate's dual moves by the raw gradient alone."""
+    p = nn.Parameter(torch.tensor([0.0, 1.0]))
+    opt = LinBreg([p], lr=0.1, reg=RegNone(), weight_decay=10.0)
+    before = opt.state[p]["sub_grad"].clone() if opt.state[p] else None
+
+    p.grad = torch.tensor([1.0, 1.0])
+    opt.step()
+
+    # sub_grad starts at p_init (RegNone contributes no subgradient).
+    moved = opt.state[p]["sub_grad"] - torch.tensor([0.0, 1.0])
+    assert before is None
+    # Zero weight: -lr * grad. Unit weight: -lr * (grad + mu * 1).
+    assert moved[0] == pytest.approx(-0.1)
+    assert moved[1] == pytest.approx(-1.1)
+
+
+@pytest.mark.parametrize("OptimizerClass", [LinBreg, AdaBreg])
+def test_negative_mu_is_rejected(OptimizerClass):
+    with pytest.raises(ValueError, match="Weight decay must be >= 0"):
+        OptimizerClass([nn.Parameter(torch.zeros(4))], weight_decay=-1.0)

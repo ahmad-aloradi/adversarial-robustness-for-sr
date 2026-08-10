@@ -24,6 +24,11 @@ class LinBreg(torch.optim.Optimizer):
     Momentum mirrors ``torch.optim.SGD`` exactly (same buffer, dampening and
     Nesterov formulas); the only difference is that the momentum-adjusted
     gradient drives the dual variable ``v`` and the weights come from its prox.
+
+    ``weight_decay`` (mu) enters ``v``, not ``w``: the prox rederives w from v
+    every step, so a post-prox shrink never accumulates. It is the only norm
+    control here -- the L1 prox translates v by a constant delta*lamda, which
+    picks the support without bounding the size of what survives.
     """
 
     def __init__(
@@ -35,11 +40,14 @@ class LinBreg(torch.optim.Optimizer):
         momentum: float = 0.0,
         dampening: float = 0.0,  # SGD dampening on the momentum buffer
         nesterov: bool = False,  # Nesterov look-ahead on the momentum step
+        weight_decay: float = 0.0,  # mu: L2 on the surviving weights, into the dual
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate")
         if momentum < 0.0:
             raise ValueError("Invalid momentum value")
+        if weight_decay < 0.0:
+            raise ValueError(f"Weight decay must be >= 0, got {weight_decay}")
         if nesterov and (momentum <= 0.0 or dampening != 0.0):
             raise ValueError(
                 "Nesterov momentum requires momentum > 0 and dampening == 0"
@@ -55,6 +63,7 @@ class LinBreg(torch.optim.Optimizer):
             momentum=momentum,
             dampening=dampening,
             nesterov=nesterov,
+            weight_decay=weight_decay,
         )
         super().__init__(params, defaults)
 
@@ -73,6 +82,7 @@ class LinBreg(torch.optim.Optimizer):
             momentum = group["momentum"]
             dampening = group["dampening"]
             nesterov = group["nesterov"]
+            weight_decay = group["weight_decay"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -88,6 +98,10 @@ class LinBreg(torch.optim.Optimizer):
 
                 state["step"] += 1
                 sub_grad = state["sub_grad"]
+
+                # mu reaches the support only: prox makes p exactly 0 elsewhere.
+                if weight_decay != 0.0:
+                    grad = grad.add(p, alpha=weight_decay)
 
                 # SGD momentum on the gradient (see torch.optim.SGD).
                 d_grad = grad
@@ -143,6 +157,10 @@ class AdaBreg(torch.optim.Optimizer):
     proportional to the gradient; with an over-sized classifier head, raising
     it to ~1e-4 stops never-vanishing phantom-class pushes from accumulating
     (see docs/bregman_phantom_classes.md).
+
+    ``weight_decay`` (mu) enters the gradient before the moments, so Adam
+    normalizes it alongside the loss term -- the same mu buys less shrinkage
+    here than in LinBreg. See LinBreg for why it must live in the dual.
     """
 
     def __init__(
@@ -153,14 +171,24 @@ class AdaBreg(torch.optim.Optimizer):
         delta: float = 1.0,
         betas: tuple = (0.9, 0.999),
         eps: float = 1e-8,
+        weight_decay: float = 0.0,  # mu: L2 on the surviving weights, into the dual
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate")
+        if weight_decay < 0.0:
+            raise ValueError(f"Weight decay must be >= 0, got {weight_decay}")
 
         if reg is None:
             reg = RegNone()
 
-        defaults = dict(lr=lr, reg=reg, delta=delta, betas=betas, eps=eps)
+        defaults = dict(
+            lr=lr,
+            reg=reg,
+            delta=delta,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -177,6 +205,7 @@ class AdaBreg(torch.optim.Optimizer):
             lr = group["lr"]
             beta1, beta2 = group["betas"]
             eps = group["eps"]
+            weight_decay = group["weight_decay"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -197,6 +226,11 @@ class AdaBreg(torch.optim.Optimizer):
                 sub_grad = state["sub_grad"]
                 exp_avg = state["exp_avg"]
                 exp_avg_sq = state["exp_avg_sq"]
+
+                # mu reaches the support only: prox makes p exactly 0 elsewhere.
+                # It enters before the moments, so Adam normalizes it too.
+                if weight_decay != 0.0:
+                    grad = grad.add(p, alpha=weight_decay)
 
                 # Bias correction
                 bias_correction1 = 1 - beta1**step
@@ -242,100 +276,13 @@ class AdaBreg(torch.optim.Optimizer):
         return reg_vals
 
 
-class AdaBregW(AdaBreg):
-    """Adaptive Bregman optimizer with decoupled weight decay.
-
-    Extends AdaBreg with AdamW-style decoupled weight decay to control the
-    magnitude of surviving weights, while L1 proximal controls sparsity. Weight
-    decay is applied directly to weights after the proximal step, keeping it
-    independent from the subgradient accumulation.
-    """
-
-    def __init__(
-        self,
-        params,
-        lr: float = 1e-3,
-        reg: Optional[BregmanRegularizer] = None,
-        delta: float = 1.0,
-        betas: tuple = (0.9, 0.999),
-        eps: float = 1e-8,
-        weight_decay: float = 1e-3,
-    ):
-        self.weight_decay = weight_decay
-        if weight_decay <= 0.0:
-            if weight_decay == 0:
-                msg = f"{weight_decay} is set to zero. If you wish to use no weigth decay, use AdaBreg instead of AdabregW"
-            else:
-                msg = f"Invalid weight decay value: {weight_decay}"
-            raise ValueError(f"{msg}")
-        super().__init__(
-            params, lr=lr, reg=reg, delta=delta, betas=betas, eps=eps
-        )
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        """Performs a single optimization step with decoupled weight decay."""
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
-        for group in self.param_groups:
-            delta = group["delta"]
-            reg = group["reg"]
-            lr = group["lr"]
-            beta1, beta2 = group["betas"]
-            eps = group["eps"]
-            wd = group.get("weight_decay", self.weight_decay)
-
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-
-                grad = p.grad.data
-                state = self.state[p]
-
-                if len(state) == 0:
-                    state["step"] = 0
-                    state["sub_grad"] = self.initialize_sub_grad(p, reg, delta)
-                    state["exp_avg"] = torch.zeros_like(state["sub_grad"])
-                    state["exp_avg_sq"] = torch.zeros_like(state["sub_grad"])
-
-                state["step"] += 1
-                step = state["step"]
-
-                sub_grad = state["sub_grad"]
-                exp_avg = state["exp_avg"]
-                exp_avg_sq = state["exp_avg_sq"]
-
-                bias_correction1 = 1 - beta1**step
-                bias_correction2 = 1 - beta2**step
-
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-
-                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(
-                    eps
-                )
-                step_size = lr / bias_correction1
-
-                # Dual update: v^(k+1) = v^(k) − τ·adam_step
-                sub_grad.addcdiv_(exp_avg, denom, value=-step_size)
-
-                # Primal update (prox): θ^(k+1) = prox(δ·v^(k+1))
-                p.copy_(reg.prox(delta * sub_grad, delta))
-
-                # Decoupled weight decay: shrink surviving weights
-                assert wd > 0, "Weight decay must be positive for AdaBregW"
-                p.mul_(1 - lr * wd)
-
-        return loss
-
-
 class ProxSGD(torch.optim.Optimizer):
     """Proximal SGD optimizer.
 
     Standard proximal gradient method for comparison.
+
+    ``weight_decay`` (mu) enters the gradient, as in ``torch.optim.SGD``: there
+    is no dual here, w carries the state, so the shrink accumulates on w itself.
     """
 
     def __init__(
@@ -346,14 +293,24 @@ class ProxSGD(torch.optim.Optimizer):
         momentum: float = 0.0,
         dampening: float = 0.0,  # SGD dampening on the momentum buffer
         nesterov: bool = False,  # Nesterov look-ahead on the momentum step
+        weight_decay: float = 0.0,  # mu: L2 on the surviving weights
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate")
+        if weight_decay < 0.0:
+            raise ValueError(f"Weight decay must be >= 0, got {weight_decay}")
 
         if reg is None:
             reg = RegNone()
 
-        defaults = dict(lr=lr, reg=reg, momentum=momentum, dampening=dampening, nesterov=nesterov)
+        defaults = dict(
+            lr=lr,
+            reg=reg,
+            momentum=momentum,
+            dampening=dampening,
+            nesterov=nesterov,
+            weight_decay=weight_decay,
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -370,6 +327,7 @@ class ProxSGD(torch.optim.Optimizer):
             momentum = group["momentum"]
             dampening = group["dampening"]
             nesterov = group["nesterov"]
+            weight_decay = group["weight_decay"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -381,6 +339,10 @@ class ProxSGD(torch.optim.Optimizer):
                 if len(state) == 0:
                     state["step"] = 0
                     state["momentum_buffer"] = None
+
+                # mu reaches the support only: prox makes p exactly 0 elsewhere.
+                if weight_decay != 0.0:
+                    grad = grad.add(p, alpha=weight_decay)
 
                 # SGD momentum on the gradient (see torch.optim.SGD).
                 d_grad = grad
@@ -425,7 +387,6 @@ class ProxSGD(torch.optim.Optimizer):
 OPTIMIZER_REGISTRY = {
     "linbreg": LinBreg,
     "adabreg": AdaBreg,
-    "adabregw": AdaBregW,
     "proxsgd": ProxSGD,
 }
 

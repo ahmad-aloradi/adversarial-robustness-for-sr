@@ -217,7 +217,9 @@ Ruled out by measurement:
 - **Extreme-target artifact**: sr95 stripes identically (column 242, `β` 84.1).
 - **Dual-space decay** (`AdaBregW`, leaky dual): TinyImageNet AdaBregW still
   stripes (column 73) — decay shrinks magnitude but leaves the size-blind
-  accumulation untouched.
+  accumulation untouched. `AdaBregW` has since been removed: its decay ran
+  after the prox, which rederives θ from v, so it never accumulated. The
+  finding stands for the leaky dual it is grouped with here.
 
 Set aside by argument, not measurement:
 

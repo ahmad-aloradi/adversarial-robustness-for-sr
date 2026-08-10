@@ -72,8 +72,6 @@ BREGMAN_LAMBDA_CONFIGS = {
         },
     },
 }
-# Alias: AdaBregW uses same lambda config as AdaBreg
-BREGMAN_LAMBDA_CONFIGS["AdaBregW"] = BREGMAN_LAMBDA_CONFIGS["AdaBreg"]
 
 
 def get_bregman_lambda(
