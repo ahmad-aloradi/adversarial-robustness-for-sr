@@ -509,12 +509,7 @@ class SpeakerVerification(pl.LightningModule):
         2.  For any standard optimizer (e.g., Adam, SGD), it applies the
             optimizer to all model parameters uniformly.
         """
-        BREGMAN_OPTIMIZERS = {
-            "AdaBreg",
-            "AdaBregW",
-            "LinBreg",
-            "ProxSGD",
-        }
+        BREGMAN_OPTIMIZERS = {"AdaBreg", "LinBreg", "ProxSGD"}
         optimizer_class_name = self.hparams.optimizer._target_.split(".")[-1]
 
         # Use the two-step partial instantiation pattern for the optimizer
@@ -523,7 +518,9 @@ class SpeakerVerification(pl.LightningModule):
         if optimizer_class_name in BREGMAN_OPTIMIZERS:
             # --- Pruning-Aware Optimizer Logic ---
             self.pruning_manager = PruningManager(
-                pl_module=self, group_configs=self.hparams.model.pruning_groups
+                pl_module=self,
+                group_configs=self.hparams.model.pruning_groups,
+                prune_first_layer=self.hparams.model.prune_first_layer,
             )
             optimizer_param_groups = (
                 self.pruning_manager.get_optimizer_param_groups()

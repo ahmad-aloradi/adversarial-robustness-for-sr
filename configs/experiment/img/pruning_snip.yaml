@@ -1,0 +1,20 @@
+# @package _global_
+
+# SNIP (Lee et al., ICLR 2019): prune once at init on the |w * grad| saliency of
+# a single batch, then train the surviving weights. The saliency is ranked
+# globally, so SNIP picks its own layerwise budget rather than taking ERK's.
+# At 99% one ranking collapses the deep layers; that collapsed net still trains
+# and its number is the finding. img/pruning_snip_iter is the fix.
+# Run: python src/train.py experiment=img/pruning_snip datamodule=datasets/mnist
+
+defaults:
+  - /experiment/img/pruning_rigl
+  - _self_
+
+tags: ["img", "${datamodule.name}", "sparse_training", "snip"]
+
+callbacks:
+  model_pruning:
+    mask_init: snip # one forward/backward on the untrained weights picks the mask
+    snip_iterations: 1 # the paper's single global ranking
+    update_frequency: null # single-shot: the mask never changes after init

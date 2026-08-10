@@ -1,7 +1,7 @@
 """Tracks weight magnitude metrics per epoch for comparing optimizer behavior.
 
-Logs per-group L2 norms, sparsity, BN gamma statistics, embedding norms,
-and total model norm. Writes to both the Lightning logger and a CSV file.
+Logs per-group L2 norms, sparsity, BN gamma statistics, embedding norms, and
+total model norm. Writes to both the Lightning logger and a CSV file.
 """
 
 import csv
@@ -41,6 +41,16 @@ def _classify_module(module: nn.Module) -> str:
     ):
         return "norm_params"
     return "fallback"
+
+
+def _param_group(module: nn.Module, param_name: str) -> str:
+    """Group a parameter by its own name first, then by its module's type."""
+    if param_name == "bias":
+        return "bias_params"
+    # STR's threshold is a knob, not a weight: it would swamp the layer's norm.
+    if param_name == "sparse_threshold":
+        return "str_thresholds"
+    return _classify_module(module)
 
 
 class WeightNormTracker(Callback):
@@ -120,7 +130,8 @@ class WeightNormTracker(Callback):
     def _get_groups(
         self, pl_module: LightningModule
     ) -> Dict[str, List[nn.Parameter]]:
-        """Get parameter groups either from pruning_manager or auto-classify."""
+        """Get parameter groups either from pruning_manager or auto-
+        classify."""
         manager = getattr(pl_module, "pruning_manager", None)
         if manager is not None and hasattr(manager, "processed_groups"):
             groups: Dict[str, List[nn.Parameter]] = {}
@@ -132,35 +143,29 @@ class WeightNormTracker(Callback):
                 groups.setdefault(name, []).extend(group["params"])
             # Classify remaining parameters not covered by pruning groups
             for mod_name, module in pl_module.named_modules():
-                group_name = _classify_module(module)
                 for pname, param in module.named_parameters(recurse=False):
                     if id(param) in seen_param_ids:
                         continue
                     seen_param_ids.add(id(param))
-                    if pname == "bias":
-                        groups.setdefault("bias_params", []).append(param)
-                    else:
-                        groups.setdefault(group_name, []).append(param)
+                    groups.setdefault(_param_group(module, pname), []).append(
+                        param
+                    )
             return groups
 
         # Auto-classify by walking named_modules
         groups = {}
         seen_param_ids = set()
         for name, module in pl_module.named_modules():
-            group_name = _classify_module(module)
             for pname, param in module.named_parameters(recurse=False):
                 if id(param) in seen_param_ids:
                     continue
                 seen_param_ids.add(id(param))
-                if pname == "bias":
-                    groups.setdefault("bias_params", []).append(param)
-                else:
-                    groups.setdefault(group_name, []).append(param)
+                groups.setdefault(_param_group(module, pname), []).append(
+                    param
+                )
         return groups
 
-    def _compute_metrics(
-        self, pl_module: LightningModule
-    ) -> Dict[str, float]:
+    def _compute_metrics(self, pl_module: LightningModule) -> Dict[str, float]:
         metrics: Dict[str, float] = {}
 
         groups = self._get_groups(pl_module)
@@ -194,10 +199,13 @@ class WeightNormTracker(Callback):
         # BN gamma stats
         bn_gammas = []
         for module in pl_module.modules():
-            if isinstance(
-                module,
-                (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d),
-            ) and module.affine:
+            if (
+                isinstance(
+                    module,
+                    (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d),
+                )
+                and module.affine
+            ):
                 bn_gammas.append(module.weight.detach().float())
 
         if bn_gammas:
@@ -230,17 +238,13 @@ class WeightNormTracker(Callback):
         pl_module: LightningModule,
         metrics: Dict[str, float],
     ) -> None:
-        prefixed = {
-            f"weight_norms/{k}": v for k, v in metrics.items()
-        }
+        prefixed = {f"weight_norms/{k}": v for k, v in metrics.items()}
         # Log directly to logger — pl_module.log_dict() is not allowed
         # inside on_validation_end per PyTorch Lightning restrictions.
         if trainer.logger:
             trainer.logger.log_metrics(prefixed, step=trainer.global_step)
 
-    def _write_csv(
-        self, trainer: Trainer, metrics: Dict[str, float]
-    ) -> None:
+    def _write_csv(self, trainer: Trainer, metrics: Dict[str, float]) -> None:
         out_dir = Path(trainer.default_root_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / self.filename

@@ -6,6 +6,44 @@ import torch
 import torch.nn as nn
 
 
+def masked_name(name: str) -> str:
+    """The attribute holding a parameter's live value.
+
+    Why: ``torch.nn.utils.prune`` renames the Parameter to ``<p>_orig`` and
+    recomputes ``<p> = orig * mask`` in a forward pre-hook, so
+    ``named_parameters`` reports ``weight_orig`` — whose masked entries drift
+    off zero under momentum — while the value the model computes with is
+    ``weight``.
+
+    >>> masked_name("weight_orig"), masked_name("weight")
+    ('weight', 'weight')
+    """
+    return name[: -len("_orig")] if name.endswith("_orig") else name
+
+
+def pool_sparsity(sparsity: float, pool_numel: int, dense_numel: int) -> float:
+    """Translate a target over every weight tensor into one over the subset a
+    callback actually sparsifies.
+
+    Weights held dense still spend their full size out of the same budget,
+    which is how RigL accounts for a dense first layer. ``pool_numel`` is the
+    sparsified subset, ``dense_numel`` everything else in the denominator.
+
+    >>> round(pool_sparsity(0.9, pool_numel=9900, dense_numel=100), 4)
+    0.9091
+    >>> pool_sparsity(0.0, pool_numel=9900, dense_numel=100)
+    0.0
+    """
+    kept = (1.0 - sparsity) * (pool_numel + dense_numel) - dense_numel
+    assert kept > 0, (
+        f"sparsity {sparsity} leaves "
+        f"{(1.0 - sparsity) * (pool_numel + dense_numel):.0f} weights but the "
+        f"layers held dense already take {dense_numel}; lower the target or "
+        f"set prune_first_layer=true"
+    )
+    return 1.0 - kept / pool_numel
+
+
 def compute_sparsity(
     target: Union[
         nn.Module,
@@ -77,12 +115,11 @@ def _iter_tensors(target) -> Iterator[torch.Tensor]:
                 if id(param) in seen:
                     continue
                 seen.add(id(param))
-                # weight_orig exposes its masked weight after pruning.
-                name = name[:-5] if name.endswith("_orig") else name
-                yield getattr(module, name)
+                yield getattr(module, masked_name(name))
     elif target and isinstance(target[0], (tuple, list)):
         for module, name in target:
-            yield getattr(module, name)  # missing attr is a wiring bug
+            # missing attr is a wiring bug
+            yield getattr(module, masked_name(name))
     else:
         yield from (p for p in target if p.requires_grad)
 
@@ -92,7 +129,7 @@ if __name__ == "__main__":
 
     half_zero = nn.Parameter(torch.tensor([0.0, 0.0, 1.0, 2.0]))
     print("raw list:", compute_sparsity([half_zero]))  # 0.5
-    linear = nn.Linear(4, 4)    # 16 weights, 4 biases
+    linear = nn.Linear(4, 4)  # 16 weights, 4 biases
     linear.weight.data.zero_()
     print("(module, name):", compute_sparsity([(linear, "weight")]))  # 1.0
     print("whole module:", compute_sparsity(linear))  # 0.8

@@ -1,17 +1,17 @@
 import json
-from typing import Any, Dict, Optional
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-import torch
+import pandas as pd
 import pytorch_lightning as pl
+import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
-import pandas as pd
 
-from src.modules.encoder_wrappers import EncoderWrapper
-from src.callbacks.pruning.utils.pruning_manager import PruningManager
 from src import utils
+from src.callbacks.pruning.utils.pruning_manager import PruningManager
+from src.modules.encoder_wrappers import EncoderWrapper
 
 log = utils.get_pylogger(__name__)
 
@@ -76,7 +76,7 @@ class CountermeasureModule(pl.LightningModule):
             audio_processor=self.audio_processor,
             audio_processor_normalizer=self.audio_processor_normalizer,
         )
-            
+
         self.classifier = instantiate(model.classifier)
 
         if self.data_augmentation is not None:
@@ -115,8 +115,8 @@ class CountermeasureModule(pl.LightningModule):
     def forward(self, batch) -> Dict[str, torch.Tensor]:
         """Forward pass through encoder + classifier.
 
-        Accepts both training batches (DatasetItem via BaseCollate) and
-        Track 1 evaluation batches (ASVSpoofTrack1Batch).
+        Accepts both training batches (DatasetItem via BaseCollate) and Track 1
+        evaluation batches (ASVSpoofTrack1Batch).
         """
         if self.training and hasattr(self, "wav_augmenter"):
             max_audio_length = max(batch.audio_length)
@@ -145,7 +145,9 @@ class CountermeasureModule(pl.LightningModule):
         self, results: Dict[str, Any], batch, stage: str
     ) -> None:
         logged_dict = {
-            f"{stage}/{self.train_criterion.__class__.__name__}": results["loss"].item()
+            f"{stage}/{self.train_criterion.__class__.__name__}": results[
+                "loss"
+            ].item()
         }
         self.log_dict(
             logged_dict,
@@ -357,12 +359,13 @@ class CountermeasureModule(pl.LightningModule):
     # ------------------------------------------------------------------ #
 
     def configure_optimizers(self) -> Dict[str, Any]:
-        BREGMAN_OPTIMIZERS = {"AdaBreg", "AdaBregW", "LinBreg", "ProxSGD"}
+        BREGMAN_OPTIMIZERS = {"AdaBreg", "LinBreg", "ProxSGD"}
         optimizer_class_name = self.hparams.optimizer._target_.split(".")[-1]
 
         # Filter out None values from optimizer config to allow swapping
         # optimizer types (e.g., SGD→Adam) without leftover params
         from omegaconf import OmegaConf
+
         opt_cfg = OmegaConf.to_container(self.hparams.optimizer, resolve=True)
         opt_cfg = {k: v for k, v in opt_cfg.items() if v is not None}
         opt_cfg = OmegaConf.create(opt_cfg)
@@ -372,6 +375,7 @@ class CountermeasureModule(pl.LightningModule):
             self.pruning_manager = PruningManager(
                 pl_module=self,
                 group_configs=self.hparams.model.pruning_groups,
+                prune_first_layer=self.hparams.model.prune_first_layer,
             )
             optimizer_param_groups = (
                 self.pruning_manager.get_optimizer_param_groups()

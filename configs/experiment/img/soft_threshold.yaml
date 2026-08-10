@@ -1,0 +1,32 @@
+# @package _global_
+
+# STR (Kusupati et al., ICML 2020): every prunable Conv2d/Linear computes with
+# sign(w) * relu(|w| - sigmoid(s)) for a learnable per-layer scalar s.
+#
+# STR has no sparsity target. One weight decay λ acts on w and s alike and sets
+# the budget, fine-tuned with s_init, so this is a sweep over Table 10's grid:
+#   python src/train.py experiment=img/soft_threshold module.optimizer.weight_decay=9.051757813e-5
+# Report whatever sparsity each run lands at, and calibrate the grid with one
+# short run per value first — the achieved sparsity depends on the step budget.
+# The run dir carries no -srNN token for the same reason, so give concurrent
+# sweep points distinct `name=` values (scripts/fabfile.py adds a -wd<value>).
+#
+# Inherits dense_sgd, so the recipe is the dense baseline's apart from λ. No
+# gates: a band around a target STR was never given would be meaningless.
+# Run: python src/train.py experiment=img/soft_threshold datamodule=datasets/mnist
+
+defaults:
+  - /experiment/img/dense_sgd
+  - _self_
+
+tags: ["img", "${datamodule.name}", "sparse_training", "str"]
+
+callbacks:
+  model_pruning:
+    _target_: src.callbacks.pruning.str_pruner.STRPruner
+    s_init: -8.0 # Consider the original=-3200 sigmoid(s) = 3.4e-4, ~1% of weights below it at init: the loss/decay balance runs from step 0
+    prune_first_layer: false # stem conv stays an nn.Conv2d, as in every other img recipe
+
+module:
+  optimizer:
+    weight_decay: 2.251757813e-5 # λ for Table 10's 90.23% sparse ResNet-50 row; one λ covers w and s

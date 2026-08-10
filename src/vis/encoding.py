@@ -38,17 +38,28 @@ METHOD_CLASS_COLORS = {
     "vanilla": "#61291e",  # distinct brown (baseline)
     "wespeaker": "#9C4F4F",  # dark charcoal
     "dense": "#7f7f7f",  # neutral grey — image dense (SGD) baseline
+    # Sparse-training baselines share a purple/teal family so they read as one group.
+    "rigl": "#9467bd",  # purple
+    "set": "#c5b0d5",  # light purple — RigL's growth ablation
+    "static": "#bcbd22",  # olive
+    "snip": "#17becf",  # cyan
+    "granet": "#e377c2",  # pink
+    "str": "#d62728",  # red
     # forget about those other methods for now, just make them black so they stand out as "other"
     "proxsgd": "#000000",  # light gray
-    "adabregw": "#000000",  # deep navy blue
 }
 
 METHOD_DISPLAY_NAMES = {
     "linbreg": "LinBreg",
     "adabreg": "AdaBreg",
-    "adabregw": "AdaBregW",
     "pruning_struct": "Str. Prun.",
     "pruning_unstruct": "Unst. Prun.",
+    "rigl": "RigL",
+    "set": "SET",
+    "static": "Static-ERK",
+    "snip": "SNIP",
+    "granet": "GraNet",
+    "str": "STR",
     "proxsgd": "ProxSGD",
     "vanilla": "AdamW",
     "wespeaker": "SGD",
@@ -61,9 +72,7 @@ DENSE_METHOD_CLASSES = frozenset({"dense", "vanilla", "wespeaker"})
 
 # Method classes carrying the Bregman knobs (alpha, f, initial sparsity).
 # ProxSGD inherits the Bregman parent config, so it belongs here despite the name.
-BREGMAN_METHOD_CLASSES = frozenset(
-    {"adabreg", "adabregw", "linbreg", "proxsgd"}
-)
+BREGMAN_METHOD_CLASSES = frozenset({"adabreg", "linbreg", "proxsgd"})
 
 # Notation shared by labels, group headers and axis titles. Math mode renders
 # under both usetex and the mathtext fallback (see setup_matplotlib).
@@ -119,11 +128,16 @@ def method_tier(info):
 # drive the marker (see get_style's ``marker_by``).
 METHOD_MARKERS = {
     "adabreg": "o",
-    "adabregw": "s",
     "linbreg": "D",
     "proxsgd": "^",
     "pruning_struct": "v",
     "pruning_unstruct": "P",
+    "rigl": "*",
+    "set": "X",
+    "static": "d",
+    "snip": "p",
+    "granet": "h",
+    "str": "<",
 }
 
 # Sparsity → marker shape  (consistent everywhere)
@@ -166,6 +180,7 @@ VARIANT_LINESTYLES = {
     "subgrad_corr_v3": (0, (5, 2, 1, 2)),
     "subgrad_corr_v4": (0, (1, 2, 5, 2)),
     "fixed": "-",  # (0, (4, 2, 1, 2, 1, 2)),
+    "iter": (0, (4, 2)),
 }
 
 # Sweep rank → marker / dash pattern. A group sweeping one field (initial
@@ -185,6 +200,7 @@ VARIANT_DISPLAY_NAMES = {
     "poor_init": "poor init",
     "fixed": "",  # the lambda value names these runs, so no redundant tag
     "progressive": "Prog.",
+    "iter": "Iter.",  # SNIP over T prune steps vs the paper's single ranking
     "regl1_conv": "",
     "constant_lr": "Const. lr",
     "RoP": "RoP",
@@ -251,6 +267,11 @@ VARIANT_COLOR_ADJUSTMENTS = {
     "subgrad_corr_v4": (-0.18, 0.10, 0.05),
     "fixed": (0.12, -0.0, 0.18),  # shift hue toward purple, slightly darker
     "progressive": (
+        0.05,
+        0.0,
+        -0.12,
+    ),  # slightly darker sibling of the base method
+    "iter": (
         0.05,
         0.0,
         -0.12,
@@ -456,9 +477,14 @@ EXPERIMENT_ORDER = [
     "wespeaker",
     "pruning_struct",
     "pruning_unstruct",
+    "static",
+    "snip",
+    "set",
+    "rigl",
+    "granet",
+    "str",
     "linbreg",
     "adabreg",
-    "adabregw",
 ]
 
 

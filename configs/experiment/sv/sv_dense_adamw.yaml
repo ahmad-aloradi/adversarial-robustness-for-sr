@@ -19,7 +19,7 @@ seed: 42
 trainer:
   max_epochs: 40 # Change this to adjust training length (all schedules auto-scale)
   min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.8)'} # 80% minimum
-  gradient_clip_val: 1.0
+  gradient_clip_val: null
   num_sanity_val_steps: 0
 
 callbacks:

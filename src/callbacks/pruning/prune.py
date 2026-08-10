@@ -6,9 +6,16 @@ import torch.nn.utils.prune as pytorch_prune
 from pytorch_lightning import Callback, LightningModule, Trainer
 
 from src.callbacks.pruning.checkpoint_handler import PrunedCheckpointHandler
-from src.callbacks.pruning.parameter_manager import ParameterManager
+from src.callbacks.pruning.parameter_manager import (
+    ParameterManager,
+    dense_held_numel,
+    regularizable_params,
+)
 from src.callbacks.pruning.scheduler import PruningScheduler
-from src.callbacks.pruning.shared_prune_utils import compute_sparsity
+from src.callbacks.pruning.shared_prune_utils import (
+    compute_sparsity,
+    pool_sparsity,
+)
 from src.utils import get_pylogger
 
 logger = get_pylogger(__name__)
@@ -34,6 +41,7 @@ class MagnitudePruner(Callback):
         pruning_dim: Optional[int] = None,
         pruning_norm: Optional[int] = 1,
         prune_bias: bool = False,
+        prune_first_layer: bool = False,
         make_pruning_permanent: bool = True,
         min_param_elements: int = 100,
         verbose: int = 1,
@@ -72,18 +80,16 @@ class MagnitudePruner(Callback):
         else:
             self.scheduler = None
 
-        # Config & Manager
-        class Config:
-            pass
-
-        self.cfg = Config()
-        self.cfg.prune_bias = prune_bias
-        self.cfg.min_param_elements = min_param_elements
-        self.cfg.pruning_dim = pruning_dim
-        self.manager = ParameterManager(self.cfg)
+        self.manager = ParameterManager(
+            prune_bias=prune_bias,
+            prune_first_layer=prune_first_layer,
+            min_param_elements=min_param_elements,
+            pruning_dim=pruning_dim,
+        )
 
         # State
         self._target_params = []
+        self._dense_numel = 0
         self._logged_overview = False
 
         # Temp state for logging
@@ -95,6 +101,9 @@ class MagnitudePruner(Callback):
     ) -> None:
         self._target_params = self.manager.collect_parameters(
             pl_module, self.manual_params
+        )
+        self._dense_numel = dense_held_numel(
+            pl_module, self._target_params, self.manager.min_param_elements
         )
         if self.verbose and not self._logged_overview:
             self.manager.log_overview()
@@ -172,6 +181,9 @@ class MagnitudePruner(Callback):
             self._target_params = self.manager.collect_parameters(
                 pl_module, self.manual_params
             )
+            self._dense_numel = dense_held_numel(
+                pl_module, self._target_params, self.manager.min_param_elements
+            )
 
         current_epoch = trainer.current_epoch
 
@@ -186,6 +198,12 @@ class MagnitudePruner(Callback):
                 target_amount = self.final_amount  # Maintain target
 
         self._current_epoch_target = target_amount
+        # The schedule is over every weight tensor; prune spends its amount on the target set alone.
+        target_amount = pool_sparsity(
+            target_amount,
+            sum(getattr(m, n).numel() for m, n in self._target_params),
+            self._dense_numel,
+        )
 
         # 2. Measure Current State
         current_sparsity = compute_sparsity(self._target_params)
@@ -221,14 +239,21 @@ class MagnitudePruner(Callback):
 
         if self.scheduled:
             trainer.callback_metrics["pruning/sparsity"] = torch.tensor(
-                new_sparsity
+                self._reported_sparsity(pl_module)
             )
+
+    def _reported_sparsity(self, model: nn.Module) -> float:
+        """Zeros over every weight tensor — the figure the gates and the
+        benchmark table read, shared with every other pruner."""
+        return compute_sparsity(
+            regularizable_params(model, self.manager.min_param_elements)
+        )
 
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         """Logs metrics and manages trackers AFTER training step."""
-        pruned_sparsity = compute_sparsity(self._target_params)
+        pruned_sparsity = self._reported_sparsity(pl_module)
         overall_sparsity = compute_sparsity(pl_module, threshold=1e-12)
 
         # 1. Log Metrics (Recorder)
@@ -241,7 +266,7 @@ class MagnitudePruner(Callback):
                 prog_bar=False,
                 on_epoch=True,
             )
-            # "pruning/sparsity" = pruned params only
+            # "pruning/sparsity" = all weight tensors, norms and biases aside
             pl_module.log(
                 "pruning/sparsity",
                 pruned_sparsity,

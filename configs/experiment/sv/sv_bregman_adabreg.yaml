@@ -1,7 +1,7 @@
 # @package _global_
 
 # Adaptive-lambda AdaBreg pruning of the WeSpeaker ECAPA-TDNN.
-# Canonical Bregman parent: linbreg / adabregw / proxsgd / *_fixed inherit
+# Canonical Bregman parent: linbreg / proxsgd / *_fixed inherit
 # these pruning_groups, gates, scheduler and augmentation; each swaps only the
 # optimizer and its lambda source.
 # Run: python src/train.py experiment=sv/sv_bregman_adabreg
@@ -36,7 +36,7 @@ _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_la
 trainer:
   max_epochs: 40
   min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.8)'}
-  gradient_clip_val: 1.0
+  gradient_clip_val: null
   num_sanity_val_steps: 0
 
 callbacks:
@@ -47,12 +47,9 @@ callbacks:
     sparsity_metric: ${_bregman_sparsity_metric}
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    save_top_k: 5
+    save_top_k: 1 # never >1: eval averages the top-k, and averaging masks refills pruned weights
     every_n_epochs: 1
-  checkpoint_averaging:
-    _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
-    num_checkpoints: ${callbacks.model_checkpoint.save_top_k}
-    output_filename: averaged_top{num}.ckpt
+  checkpoint_averaging: null # sparse iterates carry different supports, so their average is denser than any of them
   model_pruning:
     _target_: src.callbacks.pruning.bregman.bregman_pruner.BregmanPruner
     sparsity_threshold: 1e-12
@@ -126,6 +123,7 @@ module:
     lr: 1e-2
 
   model:
+    prune_first_layer: false # stem conv stays dense, matching the sparse-training baselines
     pruning_groups:
       # Group 1: Prunable Convolutional Layers
       - name: conv_layers

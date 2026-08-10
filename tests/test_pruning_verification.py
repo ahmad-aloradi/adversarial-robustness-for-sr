@@ -113,6 +113,7 @@ def test_masks_are_binary_after_pruning():
             epochs_to_ramp=0,
             pruning_dim=1,
             pruning_norm=1,
+            prune_first_layer=True,
             verbose=0,
         )
 
@@ -152,6 +153,7 @@ def test_no_fully_collapsed_layers():
         epochs_to_ramp=0,
         pruning_dim=1,
         pruning_norm=1,
+        prune_first_layer=True,
         verbose=0,
     )
 
@@ -198,6 +200,7 @@ def test_pruner_matches_pytorch_reference():
         epochs_to_ramp=0,
         pruning_dim=1,
         pruning_norm=1,
+        prune_first_layer=True,
         verbose=0,
     )
 
@@ -244,6 +247,7 @@ def test_sparsity_monotonically_increases_during_ramp():
         schedule_type="linear",
         pruning_dim=1,
         pruning_norm=1,
+        prune_first_layer=True,
         verbose=0,
     )
 

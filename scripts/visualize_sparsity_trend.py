@@ -59,7 +59,6 @@ CNCELEB_POS = (1, 1)
 # Method ordering for consistent legend
 METHOD_ORDER = [
     "adabreg",
-    "adabregw",
     "linbreg",
     "pruning_struct",
     "pruning_unstruct",

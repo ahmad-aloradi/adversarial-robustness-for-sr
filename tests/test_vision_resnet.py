@@ -19,38 +19,67 @@ _ARCH_NAMES = sorted(_ARCHS)
 
 @pytest.mark.parametrize("arch", _ARCH_NAMES)
 def test_output_shape(arch):
-    net = build_resnet(arch, num_classes=10, in_channels=3)
+    net = build_resnet(arch, num_classes=10, dataset_name="cifar10")
     out = net(torch.randn(2, 3, 32, 32))
     assert tuple(out.shape) == (2, 10)
 
 
 def test_grayscale_in_channels():
-    net = build_resnet("resnet18", num_classes=10, in_channels=1)
+    net = build_resnet(
+        "resnet18", num_classes=10, dataset_name="cifar10", in_channels=1
+    )
     out = net(torch.randn(2, 1, 28, 28))
     assert tuple(out.shape) == (2, 10)
 
 
 def test_small_image_stem_replaced():
-    net = build_resnet("resnet50", num_classes=10, in_channels=3)
+    net = build_resnet("resnet50", num_classes=10, dataset_name="cifar10")
     assert isinstance(net.maxpool, nn.Identity)
     assert net.conv1.kernel_size == (3, 3)
     assert net.conv1.stride == (1, 1)
 
 
+def test_imagenet_keeps_stock_stem():
+    """224px inputs must keep torchvision's 7x7 stride-2 conv + maxpool."""
+    net = build_resnet("resnet18", num_classes=1000, dataset_name="imagenet")
+    assert isinstance(net.maxpool, nn.MaxPool2d)
+    assert net.conv1.kernel_size == (7, 7)
+    assert net.conv1.stride == (2, 2)
+    assert tuple(net(torch.randn(2, 3, 224, 224)).shape) == (2, 1000)
+
+
+def test_imagenet_rejects_grayscale():
+    """The stock stem is never rebuilt, so grayscale must not pass silently."""
+    with pytest.raises(AssertionError):
+        build_resnet(
+            "resnet18",
+            num_classes=1000,
+            dataset_name="imagenet",
+            in_channels=1,
+        )
+
+
+def test_unknown_dataset_raises():
+    with pytest.raises(AssertionError):
+        build_resnet("resnet18", num_classes=10, dataset_name="voxceleb")
+
+
 @pytest.mark.parametrize("bad_arch", ["resnet20", ""])
 def test_unknown_arch_raises(bad_arch):
     with pytest.raises(AssertionError):
-        build_resnet(bad_arch, num_classes=10)
+        build_resnet(bad_arch, num_classes=10, dataset_name="cifar10")
 
 
 def test_invalid_num_classes_raises():
     with pytest.raises(AssertionError):
-        build_resnet("resnet18", num_classes=0)
+        build_resnet("resnet18", num_classes=0, dataset_name="cifar10")
 
 
 def test_invalid_in_channels_raises():
     with pytest.raises(AssertionError):
-        build_resnet("resnet18", num_classes=10, in_channels=2)
+        build_resnet(
+            "resnet18", num_classes=10, dataset_name="cifar10", in_channels=2
+        )
 
 
 @pytest.mark.parametrize("arch", ["resnet50", "wide_resnet50_2"])
@@ -61,7 +90,9 @@ def test_pruning_groups_route_bottleneck_downsample(arch):
     class _FakeModule(pl.LightningModule):
         def __init__(self):
             super().__init__()
-            self.net = build_resnet(arch, num_classes=10, in_channels=3)
+            self.net = build_resnet(
+                arch, num_classes=10, dataset_name="cifar10"
+            )
 
     model = _FakeModule()
     groups = [
@@ -95,7 +126,11 @@ def test_pruning_groups_route_bottleneck_downsample(arch):
             "optimizer_settings": {"lambda_scale": 1.0},
         },
     ]
-    manager = PruningManager(pl_module=model, group_configs=groups)
+    # prune_first_layer=True: this asserts type-based routing, and the stem
+    # must reach conv_layers rather than the dense group to be covered.
+    manager = PruningManager(
+        pl_module=model, group_configs=groups, prune_first_layer=True
+    )
     manager.get_optimizer_param_groups()
 
     total = sum(len(g["params"]) for g in manager.processed_groups)
@@ -118,6 +153,6 @@ def test_pruning_groups_route_bottleneck_downsample(arch):
 
 if __name__ == "__main__":
     for arch in _ARCH_NAMES:
-        net = build_resnet(arch, num_classes=10)
+        net = build_resnet(arch, num_classes=10, dataset_name="cifar10")
         out = net(torch.randn(1, 3, 32, 32))
         print(f"{arch}: {tuple(out.shape)}")

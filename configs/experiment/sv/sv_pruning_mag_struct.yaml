@@ -33,7 +33,7 @@ _pruning_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1
 trainer:
   max_epochs: 40
   min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.8)'}
-  gradient_clip_val: 1.0
+  gradient_clip_val: null
   num_sanity_val_steps: 0
 
 callbacks:
@@ -41,20 +41,18 @@ callbacks:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
     target_sparsity: ${callbacks.model_pruning.amount} # band centre = pruning rate; top-k saved only within tolerance of this
     tolerance: ${_pruning_tolerance} # in-band half-width, as a fraction of the target
-    sparsity_metric: "pruning/sparsity" # gate signal: pruned groups only (the pruning rate); `sparsity` would be overall whole-model
+    sparsity_metric: "pruning/sparsity" # gate signal: all weight tensors, norms and biases aside; `sparsity` would be overall whole-model
     mode: max
     monitor: ${replace:"valid/__metric__"}
-    save_top_k: 5
+    save_top_k: 1 # never >1: averaging masks refills pruned weights (src/train.py enforces this)
     every_n_epochs: 1
-  checkpoint_averaging:
-    _target_: src.callbacks.checkpoint_averaging.CheckpointAveraging
-    num_checkpoints: ${callbacks.model_checkpoint.save_top_k}
-    output_filename: averaged_top{num}.ckpt
+  checkpoint_averaging: null # pruned iterates carry different masks, so their average is denser than any of them
   model_pruning:
     _target_: src.callbacks.pruning.prune.MagnitudePruner
     pruning_fn: ln_structured # torch.nn.utils.prune fn: ln_structured, l1_unstructured, random_structured, random_unstructured
     amount: 0.9 # final sparsity once scheduled_pruning finishes ramping
     use_global_unstructured: false # per-layer structured pruning, not a single global ranking
+    prune_first_layer: true # SV prunes the encoder stem like any other layer
     make_pruning_permanent: true # fuse masks into weights at training end
     pruning_dim: 1 # dimension pruned by ln_structured
     pruning_norm: 1 # Ln norm used to rank structures (L1)

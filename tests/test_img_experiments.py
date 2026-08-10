@@ -179,6 +179,37 @@ def test_configure_optimizers_dense():
     assert not hasattr(model, "pruning_manager")
 
 
+def test_str_uses_one_weight_decay():
+    """"s also has the same weight-decay parameter lambda" (Kusupati et al.,
+    Sec 3), so w, bias, BatchNorm and the s scalars all sit in one group at
+    module.optimizer.weight_decay, set to Table 10's lambda."""
+    import hydra
+
+    cfg = _compose(["experiment=img/soft_threshold"])
+    model = hydra.utils.instantiate(cfg.module, _recursive_=False)
+    hydra.utils.instantiate(cfg.callbacks.model_pruning).setup(
+        None, model, stage="fit"
+    )
+    groups = model.configure_optimizers()["optimizer"].param_groups
+
+    assert len(groups) == 1, f"expected one param group, got {len(groups)}"
+    assert groups[0]["weight_decay"] == cfg.module.optimizer.weight_decay
+    assert len(groups[0]["params"]) == len(list(model.parameters()))
+    thresholds = [
+        n for n, _ in model.named_parameters() if n.endswith("sparse_threshold")
+    ]
+    assert thresholds, "no STR thresholds; did callbacks.model_pruning get disabled?"
+
+
+def test_dense_recipes_keep_one_parameter_group():
+    import hydra
+
+    cfg = _compose(["experiment=img/dense_sgd"])
+    model = hydra.utils.instantiate(cfg.module, _recursive_=False)
+    groups = model.configure_optimizers()["optimizer"].param_groups
+    assert len(groups) == 1, "no STR layers means no split"
+
+
 @pytest.mark.parametrize(
     "exp,optimizer",
     [
@@ -202,14 +233,27 @@ def test_configure_optimizers_bregman(exp, optimizer):
     name_to_group = _param_group_map(model)
     assert name_to_group["net.layer2.0.downsample.0.weight"] == "conv_layers"
     assert name_to_group["net.layer2.0.downsample.1.weight"] == "norm_params"
-    assert name_to_group["net.fc.weight"] == "linear_layers"
     assert "fallback" not in {g["config"]["name"] for g in groups}
+
+    # prune_first_layer=false: the stem sits out of RegL1, the head does not.
+    assert name_to_group["net.conv1.weight"] == "first_dense"
+    assert name_to_group["net.fc.weight"] == "linear_layers"
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "exp",
-    ["dense_sgd", "bregman_adabreg", "bregman_linbreg"],
+    [
+        "dense_sgd",
+        "bregman_adabreg",
+        "bregman_linbreg",
+        "pruning_rigl",
+        "pruning_set",
+        "pruning_static",
+        "pruning_snip",
+        "pruning_granet",
+        "soft_threshold",
+    ],
 )
 def test_mnist_fast_dev_run(exp, tmp_path):
     from src.train import train
@@ -229,4 +273,8 @@ def test_mnist_fast_dev_run(exp, tmp_path):
         cfg.save_state_dict = False
         cfg.extras.print_config = False
         cfg.extras.enforce_tags = False
+        if exp == "pruning_granet":
+            # fast_dev_run is one step; the 1000-step cubic ramp has to fit it.
+            cfg.callbacks.model_pruning.update_frequency = 1
+            cfg.callbacks.model_pruning.final_prune_epoch = 1
     train(cfg)

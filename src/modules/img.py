@@ -212,20 +212,35 @@ class ImageClassification(pl.LightningModule):
         self._write_results()
 
     def _compute_sparsities(self) -> tuple[float, float]:
-        """Whole-model sparsity and the sparsity over the active pruner's
-        target params (matching the logged pruning/sparsity). Without a pruner
-        the two are identical."""
+        """Whole-model sparsity and sparsity over every weight tensor — all but
+        norms and biases (matching the logged pruning/sparsity).
+
+        The second figure is what the benchmark compares. Without a pruner it
+        is the dense model's.
+        """
         from src.callbacks.pruning.bregman.bregman_pruner import BregmanPruner
+        from src.callbacks.pruning.dst_pruner import DynamicSparsePruner
+        from src.callbacks.pruning.parameter_manager import (
+            regularizable_params,
+        )
         from src.callbacks.pruning.prune import MagnitudePruner
+        from src.callbacks.pruning.str_pruner import STRPruner
 
         overall = compute_sparsity(self)
-        pruned = overall
+        pruned = compute_sparsity(regularizable_params(self))
         for cb in self.trainer.callbacks:
             if isinstance(cb, MagnitudePruner) and cb._target_params:
-                pruned = compute_sparsity(cb._target_params)
+                pruned = cb._reported_sparsity(self)
                 break
             if isinstance(cb, BregmanPruner):
                 pruned = cb._pruned_sparsity()
+                break
+            if isinstance(cb, DynamicSparsePruner):
+                pruned = cb.pruned_sparsity()
+                break
+            # STR's stored w stays dense during training, so both figures come from the thresholded weights.
+            if isinstance(cb, STRPruner):
+                overall, pruned = cb.sparsities()
                 break
         return overall, pruned
 
@@ -260,12 +275,7 @@ class ImageClassification(pl.LightningModule):
         """Bregman optimizers (AdaBreg/LinBreg/ProxSGD) route parameters
         through the PruningManager using ``model.pruning_groups``; any standard
         optimizer (SGD, Adam) is applied to all parameters uniformly."""
-        BREGMAN_OPTIMIZERS = {
-            "AdaBreg",
-            "AdaBregW",
-            "LinBreg",
-            "ProxSGD",
-        }
+        BREGMAN_OPTIMIZERS = {"AdaBreg", "LinBreg", "ProxSGD"}
         optimizer_class_name = self.hparams.optimizer._target_.split(".")[-1]
         optimizer_partial = instantiate(self.hparams.optimizer)
 
@@ -273,6 +283,7 @@ class ImageClassification(pl.LightningModule):
             self.pruning_manager = PruningManager(
                 pl_module=self,
                 group_configs=self.hparams.model.pruning_groups,
+                prune_first_layer=self.hparams.model.prune_first_layer,
             )
             optimizer_param_groups = (
                 self.pruning_manager.get_optimizer_param_groups()

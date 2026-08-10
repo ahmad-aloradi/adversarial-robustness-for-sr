@@ -5,12 +5,13 @@ PruningManager: A unified handler for parameter grouping, sparsity, and regulari
 import importlib
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import torch
 import torch.nn as nn
 from pytorch_lightning import LightningModule
 
+from ..parameter_manager import stem_weight
 from .sparsity_applier import SparsityApplier
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,16 @@ def _resolve_layer_types(type_strings: list) -> tuple:
         mod = importlib.import_module(module_path)
         resolved.append(getattr(mod, class_name))
     return tuple(resolved)
+
+
+def _lambda_scale(config: Dict[str, Any]) -> float:
+    """A group's regularization strength; 0 means "train this normally".
+
+    Why the keys are required: this picks the group that donates the dense
+    stem's settings, so a misspelled ``lambda_scale`` reading as 0.0 would make
+    every group look unregularized and pick the wrong donor.
+    """
+    return config["optimizer_settings"]["lambda_scale"]
 
 
 def module_param_matches(
@@ -89,13 +100,20 @@ class PruningManager:
         pl_module (LightningModule): The model containing the parameters.
         group_configs (List[Dict[str, Any]]): A list defining the pruning groups.
             The last group should be a fallback group with `is_fallback: True`.
+        prune_first_layer (bool): when False the stem weight falls through to
+            the unregularized fallback group, matching what `ParameterManager`
+            does for the pruning callbacks.
     """
 
     def __init__(
-        self, pl_module: LightningModule, group_configs: List[Dict[str, Any]]
+        self,
+        pl_module: LightningModule,
+        group_configs: List[Dict[str, Any]],
+        prune_first_layer: bool = False,
     ):
         self.pl_module = pl_module
         self._raw_configs = group_configs
+        self.prune_first_layer = prune_first_layer
         self.processed_groups = self._process_configs()
 
     def _process_configs(self) -> List[Dict[str, Any]]:
@@ -147,7 +165,67 @@ class PruningManager:
                 if not assigned:
                     fallback_group["params"].append(param)
 
+        if not self.prune_first_layer:
+            processed_groups.append(
+                self._reserve_first(processed_groups, self.pl_module)
+            )
+
         return [g for g in processed_groups if g["params"]]
+
+    @staticmethod
+    def _reserve_first(
+        processed_groups: List[Dict[str, Any]],
+        model: nn.Module,
+    ) -> Dict[str, Any]:
+        """Pull the stem weight into a group that neither regularizes nor
+        sparsifies it.
+
+        The stem comes from ``stem_weight``, the same selector the pruning
+        callbacks use, so Bregman holds the tensor dense that they do; reading
+        it off the assigned groups instead would miss a stem the config routed
+        to its fallback. The optimizer settings are copied from a configured
+        group that already has ``lambda_scale: 0``, so the "leave this alone"
+        regularizer stays a config decision rather than a hard-coded target.
+        """
+        donor = next(
+            (
+                g
+                for g in processed_groups
+                if _lambda_scale(g["config"]) == 0
+                and g["applier"].sparsity_rate == 0
+            ),
+            None,
+        )
+        if donor is None:
+            raise ValueError(
+                "prune_first_layer=false needs a pruning group with "
+                "lambda_scale: 0 and no initial sparsity to copy settings "
+                "from; none of the configured groups qualifies."
+            )
+
+        stem_module, stem_name = stem_weight(model)
+        excluded = id(getattr(stem_module, stem_name))
+        dense = {
+            "params": [],
+            "config": {
+                "name": "first_dense",
+                "optimizer_settings": donor["config"].get(
+                    "optimizer_settings", {}
+                ),
+            },
+            "resolved_types": (),
+            "applier": SparsityApplier(),
+        }
+        for group in processed_groups:
+            keep = [p for p in group["params"] if id(p) != excluded]
+            dense["params"].extend(
+                p for p in group["params"] if id(p) == excluded
+            )
+            group["params"] = keep
+        assert (
+            len(dense["params"]) == 1
+        ), f"expected 1 stem weight, moved {len(dense['params'])}"
+        return dense
 
     def get_optimizer_param_groups(self) -> List[Dict[str, Any]]:
         optimizer_groups = []

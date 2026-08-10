@@ -20,7 +20,7 @@ seed: 42
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
   min_epochs: 1
-  gradient_clip_val: 1.0
+  gradient_clip_val: null # the sparse-training recipes cannot clip, so the baseline they are compared against does not either
   num_sanity_val_steps: 0
   # AdaptiveAvgPool2d has no deterministic CUDA backward; trainer/default sets
   # deterministic: True, which would raise on GPU.
@@ -46,5 +46,5 @@ callbacks:
   model_checkpoint:
     monitor: ${replace:"valid/__metric__"}
     mode: max
-    save_top_k: 5
+    save_top_k: 1 # 1 everywhere in img/, so the dense row is evaluated the same way as the sparse ones
     every_n_epochs: 1

@@ -23,7 +23,7 @@ metrics:
     _target_: torchmetrics.Accuracy
     task: multiclass
     num_classes: ${datamodule.num_classes}
-    top_k: 5
+    top_k: ${oc.eval:'min(5, ${datamodule.num_classes})'} # torchmetrics rejects top_k > num_classes
   valid:
     _target_: torchmetrics.Accuracy
     task: multiclass
@@ -32,7 +32,7 @@ metrics:
     _target_: torchmetrics.Accuracy
     task: multiclass
     num_classes: ${datamodule.num_classes}
-    top_k: 5
+    top_k: ${oc.eval:'min(5, ${datamodule.num_classes})'} # torchmetrics rejects top_k > num_classes
   valid_best:
     _target_: torchmetrics.MaxMetric
   test:
@@ -43,7 +43,7 @@ metrics:
     _target_: torchmetrics.Accuracy
     task: multiclass
     num_classes: ${datamodule.num_classes}
-    top_k: 5
+    top_k: ${oc.eval:'min(5, ${datamodule.num_classes})'} # torchmetrics rejects top_k > num_classes
 
 ### optimizer and lr_scheduler (set per experiment; `???` blocks stale kwargs
 ### from leaking across scheduler swaps, e.g. cosine T_max -> ReduceLROnPlateau)

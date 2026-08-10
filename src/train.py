@@ -170,6 +170,19 @@ def train(cfg: DictConfig) -> Tuple[dict, dict]:
             "scripts/quantize_ptq.py."
         )
 
+    prune_cfg = cb_cfg.get("model_pruning") if hasattr(cb_cfg, "get") else None
+    ckpt_cfg = (
+        cb_cfg.get("model_checkpoint") if hasattr(cb_cfg, "get") else None
+    )
+    top_k = ckpt_cfg.get("save_top_k") if _is_live(ckpt_cfg) else 1
+    if _is_live(prune_cfg) and top_k != 1:
+        raise ValueError(
+            f"callbacks.model_checkpoint.save_top_k={top_k} with a pruner: "
+            "sparse checkpoints carry different masks, so averaging them "
+            "(src/eval.py does this by default) refills the pruned weights "
+            "and reports a denser model than was trained. Set save_top_k=1."
+        )
+
     # set seed for random number generators in pytorch, numpy and python.random
     if cfg.get("seed"):
         log.info(f"Seed everything with <{cfg.seed}>")

@@ -293,10 +293,6 @@ LR_COLUMN_RULES = {
     "linbreg": (r"^lr-LinBreg/conv_layers$", r"^lr-LinBreg/linear_layers$"),
     "adabreg": (r"^lr-AdaBreg/conv_layers$", r"^lr-AdaBreg/linear_layers$"),
     "proxsgd": (r"^lr-ProxSGD/conv_layers$", r"^lr-ProxSGD/linear_layers$"),
-    "adabregw": (
-        r"^lr-AdaBregW?/conv_layers$",
-        r"^lr-AdaBregW?/linear_layers$",
-    ),
 }
 
 
@@ -353,9 +349,8 @@ def _stage_of(metric):
 
 
 # (name substring, method_class, variant). Order matters — most-specific first
-# (adabregw before adabreg; *_fixed/_progressive before the bare method).
+# (*_fixed/_progressive and snip_iter before the bare method).
 METHOD_PATTERNS = [
-    ("adabregw", "adabregw", None),
     ("adabreg_fixed", "adabreg", "fixed"),
     ("adabreg_progressive", "adabreg", "progressive"),
     ("adabreg", "adabreg", None),
@@ -366,6 +361,13 @@ METHOD_PATTERNS = [
     ("proxsgd", "proxsgd", None),
     ("pruning_mag_struct", "pruning_struct", None),
     ("pruning_mag_unstruct", "pruning_unstruct", None),
+    ("pruning_rigl", "rigl", None),
+    ("pruning_set", "set", None),
+    ("pruning_static", "static", None),
+    ("pruning_snip_iter", "snip", "iter"),
+    ("pruning_snip", "snip", None),
+    ("pruning_granet", "granet", None),
+    ("soft_threshold", "str", None),
     ("dense_sgd", "dense", None),
 ]
 

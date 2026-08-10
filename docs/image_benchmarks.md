@@ -67,12 +67,37 @@ bash scripts/datasets/prep_imagenet.sh     # ~150 GB (~300 GB peak)
 | `proxsgd_fixed` | ProxSGD | fixed λ |
 | `pruning_mag_struct` | SGD | gradual magnitude pruning, `ln_structured` |
 | `pruning_mag_unstruct` | SGD | gradual magnitude pruning, global `l1_unstructured` |
+| `pruning_rigl` | SGD | RigL — sparse from step 0, regrow on the gradient |
+| `pruning_set` | SGD | SET — RigL with random regrowth |
+| `pruning_static` | SGD | Static-ERK — one random mask, never updated |
+| `pruning_snip` | SGD | SNIP — one-shot \|w·grad\| ranking at init |
+| `pruning_snip_iter` | SGD | iterative SNIP — the same ranking over 100 steps |
+| `pruning_granet` | SGD | GraNet — dense start, cubic ramp, RigL regrowth |
+| `soft_threshold` | SGD | STR — learned per-layer threshold, sparsity is an outcome |
 
 - `bregman_adabreg.yaml` is the parent — it holds the only full ResNet-18
   `pruning_groups` block; variants swap the optimizer and λ source.
   `pruning_mag_unstruct` inherits `pruning_mag_struct`.
+- `pruning_rigl.yaml` is the parent of the six sparse-training baselines; see
+  [sparse_training.md](sparse_training.md).
 - Target sparsity: `_bregman_target_sparsity` (default 0.9). Fixed-λ runs scale λ
   with `_bregman_lambda_factor`.
+
+### What "sparsity" means
+
+Every method reports zeros over **all weight tensors, norms and biases aside**.
+Layers a method holds dense (the stem at `prune_first_layer: false`) count in
+that denominator at full size with no zeros, so `amount: 0.99` means the same
+thing for RigL, GraNet, magnitude pruning and Bregman alike. `sparsity` is the
+whole model including BatchNorm and biases, which no method sparsifies.
+
+That one quantity is published under two keys, and each gate must read the one
+its own pruner writes — `_bregman_sparsity_metric` exists for exactly this:
+
+| Pruner | Gate metric |
+| --- | --- |
+| magnitude, DST (RigL/SET/Static/SNIP/GraNet), STR | `pruning/sparsity` |
+| Bregman (AdaBreg/LinBreg/ProxSGD) | `bregman/pruned_sparsity` |
 
 ### Pruning groups
 
@@ -81,8 +106,9 @@ bash scripts/datasets/prep_imagenet.sh     # ~150 GB (~300 GB peak)
   misroute downsample BatchNorm γ into the RegL1 group and shrink it.
 - That is why every backbone below works with no config change — covered by
   `tests/test_vision_resnet.py` / `tests/test_wide_resnet.py`.
-- `conv1` and `fc` are pruned; add a name to a group's
-  `exclude_module_name_patterns` to keep it dense.
+- `fc` is pruned; `conv1` is held dense by `prune_first_layer: false` (RigL's
+  rule). Add a name to a group's `exclude_module_name_patterns` to keep another
+  layer dense.
 
 ## Backbones
 

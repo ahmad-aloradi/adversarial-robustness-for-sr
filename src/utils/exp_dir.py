@@ -173,9 +173,9 @@ def _datamodule_declares_artifacts(exp_dir: Path) -> bool:
     """Whether the training-time datamodule config used `artifacts_dir`.
 
     Audio SV/CM/VPC datasets stage CSV metadata under `{name}_artifacts/`.
-    Torchvision image datasets (CIFAR/MNIST/TinyImageNet) have no such
-    concept, so their exp_dirs never contain one. Checked via substring
-    match on the raw composed config to avoid resolving interpolations.
+    Torchvision image datasets (CIFAR/MNIST/TinyImageNet) have no such concept,
+    so their exp_dirs never contain one. Checked via substring match on the raw
+    composed config to avoid resolving interpolations.
     """
     config_path = exp_dir / ".hydra" / "config.yaml"
     if not config_path.exists():
@@ -188,7 +188,8 @@ def _sanitize_overrides_for_eval(
     exp_dir: Path,
     keep_logger: bool,
 ) -> list[str]:
-    """Filter training-only overrides, fix cluster paths, inject artifacts dirs."""
+    """Filter training-only overrides, fix cluster paths, inject artifacts
+    dirs."""
     training_only_prefixes = (
         "trainer",
         "datamodule.loaders.train.",
@@ -268,11 +269,11 @@ def prepare_argv_for_exp_dir(hydra_params: dict) -> Path | None:
     """Pre-Hydra hook. Idempotent.
 
     If `exp_dir=` (or `ckpt_path=` from which exp_dir can be derived) is
-    present in sys.argv, swap `hydra_params["config_path"]` to the
-    training-time `{exp_dir}/metadata/configs/` snapshot (unless
-    `use_training_configs=False` is passed), mirror missing config
-    groups into that snapshot, and append sanitized training overrides
-    to sys.argv. Returns the resolved exp_dir or None.
+    present in sys.argv, swap `hydra_params["config_path"]` to the training-
+    time `{exp_dir}/metadata/configs/` snapshot (unless
+    `use_training_configs=False` is passed), mirror missing config groups into
+    that snapshot, and append sanitized training overrides to sys.argv. Returns
+    the resolved exp_dir or None.
     """
     global _PREPARED
     if _PREPARED:
@@ -514,7 +515,7 @@ def _resolve_averaged_checkpoint(cfg: DictConfig) -> str:
         log.info(f"Reusing averaged checkpoint: {existing[0]}")
         return str(existing[0])
 
-    log.warning(f"No averaged checkpoint in {ckpt_dir}; creating one.")
+    log.warning(f"No averaged checkpoint in {ckpt_dir}; selecting from it.")
     candidates = [
         p
         for p in ckpt_dir.glob("*.ckpt")
@@ -543,6 +544,11 @@ def _resolve_averaged_checkpoint(cfg: DictConfig) -> str:
             "falling back to modification time"
         )
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    # save_top_k=1 leaves nothing to average; the best checkpoint is the answer.
+    if len(candidates) == 1:
+        log.info(f"Single checkpoint, nothing to average: {candidates[0]}")
+        return str(candidates[0])
 
     if len(candidates) < avg_min:
         raise ValueError(

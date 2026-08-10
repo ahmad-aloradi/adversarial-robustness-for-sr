@@ -85,7 +85,6 @@ def fixed_lambda_for(experiment, target_sparsity, extra_overrides):
         target_sparsity is not None
     ), f"{experiment} needs a target sparsity to look its fixed lambda up"
     optimizers = {
-        "adabregw": "AdaBregW",
         "adabreg": "AdaBreg",
         "linbreg": "LinBreg",
         "proxsgd": "ProxSGD",
@@ -1083,14 +1082,23 @@ IMG_WALLTIME = {
     "cifar10": "08:00:00",
     "cifar100": "08:00:00",
     "tinyimagenet": "24:00:00",
+    # 100 ImageNet epochs exceed the 24h cap; resubmit to resume from last.ckpt
+    "imagenet": "24:00:00",
 }
 EPOCHS_IMG = {
     "mnist": 200,
     "cifar10": 350,
     "cifar100": 350,
     "tinyimagenet": 300,
+    "imagenet": 100,
 }
-IMG_BATCH_SIZE = 128
+IMG_BATCH_SIZE = {
+    "mnist": 128,
+    "cifar10": 128,
+    "cifar100": 128,
+    "tinyimagenet": 128,
+    "imagenet": 256,
+}
 
 
 def _submit_img_job(
@@ -1146,6 +1154,7 @@ def _submit_img_job(
     # Handling epochs
     epochs_to_ramp = None
     max_epochs = EPOCHS_IMG[dataset_name]
+    batch_size = IMG_BATCH_SIZE[dataset_name]
     if experiment in ramp_up_experiments:
         epochs_to_ramp = ramp_up_epochs
         # max_epochs += epochs_to_ramp
@@ -1163,7 +1172,7 @@ def _submit_img_job(
         else sparsity_token(target_sparsity)
     )
     init_sparsity_str = initial_sparsity_token(initial_sparsity)
-    exp_name = f"{experiment}{ramp_str}-{model_name}-{dataset_name}-bs{IMG_BATCH_SIZE}{init_sparsity_str}{sparsity_str}{job_name_suffix}"
+    exp_name = f"{experiment}{ramp_str}-{model_name}-{dataset_name}-bs{batch_size}{init_sparsity_str}{sparsity_str}{job_name_suffix}"
     job_name = f"{exp_name}-seed{seed}"  # unique per seed for SLURM dedup
     name = f"{dataset_name}/{model_name}/{exp_name}/seed_{seed}"  # results saved under their own seed
 
@@ -1176,7 +1185,7 @@ def _submit_img_job(
         "seed": seed,
         "name": name,
         "logger": "many_loggers",
-        "datamodule.loaders.train.batch_size": IMG_BATCH_SIZE,
+        "datamodule.loaders.train.batch_size": batch_size,
         "paths.log_dir": RESULTS_DIR,
         "hydra.run.dir": f"{RESULTS_DIR}/train/runs/{name}",
         "trainer.num_sanity_val_steps": 0,
@@ -1258,33 +1267,50 @@ def run_img():
     experiments sweep over sparsity rates; every experiment sweeps over seeds,
     each saved under its own `seed_{seed}` subdirectory.
     """
-    # dataset_names = ["mnist", "cifar10", "cifar100", "tinyimagenet"]
+    # dataset_names = ["mnist", "cifar10", "cifar100", "tinyimagenet", "imagenet"]
+    # model_names = ["wrn28_10", "resnet18", "resnet50"]
     dataset_names = ["cifar100"]
     model_names = ["resnet18"]
-    sparsity_rates_sweep = [0.95, 0.99]
+    sparsity_rates_sweep = [0.9, 0.95, 0.99]
     default_seeds = [42]
     lambda_factor_k = 0.4  # scales BREGMAN_LAMBDA_CONFIGS' fixed_lambda
     # Bregman starting sparsity sweep; 0.0 is a dense start, 0.99 the config default
-    initial_sparsity_sweep = [0.0, 0.5, 0.99]
+    # initial_sparsity_sweep = [0.0, 0.5, 0.99]
+    initial_sparsity_sweep = [0.99]
 
     ########################
     # Switch controls (master switch per group of experiments)
     ########################
     RUN_BASELINE_EXPS = False
     RUN_PRUNING_EXPS = False
+    # Sparse-training baselines (RigL/SET/Static/SNIP/GraNet), all sparse-to-sparse.
+    RUN_DST_EXPS = False
+    # STR: sparsity is an outcome of the weight decay, so sweep that instead.
+    RUN_STR_EXPS = False
+    # Table 10 rows spanning 79.55% to 99.10% sparse ResNet-50.
+    STR_WEIGHT_DECAYS = [
+        1.7e-5,
+        2.251757813e-5,
+        3.051757813e-5,
+        4.051757813e-5,
+        6.051757813e-5,
+        9.051757813e-5,
+    ]
     # Vanilla Bregman: fixed lambda, no scheduler (bregman_*_fixed).
     RUN_FIXED_BREGMAN_EXPS = False
     # Adaptive Bregman (lambda scheduler):
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
 
     # Initial-sparsity sweeps: same starting points, two ways of setting lambda.
-    RUN_INIT_SPARSITY_FIXED_LAMBDA = True  # static lambda, sparsity floats
-    RUN_INIT_SPARSITY_FIXED_TARGET = False  # adaptive lambda, sparsity pinned
+    RUN_INIT_SPARSITY_FIXED_LAMBDA = False  # static lambda, sparsity floats
+    RUN_INIT_SPARSITY_ADAPTIVE_LAMBDA = True  # adaptive, sparsity pinned
+    ADABREG_EPS_HI = True  # AdaBreg only: raise eps to EPS_HI_VALUE (stripe fix), named -epshi
 
     # Auxiliary experiments
     RUN_CONSTANT_LR_EXPS = False  # baseline with constant LR (no scheduler)
     INFLATE_CLASSIFIER_HEAD = False  # inflate the classifier head
     RUN_STRIPE_FIX_EXPS = False
+    EPS_HI_VALUE = 1e-3
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
@@ -1317,6 +1343,37 @@ def run_img():
                 }
             )
 
+    if RUN_DST_EXPS:
+        for _exp in (
+            "pruning_rigl",
+            "pruning_set",
+            "pruning_static",
+            "pruning_snip_iter",
+            "pruning_snip",
+            "pruning_granet",
+        ):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": sparsity_rates_sweep,
+                }
+            )
+
+    if RUN_STR_EXPS:
+        for _wd in STR_WEIGHT_DECAYS:
+            EXPERIMENTS.append(
+                {
+                    "experiment": "soft_threshold",
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": [None],
+                    "extra_overrides": {"module.optimizer.weight_decay": _wd},
+                    "suffix": f"-wd{_wd:g}",
+                }
+            )
+
     if RUN_FIXED_BREGMAN_EXPS:
         for _exp in ("bregman_adabreg_fixed", "bregman_linbreg_fixed"):
             EXPERIMENTS.append(
@@ -1344,7 +1401,7 @@ def run_img():
 
     # Static lambda, so sparsity is the outcome; target_sparsity only picks lambda.
     if RUN_INIT_SPARSITY_FIXED_LAMBDA:
-        for _exp in ("bregman_linbreg_fixed","bregman_adabreg_fixed"):
+        for _exp in ("bregman_linbreg_fixed", "bregman_adabreg_fixed"):
             EXPERIMENTS.append(
                 {
                     "experiment": _exp,
@@ -1359,17 +1416,22 @@ def run_img():
             )
 
     # Adaptive lambda pins the final sparsity at the target; only the start s0 varies.
-    if RUN_INIT_SPARSITY_FIXED_TARGET:
-        for _exp in ("bregman_linbreg", "bregman_adabreg"):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "dataset_names": dataset_names,
-                    "model_name": model_names,
-                    "sparsity_rates": sparsity_rates_sweep,
-                    "initial_sparsities": initial_sparsity_sweep,
+    if RUN_INIT_SPARSITY_ADAPTIVE_LAMBDA:
+        # for _exp in ("bregman_adabreg", "bregman_linbreg"):
+        for _exp in ("bregman_adabreg",):
+            entry = {
+                "experiment": _exp,
+                "dataset_names": dataset_names,
+                "model_name": model_names,
+                "sparsity_rates": sparsity_rates_sweep,
+                "initial_sparsities": initial_sparsity_sweep,
+            }
+            if ADABREG_EPS_HI and _exp == "bregman_adabreg":
+                entry["extra_overrides"] = {
+                    "++module.optimizer.eps": EPS_HI_VALUE
                 }
-            )
+                entry["suffix"] = f"-epshi{EPS_HI_VALUE}"
+            EXPERIMENTS.append(entry)
 
     if INFLATE_CLASSIFIER_HEAD:
         for _exp in (

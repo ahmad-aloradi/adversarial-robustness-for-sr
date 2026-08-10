@@ -68,7 +68,6 @@ METHOD_ORDER = [
     "adabreg",
     "linbreg_fixed",
     "adabreg_fixed",
-    "adabregw",
     "pruning_struct",
     "pruning_unstruct",
     "vanilla",
@@ -83,7 +82,6 @@ METHOD_GROUPS = {
     "adabreg_fixed": "sparse_bench",
     "linbreg": "main",
     "adabreg": "main",
-    "adabregw": "main",
     "proxsgd": "main",
     "pruning_struct": "sparse_bench",
     "pruning_unstruct": "sparse_bench",
@@ -630,7 +628,7 @@ def plot_metric_for_dataset(
         # Push the group label further down when there are sparsity ticks
         # above it, so the two tiers don't visually crowd each other.
         group_label_y = -0.07 if any_sparsity_tick else -0.05
-        # Slight tilt so longer method names ("Unst. Prun.", "AdaBregW")
+        # Slight tilt so longer method names ("Unst. Prun.", "Str. Prun.")
         # don't bump into each other when many narrow groups sit side by
         # side. Centered rotation keeps each label roughly under its run.
         for label, run_start, run_end in runs:

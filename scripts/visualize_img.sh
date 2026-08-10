@@ -59,10 +59,17 @@ for dataset in "${datasets[@]}"; do
             "dense_sgd${scheduler}"
             "pruning_mag_unstruct*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
             "pruning_mag_struct*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_rigl*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_set*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_static*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_snip*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_granet*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
             "bregman_adabreg*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
             "bregman_linbreg*${model}-${dataset}*${sparsity_rate}*${scheduler}*${suffix}"
             "bregman_adabreg_fixed*${model}-${dataset}*${fixed_lambda}"
             "bregman_linbreg_fixed*${model}-${dataset}*${fixed_lambda}"
+            # STR's sparsity is an outcome of its weight decay, so no target token selects it.
+            "soft_threshold*${model}-${dataset}*${suffix}"
         )
 
         python scripts/visualize.py \
@@ -78,6 +85,11 @@ for dataset in "${datasets[@]}"; do
         mask_experiments=(
             "pruning_mag_unstruct*${sparsity_rate}*${scheduler}*${suffix}"
             "pruning_mag_struct*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_rigl*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_set*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_static*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_snip*${sparsity_rate}*${scheduler}*${suffix}"
+            "pruning_granet*${sparsity_rate}*${scheduler}*${suffix}"
             "bregman_adabreg*${sparsity_rate}*${scheduler}*${suffix}"
             "bregman_linbreg*${sparsity_rate}*${scheduler}*${suffix}"
             "dense_sgd*${scheduler}*${suffix}*"

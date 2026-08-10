@@ -1,23 +1,21 @@
 # @package _global_
 
-# Structured (ln_structured) gradual magnitude pruning of ResNet-18.
-# Canonical magnitude-pruning parent: the unstructured variant inherits this.
-# Dataset-agnostic — the epoch budget comes from the dataset config. Equivalent
-# recipe to configs/experiment/sv/sv_pruning_mag_struct.yaml.
-# Run: python src/train.py experiment=img/pruning_mag_struct datamodule=datasets/cifar100
+# RigL (Evci et al., ICML 2020): sparse from step 0, mask redrawn every dT
+# steps by dropping the smallest weights and regrowing the largest gradients.
+# Canonical dynamic-sparse-training parent: set / static / snip / granet
+# inherit it. Dataset-agnostic — the epoch budget comes from the dataset config.
+# Run: python src/train.py experiment=img/pruning_rigl datamodule=datasets/cifar100
 # (defaults to CIFAR-10 when no datamodule override is given)
 
 defaults:
   - override /datamodule: datasets/cifar10.yaml
   - override /module: img.yaml
   - override /trainer: gpu.yaml
-  - override /callbacks:
-      - default.yaml
-      - checkpoint_handler.yaml
+  - override /callbacks: default.yaml
   - override /logger: many_loggers.yaml
   - _self_
 
-tags: ["img", "${datamodule.name}", "pruning", "ln_structured", "gradual"]
+tags: ["img", "${datamodule.name}", "sparse_training", "rigl"]
 seed: 42
 
 _pruning_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1-this)*target <= sparsity <= (1+this)*target
@@ -25,7 +23,7 @@ _pruning_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
   min_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.8)'}
-  gradient_clip_val: null
+  gradient_clip_val: null # DST keeps the gradient dense for the growth criterion, so a clip on the dense norm shrinks the live weights' steps ~6x at 99% sparsity; upstream RigL does not clip
   num_sanity_val_steps: 0
   # AdaptiveAvgPool2d has no deterministic CUDA backward.
   deterministic: warn
@@ -33,7 +31,7 @@ trainer:
 callbacks:
   model_checkpoint:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedModelCheckpoint
-    target_sparsity: ${callbacks.model_pruning.amount} # band centre = pruning rate; top-k saved only within tolerance of this
+    target_sparsity: ${callbacks.model_pruning.amount} # band centre = the mask's sparsity; top-k saved only within tolerance of this
     tolerance: ${_pruning_tolerance} # in-band half-width, as a fraction of the target
     sparsity_metric: "pruning/sparsity" # gate signal: all weight tensors, norms and biases aside; `sparsity` would be overall whole-model
     mode: max
@@ -41,19 +39,15 @@ callbacks:
     save_top_k: 1 # never >1: eval averages the top-k, and averaging masks refills pruned weights
     every_n_epochs: 1
   model_pruning:
-    _target_: src.callbacks.pruning.prune.MagnitudePruner
-    pruning_fn: ln_structured # torch.nn.utils.prune function: ln_structured, l1_unstructured, random_structured, random_unstructured
-    amount: 0.9 # final sparsity once scheduled_pruning finishes ramping
-    use_global_unstructured: false # per-layer structured pruning, not a single global ranking
-    prune_first_layer: false # stem conv stays dense, matching the sparse-training baselines
-    make_pruning_permanent: true # fuse masks into weights at training end
-    pruning_dim: 1 # dimension pruned by ln_structured
-    pruning_norm: 1 # Ln norm used to rank structures (L1)
-    verbose: 1
-    scheduled_pruning: true # ramp sparsity to `amount` over `epochs_to_ramp`
-    epochs_to_ramp: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'} # 50% of training
-    schedule_type: constant # constant pruning RATE (log-space interpolation), not a linear sparsity ramp
-    tolerance: ${_pruning_tolerance} # monotonicity check band, shared with the gates
+    _target_: src.callbacks.pruning.dst_pruner.DynamicSparsePruner
+    amount: 0.99 # final sparsity over all weight tensors (norms and biases aside), held from step 0
+    mask_init: erk # RigL's Erdos-Renyi-Kernel layerwise budget
+    growth: gradient # regrow the largest dense gradients; `random` is SET
+    update_frequency: 100 # RigL's delta-T, in optimizer steps
+    prune_first_layer: false # upstream keeps the stem conv dense on CIFAR throughout and at 99% everywhere
+    drop_fraction: 0.3 # RigL's alpha: share of active weights redrawn at step 0
+    drop_end_fraction: 0.75 # cosine reaches drop_end_value here, so updates stop
+    tolerance: ${_pruning_tolerance} # drift band asserted at every epoch end
   early_stopping:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
     target_sparsity: ${callbacks.model_pruning.amount} # patience advances only while in-band around this

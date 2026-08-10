@@ -105,7 +105,11 @@ def test_pruning_groups_route_all_parameters():
             "optimizer_settings": {"lambda_scale": 1.0},
         },
     ]
-    manager = PruningManager(pl_module=model, group_configs=groups)
+    # prune_first_layer=True: this asserts type-based routing, and the stem
+    # must reach conv_layers rather than the dense group to be covered.
+    manager = PruningManager(
+        pl_module=model, group_configs=groups, prune_first_layer=True
+    )
     manager.get_optimizer_param_groups()
 
     total = sum(len(g["params"]) for g in manager.processed_groups)
