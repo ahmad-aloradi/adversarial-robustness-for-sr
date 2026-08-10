@@ -1,0 +1,23 @@
+# @package _global_
+
+# GraNet (Liu et al., NeurIPS 2021): start dense, ramp to the target with a
+# global cubic prune, and keep RigL-style regrowth running the whole time.
+# Constants from GraNet's own CIFAR command and argparse defaults, not the paper
+# text: --init-density 1.0 --final-density 0.10 --update-frequency 1000
+# --prune-rate 0.5, --init-prune-epoch 0, --final-prune-epoch 110 of 160.
+# Run: python src/train.py experiment=img/pruning_granet datamodule=datasets/mnist
+
+defaults:
+  - /experiment/img/pruning_rigl
+  - _self_
+
+tags: ["img", "${datamodule.name}", "sparse_training", "granet"]
+
+callbacks:
+  model_pruning:
+    initial_amount: 0.0 # dense start; sparsity moves only in the global cubic prune
+    final_prune_epoch: ${oc.eval:'int(${trainer.max_epochs} * 0.6875)'} # GraNet's 110/160 epochs, as a fraction of this dataset's budget
+    update_frequency: 1000 # GraNet's --update-frequency, in optimizer steps
+    drop_fraction: 0.5 # GraNet's --prune-rate
+    drop_end_fraction: 1.0 # decay spans the whole run, so regrowth never stops
+    drop_end_value: 0.005 # CosineDecay's eta_min: the floor the drop fraction holds

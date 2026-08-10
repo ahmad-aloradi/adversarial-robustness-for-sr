@@ -1,0 +1,16 @@
+# @package _global_
+
+# Static-ERK: RigL's own control. The ERK mask is drawn once and never touched,
+# so the gap to pruning_rigl is exactly what the mask dynamics buy. Note this is
+# Static(ERK), not the random-init Static row some papers report.
+# Run: python src/train.py experiment=img/pruning_static datamodule=datasets/mnist
+
+defaults:
+  - /experiment/img/pruning_rigl
+  - _self_
+
+tags: ["img", "${datamodule.name}", "sparse_training", "static_erk"]
+
+callbacks:
+  model_pruning:
+    update_frequency: null # never redraw the mask
