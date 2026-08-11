@@ -79,6 +79,25 @@ Metrics: `bregman/global_lambda` (live λ), `bregman/lambda_delta` (applied `Δ�
 
 **Note**: the target is not guaranteed to be reached. The optimizer term and the regularizer term pull against each other in the weight update, so the Bregman optimizer, `lr`, and the LR schedule all move the reachable sparsity.
 
+#### 1.3b Target ramp
+
+`TargetScheduler` (`src/callbacks/pruning/bregman/target_scheduler.py`) is a separate callback that raises the controller's setpoint from `initial_sparsity` to its configured target over `epochs_to_ramp` epochs, then holds. It reads the endpoint off `BregmanPruner.lambda_scheduler` at train start and writes one float on it per epoch — nothing in the Bregman stack imports it.
+
+```yaml
+callbacks:
+  target_scheduler:
+    _target_: src.callbacks.pruning.bregman.target_scheduler.TargetScheduler
+    initial_sparsity: 0.0 # ramp start; the end is the controller's target
+    epochs_to_ramp: 80
+    schedule_type: cubic # Zhu & Gupta / GraNet Eq. 1 cubic ramp (default), or `linear`/`constant`
+```
+
+The ramp drives `PruningScheduler` (§2.3) itself, so it and a gradual-pruning run of the same length aim at the same sparsity in the same epoch — that comparison, from a dense start, is what the recipes are for. The gates still band the final target, so validation opens only once the run reaches it. Metric: `bregman/ramp_target`.
+
+```bash
+python src/train.py experiment=img/bregman_adabreg_progressive datamodule=datasets/cifar100
+```
+
 #### 1.4 Pruning Manager
 
 Located in `src/callbacks/pruning/utils/pruning_manager.py`:

@@ -1,0 +1,24 @@
+# @package _global_
+
+# AdaBreg from a dense start, ramping the controller's target up to
+# _bregman_target_sparsity over _bregman_ramp_epochs — gradual magnitude
+# pruning's schedule (img/pruning_mag_unstruct) driven through lambda.
+# Run: python src/train.py experiment=img/bregman_adabreg_progressive datamodule=datasets/cifar100
+
+defaults:
+  - /experiment/img/bregman_adabreg
+  - _self_
+
+tags:
+  ["img", "${datamodule.name}", "Bregman_learning", "Adabreg", "progressive"]
+
+_bregman_initial_sparsity: 0.0 # dense start: the weights begin where the ramp begins
+_bregman_ramp_epochs: 100 # ramp length; the fabfile overrides it to the pruning baseline's
+_bregman_schedule_type: cubic # Zhu & Gupta / GraNet Eq. 1 cubic ramp, as in pruning_mag_struct
+
+callbacks:
+  target_scheduler:
+    _target_: src.callbacks.pruning.bregman.target_scheduler.TargetScheduler
+    initial_sparsity: ${_bregman_initial_sparsity} # ramp start; the end is the controller's target
+    epochs_to_ramp: ${_bregman_ramp_epochs}
+    schedule_type: ${_bregman_schedule_type}

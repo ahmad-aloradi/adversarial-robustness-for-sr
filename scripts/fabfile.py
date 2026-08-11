@@ -1134,6 +1134,8 @@ def _submit_img_job(
     ramp_up_experiments = [
         "pruning_mag_struct",
         "pruning_mag_unstruct",
+        "bregman_adabreg_progressive",
+        "bregman_linbreg_progressive",
     ]
     ramp_up_epochs = 80
     schedule_type = "constant"
@@ -1204,12 +1206,17 @@ def _submit_img_job(
         script_arguments["_bregman_initial_sparsity"] = initial_sparsity
 
     if epochs_to_ramp:
-        script_arguments.update(
-            {
-                "callbacks.model_pruning.epochs_to_ramp": epochs_to_ramp,
-                "callbacks.model_pruning.schedule_type": schedule_type,
-            }
-        )
+        # Same schedule, ramped through lambda by Bregman and the amount by magnitude.
+        if "bregman" in experiment:
+            script_arguments["_bregman_ramp_epochs"] = epochs_to_ramp
+            script_arguments["_bregman_schedule_type"] = schedule_type
+        elif "pruning" in experiment:
+            script_arguments[
+                "callbacks.model_pruning.epochs_to_ramp"
+            ] = epochs_to_ramp
+            script_arguments[
+                "callbacks.model_pruning.schedule_type"
+            ] = schedule_type
 
     if extra_overrides:
         script_arguments.update(extra_overrides)
@@ -1300,6 +1307,8 @@ def run_img():
     RUN_FIXED_BREGMAN_EXPS = False
     # Adaptive Bregman (lambda scheduler):
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
+    # Dense start, target ramped over ramp_up_epochs (see ramp_up_experiments).
+    RUN_PROGRESSIVE_BREGMAN_EXPS = False
 
     # Initial-sparsity sweeps: same starting points, two ways of setting lambda.
     RUN_INIT_SPARSITY_FIXED_LAMBDA = False  # static lambda, sparsity floats
@@ -1390,6 +1399,20 @@ def run_img():
 
     if RUN_ADAPTIVE_CLASSICAL:
         for _exp in ("bregman_adabreg", "bregman_linbreg"):
+            EXPERIMENTS.append(
+                {
+                    "experiment": _exp,
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": sparsity_rates_sweep,
+                }
+            )
+
+    if RUN_PROGRESSIVE_BREGMAN_EXPS:
+        for _exp in (
+            "bregman_adabreg_progressive",
+            "bregman_linbreg_progressive",
+        ):
             EXPERIMENTS.append(
                 {
                     "experiment": _exp,

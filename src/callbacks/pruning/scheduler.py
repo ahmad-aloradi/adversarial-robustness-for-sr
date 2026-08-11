@@ -9,6 +9,11 @@ class PruningScheduler:
     """
     Manages the pruning schedule by pre-computing targets for each epoch.
     Supports state persistence to ensure consistency upon resumption.
+
+    ``schedule_type``: ``"linear"`` walks the sparsity value; ``"constant"``
+    walks the surviving-weight fraction in log-space (constant pruning rate
+    per epoch); ``"cubic"`` is Zhu & Gupta's GMP schedule (the one GraNet's
+    Eq. 1 also uses), spending most of the budget in the middle of the ramp.
     """
     def __init__(
         self,
@@ -44,7 +49,7 @@ class PruningScheduler:
                 # Constant Pruning Rate: S_t = 1 - (1 - S_final)^(t / N)
                 remaining_final = 1.0 - self.final_sparsity
                 remaining_initial = 1.0 - self.initial_sparsity
-                
+
                 if remaining_final <= 1e-9:
                     remaining_final = 1e-9
                 if remaining_initial <= 1e-9:
@@ -53,6 +58,9 @@ class PruningScheduler:
                     # Log-space interpolation
                     current_remaining = remaining_initial * (remaining_final / remaining_initial) ** progress
                     target = 1.0 - current_remaining
+            elif self.schedule_type == "cubic":
+                # Zhu & Gupta 2017 / GraNet Eq. 1: S_t = S_f + (S_i - S_f) * (1 - progress)^3
+                target = self.final_sparsity + (self.initial_sparsity - self.final_sparsity) * (1.0 - progress) ** 3
             else:
                 raise ValueError(f"Unknown schedule_type: {self.schedule_type}")
             
