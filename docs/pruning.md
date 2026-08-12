@@ -29,8 +29,11 @@ All of them support **parameter groups** with different regularization strategie
 
 ##### Weight decay (μ) in a Bregman iteration
 
-The iteration is dual. With the elastic net `J(w) = λ‖w‖₁ + ‖w‖₂²/(2δ)`, LinBreg
-and AdaBreg carry `v ∈ ∂J(w)` as their state and read `w` back off it each step:
+Notation: `τ = lr`, `δ = delta`, `μ = weight_decay`, `m = momentum`,
+`S_a(x) = sign(x)·max(|x| − a, 0)`.
+
+**The iteration is dual.** With the elastic net `J(w) = λ‖w‖₁ + ‖w‖₂²/(2δ)`,
+LinBreg and AdaBreg carry `v ∈ ∂J(w)` as their state and read `w` back off it:
 
 ```text
 v⁰ = w⁰/δ + λ·sign(w⁰) ∈ ∂J(w⁰)      # initialize_sub_grad
@@ -38,43 +41,95 @@ v ← v − τ·g                           # sub_grad.add_(d_grad, alpha=-lr)
 w ← ∇J*(v) = S_δλ(δ·v)                # p.copy_(reg.prox(delta * sub_grad, delta))
 ```
 
-`S` is soft-thresholding. `w` is a readout, not state — which rules out two of
-the three places μ could go:
+###### The master equation
 
-| Placement | Why it is not weight decay |
-|---|---|
-| After the prox, `w ← (1 − τμ)·w` | The next step recomputes `w` from `S_δλ(δv)`; the shrink survives one forward pass and never accumulates |
-| Into `J`, as `+ μ‖w‖₂²/2` | `∇J*` becomes `S_δ'λ(δ'v)` with `δ' = δ/(1 + δμ)` — a static rescale of δ, constant in `k`, so nothing decays over time |
-| Into the gradient, `g = ∇L(w) + μ·w` | The iteration is unchanged; it is LinBreg on `L_μ = L + μ‖w‖₂²/2`, which is differentiable and `(Lip + μ)`-smooth, so the published convergence result carries over verbatim |
-
-The third is what the code does. Substituting `w = δv − δλ·sign(v)` (the prox on
-the support) into `v ← v − τ(∇L + μw)` and reading back through the prox gives
+Fix a coordinate on the support and hold `s = sign(v)`. There the prox is affine
+in `v`, and a difference cancels its constant offset:
 
 ```text
-support:  w ← (1 − τμδ)·w − δτ·∇L        # ordinary multiplicative decay, rate τμδ
-off it:   w = 0, so μ·w = 0              # v moves on ∇L alone
+(A)   w  = δ·(v − λ·s)
+(B)   Δw = δ·Δv                       # the λ·s offset drops out
+(M)   Δw = −δτ·g                      # since Δv = −τ·g
 ```
 
-so μ is exactly standard weight decay on the survivors and exactly nothing on
-the pruned coordinates — the prox does the masking. Two consequences:
+**Inside a sign cell, LinBreg is gradient descent on `w` with step `δτ`.** λ is
+absent from (M): it acts only when a coordinate changes cell — enters or leaves
+the support. That is the debiasing, and every result below is a substitution
+into (M).
 
-- With `∇L = 0` the dual settles at `|v| = λ`, the support boundary, not at 0. μ
-  therefore raises the sparsity a given λ reaches, so `fixed_lambda` is
-  calibrated per μ. The adaptive arms re-derive λ online and are not affected.
-- **AdaBreg does not get the identity above.** μ·w enters the numerator before
-  the moments, and the denominator `√ŝ + ε` divides it and `∇L` alike: μ sets the
-  decay's share of the numerator, not a rate. Where `μw` dominates the numerator
-  the dual step is `τ·sign(w)` for any μ — Adam's scale invariance normalizes μ
-  away.
+| `g` | `Δw = −δτ·g` gives |
+| --- | --- |
+| `∇L + μw` | `w⁺ = (1 − δτμ)·w − δτ·∇L` |
+| `μw`, i.e. `∇L = 0` | `w⁺ = (1 − δτμ)·w` — ordinary multiplicative decay |
+| `w = 0`, off the support | `μ·w = 0`; the decay term is absent, no mask needed |
+| `b`, with `b⁺ = m·b + μw` | SGD's heavy-ball recursion, char. poly `ρ² − (1 + m − δτμ)·ρ + m = 0`, so `ρ ≈ 1 − δτμ/(1 − m)` |
 
-`ProxSGD` also takes μ into the gradient, but there is no dual there: `w` is the
-state and the prox thresholds it directly, so the same decay-only step is
-`w ← (1 − τμ)·w − τλ`. That trailing `−τλ` is the LASSO bias, applied afresh
-every step; it is what thresholding the dual instead of the weights removes.
+Stationarity follows too: `Δw = 0 ⟺ g = 0 ⟺ ∇L = −μw`, which is stationarity of
+`L + μ‖w‖₂²/2`. At `∇L = 0` that forces `w = 0`, i.e. `|v| ≤ λ` — μ drives a
+coordinate onto the threshold and out of the support, so it raises the sparsity a
+given λ reaches. `fixed_lambda` is therefore calibrated per μ; the adaptive arms
+re-derive λ online and are unaffected.
+
+###### Why μ can only enter g
+
+```text
+(G)   w = ∇J*(v)                      # w is a function of v alone: a post-prox
+                                      # edit to w is overwritten at the next step
+(H)   J + μ‖w‖₂²/2                    # sends 1/(2δ) to 1/(2δ) + μ/2, i.e.
+                                      # δ to δ/(1 + δμ). J enters only through
+                                      # ∇J*, so this rescales δ, constant in k
+```
+
+`g` is what is left, and by (M) it is exactly SGD's weight decay — momentum and
+all. Equivalently: the iteration is unchanged, run on `L + μ‖w‖₂²/2`, which is
+differentiable and `(Lip + μ)`-smooth, so the published convergence result
+carries over verbatim.
+
+###### AdaBreg: μ cancels by scale invariance
+
+Adam is invariant to `g ↦ c·g` for `c > 0`, up to `ε`:
+
+```text
+(C)   m̂ ↦ c·m̂ ,  √Ŝ ↦ c·√Ŝ ,  so  m̂/(√Ŝ + ε) ↦ m̂/(√Ŝ + ε/c)
+```
+
+At `∇L = 0` the gradient is `g = μ·w` — exactly `w` scaled by a positive
+constant — so the scale is normalized away:
+
+```text
+(D)   A = m̂/(√Ŝ + ε) → sign(w)
+(E)   w⁺ = w − δτ·sign(w)             # by (M); μ is gone
+```
+
+A step of fixed size `δτ`, for any μ. With `∇L ≠ 0`,
+`m̂ ≈ EMA(∇L) + μ·EMA(w)` and both terms share the denominator, so μ sets the
+decay's **share of the numerator**, never a rate.
+
+###### ProxSGD: the offset does not cancel
+
+The prox is applied to the iterate, not to the state, so (B) never happens:
+
+```text
+(F)   w⁺ = S_τλ(w − τ·g) = w − τ·g − τλ·s
+```
+
+Side by side, the `−τλ·s` is the whole difference:
+
+```text
+LinBreg   Δw = −δτ·g
+ProxSGD   Δw = −τ·g − τλ·s
+```
+
+That term is the LASSO bias, re-applied every step. LinBreg pays it once, as a
+coordinate change in (A).
+
+###### In the recipes
 
 μ defaults to `0.0`, the published algorithm. Every arm is configured with the L2
 of the baseline it is compared against — `5e-4` on the img recipes, `1e-4` on the
-SV ones. No recipe overrides `delta`, so `δ = 1` and the rate is `τμ`.
+SV ones — so on the support the two decay identically, and off it Bregman decays
+nothing, because there is nothing there. No recipe overrides `delta`, so `δ = 1`
+and the rate is `τμ`, times `1/(1 − m)` under momentum.
 
 #### 1.2 Bregman Regularizers
 
