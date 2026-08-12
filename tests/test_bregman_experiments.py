@@ -21,6 +21,9 @@ from src.callbacks.pruning.bregman.bregman_optimizers import AdaBreg
 from src.callbacks.pruning.bregman.bregman_pruner import BregmanPruner
 from src.callbacks.pruning.bregman.bregman_regularizers import RegL1
 from src.callbacks.pruning.bregman.lambda_scheduler import LambdaScheduler
+from src.callbacks.pruning.bregman.quantile_lambda_scheduler import (
+    QuantileLambdaScheduler,
+)
 from src.callbacks.pruning.shared_prune_utils import compute_sparsity
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
@@ -123,8 +126,16 @@ def _run_mini_bregman_training(
     initial_sparsity=0.99,
     num_epochs=10,
     num_batches_per_epoch=20,
+    scheduler_cls=LambdaScheduler,
+    scheduler_kwargs=None,
 ):
     """Run mini Bregman training loop and return metrics.
+
+    Args:
+        scheduler_cls: LambdaScheduler (default) or QuantileLambdaScheduler.
+            Both accept target_sparsity/initial_sparsity/initial_lambda, so
+            they're interchangeable here.
+        scheduler_kwargs: Extra kwargs merged in for the chosen scheduler.
 
     Returns:
         sparsity_per_epoch: List of sparsity values per epoch
@@ -148,10 +159,11 @@ def _run_mini_bregman_training(
     pl_module = MiniBregmanModule(model, optimizer_config)
 
     # Create lambda scheduler
-    scheduler = LambdaScheduler(
+    scheduler = scheduler_cls(
         target_sparsity=target_sparsity,
         initial_sparsity=initial_sparsity,
         initial_lambda=0.1,
+        **(scheduler_kwargs or {}),
     )
 
     # Create pruner
@@ -308,6 +320,41 @@ def test_bregman_lambda_evolves_during_training():
     assert (
         final_lambda < initial_lambda
     ), f"Expected lambda to decrease, but {initial_lambda} -> {final_lambda}"
+
+
+@pytest.mark.slow
+def test_quantile_mini_training_hits_target_sparsity():
+    """QuantileLambdaScheduler lands pruned sparsity in a much tighter band
+    than LambdaScheduler's -- exact by construction, not by convergence."""
+    _, _, _, model = _run_mini_bregman_training(
+        target_sparsity=0.7,
+        initial_sparsity=0.99,
+        num_epochs=10,
+        num_batches_per_epoch=20,
+        scheduler_cls=QuantileLambdaScheduler,
+    )
+
+    pruned_sparsity = compute_sparsity(
+        [model.fc1.weight, model.fc2.weight], threshold=1e-12
+    )
+    assert pruned_sparsity == pytest.approx(0.7, abs=0.02)
+
+
+@pytest.mark.slow
+def test_quantile_mini_training_no_nan():
+    """Mini-training under QuantileLambdaScheduler produces no NaN or Inf."""
+    _, _, final_params, _ = _run_mini_bregman_training(
+        target_sparsity=0.7,
+        initial_sparsity=0.0,
+        num_epochs=5,
+        num_batches_per_epoch=20,
+        scheduler_cls=QuantileLambdaScheduler,
+    )
+
+    for param in final_params:
+        assert torch.all(
+            torch.isfinite(param)
+        ), "Parameter contains NaN or Inf values"
 
 
 # =============================================================================

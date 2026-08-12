@@ -24,7 +24,6 @@ from .bregman_report import (
     log_group_assignments,
     log_step_metrics,
 )
-from .lambda_scheduler import LambdaScheduler
 
 log = utils.get_pylogger(__name__)
 
@@ -41,8 +40,8 @@ class BregmanPruner(Callback):
 
     This callback:
     - Applies initial sparsity to the model (via PruningManager)
-    - Optionally steers the regularization strength (lambda) per batch via
-      LambdaScheduler
+    - Optionally steers the regularization strength (lambda) per batch via a
+      duck-typed lambda scheduler
     - Logs sparsity metrics and checkpoints the scheduler state
     """
 
@@ -51,7 +50,7 @@ class BregmanPruner(Callback):
         target_sparsity: float,
         sparsity_threshold: float = 1e-12,
         verbose: int = 1,
-        lambda_scheduler: Optional[LambdaScheduler] = None,
+        lambda_scheduler: Optional[Any] = None,
     ):
         """
         Args:
@@ -59,7 +58,11 @@ class BregmanPruner(Callback):
                 the controller drives toward.
             sparsity_threshold: Threshold below which a weight is considered zero.
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
-            lambda_scheduler: Optional scheduler for dynamic lambda updates.
+            lambda_scheduler: Optional scheduler for dynamic lambda updates. Duck
+                typed to `.step(sparsity, step) -> float`, `.get_lambda() -> float`,
+                `.get_state()/.load_state(dict)`, `.target_sparsity`; an optional
+                `.bind(optimizer, params)` runs once at setup if defined
+                (LambdaScheduler, QuantileLambdaScheduler).
         """
         super().__init__()
         self.sparsity_threshold = sparsity_threshold
@@ -205,6 +208,13 @@ class BregmanPruner(Callback):
         # Configs pass the scheduler as a Hydra partial (_partial_: true).
         if not hasattr(self.lambda_scheduler, "step"):
             self.lambda_scheduler = self.lambda_scheduler()
+
+        # QuantileLambdaScheduler needs the optimizer/dual state LambdaScheduler
+        # doesn't; only the former defines this hook.
+        if hasattr(self.lambda_scheduler, "bind"):
+            self.lambda_scheduler.bind(
+                self._optimizer, self._regularized_parameters()
+            )
 
         if is_resuming and self._ckpt_scheduler_state:
             self.lambda_scheduler.load_state(self._ckpt_scheduler_state)

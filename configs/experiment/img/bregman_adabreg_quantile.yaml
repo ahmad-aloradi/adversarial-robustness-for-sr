@@ -1,0 +1,17 @@
+# @package _global_
+
+# Quantile-threshold AdaBreg: lambda is the K-th order statistic of |v| each
+# update (K from target_sparsity), not a feedback estimate off measured
+# sparsity -- sparsity is exact by construction instead of converged to.
+# Run: python src/train.py experiment=img/bregman_adabreg_quantile datamodule=datasets/mnist
+
+defaults:
+  - /experiment/img/bregman_adabreg
+  - _self_
+
+tags: ["img", "${datamodule.name}", "Bregman_learning", "Adabreg", "quantile"]
+
+callbacks:
+  model_pruning:
+    lambda_scheduler:
+      _target_: src.callbacks.pruning.bregman.quantile_lambda_scheduler.QuantileLambdaScheduler

@@ -564,7 +564,8 @@ def test_lambda_is_reproduced_after_a_resume():
 
 
 def test_the_starting_gap_comes_from_the_initial_sparsity():
-    """A sparse start means a negative opening gap, logged before any update."""
+    """A sparse start means a negative opening gap, logged before any
+    update."""
     sparse_start = _controller(target_sparsity=0.9, initial_sparsity=0.99)
     assert sparse_start.gap == pytest.approx(-0.09)
     assert sparse_start.prev_gap == pytest.approx(-0.09)
@@ -620,3 +621,50 @@ def test_pruner_steps_the_scheduler_and_broadcasts_lambda():
     # gap = 0.99 at alpha = 1.0, so lambda nearly doubles.
     assert scheduler.get_lambda() == pytest.approx(1.99)
     assert optimizer.param_groups[0]["reg"].lamda == pytest.approx(1.99)
+
+
+def test_setup_calls_bind_when_scheduler_defines_it():
+    """QuantileLambdaScheduler-shaped schedulers get bound to the optimizer."""
+    mock_param = torch.nn.Parameter(torch.randn(4))
+    optimizer = _make_mock_optimizer(
+        [
+            {
+                "params": [mock_param],
+                "reg": RegL1(lamda=0.01),
+                "lambda_scale": 1.0,
+            }
+        ]
+    )
+    scheduler = Mock(
+        spec=[
+            "step",
+            "get_lambda",
+            "get_state",
+            "load_state",
+            "target_sparsity",
+            "bind",
+        ]
+    )
+    scheduler.get_lambda.return_value = 0.01
+    scheduler.target_sparsity = 0.9
+    pruner = BregmanPruner(
+        verbose=0, target_sparsity=0.9, lambda_scheduler=scheduler
+    )
+    pruner._optimizer = optimizer
+
+    pruner._setup_lambda_scheduler(is_resuming=False)
+
+    scheduler.bind.assert_called_once_with(optimizer, [mock_param])
+
+
+def test_setup_skips_bind_when_scheduler_has_none():
+    """LambdaScheduler has no bind hook; setup must not assume one."""
+    pruner, scheduler = _make_bregman_pruner_and_mocks(target_sparsity=0.9)
+    optimizer = _make_mock_optimizer(
+        [{"params": [], "reg": RegL1(lamda=0.01), "lambda_scale": 1.0}]
+    )
+    pruner._optimizer = optimizer
+
+    pruner._setup_lambda_scheduler(is_resuming=False)  # must not raise
+
+    assert not hasattr(scheduler, "bind")

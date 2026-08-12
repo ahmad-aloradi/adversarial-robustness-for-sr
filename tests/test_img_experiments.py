@@ -112,6 +112,8 @@ _RAMP_KNOB = {
     "pruning_granet": "callbacks.model_pruning.final_prune_epoch",
     "bregman_adabreg_progressive": "_bregman_ramp_epochs",
     "bregman_linbreg_progressive": "_bregman_ramp_epochs",
+    "bregman_adabreg_quantile_progressive": "_bregman_ramp_epochs",
+    "bregman_linbreg_quantile_progressive": "_bregman_ramp_epochs",
 }
 _BASE_LR = 0.1
 
@@ -154,7 +156,9 @@ def test_lr_is_held_flat_for_exactly_the_sparsity_ramp(exp, dataset):
     assert values[-1] < 0.05 * _BASE_LR
 
 
-@pytest.mark.parametrize("exp", [e for e in _img_experiments() if e not in _RAMP_KNOB])
+@pytest.mark.parametrize(
+    "exp", [e for e in _img_experiments() if e not in _RAMP_KNOB]
+)
 def test_lr_anneals_from_epoch_zero_when_unramped(exp):
     """Every recipe outside ``_RAMP_KNOB`` anneals from epoch 0."""
     cfg = _compose(
@@ -286,7 +290,7 @@ def test_configure_optimizers_dense():
 
 
 def test_str_uses_one_weight_decay():
-    """ "s also has the same weight-decay parameter lambda" (Kusupati et al.,
+    """"s also has the same weight-decay parameter lambda" (Kusupati et al.,
     Sec 3), so w, bias, BatchNorm and the s scalars all sit in one group at
     module.optimizer.weight_decay, set to Table 10's lambda."""
     import hydra
@@ -357,6 +361,8 @@ def test_configure_optimizers_bregman(exp, optimizer):
         "dense_sgd",
         "bregman_adabreg",
         "bregman_linbreg",
+        "bregman_adabreg_quantile",
+        "bregman_linbreg_quantile",
         "pruning_rigl",
         "pruning_set",
         "pruning_static",

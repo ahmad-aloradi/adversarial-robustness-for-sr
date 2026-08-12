@@ -14,6 +14,10 @@ from src.callbacks.pruning.bregman.bregman_regularizers import (
     is_regularized,
     lambda_scale,
 )
+from src.callbacks.pruning.bregman.lambda_scheduler import LambdaScheduler
+from src.callbacks.pruning.bregman.quantile_lambda_scheduler import (
+    QuantileLambdaScheduler,
+)
 from src.callbacks.pruning.shared_prune_utils import compute_sparsity
 
 log = utils.get_pylogger(__name__)
@@ -47,16 +51,31 @@ def log_step_metrics(
     pl_module.log("bregman/global_lambda", sched.get_lambda(), **per_step)
     # Controller scalars are identical on every rank; skip the all-reduce.
     rank_identical = {**per_step, "sync_dist": False, "prog_bar": False}
-    pl_module.log_dict(
-        {
-            "bregman/delta_lambda": sched.last_delta,
-            "bregman/delta_lambda_over_lambda": sched.last_delta_over_lambda,
-            "bregman/sparsity_diff": sched.gap,
-            "bregman/sparsity_crossings": float(sched.crossings),
-            "bregman/alpha": sched.alpha,
-        },
-        **rank_identical,
-    )
+    if isinstance(sched, LambdaScheduler):
+        pl_module.log_dict(
+            {
+                "bregman/delta_lambda": sched.last_delta,
+                "bregman/delta_lambda_over_lambda": sched.last_delta_over_lambda,
+                "bregman/sparsity_diff": sched.gap,
+                "bregman/sparsity_crossings": float(sched.crossings),
+                "bregman/alpha": sched.alpha,
+            },
+            **rank_identical,
+        )
+    elif isinstance(sched, QuantileLambdaScheduler):
+        pl_module.log_dict(
+            {
+                "bregman/quantile_k": float(sched.last_k),
+                "bregman/achieved_sparsity_at_update": 1.0
+                - sched.last_k / sched.n,
+            },
+            **rank_identical,
+        )
+    else:
+        raise TypeError(
+            "log_step_metrics supports LambdaScheduler or "
+            f"QuantileLambdaScheduler, got {type(sched).__name__}"
+        )
 
 
 @rank_zero_only
@@ -73,14 +92,26 @@ def log_configuration(
     log.info("=== Bregman Configuration ===")
     log.info(f"Optimizer: {type(optimizer).__name__}")
 
-    if lambda_scheduler:
+    if isinstance(lambda_scheduler, LambdaScheduler):
         log.info(
-            f"Lambda Scheduler: target_sparsity={target_sparsity}, "
+            f"Lambda Scheduler: feedback controller, target_sparsity={target_sparsity}, "
             f"lambda={lambda_scheduler.get_lambda():.4f}, "
             f"update_frequency={lambda_scheduler.update_frequency}"
         )
-    else:
+    elif isinstance(lambda_scheduler, QuantileLambdaScheduler):
+        log.info(
+            f"Lambda Scheduler: quantile threshold, target_sparsity={target_sparsity}, "
+            f"lambda={lambda_scheduler.get_lambda():.4f}, "
+            f"update_frequency={lambda_scheduler.update_frequency}, "
+            f"n={lambda_scheduler.n}"
+        )
+    elif lambda_scheduler is None:
         log.info("Lambda Scheduler: None (static lambda mode)")
+    else:
+        raise TypeError(
+            "log_configuration supports LambdaScheduler, QuantileLambdaScheduler "
+            f"or None, got {type(lambda_scheduler).__name__}"
+        )
 
     for group in optimizer.param_groups:
         name = group.get("name", "unnamed")

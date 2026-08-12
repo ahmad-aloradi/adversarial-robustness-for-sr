@@ -1138,6 +1138,7 @@ def _submit_img_job(
         "pruning_mag_unstruct",
         "bregman_adabreg_progressive",
         "bregman_linbreg_progressive",
+        "bregman_adabreg_quantile_progressive",
     ]
     ramp_up_fraction = 0.75  # of the budget, as the img configs write it
     schedule_type = "cubic"  # Options: 'cubic', 'constant', 'linear'
@@ -1464,6 +1465,25 @@ def run_img():
                 }
                 entry["suffix"] = f"-epshi{EPS_HI_VALUE}"
             EXPERIMENTS.append(entry)
+
+    # Validates QuantileLambdaScheduler against the diagnosed feedback-controller
+    # oscillation (bregman_adabreg_progressive, sr95, eps sweep) on a real run.
+    # docs/quantile_topk_poc.py is the toy that motivated this; the existing
+    # feedback CSVs at eps=1e-8/1e-4 are the baseline these 2 jobs compare against.
+    RUN_QUANTILE_VALIDATION = False
+    if RUN_QUANTILE_VALIDATION:
+        for _eps in (1e-8, 1e-4):
+            EXPERIMENTS.append(
+                {
+                    "experiment": "bregman_adabreg_quantile_progressive",
+                    "dataset_names": ["cifar100"],
+                    "model_name": ["resnet18"],
+                    "sparsity_rates": [0.95],
+                    "initial_sparsities": [0.5],
+                    "extra_overrides": {"++module.optimizer.eps": _eps},
+                    "suffix": f"-epshi{_eps:g}" if _eps != 1e-8 else "",
+                }
+            )
 
     if INFLATE_CLASSIFIER_HEAD:
         for _exp in (
