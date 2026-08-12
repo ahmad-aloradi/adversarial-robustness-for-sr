@@ -25,10 +25,13 @@ class LinBreg(torch.optim.Optimizer):
     Nesterov formulas); the only difference is that the momentum-adjusted
     gradient drives the dual variable ``v`` and the weights come from its prox.
 
-    ``weight_decay`` (mu) enters ``v``, not ``w``: the prox rederives w from v
-    every step, so a post-prox shrink never accumulates. It is the only norm
-    control here -- the L1 prox translates v by a constant delta*lamda, which
-    picks the support without bounding the size of what survives.
+    ``weight_decay`` (mu) enters the gradient, so the iteration is LinBreg on
+    ``L + mu*||w||^2/2``. Through the prox that is ``w <- (1 - lr*mu*delta)*w``
+    on the support and nothing off it, where w is already 0. It cannot go after
+    the prox -- w is a readout of v, recomputed every step -- and adding L2 to J
+    only rescales delta. It is also the only norm control: the L1 prox
+    translates v by a constant delta*lamda, which picks the support without
+    bounding the size of what survives. See docs/pruning.md 1.1.
     """
 
     def __init__(
@@ -158,9 +161,11 @@ class AdaBreg(torch.optim.Optimizer):
     it to ~1e-4 stops never-vanishing phantom-class pushes from accumulating
     (see docs/bregman_phantom_classes.md).
 
-    ``weight_decay`` (mu) enters the gradient before the moments, so Adam
-    normalizes it alongside the loss term -- the same mu buys less shrinkage
-    here than in LinBreg. See LinBreg for why it must live in the dual.
+    ``weight_decay`` (mu) enters the gradient before the moments, so the
+    denominator divides ``mu*w`` and ``grad L`` alike: mu sets the decay's share
+    of the numerator, not a rate, and LinBreg's ``(1 - lr*mu*delta)`` does not
+    hold here. Where ``mu*w`` dominates the numerator the dual step is
+    ``lr*sign(w)`` for any mu. See LinBreg for why it must live in the dual.
     """
 
     def __init__(

@@ -604,6 +604,56 @@ def test_mu_adds_nothing_to_the_dual_where_the_weight_is_zero():
     assert moved[1] == pytest.approx(-1.1)
 
 
+def test_mu_is_exactly_multiplicative_decay_on_the_support():
+    """With no loss gradient, mu is ``w <- (1 - lr*mu*delta)*w``.
+
+    Why: on the support the prox is the translation w = delta*v - delta*lamda*
+    sign(v), so the dual's ``-lr*mu*w`` reads back as a plain contraction.
+    """
+    lr, mu = 0.1, 5e-4
+    p = nn.Parameter(torch.tensor([0.9, -0.6, 0.02, 0.0]))
+    opt = LinBreg([p], lr=lr, reg=RegL1(lamda=0.05), weight_decay=mu)
+
+    p.grad = torch.zeros_like(p)
+    opt.step()  # first step establishes w = prox(delta * v)
+    before = p.detach().clone()
+    p.grad = torch.zeros_like(p)
+    opt.step()
+
+    assert torch.allclose(p.detach(), before * (1 - lr * mu), atol=1e-8)
+    assert p.detach()[3] == 0.0  # off the support mu never acts
+
+
+def test_proxsgd_mu_carries_the_lasso_shrink_linbreg_does_not():
+    """ProxSGD thresholds w itself, so a decay-only step is the contraction
+    minus lr*lamda -- the bias the Bregman dual is debiased of."""
+    lr, mu, lamda = 0.1, 5e-4, 0.05
+    p = nn.Parameter(torch.tensor([0.9]))
+    opt = ProxSGD([p], lr=lr, reg=RegL1(lamda=lamda), weight_decay=mu)
+
+    p.grad = torch.zeros_like(p)
+    opt.step()
+
+    assert p.item() == pytest.approx((1 - lr * mu) * 0.9 - lr * lamda)
+
+
+def test_adabreg_mu_is_not_a_contraction():
+    """Adam's denominator normalizes mu*w away when it dominates the numerator:
+    the dual step is lr*sign(w), so w falls by lr per step whatever mu is."""
+    lr = 1e-2
+    steps = []
+    for mu in (5e-4, 5e-2):
+        p = nn.Parameter(torch.tensor([0.9]))
+        opt = AdaBreg([p], lr=lr, reg=RegL1(lamda=0.05), weight_decay=mu)
+        for _ in range(3):
+            p.grad = torch.zeros_like(p)
+            opt.step()
+        steps.append(float(p.detach()[0]))
+
+    assert steps[0] == pytest.approx(steps[1], abs=1e-6)  # 100x mu, same step
+    assert steps[0] == pytest.approx(0.9 - 3 * lr, abs=1e-4)
+
+
 @pytest.mark.parametrize("OptimizerClass", [LinBreg, AdaBreg])
 def test_negative_mu_is_rejected(OptimizerClass):
     with pytest.raises(ValueError, match="Weight decay must be >= 0"):
