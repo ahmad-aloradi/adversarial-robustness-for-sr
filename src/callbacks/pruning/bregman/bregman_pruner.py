@@ -272,9 +272,9 @@ class BregmanPruner(Callback):
         """Fail loud if an overall-sparsity target can never be reached.
 
         Norm/bias groups stay dense, so overall sparsity cannot exceed
-        prunable/total; a target above that ceiling suppresses validation,
-        checkpointing and early stopping for the whole run. The pruned groups
-        can go all the way to 1.0, so they have no such ceiling.
+        prunable/total; a target above that ceiling leaves every sparsity gate
+        shut for the whole run. The pruned groups can go all the way to 1.0, so
+        they have no such ceiling.
         """
         if WHICH_SPARSITY_PERCENTAGE != "overall":
             return
@@ -284,6 +284,6 @@ class BregmanPruner(Callback):
         assert self._target_sparsity <= ceiling, (
             f"target_sparsity={self._target_sparsity} exceeds the achievable "
             f"overall-sparsity ceiling={ceiling:.4f} "
-            f"({prunable}/{total} params prunable); the validation gate could "
-            f"never reopen. Lower target_sparsity or regularize more groups."
+            f"({prunable}/{total} params prunable); the gates could never "
+            f"reopen. Lower target_sparsity or regularize more groups."
         )

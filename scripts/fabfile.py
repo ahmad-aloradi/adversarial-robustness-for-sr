@@ -682,7 +682,7 @@ def _submit_sv_job(
         # augmentation doubles the effective batch via paired views; match it
         batch_size_base *= 2
     apply_vad = False
-    schedule_type = "constant"  # Options: 'constant', 'linear'
+    schedule_type = "cubic"  # Options: 'cubic', 'constant', 'linear'
     num_ckpt_avg = 0  # Number of checkpoints to average for final model (only applicable for certain experiments)
     ramp_up_epochs = 10
     virtual_spks = "False"
@@ -1128,8 +1128,10 @@ def _submit_img_job(
         ), "target_sparsity should be None for baseline experiments"
 
     assert (
-        initial_sparsity is None or "bregman" in experiment
-    ), "initial_sparsity is a Bregman-only knob (_bregman_initial_sparsity)"
+        initial_sparsity is None
+        or "bregman" in experiment
+        or experiment in ("pruning_granet", "pruning_mag_struct", "pruning_mag_unstruct")
+    ), f"initial_sparsity needs a ramp to start; {experiment} has none"
 
     ramp_up_experiments = [
         "pruning_mag_struct",
@@ -1137,8 +1139,8 @@ def _submit_img_job(
         "bregman_adabreg_progressive",
         "bregman_linbreg_progressive",
     ]
-    ramp_up_epochs = 80
-    schedule_type = "constant"
+    ramp_up_fraction = 0.75  # of the budget, as the img configs write it
+    schedule_type = "cubic"  # Options: 'cubic', 'constant', 'linear'
 
     settings = {
         "script_name": "src/train.py",
@@ -1158,8 +1160,7 @@ def _submit_img_job(
     max_epochs = EPOCHS_IMG[dataset_name]
     batch_size = IMG_BATCH_SIZE[dataset_name]
     if experiment in ramp_up_experiments:
-        epochs_to_ramp = ramp_up_epochs
-        # max_epochs += epochs_to_ramp
+        epochs_to_ramp = int(max_epochs * ramp_up_fraction)
 
     ramp_str = (
         f"-ramp{epochs_to_ramp}_{schedule_type}" if epochs_to_ramp else ""
@@ -1174,7 +1175,10 @@ def _submit_img_job(
         else sparsity_token(target_sparsity)
     )
     init_sparsity_str = initial_sparsity_token(initial_sparsity)
-    exp_name = f"{experiment}{ramp_str}-{model_name}-{dataset_name}-bs{batch_size}{init_sparsity_str}{sparsity_str}{job_name_suffix}"
+    # An overridden lr hold is a different run.
+    lr_hold = (extra_overrides or {}).get("_lr_constant_epochs")
+    lr_hold_str = f"-const{lr_hold}" if lr_hold is not None else ""
+    exp_name = f"{experiment}{ramp_str}-{model_name}-{dataset_name}-bs{batch_size}{init_sparsity_str}{sparsity_str}{lr_hold_str}{job_name_suffix}"
     job_name = f"{exp_name}-seed{seed}"  # unique per seed for SLURM dedup
     name = f"{dataset_name}/{model_name}/{exp_name}/seed_{seed}"  # results saved under their own seed
 
@@ -1203,7 +1207,12 @@ def _submit_img_job(
             ] = target_sparsity
 
     if initial_sparsity is not None:
-        script_arguments["_bregman_initial_sparsity"] = initial_sparsity
+        if "bregman" in experiment:
+            script_arguments["_bregman_initial_sparsity"] = initial_sparsity
+        else:
+            script_arguments[
+                "callbacks.model_pruning.initial_amount"
+            ] = initial_sparsity
 
     if epochs_to_ramp:
         # Same schedule, ramped through lambda by Bregman and the amount by magnitude.
@@ -1281,7 +1290,7 @@ def run_img():
     sparsity_rates_sweep = [0.9, 0.95, 0.99]
     default_seeds = [42]
     lambda_factor_k = 0.4  # scales BREGMAN_LAMBDA_CONFIGS' fixed_lambda
-    # Bregman starting sparsity sweep; 0.0 is a dense start, 0.99 the config default
+    # Starting sparsity sweep (Bregman `_bregman_initial_sparsity`, GraNet `initial_amount`)
     # initial_sparsity_sweep = [0.0, 0.5, 0.99]
     initial_sparsity_sweep = [0.99]
 
@@ -1307,7 +1316,7 @@ def run_img():
     RUN_FIXED_BREGMAN_EXPS = False
     # Adaptive Bregman (lambda scheduler):
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
-    # Dense start, target ramped over ramp_up_epochs (see ramp_up_experiments).
+    # Target ramped from the config's start over ramp_up_fraction of the budget.
     RUN_PROGRESSIVE_BREGMAN_EXPS = False
 
     # Initial-sparsity sweeps: same starting points, two ways of setting lambda.

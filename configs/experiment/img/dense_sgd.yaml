@@ -33,7 +33,7 @@ module:
     lr: 0.1
     momentum: 0.9
     weight_decay: 5e-4
-    nesterov: True
+    nesterov: false
   lr_scheduler:
     scheduler:
       _target_: torch.optim.lr_scheduler.CosineAnnealingLR

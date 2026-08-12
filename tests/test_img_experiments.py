@@ -105,6 +105,115 @@ def test_img_experiment_composes(exp, dataset):
     assert dataset in tags
 
 
+# The ramp knob each recipe holds the lr for; every other experiment anneals from epoch 0.
+_RAMP_KNOB = {
+    "pruning_mag_struct": "callbacks.model_pruning.epochs_to_ramp",
+    "pruning_mag_unstruct": "callbacks.model_pruning.epochs_to_ramp",
+    "pruning_granet": "callbacks.model_pruning.final_prune_epoch",
+    "bregman_adabreg_progressive": "_bregman_ramp_epochs",
+    "bregman_linbreg_progressive": "_bregman_ramp_epochs",
+}
+_BASE_LR = 0.1
+
+
+def _lr_trajectory(cfg):
+    """The per-epoch lr an experiment's configured scheduler produces."""
+    optimizer = torch.optim.SGD(
+        [torch.nn.Parameter(torch.zeros(1))], lr=_BASE_LR
+    )
+    scheduler = hydra.utils.instantiate(
+        cfg.module.lr_scheduler.scheduler, optimizer=optimizer
+    )
+    values = []
+    for _ in range(cfg.trainer.max_epochs):
+        values.append(optimizer.param_groups[0]["lr"])
+        scheduler.step()
+    return scheduler, values
+
+
+@pytest.mark.parametrize("dataset", sorted(_DATASETS))
+@pytest.mark.parametrize("exp", sorted(_RAMP_KNOB))
+def test_lr_is_held_flat_for_exactly_the_sparsity_ramp(exp, dataset):
+    """Ramped recipes hold the base lr over their own ramp, then anneal.
+
+    Parametrized over datasets because the knob is a fraction of the budget.
+    """
+    cfg = _compose(
+        [
+            f"experiment=img/{exp}",
+            f"datamodule=datasets/{dataset}",
+            "logger=[]",
+        ]
+    )
+    _, values = _lr_trajectory(cfg)
+
+    hold = OmegaConf.select(cfg, _RAMP_KNOB[exp], throw_on_missing=True)
+    assert cfg.module.lr_scheduler.scheduler.constant_epochs == hold
+    assert values[: hold + 1] == pytest.approx([_BASE_LR] * (hold + 1))
+    assert values[hold + 1] < _BASE_LR
+    assert values[-1] < 0.05 * _BASE_LR
+
+
+@pytest.mark.parametrize("exp", [e for e in _img_experiments() if e not in _RAMP_KNOB])
+def test_lr_anneals_from_epoch_zero_when_unramped(exp):
+    """Every recipe outside ``_RAMP_KNOB`` anneals from epoch 0."""
+    cfg = _compose(
+        [f"experiment=img/{exp}", "datamodule=datasets/cifar100", "logger=[]"]
+    )
+    scheduler, values = _lr_trajectory(cfg)
+    assert isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR)
+    assert values[1] < _BASE_LR
+
+
+@pytest.mark.parametrize("exp", sorted(_RAMP_KNOB))
+def test_zero_hold_is_a_plain_cosine(exp):
+    """``_lr_constant_epochs=0`` composes to a bare ``CosineAnnealingLR``.
+
+    The trajectory equivalence itself is proven once, without Hydra, by
+    test_lr_schedulers.py::test_zero_constant_epochs_matches_plain_cosine_trajectory.
+    """
+    cfg = _compose(
+        [
+            f"experiment=img/{exp}",
+            "datamodule=datasets/cifar100",
+            "logger=[]",
+            "_lr_constant_epochs=0",
+        ]
+    )
+    assert cfg.module.lr_scheduler.scheduler.constant_epochs == 0
+    scheduler, values = _lr_trajectory(cfg)
+    assert isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR)
+    assert values[1] < _BASE_LR
+
+
+_SELECTION_GATES = ("model_checkpoint", "early_stopping")
+
+
+@pytest.mark.parametrize("dataset", ["cifar100", "imagenet"])
+@pytest.mark.parametrize("exp", _img_experiments())
+def test_selection_is_banded_and_validation_is_not(exp, dataset):
+    """Checkpointing and early stopping band the target; validation does not.
+
+    Why: docs/pruning.md §3. ImageNet bands validation too, and a *_fixed run
+    has no setpoint to band, so it opens all three.
+    """
+    cfg = _compose(
+        [
+            f"experiment=img/{exp}",
+            f"datamodule=datasets/{dataset}",
+            "logger=[]",
+        ]
+    )
+    if cfg.callbacks.get("ramp_validation_gate") is None:
+        pytest.skip(f"{exp} controls no sparsity to gate on")
+
+    band = 1.0 if "fixed" in exp else 0.005
+    assert all(cfg.callbacks[g].tolerance == band for g in _SELECTION_GATES)
+    assert cfg.callbacks.ramp_validation_gate.tolerance == (
+        band if dataset == "imagenet" else 1.0
+    )
+
+
 def test_mnist_transform_contract():
     """MNIST transforms pad 28->32 and replicate to 3 channels so it meets the
     same input contract as CIFAR (no download needed)."""
@@ -130,15 +239,12 @@ def test_bregman_wiring(exp):
     groups = [g.name for g in cfg.module.model.pruning_groups]
     assert groups[-1] == "fallback"
 
-    gates = ("model_checkpoint", "early_stopping", "ramp_validation_gate")
     scheduler = cfg.callbacks.model_pruning.lambda_scheduler
     if "fixed" in exp:
         # Static lambda -> sparsity is uncontrolled, so nothing gates on it.
         assert scheduler is None
-        assert all(cfg.callbacks[g].tolerance == 1.0 for g in gates)
     else:
         assert scheduler is not None
-        assert all(cfg.callbacks[g].tolerance == 0.005 for g in gates)
 
 
 def _param_group_map(model):
@@ -180,7 +286,7 @@ def test_configure_optimizers_dense():
 
 
 def test_str_uses_one_weight_decay():
-    """"s also has the same weight-decay parameter lambda" (Kusupati et al.,
+    """ "s also has the same weight-decay parameter lambda" (Kusupati et al.,
     Sec 3), so w, bias, BatchNorm and the s scalars all sit in one group at
     module.optimizer.weight_decay, set to Table 10's lambda."""
     import hydra
@@ -196,9 +302,13 @@ def test_str_uses_one_weight_decay():
     assert groups[0]["weight_decay"] == cfg.module.optimizer.weight_decay
     assert len(groups[0]["params"]) == len(list(model.parameters()))
     thresholds = [
-        n for n, _ in model.named_parameters() if n.endswith("sparse_threshold")
+        n
+        for n, _ in model.named_parameters()
+        if n.endswith("sparse_threshold")
     ]
-    assert thresholds, "no STR thresholds; did callbacks.model_pruning get disabled?"
+    assert (
+        thresholds
+    ), "no STR thresholds; did callbacks.model_pruning get disabled?"
 
 
 def test_dense_recipes_keep_one_parameter_group():

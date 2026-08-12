@@ -19,6 +19,7 @@ tags: ["img", "${datamodule.name}", "sparse_training", "rigl"]
 seed: 42
 
 _pruning_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1-this)*target <= sparsity <= (1+this)*target
+_lr_constant_epochs: 0 # epochs to hold lr flat before the cosine leg; pruning_granet sets it to its ramp length
 
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
@@ -59,8 +60,8 @@ callbacks:
     patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
   ramp_validation_gate:
     _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
-    target_sparsity: ${callbacks.model_pruning.amount} # validation runs only within tolerance of this
-    tolerance: ${_pruning_tolerance} # shared band half-width, as a fraction of the target
+    target_sparsity: ${callbacks.model_pruning.amount} # band centre
+    tolerance: ${oc.eval:"${_pruning_tolerance} if '${datamodule.name}' == 'imagenet' else 1.0"} # 1.0 disables the gate; ImageNet keeps the band (docs/pruning.md §3)
     sparsity_metric: "pruning/sparsity" # gate signal (see model_checkpoint)
 
 module:
@@ -70,11 +71,12 @@ module:
     lr: 0.1
     momentum: 0.9
     weight_decay: 5e-4
-    nesterov: True
+    nesterov: false
   lr_scheduler:
     scheduler:
-      _target_: torch.optim.lr_scheduler.CosineAnnealingLR
-      T_max: ${trainer.max_epochs}
+      _target_: src.utils.lr_schedulers.constant_then_cosine
+      constant_epochs: ${_lr_constant_epochs}
+      max_epochs: ${trainer.max_epochs}
     extras:
       interval: epoch
       frequency: ${trainer.check_val_every_n_epoch}

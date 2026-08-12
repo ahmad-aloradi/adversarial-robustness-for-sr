@@ -24,6 +24,7 @@ _bregman_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1
 _bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
 _bregman_sparsity_metric: bregman/pruned_sparsity # gate signal: the metric lambda steers on (regularized groups); `sparsity` is whole-model
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
+_lr_constant_epochs: 0 # epochs to hold lr flat before the cosine leg; the progressive children set it to their ramp length
 
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
@@ -67,8 +68,8 @@ callbacks:
     patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
   ramp_validation_gate:
     _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
-    target_sparsity: ${_bregman_target_sparsity} # validation runs only within tolerance of this
-    tolerance: ${_bregman_tolerance} # shared band half-width, as a fraction of the target
+    target_sparsity: ${_bregman_target_sparsity} # band centre
+    tolerance: ${oc.eval:"${_bregman_tolerance} if '${datamodule.name}' == 'imagenet' else 1.0"} # 1.0 disables the gate; ImageNet keeps the band (docs/pruning.md §3)
     sparsity_metric: ${_bregman_sparsity_metric}
 
 module:
@@ -79,8 +80,9 @@ module:
 
   lr_scheduler:
     scheduler:
-      _target_: torch.optim.lr_scheduler.CosineAnnealingLR
-      T_max: ${trainer.max_epochs}
+      _target_: src.utils.lr_schedulers.constant_then_cosine
+      constant_epochs: ${_lr_constant_epochs}
+      max_epochs: ${trainer.max_epochs}
 
     extras:
       interval: epoch

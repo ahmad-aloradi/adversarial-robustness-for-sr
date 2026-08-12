@@ -66,7 +66,7 @@ class DynamicSparsePruner(Callback):
         amount: final sparsity over every weight tensor (all but norms and
             biases), including the ones this callback holds dense.
         initial_amount: sparsity at step 0; ``None`` means "same as amount",
-            i.e. constant sparsity. GraNet sets 0.0 for a dense start.
+            i.e. constant sparsity. GraNet takes 0.0 (dense) or 0.5 (Table 4).
         mask_init: ``erk`` (RigL's Erdos-Renyi-Kernel layerwise budget) or
             ``snip`` (|w * grad| saliency, ranked globally).
         snip_iterations: prune steps SNIP takes to reach the target. ``1`` is

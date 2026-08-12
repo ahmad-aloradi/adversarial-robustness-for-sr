@@ -61,18 +61,20 @@ bash scripts/datasets/prep_imagenet.sh     # ~150 GB (~300 GB peak)
 | `dense_sgd` | SGD | — (dense baseline) |
 | `bregman_adabreg` | AdaBreg | adaptive λ (feedback loop → target sparsity) |
 | `bregman_adabreg_fixed` | AdaBreg | fixed λ, no scheduler |
+| `bregman_adabreg_progressive` | AdaBreg | adaptive λ, target ramped 0.5 → target |
 | `bregman_linbreg` | LinBreg | adaptive λ |
 | `bregman_linbreg_fixed` | LinBreg | fixed λ |
+| `bregman_linbreg_progressive` | LinBreg | adaptive λ, target ramped 0.5 → target |
 | `proxsgd` | ProxSGD | adaptive λ; dense start, no augmentation |
 | `proxsgd_fixed` | ProxSGD | fixed λ |
-| `pruning_mag_struct` | SGD | gradual magnitude pruning, `ln_structured` |
+| `pruning_mag_struct` | SGD | gradual magnitude pruning, `ln_structured`; 50% sparse start |
 | `pruning_mag_unstruct` | SGD | gradual magnitude pruning, global `l1_unstructured` |
 | `pruning_rigl` | SGD | RigL — sparse from step 0, regrow on the gradient |
 | `pruning_set` | SGD | SET — RigL with random regrowth |
 | `pruning_static` | SGD | Static-ERK — one random mask, never updated |
 | `pruning_snip` | SGD | SNIP — one-shot \|w·grad\| ranking at init |
 | `pruning_snip_iter` | SGD | iterative SNIP — the same ranking over 100 steps |
-| `pruning_granet` | SGD | GraNet — dense start, cubic ramp, RigL regrowth |
+| `pruning_granet` | SGD | GraNet — 50% sparse start, cubic ramp, RigL regrowth |
 | `soft_threshold` | SGD | STR — learned per-layer threshold, sparsity is an outcome |
 
 - `bregman_adabreg.yaml` is the parent — it holds the only full ResNet-18
@@ -82,6 +84,42 @@ bash scripts/datasets/prep_imagenet.sh     # ~150 GB (~300 GB peak)
   [sparse_training.md](sparse_training.md).
 - Target sparsity: `_bregman_target_sparsity` (default 0.9). Fixed-λ runs scale λ
   with `_bregman_lambda_factor`.
+
+### The ramped recipes share one ramp
+
+`pruning_mag_struct` / `_unstruct`, `pruning_granet` and both `*_progressive`
+recipes share start (0.5), shape (cubic) and length (75% of the budget), so at
+epoch *t* they all aim at one sparsity — which is what makes their per-epoch
+validation curves comparable. Those curves exist because the validation gate is
+open on the img recipes while the selection gates band the target; see
+[pruning.md](pruning.md) §3.
+
+### The lr is held flat while sparsity ramps
+
+Every image experiment except `dense_sgd` and `soft_threshold` schedules its lr
+with `src.utils.lr_schedulers.constant_then_cosine`: flat at the base lr for
+`_lr_constant_epochs`, then `CosineAnnealingLR` to 0 over the rest. The recipes
+that ramp sparsity hold the lr up for the length of their own ramp, so the
+anneal starts once the target is reached:
+
+| Experiment | `_lr_constant_epochs` reads | ramp knob |
+| --- | --- | --- |
+| `pruning_mag_struct` / `_unstruct` | `callbacks.model_pruning.epochs_to_ramp` | 75% of the budget |
+| `pruning_granet` | `callbacks.model_pruning.final_prune_epoch` | 75% of the budget |
+| `bregman_{adabreg,linbreg}_progressive` | `_bregman_ramp_epochs` | 75% of the budget |
+
+Why: GraNet's plasticity result (Liu et al., NeurIPS 2021, Fig. 2) — connection
+regeneration stops recovering accuracy once the lr has decayed. Every other
+recipe leaves `_lr_constant_epochs` at 0, where `constant_then_cosine` builds a
+`CosineAnnealingLR` over the full budget. Set it to 0 to run a ramped recipe on
+the cosine alone:
+
+```bash
+python src/train.py experiment=img/pruning_granet datamodule=datasets/cifar100 _lr_constant_epochs=0
+```
+
+The hold length is part of the run-dir tag — `-Const<N>Cosine` at N > 0,
+`-CosineAnnealing` at 0 — so the two schedules land in separate directories.
 
 ### What "sparsity" means
 

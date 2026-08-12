@@ -23,6 +23,6 @@ module:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
     _partial_: True
     lr: 1e-1
-    # Use momentum: 0.0 and nesterov: false to reproduce the NeurIPS draft results
+    # Use momentum: 0.0 to reproduce the NeurIPS draft results
     momentum: 0.9
-    nesterov: true
+    nesterov: false

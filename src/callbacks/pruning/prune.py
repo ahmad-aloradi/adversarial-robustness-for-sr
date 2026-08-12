@@ -35,7 +35,7 @@ class MagnitudePruner(Callback):
         initial_amount: float = 0.0,
         epochs_to_ramp: int = 10,
         scheduled_pruning: bool = False,
-        schedule_type: str = "linear",
+        schedule_type: str = "cubic",
         parameters_to_prune: Optional[List[Tuple[nn.Module, str]]] = None,
         use_global_unstructured: bool = True,
         pruning_dim: Optional[int] = None,

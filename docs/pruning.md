@@ -87,12 +87,12 @@ Metrics: `bregman/global_lambda` (live λ), `bregman/lambda_delta` (applied `Δ�
 callbacks:
   target_scheduler:
     _target_: src.callbacks.pruning.bregman.target_scheduler.TargetScheduler
-    initial_sparsity: 0.0 # ramp start; the end is the controller's target
+    initial_sparsity: 0.5 # ramp start; the end is the controller's target
     epochs_to_ramp: 80
     schedule_type: cubic # Zhu & Gupta / GraNet Eq. 1 cubic ramp (default), or `linear`/`constant`
 ```
 
-The ramp drives `PruningScheduler` (§2.3) itself, so it and a gradual-pruning run of the same length aim at the same sparsity in the same epoch — that comparison, from a dense start, is what the recipes are for. The gates still band the final target, so validation opens only once the run reaches it. Metric: `bregman/ramp_target`.
+The ramp drives `PruningScheduler` (§2.3) itself, so a Bregman ramp and a gradual-pruning run that share `initial_sparsity` and length aim at the same sparsity in the same epoch — that comparison is what the recipes are for, and the img recipes are aligned for it (see [image_benchmarks.md](image_benchmarks.md)). Metric: `bregman/ramp_target`.
 
 ```bash
 python src/train.py experiment=img/bregman_adabreg_progressive datamodule=datasets/cifar100
@@ -206,9 +206,9 @@ callbacks:
     _target_: src.callbacks.pruning.prune.MagnitudePruner
     pruning_fn: "l1_unstructured"    # Pruning strategy
     amount: 0.5                      # 50% final sparsity
-    initial_amount: 0.0              # Starting sparsity for scheduled pruning (to be deprecated --> always 0)
+    initial_amount: 0.5              # Sparsity the ramp starts from (img recipes: 0.5)
     scheduled_pruning: true          # Enable gradual ramping
-    schedule_type: "linear"          # The rate of increasing sparsity [linear, constant]
+    schedule_type: "cubic"           # The rate of increasing sparsity [linear, constant, cubic] (default: cubic)
     epochs_to_ramp: 10               # Epochs to reach target sparsity
     use_global_unstructured: true    # Global vs local pruning
     make_pruning_permanent: true     # Fuse masks at training end
@@ -240,11 +240,12 @@ Implements various sparsity ramping schedules:
 
 - **Linear**: Uniformly increase from initial to final sparsity
 - **Constant**: Prune the same amount of weights in each epoch
+- **Cubic** (default): Zhu & Gupta's GMP schedule, `S_t = S_f + (S_i - S_f)(1 - progress)^3` — also GraNet's Eq. 1 (`dst_schedules.cubic_prune_rate`)
 
 
 ```python
 scheduler = PruningScheduler(
-    schedule_type="linear",
+    schedule_type="cubic",
     final_sparsity=0.8,
     epochs_to_ramp=20,
     initial_sparsity=0.0
@@ -325,9 +326,9 @@ Located in `src/callbacks/pruning/sparsity_gating.py`, shared by both stacks. Of
 | `SparsityGatedEarlyStopping` | skips the check, so patience never accrues on an off-target metric |
 | `RampValidationGate` | zeroes `limit_val_batches`, skipping the validation pass |
 
-**The band is relative:** in band iff `(1 - tolerance) * target <= sparsity <= (1 + tolerance) * target`. The shipped recipes use `tolerance: 0.005` (0.5%), declared once as `_bregman_tolerance` / `_pruning_tolerance` and shared by all three.
+**The band is relative:** in band iff `(1 - tolerance) * target <= sparsity <= (1 + tolerance) * target`. Each gate takes its own `tolerance`; `1.0` spans every sparsity, which disables that gate.
 
-`tolerance: 1.0` spans every sparsity, which disables a gate. Only the `*_fixed` recipes use it, and they use it on all three: a static λ reaches whatever sparsity it reaches, so there is no setpoint to band around. Every adaptive-λ and magnitude-pruning recipe stays banded on all three gates, so an off-target epoch never becomes the evaluated model.
+The two selection gates take `tolerance: 0.005` (0.5%, declared once as `_bregman_tolerance` / `_pruning_tolerance`) on every recipe whose sparsity is controlled, so an off-target epoch never becomes the evaluated model. `RampValidationGate` takes `1.0` on the img recipes, so the per-epoch curve is measured over the whole ramp; it takes the same 0.5% band where a validation pass is too expensive to spend off-target — ImageNet, and every SV recipe. The `*_fixed` recipes open all three: a static λ reaches whatever sparsity it reaches, so there is no setpoint to band around.
 
 Point all three at the same metric as the pruner steers on: `bregman/pruned_sparsity` (Bregman) or `pruning/sparsity` (magnitude); `sparsity` is whole-model.
 

@@ -1,14 +1,11 @@
 """Per-epoch ramp of the sparsity target the Bregman lambda controller chases.
 
-Idea: start the weights dense and raise the controller's setpoint up to its
+Idea: raise the controller's setpoint from ``initial_sparsity`` up to its
 configured target over ``epochs_to_ramp`` epochs, then hold — gradual magnitude
-pruning's schedule, driven through lambda instead of a mask. It reads
-``BregmanPruner.lambda_scheduler`` and writes one float on it per epoch;
-nothing in the Bregman stack imports this file.
+pruning's schedule, driven through lambda instead of a mask.
 
-**The gates keep the fixed final target!** Checkpointing, early stopping and
-validation open only inside the band around it, so every epoch of the ramp is
-unvalidated.
+**Checkpointing and early stopping band the run's fixed final target!** No epoch
+of the ramp can be selected as the evaluated model.
 
 Run it with::
 
@@ -91,9 +88,16 @@ class TargetScheduler(Callback):
     def on_train_epoch_start(
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
-        """Move the controller's setpoint to this epoch's ramp value."""
+        """Move the controller's setpoint to this epoch's ramp value, and hold
+        ``decay_alpha`` off until the last ramp epoch.
+
+        Why: a moving setpoint flips the controller's gap sign on its own, which
+        ``update_alpha`` would otherwise charge as overshoot.
+        """
+        controller = self._controller(trainer)
         target = self.schedule.get_target_sparsity(trainer.current_epoch)
-        self._controller(trainer).target_sparsity = target
+        controller.target_sparsity = target
+        controller.decay_alpha = trainer.current_epoch >= self.epochs_to_ramp - 1
         pl_module.log("bregman/ramp_target", target)
 
     @staticmethod

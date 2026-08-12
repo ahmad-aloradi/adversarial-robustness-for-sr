@@ -15,8 +15,9 @@ class LambdaScheduler:
     so the controller behaves the same at any λ scale and λ can reach any
     setpoint from any start.
 
-    The step size ``α`` starts at ``alpha_0`` and decays by ``gamma`` on every
-    overshoot, so λ settles instead of ringing (see :meth:`update_alpha`).
+    The step size ``α`` starts at ``alpha_0`` and, while ``decay_alpha`` is set,
+    decays by ``gamma`` on every overshoot, so λ settles instead of ringing
+    (see :meth:`update_alpha`).
 
     >>> sched = LambdaScheduler(0.9, initial_sparsity=0.5, initial_lambda=1.0)
     >>> sched.step(0.5, current_step=0) > 1.0  # below target -> grows
@@ -59,15 +60,18 @@ class LambdaScheduler:
         self.last_delta_over_lambda = 0.0  # Δλ/λ the last step() applied
         self.alpha = alpha_0  # α the last update scaled by
         self.crossings = 0  # updates whose gap flipped sign
+        self.decay_alpha = True  # False while a TargetScheduler ramp moves the setpoint
         self.gap = target_sparsity - initial_sparsity
         self.prev_gap = self.gap
 
     def update_alpha(self, gap: float) -> float:
-        """Record ``gap`` and set α to ``alpha_0 · gamma**crossings``"""
+        """Record ``gap``; while ``decay_alpha``, set α to
+        ``alpha_0 · gamma**crossings`` on every sign flip."""
         self.prev_gap, self.gap = self.gap, gap
-        if self.gap * self.prev_gap < 0.0:
-            self.crossings += 1
-        self.alpha = self.alpha_0 * self.gamma**self.crossings
+        if self.decay_alpha:
+            if self.gap * self.prev_gap < 0.0:
+                self.crossings += 1
+            self.alpha = self.alpha_0 * self.gamma**self.crossings
         return self.alpha
 
     def step(self, current_sparsity: float, current_step: int) -> float:

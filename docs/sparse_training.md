@@ -19,12 +19,15 @@ python src/train.py experiment=img/soft_threshold module.optimizer.weight_decay=
 | `pruning_static` | RigL's Static-ERK control | ERK layer budget, random | none | fixed |
 | `pruning_snip` | Lee et al., ICLR 2019 | one global \|w·grad\| ranking | none | fixed |
 | `pruning_snip_iter` | de Jorge et al., ICLR 2021 | the same ranking over 100 steps | none | fixed |
-| `pruning_granet` | Liu et al., NeurIPS 2021 | dense | every 1000 steps: cubic prune + RigL regrowth | 0 → target |
+| `pruning_granet` | Liu et al., NeurIPS 2021 | ERK layer budget at 50% sparse (s_i=0.5) | every 1000 steps: cubic prune + RigL regrowth | 0.5 → target |
 | `soft_threshold` | Kusupati et al., ICML 2020 | dense, learned threshold per layer | continuous | **outcome, not a target** |
 
 `pruning_rigl.yaml` is the parent; the others are thin children that change one
-or two knobs. The schedules live in `dst_schedules.py` and the layer budget in
-`utils/erk_sparsity.py`, both runnable on their own:
+or two knobs. GraNet holds the lr flat through its prune+regrow ramp
+(`_lr_constant_epochs`), where the rest anneal from epoch 0 — see
+[image_benchmarks.md](image_benchmarks.md). The schedules live in
+`dst_schedules.py` and the layer budget in `utils/erk_sparsity.py`, both
+runnable on their own:
 
 ```bash
 python -m src.callbacks.pruning.dst_pruner
@@ -138,5 +141,5 @@ pytest tests/test_dst_pruner.py tests/test_str_pruner.py tests/test_dst_schedule
 ```
 
 At every epoch end the DST callback asserts the achieved sparsity is inside
-`tolerance` (a fraction of the target, the same band the checkpoint, early-stop
-and validation gates use). A drift means a mask update lost or gained weights.
+`tolerance` (a fraction of the target, the same band the checkpoint and
+early-stop gates use). A drift means a mask update lost or gained weights.

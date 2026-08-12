@@ -470,6 +470,21 @@ def test_alpha_decays_on_every_sign_flip():
     assert ratios == pytest.approx([ratios[0]] * len(ratios))
 
 
+def test_decay_alpha_off_holds_alpha_through_sign_flips():
+    """A moving setpoint crosses the gap's sign on its own; with decay_alpha
+    cleared, those crossings must not count as overshoot."""
+    sched = _controller(alpha_0=0.75)
+    sched.decay_alpha = False
+    for gap in (0.4, -0.2, 0.1, -0.05):
+        assert sched.update_alpha(gap) == 0.75
+    assert sched.crossings == 0
+
+    sched.decay_alpha = True
+    sched.update_alpha(0.2)  # sign flip vs the last recorded gap (-0.05)
+    assert sched.crossings == 1
+    assert sched.alpha < 0.75
+
+
 def test_alpha_records_the_factor_the_update_used():
     """The logged alpha is the one step() applied, and it holds between
     updates."""

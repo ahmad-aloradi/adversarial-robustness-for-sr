@@ -2,7 +2,8 @@
 
 A sparsity ramp must not select on off-target epochs: an epoch whose sparsity
 falls outside ``tolerance`` as a fraction of the target should not win a
-``save_top_k`` slot, trip early stopping, or even spend the validation pass.
+``save_top_k`` slot or trip early stopping. Each callback takes its own
+``tolerance``; ``1.0`` spans every sparsity, which disables that gate.
 
 Three self-contained pieces, each gating on the sparsity the pruner injects
 into ``trainer.callback_metrics`` at the epoch's last training batch:

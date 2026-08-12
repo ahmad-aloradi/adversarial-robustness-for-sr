@@ -59,7 +59,7 @@ callbacks:
     verbose: 1
     scheduled_pruning: true # ramp sparsity to `amount` over `epochs_to_ramp`
     epochs_to_ramp: 10 # epochs over which the pruning rate ramps to `amount`
-    schedule_type: constant # constant pruning RATE (log-space interpolation), not a linear sparsity ramp
+    schedule_type: cubic # Zhu & Gupta / GraNet Eq. 1 cubic ramp, not a linear sparsity ramp
     tolerance: ${_pruning_tolerance} # monotonicity check band, shared with the gates
   early_stopping:
     _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
@@ -119,7 +119,7 @@ module:
     _partial_: True
     lr: 0.1
     momentum: 0.9
-    nesterov: true
+    nesterov: false
     weight_decay: 1.0e-4
 
 logger:

@@ -18,4 +18,4 @@ module:
     _partial_: True
     lr: 1e-1
     momentum: 0.9
-    nesterov: true
+    nesterov: false

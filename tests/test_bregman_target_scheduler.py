@@ -63,6 +63,21 @@ def test_setpoint_follows_the_magnitude_pruner_schedule(schedule_type):
         )
 
 
+def test_decay_alpha_off_until_the_ramp_holds():
+    """Every intermediate target flips the controller's gap sign on its own;
+    only the final, held target should let alpha decay."""
+    ramp, controller, trainer = _wired(epochs_to_ramp=10)
+    ramp.on_train_start(trainer, Mock())
+    for epoch in range(9):
+        trainer.current_epoch = epoch
+        ramp.on_train_epoch_start(trainer, Mock())
+        assert controller.decay_alpha is False
+    for epoch in (9, 10, 12):
+        trainer.current_epoch = epoch
+        ramp.on_train_epoch_start(trainer, Mock())
+        assert controller.decay_alpha is True
+
+
 def test_endpoint_comes_from_the_controller():
     """No final_sparsity config key: the ramp ends at the run's fixed target,
     which is also what the gates band."""

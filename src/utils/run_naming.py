@@ -9,7 +9,7 @@ compression method lands under one ``<dataset>/<model>/<augmentation>`` parent
 import os
 
 
-def _scheduler_tag(target):
+def _scheduler_tag(target, constant_epochs=None):
     """Short tag for an LR-scheduler ``_target_``; ``no_scheduler`` when unset.
 
     Strips the module path and a trailing ``LR`` (``CosineAnnealingLR`` ->
@@ -19,12 +19,22 @@ def _scheduler_tag(target):
     'CosineAnnealing'
     >>> _scheduler_tag("torch.optim.lr_scheduler.ReduceLROnPlateau")
     'ReduceLROnPlateau'
+    >>> _scheduler_tag("src.utils.lr_schedulers.constant_then_cosine", 0)
+    'CosineAnnealing'
+    >>> _scheduler_tag("src.utils.lr_schedulers.constant_then_cosine", 80)
+    'Const80Cosine'
     >>> _scheduler_tag(None)
     'no_scheduler'
     """
     if not target or target in ("none", "None"):
         return "no_scheduler"
     name = target.rsplit(".", 1)[-1]
+    if name == "constant_then_cosine":
+        return (
+            f"Const{constant_epochs}Cosine"
+            if constant_epochs
+            else "CosineAnnealing"
+        )
     return name[:-2] if name.endswith("LR") and len(name) > 2 else name
 
 
@@ -77,6 +87,7 @@ def run_subdir(
     initial_sparsity,
     lambda_value,
     scheduler,
+    lr_constant_epochs=None,
 ):
     """Build the ``<dataset>/<model>/<aug>/<method>`` stem for the run dir.
 
@@ -109,7 +120,7 @@ def run_subdir(
         tag = lambda_token(lambda_value)
     else:
         tag = sparsity_token(sparsity)
-    return f"{dataset}/{model}/{aug}/{method}{isr}{tag}-{_scheduler_tag(scheduler)}"
+    return f"{dataset}/{model}/{aug}/{method}{isr}{tag}-{_scheduler_tag(scheduler, lr_constant_epochs)}"
 
 
 def run_name(output_dir, log_dir):

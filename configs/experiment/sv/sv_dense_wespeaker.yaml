@@ -89,7 +89,7 @@ module:
     _partial_: True
     lr: 0.1
     momentum: 0.9
-    nesterov: True
+    nesterov: false
     weight_decay: 1.0e-4
 
 logger:
