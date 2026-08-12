@@ -37,8 +37,9 @@ the published algorithm. Two facts decide where it goes and what it is for:
 | On the support `w = δv − δλ·sign(v)` — a translation, not a contraction | The L1 prox picks the support but cannot bound `‖w‖`; μ is the only norm control |
 | `w` is exactly `0` off the support | `μ·w` reaches survivors only, with no masking needed |
 
-Set it when comparing against a baseline that carries weight decay (RigL, dense
-SGD and magnitude pruning all use `5e-4`); leave it at `0.0` to reproduce the paper.
+`ProxSGD` takes it too, into the gradient as `torch.optim.SGD` does. Every arm
+carries the L2 of the baseline it is compared against — `5e-4` on the img
+recipes, `1e-4` on the SV ones. Set it to `0.0` to reproduce the paper.
 
 #### 1.2 Bregman Regularizers
 
