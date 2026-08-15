@@ -25,9 +25,7 @@ transforms:
   augment: # PIL-space, before ToTensor; gated by augmentation
     - { _target_: torchvision.transforms.RandomCrop, size: 32, padding: 4 }
     - { _target_: torchvision.transforms.RandomHorizontalFlip }
-    - { _target_: torchvision.transforms.TrivialAugmentWide }
-  augment_post: # tensor-space, after Normalize; gated by augmentation
-    - { _target_: torchvision.transforms.RandomErasing, p: 0.1 } # p=0.1 to 0.5 is standard.
+  augment_post: [] # tensor-space, after Normalize; gated by augmentation
   eval:
     - { _target_: torchvision.transforms.ToTensor }
     - _target_: torchvision.transforms.Normalize

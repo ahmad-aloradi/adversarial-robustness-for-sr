@@ -23,9 +23,7 @@ transforms:
   augment: # PIL-space, before ToTensor; gated by augmentation
     - { _target_: torchvision.transforms.RandomResizedCrop, size: 224 }
     - { _target_: torchvision.transforms.RandomHorizontalFlip }
-    - { _target_: torchvision.transforms.TrivialAugmentWide }
-  augment_post: # tensor-space, after Normalize; gated by augmentation
-    - { _target_: torchvision.transforms.RandomErasing, p: 0.1 } # p=0.1 to 0.5 is standard.
+  augment_post: [] # tensor-space, after Normalize; gated by augmentation
   eval: # standard ILSVRC eval crop: shorter side to 256, then centre 224
     - { _target_: torchvision.transforms.Resize, size: 256 }
     - { _target_: torchvision.transforms.CenterCrop, size: 224 }
