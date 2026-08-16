@@ -162,7 +162,7 @@ lambda_scheduler:
 
 **The update.** With `gap = target − sparsity`, λ is multiplied by `1 + α·|gap|` while the model is short of the target and divided by it once past. The move is relative, so the controller behaves the same at any λ scale and reaches any setpoint from any `initial_lambda`.
 
-**The step size.** `α = alpha_0 · gamma^C`, where `C` counts the updates whose gap changed sign. Each overshoot shrinks the steps, so λ settles instead of ringing and α tends to zero over a long run. A gap that shrinks, grows or hovers keeps its sign and leaves α alone. `gamma` defaults to 0.95 and is a constructor argument only — not yet wired to a config key.
+**The step size.** `α = alpha_0 · gamma^max(C − 1, 0)`, where `C` counts the updates whose gap changed sign. Each overshoot shrinks the steps, so λ settles instead of ringing and α tends to zero over a long run. A gap that shrinks, grows or hovers keeps its sign and leaves α alone. The model starts at `initial_sparsity`, on one side of the setpoint, so crossing #1 is the approach and not an overshoot — at `initial_sparsity: 0.99` and `target_sparsity: 0.9` the support grows through the target in the first updates, and that crossing costs no α. `gamma` defaults to 0.95 and is a constructor argument only — not yet wired to a config key.
 
 λ steers on the sparsity of every weight tensor — all but norms and biases (`WHICH_SPARSITY_PERCENTAGE` in `bregman_pruner.py`, default `pruned`), so `target_sparsity: 0.9` means the same thing as the magnitude pruner's `amount: 0.9` and RigL's. A group left unregularized (the stem at `prune_first_layer: false`) sits in that denominator at full size with no zeros. Switching the constant to `overall` means pointing `_bregman_sparsity_metric` at `sparsity` instead.
 

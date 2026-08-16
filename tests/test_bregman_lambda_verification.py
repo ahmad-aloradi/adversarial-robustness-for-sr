@@ -458,14 +458,16 @@ def test_alpha_holds_while_the_gap_keeps_its_sign():
     assert hovering.crossings == 0
 
 
-def test_alpha_decays_on_every_sign_flip():
-    """Each overshoot shrinks the factor geometrically."""
+def test_alpha_decays_on_every_overshoot():
+    """Each overshoot shrinks the factor geometrically. The first crossing is
+    the approach and costs nothing."""
     cross = _controller(alpha_0=1.0)
-    alphas = [cross.update_alpha(gap) for gap in (0.4, -0.2, 0.1, -0.05)]
-    assert cross.crossings == 3
+    alphas = [cross.update_alpha(gap) for gap in (0.4, -0.2, 0.1, -0.05, 0.02)]
+    assert cross.crossings == 4
+    assert alphas[:2] == [1.0, 1.0]  # the gap holds its sign, then approaches
 
     # A constant ratio in (0, 1) is the geometric decay, whatever gamma is.
-    ratios = [b / a for a, b in zip(alphas, alphas[1:])]
+    ratios = [b / a for a, b in zip(alphas[1:], alphas[2:])]
     assert all(0.0 < r < 1.0 for r in ratios)
     assert ratios == pytest.approx([ratios[0]] * len(ratios))
 
@@ -482,6 +484,9 @@ def test_decay_alpha_off_holds_alpha_through_sign_flips():
     sched.decay_alpha = True
     sched.update_alpha(0.2)  # sign flip vs the last recorded gap (-0.05)
     assert sched.crossings == 1
+    assert sched.alpha == 0.75  # the first counted crossing is the approach
+    sched.update_alpha(-0.1)
+    assert sched.crossings == 2
     assert sched.alpha < 0.75
 
 
@@ -493,11 +498,13 @@ def test_alpha_records_the_factor_the_update_used():
 
     sched.step(0.5, current_step=0)  # below target, gap > 0
     assert sched.alpha == 1.0
-    sched.step(0.95, current_step=10)  # past target -> gap flips sign
+    sched.step(0.95, current_step=10)  # past target -> the approach ends
+    assert sched.alpha == 1.0
+    sched.step(0.5, current_step=20)  # back below target -> overshoot
     damped = sched.alpha
     assert 0.0 < damped < 1.0
 
-    sched.step(0.95, current_step=15)  # between updates -> held, not reset
+    sched.step(0.95, current_step=25)  # between updates -> held, not reset
     assert sched.alpha == damped
 
 
@@ -566,13 +573,16 @@ def test_lambda_is_reproduced_after_a_resume():
 def test_the_starting_gap_comes_from_the_initial_sparsity():
     """A sparse start means a negative opening gap, logged before any
     update."""
-    sparse_start = _controller(target_sparsity=0.9, initial_sparsity=0.99)
+    sparse_start = _controller(
+        target_sparsity=0.9, initial_sparsity=0.99, alpha_0=1.0
+    )
     assert sparse_start.gap == pytest.approx(-0.09)
     assert sparse_start.prev_gap == pytest.approx(-0.09)
 
-    # Densifying past the target counts as an overshoot on the first update.
+    # Densifying past the target is the approach, so it leaves alpha alone.
     sparse_start.step(0.5, current_step=0)
     assert sparse_start.crossings == 1
+    assert sparse_start.alpha == 1.0
 
 
 def test_constructor_rejects_setpoints_outside_the_unit_interval():
