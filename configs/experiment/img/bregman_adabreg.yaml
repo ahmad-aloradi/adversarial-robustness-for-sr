@@ -24,6 +24,7 @@ _bregman_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1
 _bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
 _bregman_sparsity_metric: bregman/pruned_sparsity # gate signal: the metric lambda steers on (regularized groups); `sparsity` is whole-model
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
+_bregman_regularizer: RegL1 # readout on the regularized groups; RegL1 soft-thresholds
 _lr_constant_epochs: 0 # epochs to hold lr flat before the cosine leg; the progressive children set it to their ramp length
 
 trainer:
@@ -99,7 +100,7 @@ module:
         param_names: ["weight"]
         optimizer_settings:
           reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.${_bregman_regularizer}
             lamda: ${_bregman_lambda}
           lambda_scale: 1.0
         pruning_config:
@@ -112,7 +113,7 @@ module:
         param_names: ["weight"]
         optimizer_settings:
           reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.${_bregman_regularizer}
             lamda: ${_bregman_lambda}
           lambda_scale: 1.0
         pruning_config:
@@ -144,7 +145,7 @@ module:
         param_names: ["weight"]
         optimizer_settings:
           reg:
-            _target_: src.callbacks.pruning.bregman.bregman_regularizers.RegL1
+            _target_: src.callbacks.pruning.bregman.bregman_regularizers.${_bregman_regularizer}
             lamda: ${_bregman_lambda}
           lambda_scale: 1.0
         pruning_config:

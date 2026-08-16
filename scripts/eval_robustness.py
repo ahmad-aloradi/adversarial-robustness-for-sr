@@ -8,7 +8,7 @@ via a generic torchattacks adapter (AutoAttack by default). Attacks need NO
 training: they perturb test inputs against the frozen checkpoint. Results are
 merged into ``results.json`` and appended to the run's own loggers (wandb
 resumed by id, csv/tensorboard as version_1). Each attack also dumps its first
-``robustness.save_samples`` clean/adversarial pairs (default 5) as PNGs under
+``robustness.save_samples`` clean/adversarial pairs (default 20) as PNGs under
 ``{exp_dir}/adv_attacks/<name>/<norm>_e_<eps>/`` for visual inspection.
 
 Usage::

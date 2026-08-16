@@ -1,5 +1,4 @@
-"""
-Bregman Regularizers for sparse neural network training.
+"""Bregman Regularizers for sparse neural network training.
 
 This module provides various regularizers compatible with the BregmanPruner,
 replicating the implementations from the `TimRoith/BregmanLearning` repository.
@@ -25,8 +24,10 @@ class BregmanRegularizer:
     def prox(
         self, x: torch.Tensor, delta: float = 1.0, lamda: float = None
     ) -> torch.Tensor:
-        """Proximal operator. When lamda is None, uses self.lamda (set by the
-        scheduler)."""
+        """Proximal operator.
+
+        When lamda is None, uses self.lamda (set by the scheduler).
+        """
         raise NotImplementedError
 
     def sub_grad(self, v: torch.Tensor) -> torch.Tensor:
@@ -187,8 +188,7 @@ _REGULARIZERS = {
 
 
 def get_regularizer(name: str, **kwargs) -> BregmanRegularizer:
-    """
-    Factory function to get a regularizer instance by name.
+    """Factory function to get a regularizer instance by name.
 
     Parameters
     ----------
@@ -232,3 +232,14 @@ def lambda_scale(group: dict) -> float:
 def is_regularized(group: dict) -> bool:
     """An actively pruning group: thresholding, with lambda_scale > 0."""
     return thresholds_weights(group) and lambda_scale(group) > 0.0
+
+
+if __name__ == "__main__":
+    # Smoke: RegL1 keeps every weight above the barrier and shrinks it by delta*lamda.
+    delta, lamda = 1.0, 0.3
+    w0 = torch.tensor([-2.0, -0.5, -0.1, 0.0, 0.1, 0.5, 2.0])
+    reg = RegL1(lamda=lamda)
+    v0 = w0 / delta + reg.sub_grad(w0)  # v0 in dJ(w0), as LinBreg builds it
+    print(f"RegL1: v0={v0.tolist()}")
+    print(f"       w ={reg.prox(delta * v0, delta).tolist()}")
+    print(f"barrier delta*lamda = {delta * lamda}")
