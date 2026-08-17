@@ -10,15 +10,17 @@ log = utils.get_pylogger(__name__)
 
 
 class QuantileLambdaScheduler:
-    """Sets λ to the K-th order statistic of ``|v|``, K from
-    ``target_sparsity``.
+    """Sets λ to ``max(kthvalue(|v|, n-k), λ)``, K from ``target_sparsity``.
 
-    Unlike ``LambdaScheduler``, λ is not estimated from a measured sparsity
-    and corrected by feedback — it is read directly off the current dual
-    distribution, so the prox keeps exactly K of N regularized weights every
-    time :meth:`step` fires. Measured sparsity is therefore exact by
-    construction, not by convergence, which is what removes the chattering a
-    noisy feedback loop can fall into (docs/bregman_phantom_classes.md).
+    Unlike ``LambdaScheduler``, λ is read off the current dual distribution
+    instead of estimated from a measured sparsity, so the prox keeps K of N
+    regularized weights every time :meth:`step` fires
+    (docs/bregman_phantom_classes.md).
+
+    λ never falls: the FTRL increment ``(λ_k - λ_{k-1})*||w||_1`` must stay
+    non-negative for the dual-averaging regret bound. ``clamp_hits`` counts
+    the updates where the running max held instead of the new order
+    statistic (docs/fixed_vs_adaptive_lambda.md §3-4).
 
     :meth:`bind` must run once before :meth:`step`: computing K needs each
     param's Bregman dual (``optimizer.state[p]["sub_grad"]``), which
@@ -62,6 +64,7 @@ class QuantileLambdaScheduler:
 
         self.last_k = 0  # survivors the last step() selected
         self.n = 0  # total regularized elements; set by bind()
+        self.clamp_hits = 0  # updates where the running max held lambda_value
         self._optimizer: Optional[torch.optim.Optimizer] = None
         self._params: List[torch.nn.Parameter] = []
         self._scale: List[float] = []
@@ -96,13 +99,11 @@ class QuantileLambdaScheduler:
         self.n = sum(p.numel() for p in self._params)
 
     def step(self, current_sparsity: float, current_step: int) -> float:
-        """Move λ to the exact K-th-largest-|v| threshold for this update.
+        """Move λ to ``max(K-th-largest-|v|, λ)`` for this update.
 
         Inputs:
             current_sparsity: unused -- the quantile computes its own exact
-                count instead of trusting a measurement (already validated
-                by ``compute_sparsity``, so re-checking it here would be
-                redundant).
+                count instead of trusting a measurement.
             current_step: global step; updates land on multiples of
                 ``update_frequency``.
 
@@ -123,13 +124,14 @@ class QuantileLambdaScheduler:
         )
         k = max(1, min(self.n, round((1.0 - self.target_sparsity) * self.n)))
         self.last_k = k
-        self.lambda_value = (
+        raw = (
             0.0 if k >= self.n else torch.kthvalue(v, self.n - k).values.item()
         )
+        assert math.isfinite(raw), f"Infinite λ: {raw}"
 
-        assert math.isfinite(
-            self.lambda_value
-        ), f"Infinite λ: {self.lambda_value}"
+        if raw < self.lambda_value:
+            self.clamp_hits += 1
+        self.lambda_value = max(raw, self.lambda_value)
         return self.lambda_value
 
     def get_lambda(self) -> float:
@@ -137,18 +139,21 @@ class QuantileLambdaScheduler:
         return self.lambda_value
 
     def get_state(self) -> dict:
-        """Checkpoint state: the live lambda. ``n``/``last_k`` are
-        recomputed by ``bind()`` from the live model on every run, fresh or
-        resumed, so persisting them would risk drifting from what's loaded.
+        """Checkpoint state: the live lambda and the clamp count. ``n`` and
+        ``last_k`` are recomputed by ``bind()``/``step()`` from the live
+        model on every run, fresh or resumed, so persisting them would risk
+        drifting from what's loaded.
         """
-        return {"lambda_value": self.lambda_value}
+        return {"lambda_value": self.lambda_value, "clamp_hits": self.clamp_hits}
 
     def load_state(self, state: dict) -> None:
-        """Restore lambda; the rest comes from config and the next
-        ``bind()``."""
+        """Restore lambda and the clamp count; the rest comes from config
+        and the next ``bind()``."""
         self.lambda_value = state["lambda_value"]
+        self.clamp_hits = state["clamp_hits"]
         log.info(
-            f"QuantileLambdaScheduler state restored. lambda={self.lambda_value:.4f}"
+            f"QuantileLambdaScheduler state restored. lambda={self.lambda_value:.4f}, "
+            f"clamp_hits={self.clamp_hits}"
         )
 
 
@@ -176,5 +181,6 @@ if __name__ == "__main__":
         )  # broadcast, as BregmanPruner does
         achieved = compute_sparsity([w], threshold=1e-12)
         print(
-            f"step {step}: n={sched.n} k={sched.last_k} lambda={reg.lamda:.4f} achieved_sparsity={achieved:.4f}"
+            f"step {step}: n={sched.n} k={sched.last_k} lambda={reg.lamda:.4f} "
+            f"achieved_sparsity={achieved:.4f} clamp_hits={sched.clamp_hits}"
         )

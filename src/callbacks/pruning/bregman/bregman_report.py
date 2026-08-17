@@ -68,6 +68,7 @@ def log_step_metrics(
                 "bregman/quantile_k": float(sched.last_k),
                 "bregman/achieved_sparsity_at_update": 1.0
                 - sched.last_k / sched.n,
+                "bregman/lambda_clamp_hits": float(sched.clamp_hits),
             },
             **rank_identical,
         )
