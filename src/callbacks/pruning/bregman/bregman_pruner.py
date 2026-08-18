@@ -60,9 +60,10 @@ class BregmanPruner(Callback):
             verbose: Verbosity level (0=silent, 1=normal, 2=detailed).
             lambda_scheduler: Optional scheduler for dynamic lambda updates. Duck
                 typed to `.step(sparsity, step) -> float`, `.get_lambda() -> float`,
-                `.get_state()/.load_state(dict)`, `.target_sparsity`; an optional
-                `.bind(optimizer, params)` runs once at setup if defined
-                (LambdaScheduler, QuantileLambdaScheduler).
+                `.get_state()/.load_state(dict)`, `.target_sparsity`,
+                `.update_frequency`; an optional `.bind(optimizer, params)`
+                runs once at setup if defined (LambdaScheduler,
+                QuantileLambdaScheduler).
         """
         super().__init__()
         self.sparsity_threshold = sparsity_threshold
@@ -139,8 +140,14 @@ class BregmanPruner(Callback):
         if not self._initialized:
             return
 
-        # Both scans are the dominant per-batch cost; compute once and share
-        # them with the scheduler step, the metric logging, and the gates.
+        # The scans are the dominant per-batch cost, and step() discards the sparsity it gets between its own updates.
+        if (
+            self.lambda_scheduler is not None
+            and trainer.global_step % self.lambda_scheduler.update_frequency
+            and not trainer.is_last_batch
+        ):
+            return
+
         overall_sparsity = self._overall_sparsity()
         pruned_sparsity = self._pruned_sparsity()
         steering_sparsity = (
