@@ -59,7 +59,7 @@ def _loaders(num_workers=0):
     }
 
 
-def test_fakedata_mechanics():
+def _dm(augmentation, transforms):
     fake = _fake()
     cfg = OmegaConf.create(
         {
@@ -68,19 +68,31 @@ def test_fakedata_mechanics():
                 "valid_dataset": {"split": 0.25, "split_seed": 0},
                 "test_dataset": fake,
             },
-            "augmentation": False,
-            "transforms": {
-                "base": [_TOTENSOR],
-                "augment": [],
-                "augment_post": [],
-                "eval": [_TOTENSOR],
-            },
+            "augmentation": augmentation,
+            "transforms": transforms,
             "num_classes": 10,
             "loaders": _loaders(),
         }
     )
     dm = VisionDataModule(**cfg)
     dm.setup()  # synthetic data needs no prepare_data/download
+    return dm
+
+
+# ds is a Subset; its transforms live on the underlying view.
+_types = lambda ds: [type(t) for t in ds.dataset.transform.transforms]
+
+
+def test_fakedata_mechanics():
+    dm = _dm(
+        False,
+        {
+            "base": [_TOTENSOR],
+            "augment": [],
+            "augment_post": [],
+            "eval": [_TOTENSOR],
+        },
+    )
 
     images, targets = next(iter(dm.train_dataloader()))
     assert images.shape == (4, 3, 32, 32)
@@ -103,35 +115,14 @@ def test_augmentation_flag_gates_train_transforms():
 
     flip = {"_target_": "torchvision.transforms.RandomHorizontalFlip"}
     erase = {"_target_": "torchvision.transforms.RandomErasing"}
+    specs = {
+        "base": [_TOTENSOR],
+        "augment": [flip],  # PIL-space
+        "augment_post": [erase],  # tensor-space
+        "eval": [_TOTENSOR],
+    }
 
-    def _dm(augmentation):
-        fake = _fake()
-        cfg = OmegaConf.create(
-            {
-                "dataset": {
-                    "train_dataset": fake,
-                    "valid_dataset": {"split": 0.25, "split_seed": 0},
-                    "test_dataset": fake,
-                },
-                "augmentation": augmentation,
-                "transforms": {
-                    "base": [_TOTENSOR],
-                    "augment": [flip],  # PIL-space
-                    "augment_post": [erase],  # tensor-space
-                    "eval": [_TOTENSOR],
-                },
-                "num_classes": 10,
-                "loaders": _loaders(),
-            }
-        )
-        dm = VisionDataModule(**cfg)
-        dm.setup()
-        return dm
-
-    # ds is a Subset; its transforms live on the underlying view.
-    _types = lambda ds: [type(t) for t in ds.dataset.transform.transforms]
-
-    on, off = _dm(True), _dm(False)
+    on, off = _dm(True, specs), _dm(False, specs)
     # Both augment lists (PIL-space and tensor-space) are gated by the flag.
     assert {RandomHorizontalFlip, RandomErasing} <= set(_types(on.train_data))
     assert not {RandomHorizontalFlip, RandomErasing} & set(
@@ -139,6 +130,31 @@ def test_augmentation_flag_gates_train_transforms():
     )
     # Val/eval is never augmented.
     assert not {RandomHorizontalFlip, RandomErasing} & set(_types(on.val_data))
+
+
+def test_unaugmented_train_uses_eval_pipeline():
+    """When base and eval differ (the ImageNet shape), un-augmented train must
+    take eval's geometry so train and test see the same crop."""
+    from torchvision.transforms import CenterCrop, Resize
+
+    resize = {"_target_": "torchvision.transforms.Resize", "size": 24}
+    crop = {"_target_": "torchvision.transforms.CenterCrop", "size": 16}
+    rrc = {"_target_": "torchvision.transforms.RandomResizedCrop", "size": 16}
+    specs = {
+        "base": [_TOTENSOR],  # no geometry, unlike eval
+        "augment": [rrc],
+        "augment_post": [],
+        "eval": [resize, crop, _TOTENSOR],
+    }
+
+    off = _dm(False, specs)
+    assert _types(off.train_data) == _types(off.val_data)
+    images, _ = next(iter(off.train_dataloader()))
+    assert images.shape == (4, 3, 16, 16)  # eval crop, not the raw 32x32
+
+    # With augmentation on, geometry comes from augment and eval is not reused.
+    on = _dm(True, specs)
+    assert {Resize, CenterCrop}.isdisjoint(_types(on.train_data))
 
 
 @pytest.mark.slow

@@ -251,6 +251,33 @@ def test_bregman_wiring(exp):
         assert scheduler is not None
 
 
+@pytest.mark.parametrize("exp", _bregman_experiments())
+def test_regularizer_key_switches_every_thresholding_group(exp):
+    """``_bregman_regularizer`` picks the readout; RegL1 is the default.
+
+    The unregularized groups keep RegNone: only groups that threshold weights
+    follow the key.
+    """
+    for override, expected in (
+        ([], "RegL1"),
+        (["_bregman_regularizer=RegSoftBernoulli"], "RegSoftBernoulli"),
+    ):
+        cfg = _compose([f"experiment=img/{exp}", "logger=[]"] + override)
+        got = {
+            g.name: type(
+                hydra.utils.instantiate(g.optimizer_settings.reg)
+            ).__name__
+            for g in cfg.module.model.pruning_groups
+        }
+        assert got == {
+            "conv_layers": expected,
+            "linear_layers": expected,
+            "norm_params": "RegNone",
+            "bias_params": "RegNone",
+            "fallback": expected,
+        }
+
+
 def _param_group_map(model):
     """Map each parameter name to the pruning group it landed in."""
     id_to_group = {}
