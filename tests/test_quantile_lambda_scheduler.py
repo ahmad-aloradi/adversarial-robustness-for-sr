@@ -19,7 +19,7 @@ def _controller(target_sparsity=0.5, initial_lambda=1e-2, **kwargs):
     return QuantileLambdaScheduler(
         target_sparsity=target_sparsity,
         initial_lambda=initial_lambda,
-        **kwargs
+        **kwargs,
     )
 
 
@@ -112,34 +112,58 @@ def test_scale_aware_threshold_matches_lambda_scale():
 
 
 def test_step_updates_only_every_update_frequency_steps():
-    """Lambda moves on steps divisible by update_frequency, not in between.
+    """The order statistic is recomputed on steps divisible by
+    update_frequency, not in between.
 
-    Needs sub_grad to actually evolve between update instants (unlike the other
-    tests' single zero-gradient step) to tell "cached" from "recomputed but
-    coincidentally equal".
+    Drives sub_grad to a distinct magnitude at each fired instant, so
+    lambda_value reveals exactly when a recompute happened.
     """
-    w = torch.nn.Parameter(torch.randn(50))
-    reg = RegL1(lamda=0.0)
-    optimizer = AdaBreg(
-        [{"params": [w], "reg": reg, "lambda_scale": 1.0}], lr=1e-2
-    )
+    w = torch.nn.Parameter(torch.zeros(50))
+    optimizer = _materialize_sub_grad(w)
     scheduler = _controller(update_frequency=10)
     scheduler.bind(optimizer, [w])
 
+    v = optimizer.state[w]["sub_grad"]
     values = []
     for step in range(100):
-        w.grad = torch.randn_like(w) * 0.1
-        optimizer.step()
-        values.append(scheduler.step(0.0, step))
+        v.fill_(1.0 + step)
+        scheduler.step(0.0, step)
+        values.append(scheduler.lambda_value)
 
-    assert len(set(values)) == 10
+    assert len(set(values)) == 10  # one order statistic per update instant
+    changed_at = {
+        i
+        for i, (a, b) in enumerate(zip(values, values[1:]), start=1)
+        if a != b
+    }
+    assert changed_at and all(i % 10 == 0 for i in changed_at)
+
+
+def test_lambda_follows_a_falling_order_statistic():
+    """A shrinking dual distribution pulls lambda down with it, so K weights
+    still survive the prox."""
+    w = torch.nn.Parameter(torch.zeros(20))
+    optimizer = _materialize_sub_grad(w)
+    scheduler = _controller(target_sparsity=0.5, update_frequency=1)
+    scheduler.bind(optimizer, [w])
+
+    v = optimizer.state[w]["sub_grad"]
+    v.copy_(torch.linspace(1.0, 20.0, steps=20))
+    first = scheduler.step(0.0, 0)  # k = 10, so lambda is the 10th smallest
+
+    v.mul_(0.5)  # every dual halves, so the order statistic halves with it
+    second = scheduler.step(0.0, 1)
+
+    assert first == pytest.approx(10.0)
+    assert second == pytest.approx(5.0)
 
 
 def test_get_state_load_state_round_trip():
-    """lambda_value is the only state a checkpoint has to carry."""
+    """Lambda rides the checkpoint, so a resumed run thresholds where it
+    stopped."""
     w = torch.nn.Parameter(torch.randn(20))
     optimizer = _materialize_sub_grad(w)
-    scheduler = _controller(initial_lambda=1.0)
+    scheduler = _controller(update_frequency=1)
     scheduler.bind(optimizer, [w])
     scheduler.step(current_sparsity=0.0, current_step=0)
 
@@ -171,6 +195,23 @@ def test_accepted_but_unused_kwargs_do_not_change_lambda():
     lam_b = scheduler_b.step(current_sparsity=0.0, current_step=0)
 
     assert lam_a == pytest.approx(lam_b)
+
+
+@pytest.mark.parametrize("target_sparsity", [0.5, 0.9, 0.99])
+def test_topk_returns_the_kthvalue_order_statistic(target_sparsity):
+    """Step() selects with topk; kthvalue is the definition it must match.
+
+    Why: topk(k+1).min is the (n-k)-th smallest, the same order statistic
+    kthvalue(n-k) returns. topk(k) is off by one.
+    """
+    v = torch.rand(10_000)
+    n = v.numel()
+    k = max(1, min(n, round((1.0 - target_sparsity) * n)))
+
+    assert (
+        torch.topk(v, k + 1, sorted=False).values.min()
+        == torch.kthvalue(v, n - k).values
+    )
 
 
 if __name__ == "__main__":
