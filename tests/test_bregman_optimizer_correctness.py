@@ -624,6 +624,55 @@ def test_mu_is_exactly_multiplicative_decay_on_the_support():
     assert p.detach()[3] == 0.0  # off the support mu never acts
 
 
+def test_linbreg_mu_decay_is_exact_under_momentum():
+    """Decoupling keeps mu*p out of the momentum buffer, so the multiplicative
+    decay identity holds even with momentum on -- unlike SGD+L2+momentum,
+    where the buffer would smear mu*w across steps."""
+    lr, mu, momentum = 0.1, 5e-4, 0.9
+    p = nn.Parameter(torch.tensor([0.9, -0.6, 0.02, 0.0]))
+    opt = LinBreg(
+        [p], lr=lr, reg=RegL1(lamda=0.05), weight_decay=mu, momentum=momentum
+    )
+
+    p.grad = torch.zeros_like(p)
+    opt.step()
+    before = p.detach().clone()
+    p.grad = torch.zeros_like(p)
+    opt.step()
+
+    assert torch.allclose(p.detach(), before * (1 - lr * mu), atol=1e-8)
+
+
+def test_decay_only_trajectory_is_identical_across_momentum_and_adam():
+    """Decoupling isolates mu's effect from the optimizer-specific machinery
+    entirely, not just approximately: with grad L == 0 throughout, LinBreg
+    (no momentum), LinBreg (momentum=0.9) and AdaBreg trace bit-for-bit
+    identical trajectories over many steps. The momentum buffer and the Adam
+    moments both stay exactly 0.0 (nothing ever feeds them), so their
+    contribution to the dual update is an exact +0.0/-0.0 no-op in every
+    variant, leaving only the shared ``-lr*mu*p`` term."""
+    lr, mu = 0.1, 0.5
+    w0 = torch.tensor([0.9, -0.6, 0.02])
+
+    def run(**kwargs):
+        p = nn.Parameter(w0.clone())
+        opt_cls = kwargs.pop("opt_cls")
+        opt = opt_cls([p], lr=lr, reg=RegL1(lamda=0.05), weight_decay=mu, **kwargs)
+        trajectory = []
+        for _ in range(60):
+            p.grad = torch.zeros_like(p)
+            opt.step()
+            trajectory.append(p.detach().clone())
+        return torch.stack(trajectory)
+
+    linbreg_no_momentum = run(opt_cls=LinBreg)
+    linbreg_with_momentum = run(opt_cls=LinBreg, momentum=0.9)
+    adabreg = run(opt_cls=AdaBreg)
+
+    assert torch.equal(linbreg_no_momentum, linbreg_with_momentum)
+    assert torch.equal(linbreg_no_momentum, adabreg)
+
+
 def test_proxsgd_mu_carries_the_lasso_shrink_linbreg_does_not():
     """ProxSGD thresholds w itself, so a decay-only step is the contraction
     minus lr*lamda -- the bias the Bregman dual is debiased of."""
@@ -637,9 +686,28 @@ def test_proxsgd_mu_carries_the_lasso_shrink_linbreg_does_not():
     assert p.item() == pytest.approx((1 - lr * mu) * 0.9 - lr * lamda)
 
 
-def test_adabreg_mu_is_not_a_contraction():
-    """Adam's denominator normalizes mu*w away when it dominates the numerator:
-    the dual step is lr*sign(w), so w falls by lr per step whatever mu is."""
+def test_adabreg_mu_is_exactly_multiplicative_decay_on_the_support():
+    """With no loss gradient, mu is ``w <- (1 - lr*mu*delta)*w``, matching
+    LinBreg: decoupling keeps mu out of Adam's exp_avg/exp_avg_sq, so with
+    grad L == 0 those stay at 0 and the adam step vanishes, leaving only
+    the decay term."""
+    lr, mu = 1e-2, 5e-4
+    p = nn.Parameter(torch.tensor([0.9, -0.6, 0.02, 0.0]))
+    opt = AdaBreg([p], lr=lr, reg=RegL1(lamda=0.05), weight_decay=mu)
+
+    p.grad = torch.zeros_like(p)
+    opt.step()  # first step establishes w = prox(delta * v)
+    before = p.detach().clone()
+    p.grad = torch.zeros_like(p)
+    opt.step()
+
+    assert torch.allclose(p.detach(), before * (1 - lr * mu), atol=1e-8)
+    assert p.detach()[3] == 0.0  # off the support mu never acts
+
+
+def test_adabreg_mu_is_now_rate_dependent():
+    """Decoupled decay scales with mu; Adam's denominator no longer absorbs
+    it into a fixed lr*sign(w) step."""
     lr = 1e-2
     steps = []
     for mu in (5e-4, 5e-2):
@@ -650,8 +718,7 @@ def test_adabreg_mu_is_not_a_contraction():
             opt.step()
         steps.append(float(p.detach()[0]))
 
-    assert steps[0] == pytest.approx(steps[1], abs=1e-6)  # 100x mu, same step
-    assert steps[0] == pytest.approx(0.9 - 3 * lr, abs=1e-4)
+    assert steps[0] != pytest.approx(steps[1], abs=1e-6)  # 100x mu, different step
 
 
 @pytest.mark.parametrize("OptimizerClass", [LinBreg, AdaBreg])

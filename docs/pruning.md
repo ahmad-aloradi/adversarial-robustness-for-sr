@@ -44,33 +44,36 @@ w ← ∇J*(v) = S_δλ(δ·v)                # p.copy_(reg.prox(delta * sub_gra
 ###### The master equation
 
 Fix a coordinate on the support and hold `s = sign(v)`. There the prox is affine
-in `v`, and a difference cancels its constant offset:
+in `v`, and a difference cancels its constant offset. `g` is the momentum- or
+Adam-processed loss step alone — LinBreg and AdaBreg add `μw` to the dual as a
+separate term (AdamW-style: Loshchilov & Hutter, ICLR 2019), so it never shares
+`g`'s buffer:
 
 ```text
 (A)   w  = δ·(v − λ·s)
 (B)   Δw = δ·Δv                       # the λ·s offset drops out
-(M)   Δw = −δτ·g                      # since Δv = −τ·g
+(M)   Δw = −δτ·g − δτμ·w              # since Δv = −τ·g − τμ·w
 ```
 
-**Inside a sign cell, LinBreg is gradient descent on `w` with step `δτ`.** λ is
-absent from (M): it acts only when a coordinate changes cell — enters or leaves
-the support. That is the debiasing, and every result below is a substitution
-into (M).
+**Inside a sign cell, LinBreg is gradient descent on `w` with step `δτ`, plus a
+decay term independent of `g`.** λ is absent from (M): it acts only when a
+coordinate changes cell — enters or leaves the support. That is the debiasing,
+and every result below is a substitution into (M).
 
-| `g` | `Δw = −δτ·g` gives |
+| `g` | `Δw = −δτ·g − δτμ·w` gives |
 | --- | --- |
-| `∇L + μw` | `w⁺ = (1 − δτμ)·w − δτ·∇L` |
-| `μw`, i.e. `∇L = 0` | `w⁺ = (1 − δτμ)·w` — ordinary multiplicative decay |
+| `∇L` (momentum = 0) | `w⁺ = (1 − δτμ)·w − δτ·∇L` |
+| `b`, momentum's buffer of `∇L` alone | `w⁺ = (1 − δτμ)·w − δτ·b` — the same `(1 − δτμ)` factor, for any momentum, since `μw` never enters `b` |
+| `∇L = 0` (any momentum) | `w⁺ = (1 − δτμ)·w` — ordinary multiplicative decay |
 | `w = 0`, off the support | `μ·w = 0`; the decay term is absent, no mask needed |
-| `b`, with `b⁺ = m·b + μw` | SGD's heavy-ball recursion, char. poly `ρ² − (1 + m − δτμ)·ρ + m = 0`, so `ρ ≈ 1 − δτμ/(1 − m)` |
 
-Stationarity follows too: `Δw = 0 ⟺ g = 0 ⟺ ∇L = −μw`, which is stationarity of
+Stationarity follows too: `Δw = 0 ⟺ g = −μw`, which is stationarity of
 `L + μ‖w‖₂²/2`. At `∇L = 0` that forces `w = 0`, i.e. `|v| ≤ λ` — μ drives a
 coordinate onto the threshold and out of the support, so it raises the sparsity a
 given λ reaches. `fixed_lambda` is therefore calibrated per μ; the adaptive arms
 re-derive λ online and are unaffected.
 
-###### Why μ can only enter g
+###### Why μ must enter the dual update, before the prox
 
 ```text
 (G)   w = ∇J*(v)                      # w is a function of v alone: a post-prox
@@ -80,30 +83,63 @@ re-derive λ online and are unaffected.
                                       # ∇J*, so this rescales δ, constant in k
 ```
 
-`g` is what is left, and by (M) it is exactly SGD's weight decay — momentum and
-all. Equivalently: the iteration is unchanged, run on `L + μ‖w‖₂²/2`, which is
-differentiable and `(Lip + μ)`-smooth, so the published convergence result
-carries over verbatim.
+μ must land in the dual update `v ← v − τ(...)`, before the prox — (G)/(H) rule
+out any post-prox edit to `w`. It does not have to share a buffer with `g`:
+LinBreg and AdaBreg add it as an independent term, so every step it reaches the
+dual at the full rate `τμ`, never smeared by momentum or normalized by Adam's
+denominator. Equivalently: the loss part of the iteration is unchanged, run on
+`L` (not `L + μ‖w‖₂²/2` — μ is no longer folded into the smooth loss term, it
+sits beside it), which keeps the published convergence result for the `∇L`
+part untouched by μ.
 
-###### AdaBreg: μ cancels by scale invariance
+###### AdaBreg: μ is decoupled from Adam's normalization
 
-Adam is invariant to `g ↦ c·g` for `c > 0`, up to `ε`:
+`exp_avg`/`exp_avg_sq` are built from `∇L` alone — `μw` never enters them, so
+Adam's `√Ŝ` denominator never sees it. Substituting `g = adam_step =
+m̂/(√Ŝ + ε)` into (M):
 
 ```text
-(C)   m̂ ↦ c·m̂ ,  √Ŝ ↦ c·√Ŝ ,  so  m̂/(√Ŝ + ε) ↦ m̂/(√Ŝ + ε/c)
+(D)   w⁺ = (1 − δτμ)·w − δτ·adam_step
 ```
 
-At `∇L = 0` the gradient is `g = μ·w` — exactly `w` scaled by a positive
-constant — so the scale is normalized away:
+At `∇L = 0`, `exp_avg` and `exp_avg_sq` stay at `0` forever — nothing ever
+feeds them — so `adam_step = 0/ε = 0` and:
 
 ```text
-(D)   A = m̂/(√Ŝ + ε) → sign(w)
-(E)   w⁺ = w − δτ·sign(w)             # by (M); μ is gone
+(E)   w⁺ = (1 − δτμ)·w                # the same identity as LinBreg
 ```
 
-A step of fixed size `δτ`, for any μ. With `∇L ≠ 0`,
-`m̂ ≈ EMA(∇L) + μ·EMA(w)` and both terms share the denominator, so μ sets the
-decay's **share of the numerator**, never a rate.
+μ is a fixed rate here, exactly as it is for LinBreg — not a share of Adam's
+numerator that vanishes into `sign(w)` regardless of magnitude.
+
+###### What is established, and what is not
+
+(D) shows the `(1 − δτμ)` rate is the same substitution into (M) whatever `g`
+is — a property of the dual update, true by construction: the momentum buffer
+and the Adam moments only ever accumulate `∇L`, so `μw`'s contribution to (M)
+never touches them. That is definitional, verifiable by reading the code, and
+does not depend on being on the support.
+
+Its translation into a *w-space* claim — "LinBreg and AdaBreg decay `w`
+identically" — does depend on the support precondition, same as every other
+row in the master-equation table. It is not left as an analogy:
+`test_decay_only_trajectory_is_identical_across_momentum_and_adam`
+(`tests/test_bregman_optimizer_correctness.py`) drives LinBreg (no momentum),
+LinBreg (momentum=0.9) and AdaBreg for 60 steps at `∇L = 0` and asserts the
+three trajectories are bit-for-bit equal (`torch.equal`, not `allclose`) —
+the momentum buffer and the Adam moments both collapse to an exact `+0.0`
+contribution when fed nothing but zeros, so all three machineries reduce to
+the identical no-op and only the shared `−τμ·w` term survives.
+
+What this does not cover: a coordinate crossing the support boundary or
+flipping sign, where (B) fails. Decay alone cannot cause that crossing —
+`v_{k+1} = v_k(1 − τμδ) + τμδλs` is a contraction toward the fixed point
+`v* = λs`, so for `0 < τμδ < 1` it approaches the boundary geometrically and
+never reaches it in exact arithmetic (confirmed numerically: 60 steps at
+`τμδ = 0.05` leaves every coordinate strictly inside the support). A crossing
+needs `∇L` or a λ update to push past it, and that mechanism is identical for
+LinBreg and AdaBreg — the prox and λ are shared, so a crossing is symmetric
+across optimizers, not something this decoupling treats differently.
 
 ###### ProxSGD: the offset does not cancel
 
@@ -129,7 +165,7 @@ coordinate change in (A).
 of the baseline it is compared against — `5e-4` on the img recipes, `1e-4` on the
 SV ones — so on the support the two decay identically, and off it Bregman decays
 nothing, because there is nothing there. No recipe overrides `delta`, so `δ = 1`
-and the rate is `τμ`, times `1/(1 − m)` under momentum.
+and the rate is `τμ`, regardless of momentum.
 
 #### 1.2 Bregman Regularizers
 
