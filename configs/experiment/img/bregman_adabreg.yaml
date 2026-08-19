@@ -91,7 +91,6 @@ module:
       frequency: ${trainer.check_val_every_n_epoch}
 
   model:
-    prune_first_layer: false # stem conv stays dense, matching the sparse-training baselines
     pruning_groups:
       # Prunable convolutions (stem conv1 + all block convs + downsample convs).
       - name: conv_layers

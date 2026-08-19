@@ -77,7 +77,6 @@ class MiniBregmanModule(LightningModule):
         # Setup pruning manager first
         self.pruning_manager = PruningManager(
             pl_module=self,
-            prune_first_layer=True,
             group_configs=[
                 {
                     "name": "linear_weights",

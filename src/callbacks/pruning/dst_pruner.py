@@ -75,8 +75,8 @@ class DynamicSparsePruner(Callback):
         growth: ``gradient`` regrows the largest dense gradients (RigL),
             ``random`` regrows uniformly at random (SET).
         update_frequency: steps between mask updates; ``None`` never updates.
-        prune_first_layer: ``False`` holds the stem conv dense, as RigL does at
-            99 % sparsity and on CIFAR throughout.
+        prune_first_layer: ``False`` holds the stem conv dense; the target
+            then rises on the layers that are left (``_pool_target``).
         drop_fraction / drop_end_fraction / drop_end_value: the cosine schedule
             for how much of each mask is redrawn (see ``dst_schedules``).
         final_prune_epoch: epoch GraNet's cubic ramp reaches ``amount``.

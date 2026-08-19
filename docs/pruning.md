@@ -200,7 +200,7 @@ lambda_scheduler:
 
 **The step size.** `α = alpha_0 · gamma^max(C − 1, 0)`, where `C` counts the updates whose gap changed sign. Each overshoot shrinks the steps, so λ settles instead of ringing and α tends to zero over a long run. A gap that shrinks, grows or hovers keeps its sign and leaves α alone. The model starts at `initial_sparsity`, on one side of the setpoint, so crossing #1 is the approach and not an overshoot — at `initial_sparsity: 0.99` and `target_sparsity: 0.9` the support grows through the target in the first updates, and that crossing costs no α. `gamma` defaults to 0.95 and is a constructor argument only — not yet wired to a config key.
 
-λ steers on the sparsity of every weight tensor — all but norms and biases (`WHICH_SPARSITY_PERCENTAGE` in `bregman_pruner.py`, default `pruned`), so `target_sparsity: 0.9` means the same thing as the magnitude pruner's `amount: 0.9` and RigL's. A group left unregularized (the stem at `prune_first_layer: false`) sits in that denominator at full size with no zeros. Switching the constant to `overall` means pointing `_bregman_sparsity_metric` at `sparsity` instead.
+λ steers on the sparsity of every weight tensor — all but norms and biases (`WHICH_SPARSITY_PERCENTAGE` in `bregman_pruner.py`, default `pruned`), so `target_sparsity: 0.9` means the same thing as the magnitude pruner's `amount: 0.9` and RigL's. Switching the constant to `overall` means pointing `_bregman_sparsity_metric` at `sparsity` instead.
 
 Metrics: `bregman/global_lambda` (live λ), `bregman/lambda_delta` (applied `Δλ`, zero between updates), `bregman/lambda_delta_over_lambda` (the relative move), `bregman/lambda_gap` (`target − sparsity` at the last update), `bregman/lambda_crossings` (`C`), `bregman/alpha` (the α of the last update).
 
@@ -430,16 +430,21 @@ Both goals ensure seamless loading of pruned checkpoints into unpruned models:
 
 ## The stem: `prune_first_layer`
 
-`prune_first_layer: false` (the default) holds the model's first weight tensor dense — RigL's rule on CIFAR and at 99 % everywhere. All four stacks take the flag and resolve the stem through one selector, `parameter_manager.stem_weight`, so they hold the *same* tensor dense and the benchmark rows stay comparable:
+`callbacks.model_pruning.prune_first_layer` drops the model's first weight tensor from the target list. Every recipe sets `true`, because every method's own implementation sparsifies the stem:
 
-| Stack | Key | Where it lands |
+| Recipe | Source | Evidence |
 | --- | --- | --- |
-| magnitude, DST, STR | `callbacks.model_pruning.prune_first_layer` | dropped from the target list |
-| Bregman | `module.model.prune_first_layer` | a synthesized `first_dense` optimizer group |
+| `pruning_rigl`, `pruning_set`, `pruning_static` | google-research/rigl | the dense stem is the paper's **Uniform** rule (sec. 3); the recipes run ERK, which "applies to all layers" (README) |
+| `pruning_granet` | VITA-Group/GraNet | `--rm-first` is `store_true` and no published command passes it |
+| `pruning_snip`, `pruning_snip_iter` | namhoonlee/snip-public, naver/force | SNIP masks every `w`/`b` key; FORCE takes every `nn.Conv2d`/`nn.Linear` |
+| `soft_threshold` | RAIVNLab/STR | `--first-layer-dense` defaults to `False`; STR's own ResNet-50 budget puts `conv1` at 51–78 % sparse |
+| `pruning_mag_*`, `sv_pruning_mag_*` | Gale et al. 2019 | GMP sparsifies "all convolutional and fully-connected layers" |
 
-`stem_weight` reads the module walk, not a layer-type list and not a filtered target list: the first module with a trainable `weight` Parameter that is not a norm layer. So a custom encoder stem counts, and a stem below `min_param_elements` costs only itself. img recipes set `false`, SV recipes set `true` (stem sparsity is part of what the SV study measures).
+The Bregman stack has no such flag: `TimRoith/BregmanLearning` excludes no layer, so every weight tensor carries the regularizer.
 
-The held-dense tensor stays in the reported denominator at full size, spending its share of the budget — which is how RigL accounts for a dense first layer, and why `pool_sparsity` scales the target the callback actually applies.
+`stem_weight` reads the module walk, not a layer-type list and not a filtered target list: the first module with a trainable `weight` Parameter that is not a norm layer. So a custom encoder stem counts, and a stem below `min_param_elements` costs only itself.
+
+At `false` the held-dense tensor stays in the reported denominator at full size, spending its share of the budget — which is how RigL accounts for a dense first layer, and why `pool_sparsity` scales the target the callback actually applies.
 
 ---
 

@@ -317,7 +317,7 @@ def test_configure_optimizers_dense():
 
 
 def test_str_uses_one_weight_decay():
-    """"s also has the same weight-decay parameter lambda" (Kusupati et al.,
+    """ "s also has the same weight-decay parameter lambda" (Kusupati et al.,
     Sec 3), so w, bias, BatchNorm and the s scalars all sit in one group at
     module.optimizer.weight_decay, set to Table 10's lambda."""
     import hydra
@@ -376,8 +376,7 @@ def test_configure_optimizers_bregman(exp, optimizer):
     assert name_to_group["net.layer2.0.downsample.1.weight"] == "norm_params"
     assert "fallback" not in {g["config"]["name"] for g in groups}
 
-    # prune_first_layer=false: the stem sits out of RegL1, the head does not.
-    assert name_to_group["net.conv1.weight"] == "first_dense"
+    assert name_to_group["net.conv1.weight"] == "conv_layers"
     assert name_to_group["net.fc.weight"] == "linear_layers"
 
 

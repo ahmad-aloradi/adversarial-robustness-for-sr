@@ -375,7 +375,6 @@ class CountermeasureModule(pl.LightningModule):
             self.pruning_manager = PruningManager(
                 pl_module=self,
                 group_configs=self.hparams.model.pruning_groups,
-                prune_first_layer=self.hparams.model.prune_first_layer,
             )
             optimizer_param_groups = (
                 self.pruning_manager.get_optimizer_param_groups()

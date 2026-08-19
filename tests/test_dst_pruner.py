@@ -19,6 +19,7 @@ from torchmetrics import Accuracy
 
 from src.callbacks.pruning.dst_pruner import DynamicSparsePruner
 from src.callbacks.pruning.shared_prune_utils import compute_sparsity
+from src.modules.models.vision_resnet import build_resnet
 
 TOTAL_STEPS = 1000
 
@@ -500,6 +501,72 @@ def test_snip_without_a_trainer_raises():
     pruner._collect(model)
     with pytest.raises(AssertionError, match="needs a live trainer"):
         pruner._build_masks(model, None)
+
+
+class _ResNetClassifier(pl.LightningModule):
+    """The img recipes' own backbone, so the SNIP budget sees real layer
+    sizes."""
+
+    def __init__(self):
+        super().__init__()
+        self.net = build_resnet(
+            "resnet18", num_classes=100, dataset_name="cifar100"
+        )
+
+    def training_step(self, batch, batch_idx):
+        images, targets = batch
+        return {"loss": nn.functional.cross_entropy(self.net(images), targets)}
+
+    def configure_optimizers(self):
+        return torch.optim.SGD(self.parameters(), lr=0.1)
+
+
+def _resnet_snip_trainer():
+    dataset = torch.utils.data.TensorDataset(
+        torch.randn(8, 3, 32, 32), torch.randint(0, 100, (8,))
+    )
+    trainer = MagicMock(spec=Trainer)
+    trainer.world_size = 1
+    trainer.train_dataloader = torch.utils.data.DataLoader(
+        dataset, batch_size=8
+    )
+    return trainer
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("iterations, expect_empty", [(1, True), (100, False)])
+def test_snip_at_99_percent_on_resnet18(iterations, expect_empty):
+    """99 % is the sweep's headline rate and the stem is in the pool there.
+
+    One ranking severs the deepest layers; ``snip_iterations`` clears them. The
+    mask hits the target and the model still runs either way, so the collapsed
+    accuracy is a measurement and not a crash.
+    """
+    model = _ResNetClassifier()
+    pruner = DynamicSparsePruner(
+        amount=0.99,
+        mask_init="snip",
+        snip_iterations=iterations,
+        prune_first_layer=True,
+        verbose=0,
+    )
+    pruner._collect(model)
+    pruner._build_masks(model, _resnet_snip_trainer())
+    pruner._apply_masks(_sgd(model))
+
+    assert pruner.pruned_sparsity() == pytest.approx(0.99, abs=5e-4)
+    empty = [k for k, m in pruner._masks.items() if int(m.sum()) == 0]
+    assert bool(empty) is expect_empty, f"empty layers: {empty}"
+
+    images, targets = next(iter(_resnet_snip_trainer().train_dataloader))
+    loss = model.training_step((images, targets), 0)["loss"]
+    loss.backward()
+    assert torch.isfinite(loss), "SNIP left the network unable to run"
+    assert all(
+        torch.isfinite(p.grad).all()
+        for p in model.parameters()
+        if p.grad is not None
+    )
 
 
 def test_snip_layer_collapse_is_reported_not_fatal(caplog):

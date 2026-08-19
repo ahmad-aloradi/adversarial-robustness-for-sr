@@ -125,7 +125,6 @@ module:
     weight_decay: 1.0e-4 # mu: sv_dense_wespeaker's L2, inherited by every SV Bregman arm
 
   model:
-    prune_first_layer: false # stem conv stays dense, matching the sparse-training baselines
     pruning_groups:
       # Group 1: Prunable Convolutional Layers
       - name: conv_layers

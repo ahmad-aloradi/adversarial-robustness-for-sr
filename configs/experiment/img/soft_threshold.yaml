@@ -25,7 +25,7 @@ callbacks:
   model_pruning:
     _target_: src.callbacks.pruning.str_pruner.STRPruner
     s_init: -8.0 # Consider the original=-3200 sigmoid(s) = 3.4e-4, ~1% of weights below it at init: the loss/decay balance runs from step 0
-    prune_first_layer: false # stem conv stays an nn.Conv2d, as in every other img recipe
+    prune_first_layer: true # STR learns the stem's threshold too; upstream --first-layer-dense is off
 
 module:
   optimizer:

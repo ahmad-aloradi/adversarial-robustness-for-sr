@@ -45,7 +45,7 @@ callbacks:
     mask_init: erk # RigL's Erdos-Renyi-Kernel layerwise budget
     growth: gradient # regrow the largest dense gradients; `random` is SET
     update_frequency: 100 # RigL's delta-T, in optimizer steps
-    prune_first_layer: false # upstream keeps the stem conv dense on CIFAR throughout and at 99% everywhere
+    prune_first_layer: true # ERK sparsifies every layer; RigL holds the stem dense only under its Uniform distribution
     drop_fraction: 0.3 # RigL's alpha: share of active weights redrawn at step 0
     drop_end_fraction: 0.75 # cosine reaches drop_end_value here, so updates stop
     tolerance: ${_pruning_tolerance} # drift band asserted at every epoch end

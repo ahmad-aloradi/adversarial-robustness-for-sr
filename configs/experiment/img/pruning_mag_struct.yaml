@@ -47,7 +47,7 @@ callbacks:
     amount: 0.9 # final sparsity once scheduled_pruning finishes ramping
     initial_amount: 0.5 # ramp start; GraNet Table 4's s_i, shared by the ramped recipes
     use_global_unstructured: false # per-layer structured pruning, not a single global ranking
-    prune_first_layer: false # stem conv stays dense, matching the sparse-training baselines
+    prune_first_layer: true # GMP sparsifies every conv and fc layer (Gale et al. 2019)
     make_pruning_permanent: true # fuse masks into weights at training end
     pruning_dim: 1 # dimension pruned by ln_structured
     pruning_norm: 1 # Ln norm used to rank structures (L1)

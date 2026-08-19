@@ -13,9 +13,9 @@ logger = get_pylogger(__name__)
 def stem_weight(model: nn.Module) -> Tuple[nn.Module, str]:
     """The model's first weight tensor, in module-definition order.
 
-    The single answer to "which layer is the stem", shared by ParameterManager
-    (DST, magnitude, STR) and PruningManager (Bregman), so the four methods
-    hold the same tensor dense at ``prune_first_layer: false``.
+    The single answer to "which layer is the stem", shared by the DST,
+    magnitude and STR selectors, so the three methods hold the same tensor
+    dense at ``prune_first_layer: false``.
 
     Why it reads the module walk rather than a caller's target list: the size
     and dim filters run after this, so a stem below ``min_param_elements``

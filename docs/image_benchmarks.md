@@ -124,9 +124,9 @@ The hold length is part of the run-dir tag — `-Const<N>Cosine` at N > 0,
 ### What "sparsity" means
 
 Every method reports zeros over **all weight tensors, norms and biases aside**.
-Layers a method holds dense (the stem at `prune_first_layer: false`) count in
-that denominator at full size with no zeros, so `amount: 0.99` means the same
-thing for RigL, GraNet, magnitude pruning and Bregman alike. `sparsity` is the
+Every recipe sparsifies all of them, so `amount: 0.99` means the same thing for
+RigL, GraNet, magnitude pruning and Bregman alike. A layer held dense would
+still count in that denominator at full size with no zeros. `sparsity` is the
 whole model including BatchNorm and biases, which no method sparsifies.
 
 That one quantity is published under two keys, and each gate must read the one
@@ -144,9 +144,8 @@ its own pruner writes — `_bregman_sparsity_metric` exists for exactly this:
   misroute downsample BatchNorm γ into the RegL1 group and shrink it.
 - That is why every backbone below works with no config change — covered by
   `tests/test_vision_resnet.py` / `tests/test_wide_resnet.py`.
-- `fc` is pruned; `conv1` is held dense by `prune_first_layer: false` (RigL's
-  rule). Add a name to a group's `exclude_module_name_patterns` to keep another
-  layer dense.
+- `conv1` and `fc` are both pruned. Add a name to a group's
+  `exclude_module_name_patterns` to keep a layer dense.
 
 ## Backbones
 

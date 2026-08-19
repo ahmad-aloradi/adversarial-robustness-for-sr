@@ -16,5 +16,6 @@ tags: ["img", "${datamodule.name}", "sparse_training", "snip"]
 callbacks:
   model_pruning:
     mask_init: snip # one forward/backward on the untrained weights picks the mask
+    prune_first_layer: true # SNIP scores every weight tensor, stem included
     snip_iterations: 1 # the paper's single global ranking
     update_frequency: null # single-shot: the mask never changes after init

@@ -41,11 +41,13 @@ tensor — all but norms and biases**. Layers held dense count in that denominat
 at full size with no zeros, so the number is comparable across every method in
 the benchmark, including Bregman and magnitude pruning.
 
-`prune_first_layer: false` (the default) holds the stem conv dense, which is
-RigL's rule on CIFAR and at 99 % everywhere. It costs 1,728 of the 111,644
-weights a 99 % budget allows on ResNet-18 — 1.5 %, so it is always affordable.
-The classifier **is** pruned: holding it dense too would eat 46 % of the budget
-on CIFAR-100 and more than all of it on ImageNet.
+Every recipe sets `prune_first_layer: true`, because every method's own
+implementation sparsifies the stem — see the table in
+[pruning.md](pruning.md#the-stem-prune_first_layer) for the source behind each
+one. RigL's dense stem belongs to its **Uniform** distribution; these recipes
+run ERK, whose shape-based budget already clamps a small stem toward dense on
+its own. The classifier is pruned too: holding it dense would eat 46 % of the
+budget on CIFAR-100 and more than all of it on ImageNet.
 
 ## SNIP collapses at 99 %, and that is the finding
 
