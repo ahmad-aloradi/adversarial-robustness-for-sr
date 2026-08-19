@@ -95,7 +95,7 @@ class DynamicSparsePruner(Callback):
         drop_end_value: float = 0.0,
         final_prune_epoch: Optional[int] = None,
         prune_bias: bool = False,
-        prune_first_layer: bool = False,
+        prune_first_layer: bool = True,
         min_param_elements: int = 100,
         tolerance: float = 0.005,
         verbose: int = 1,

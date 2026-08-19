@@ -41,7 +41,7 @@ class MagnitudePruner(Callback):
         pruning_dim: Optional[int] = None,
         pruning_norm: Optional[int] = 1,
         prune_bias: bool = False,
-        prune_first_layer: bool = False,
+        prune_first_layer: bool = True,
         make_pruning_permanent: bool = True,
         min_param_elements: int = 100,
         verbose: int = 1,

@@ -125,7 +125,7 @@ class ParameterManager:
     def __init__(
         self,
         prune_bias: bool = False,
-        prune_first_layer: bool = False,
+        prune_first_layer: bool = True,
         min_param_elements: int = 100,
         pruning_dim: Optional[int] = None,
     ):

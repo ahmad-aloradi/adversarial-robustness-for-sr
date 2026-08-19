@@ -134,7 +134,7 @@ class STRPruner(Callback):
         self,
         s_init: float = -3200.0,
         prune_bias: bool = False,
-        prune_first_layer: bool = False,
+        prune_first_layer: bool = True,
         min_param_elements: int = 100,
         verbose: int = 1,
     ):
