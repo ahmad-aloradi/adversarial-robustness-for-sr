@@ -372,12 +372,6 @@ def register_custom_resolvers(
     if not OmegaConf.has_resolver("oc.eval"):
         OmegaConf.register_new_resolver("oc.eval", eval)
 
-    # register the run-directory naming resolver (used in hydra.run.dir)
-    if not OmegaConf.has_resolver("run_subdir"):
-        from src.utils.run_naming import run_subdir
-
-        OmegaConf.register_new_resolver("run_subdir", run_subdir)
-
     # register the logger run-name resolver (used in logger/wandb.yaml)
     if not OmegaConf.has_resolver("run_name"):
         from src.utils.run_naming import run_name

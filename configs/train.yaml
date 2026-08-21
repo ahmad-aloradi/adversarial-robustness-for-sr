@@ -56,16 +56,11 @@ expdir: null
 # seed for random number generators in pytorch, numpy and python.random
 seed: 42
 
-# job start timestamp, kept for reference; never put it in the run dir (breaks viz discovery)
+# job start timestamp; it names the run dir
 run_stamp: ${now:%Y-%m-%d_%H-%M-%S}
 
-# output dir stem (hydra run/sweep dir = name/seed_N); the wandb run name is derived from that dir
-# format: <dataset>/<model>/<augmentation>/<method>-isr<NN>-sr<NN>-<scheduler> so methods compare side by side
-# sparsity source: Bregman `_bregman_target_sparsity`, else pruning `model_pruning.amount`, else none
-# isr<NN> is the starting sparsity: Bregman `_bregman_initial_sparsity`, else GraNet's `model_pruning.initial_amount`
-# *_fixed experiments swap sr<NN> for lam<value>: their sparsity is whatever the static `_bregman_lambda` reaches
-# constant_then_cosine tags as Const<N>Cosine for a hold of N>0 epochs, CosineAnnealing at 0
-name: ${run_subdir:${oc.select:datamodule.name,null},${hydra:runtime.choices.module/img_model},${oc.select:datamodule.augmentation,null},${hydra:runtime.choices.experiment},${oc.select:_bregman_target_sparsity,${oc.select:callbacks.model_pruning.amount,null}},${oc.select:_bregman_initial_sparsity,${oc.select:callbacks.model_pruning.initial_amount,null}},${oc.select:_bregman_lambda,null},${oc.select:module.lr_scheduler.scheduler._target_,null},${oc.select:module.lr_scheduler.scheduler.constant_epochs,null}}
+# output dir stem (hydra run/sweep dir = name/seed_N); scripts/fabfile.py overrides it per job
+name: ${run_stamp}
 
 # default trainer overrides
 trainer:

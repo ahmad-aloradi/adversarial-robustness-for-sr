@@ -1,41 +1,12 @@
-"""Run naming: the output-directory stem and the logger run name.
+"""Run naming: the shared name tokens and the logger run name.
 
-``configs/hydra/default.yaml`` calls the ``run_subdir`` resolver so every
-compression method lands under one ``<dataset>/<model>/<augmentation>`` parent
-— comparing methods is then a plain ``ls``. ``configs/logger/wandb.yaml`` calls
-``run_name`` to label the dashboard entry with that same run directory.
+``scripts/fabfile.py`` builds every submitted run's name from the tokens here,
+so the launcher and ``scripts/retag_fixed_lambda_runs.py`` spell a token the
+same way. ``configs/logger/wandb.yaml`` calls ``run_name`` to label the
+dashboard entry after the run directory.
 """
 
 import os
-
-
-def _scheduler_tag(target, constant_epochs=None):
-    """Short tag for an LR-scheduler ``_target_``; ``no_scheduler`` when unset.
-
-    Strips the module path and a trailing ``LR`` (``CosineAnnealingLR`` ->
-    ``CosineAnnealing``), leaving names without that suffix untouched.
-
-    >>> _scheduler_tag("torch.optim.lr_scheduler.CosineAnnealingLR")
-    'CosineAnnealing'
-    >>> _scheduler_tag("torch.optim.lr_scheduler.ReduceLROnPlateau")
-    'ReduceLROnPlateau'
-    >>> _scheduler_tag("src.utils.lr_schedulers.constant_then_cosine", 0)
-    'CosineAnnealing'
-    >>> _scheduler_tag("src.utils.lr_schedulers.constant_then_cosine", 80)
-    'Const80Cosine'
-    >>> _scheduler_tag(None)
-    'no_scheduler'
-    """
-    if not target or target in ("none", "None"):
-        return "no_scheduler"
-    name = target.rsplit(".", 1)[-1]
-    if name == "constant_then_cosine":
-        return (
-            f"Const{constant_epochs}Cosine"
-            if constant_epochs
-            else "CosineAnnealing"
-        )
-    return name[:-2] if name.endswith("LR") and len(name) > 2 else name
 
 
 def sparsity_token(sparsity):
@@ -78,51 +49,6 @@ def is_fixed_lambda(method):
     return method.endswith("_fixed")
 
 
-def run_subdir(
-    dataset,
-    model,
-    augmentation,
-    experiment,
-    sparsity,
-    initial_sparsity,
-    lambda_value,
-    scheduler,
-    lr_constant_epochs=None,
-):
-    """Build the ``<dataset>/<model>/<aug>/<method>`` stem for the run dir.
-
-    The method token carries ``[-isrNN]``, then either ``-srNN`` (the sparsity
-    the run drives toward) or ``-lam<value>`` for a fixed-lambda run, whose
-    sparsity is an outcome of that lambda rather than a target. The scheduler
-    tag closes it. Each argument is a config interpolation; ``None`` (a field
-    absent on a non-image task, no target sparsity on a dense baseline, no
-    initial sparsity outside Bregman) becomes a neutral tag or is dropped so
-    the path never fails to resolve.
-
-    >>> run_subdir("cifar10", "resnet18", True,
-    ...            "img/pruning_mag_struct", 0.9, None, None,
-    ...            "torch.optim.lr_scheduler.CosineAnnealingLR")
-    'cifar10/resnet18/augmentation/pruning_mag_struct-sr90-CosineAnnealing'
-    >>> run_subdir("cifar10", "resnet18", False,
-    ...            "img/bregman_adabreg", 0.9, 0.99, 0.01, None)
-    'cifar10/resnet18/no_augmentation/bregman_adabreg-isr99-sr90-no_scheduler'
-    >>> run_subdir("cifar10", "resnet18", False,
-    ...            "img/bregman_adabreg_fixed", 0.9, 0.99, 10.0, None)
-    'cifar10/resnet18/no_augmentation/bregman_adabreg_fixed-isr99-lam10-no_scheduler'
-    >>> run_subdir("mnist", "resnet18", False, "img/dense_sgd", None, None, None, None)
-    'mnist/resnet18/no_augmentation/dense_sgd-no_scheduler'
-    """
-
-    aug = "augmentation" if augmentation else "no_augmentation"
-    method = (experiment or "no_experiment").rsplit("/", 1)[-1].split(".")[0]
-    isr = initial_sparsity_token(initial_sparsity)
-    if is_fixed_lambda(method) and lambda_value is not None:
-        tag = lambda_token(lambda_value)
-    else:
-        tag = sparsity_token(sparsity)
-    return f"{dataset}/{model}/{aug}/{method}{isr}{tag}-{_scheduler_tag(scheduler, lr_constant_epochs)}"
-
-
 def run_name(output_dir, log_dir):
     """Name the logger run after its run directory, minus the machine root.
 
@@ -157,54 +83,9 @@ def run_name(output_dir, log_dir):
 
 
 if __name__ == "__main__":
-    print(
-        run_subdir(
-            "cifar10",
-            "resnet18",
-            False,
-            "img/bregman_adabreg.yaml",
-            0.9,
-            0.99,
-            0.01,
-            None,
-        )
-    )
-    print(
-        run_subdir(
-            "cifar10",
-            "resnet18",
-            False,
-            "img/bregman_adabreg_fixed",
-            0.9,
-            0.99,
-            10.0,
-            None,
-        )
-    )
-    print(
-        run_subdir(
-            "cifar100",
-            "wrn28_10",
-            True,
-            "img/dense_sgd",
-            None,
-            None,
-            None,
-            "torch.optim.lr_scheduler.ReduceLROnPlateau",
-        )
-    )
-    print(
-        run_subdir(
-            "cifar100",
-            "wrn28_10",
-            True,
-            "img/pruning_mag_struct",
-            0.8,
-            None,
-            None,
-            "torch.optim.lr_scheduler.CosineAnnealingLR",
-        )
-    )
+    print(initial_sparsity_token(0.99) + sparsity_token(0.9))
+    print(initial_sparsity_token(0.5) + lambda_token(18.0))
+    print(is_fixed_lambda("bregman_adabreg_fixed"))
     print(
         run_name(
             "/results/train/runs/cifar10/wrn28_10/dense_sgd/seed_42",

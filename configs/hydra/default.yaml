@@ -5,7 +5,7 @@ defaults:
   - override hydra_logging: colorlog
   - override job_logging: custom  # Changed from colorlog to custom
 
-# output directory = <name>/seed_<seed>; name is built in train.yaml via run_subdir
+# output directory = <name>/seed_<seed>; train.yaml sets name to the job timestamp
 run:
   dir: ${paths.log_dir}/${task_name}/runs/${name}/seed_${seed}
 sweep:

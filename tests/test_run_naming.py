@@ -1,6 +1,6 @@
-"""Tests for run-directory naming and the fixed-lambda retag script.
+"""Tests for the shared run-name tokens and the fixed-lambda retag script.
 
-``run_subdir`` builds the name ``python src/train.py`` writes to;
+``scripts/fabfile.py`` builds every submitted run's name from these tokens;
 ``scripts/retag_fixed_lambda_runs.py`` migrates runs that finished under the
 older spelling. Both must agree on how a token is spelled, or a finished run
 becomes unfindable.
@@ -10,21 +10,15 @@ import pathlib
 
 import pytest
 import yaml
-from hydra import compose, initialize_config_dir
-from hydra.core.global_hydra import GlobalHydra
-from hydra.core.hydra_config import HydraConfig
 
-from src.utils import register_custom_resolvers
 from src.utils.run_naming import (
     initial_sparsity_token,
     is_fixed_lambda,
     lambda_token,
-    run_subdir,
     sparsity_token,
 )
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONFIGS_DIR = str(ROOT / "configs")
 _spec = importlib.util.spec_from_file_location(
     "retag_fixed_lambda_runs", ROOT / "scripts" / "retag_fixed_lambda_runs.py"
 )
@@ -55,129 +49,10 @@ def test_lambda_token(value, expected):
     assert lambda_token(value) == expected
 
 
-# ---------------------------------------------------------------------------
-# run_subdir
-# ---------------------------------------------------------------------------
-
-
-def test_fixed_runs_are_named_by_lambda_not_target():
-    # A static lambda decides where the run lands, so a target would misdescribe it.
-    assert run_subdir(
-        "cifar100",
-        "resnet18",
-        False,
-        "img/bregman_adabreg_fixed",
-        0.99,
-        0.5,
-        18.0,
-        None,
-    ).endswith("bregman_adabreg_fixed-isr50-lam18-no_scheduler")
-
-
-def test_adaptive_runs_keep_the_target():
-    assert run_subdir(
-        "cifar100",
-        "resnet18",
-        False,
-        "img/bregman_adabreg",
-        0.99,
-        0.5,
-        0.01,
-        None,
-    ).endswith("bregman_adabreg-isr50-sr99-no_scheduler")
-
-
-def test_fixed_run_without_a_lambda_falls_back_to_the_target():
-    # A non-Bregman *_fixed experiment has no lambda to name itself after.
-    assert run_subdir(
-        "cifar100",
-        "resnet18",
-        False,
-        "img/something_fixed",
-        0.9,
-        None,
-        None,
-        None,
-    ).endswith("something_fixed-sr90-no_scheduler")
-
-
 def test_is_fixed_lambda():
     assert is_fixed_lambda("proxsgd_fixed")
     assert not is_fixed_lambda("proxsgd")
     assert not is_fixed_lambda("bregman_adabreg")
-
-
-# ---------------------------------------------------------------------------
-# End-to-end: the name train.yaml actually resolves to
-# ---------------------------------------------------------------------------
-
-
-def _resolved_name(experiment):
-    """The run-dir stem ``python src/train.py experiment=<experiment>`` writes
-    to."""
-    overrides = [
-        f"experiment={experiment}",
-        "datamodule=datasets/cifar100",
-        "datamodule.augmentation=true", # pinned: the stem under test is the method's, not the dataset's augmentation default
-        "logger=[]",
-    ]
-    GlobalHydra.instance().clear()
-
-    @register_custom_resolvers(
-        config_name="train.yaml",
-        overrides=overrides,
-        version_base="1.3",
-        config_path=CONFIGS_DIR,
-    )
-    def _compose():
-        with initialize_config_dir(version_base="1.3", config_dir=CONFIGS_DIR):
-            cfg = compose(
-                config_name="train.yaml",
-                overrides=overrides,
-                return_hydra_config=True,
-            )
-            HydraConfig().set_config(
-                cfg
-            )  # the name interpolation reads hydra.runtime
-            return cfg.name
-
-    try:
-        return _compose()
-    finally:
-        GlobalHydra.instance().clear()
-
-
-@pytest.mark.parametrize(
-    "experiment, stem",
-    [
-        (
-            "img/bregman_adabreg_fixed",
-            "bregman_adabreg_fixed-isr99-lam5-CosineAnnealing",
-        ),
-        (
-            "img/bregman_linbreg_fixed",
-            "bregman_linbreg_fixed-isr99-lam0.15-CosineAnnealing",
-        ),
-        ("img/proxsgd_fixed", "proxsgd_fixed-isr0-lam0.0001-CosineAnnealing"),
-        ("img/bregman_adabreg", "bregman_adabreg-isr99-sr90-CosineAnnealing"),
-        # lr is held flat over the sparsity ramp, so the tag names the hold;
-        # isr reads model_pruning.initial_amount outside Bregman
-        (
-            "img/pruning_mag_struct",
-            "pruning_mag_struct-isr50-sr90-Const150Cosine",
-        ),
-        ("img/pruning_granet", "pruning_granet-isr50-sr99-Const150Cosine"),
-        (
-            "img/bregman_adabreg_progressive",
-            "bregman_adabreg_progressive-isr50-sr90-Const150Cosine",
-        ),
-        ("img/dense_sgd", "dense_sgd-CosineAnnealing"),
-    ],
-)
-def test_train_yaml_resolves_the_expected_stem(experiment, stem):
-    assert (
-        _resolved_name(experiment) == f"cifar100/resnet18/augmentation/{stem}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -256,19 +131,3 @@ def test_read_lambda_rejects_seeds_that_disagree(tmp_path):
 
     with pytest.raises(AssertionError, match="disagree on lambda"):
         retag.read_lambda(str(run))
-
-
-def test_retagged_matches_run_subdir(tmp_path):
-    # The migrated name must equal what src/train.py would write today.
-    old = "bregman_adabreg_fixed-isr50-sr99-CosineAnnealing"
-    expected = run_subdir(
-        "cifar100",
-        "resnet18",
-        False,
-        "img/bregman_adabreg_fixed",
-        0.99,
-        0.5,
-        18.0,
-        "torch.optim.lr_scheduler.CosineAnnealingLR",
-    ).rsplit("/", 1)[-1]
-    assert retag.retagged(old, 18.0) == expected
