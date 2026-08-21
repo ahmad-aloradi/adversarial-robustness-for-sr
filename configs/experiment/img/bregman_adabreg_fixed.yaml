@@ -19,7 +19,5 @@ callbacks:
   # Sparsity is whatever the static lambda reaches, so don't gate on it: tolerance 1.0 spans all sparsities.
   model_checkpoint:
     tolerance: 1.0
-  early_stopping:
-    tolerance: 1.0
   ramp_validation_gate:
     tolerance: 1.0

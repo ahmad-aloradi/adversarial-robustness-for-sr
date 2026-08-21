@@ -14,5 +14,4 @@ tags: ["img", "${datamodule.name}", "sparse_training", "snip_iter"]
 
 callbacks:
   model_pruning:
-    amount: 0.99 # back to the sparse-training default; iterative SNIP holds here
     snip_iterations: 100 # T: density walks (1 - amount)^(t/T) down to the target

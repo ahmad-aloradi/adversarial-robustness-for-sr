@@ -16,6 +16,6 @@ module:
   optimizer:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.LinBreg
     _partial_: True
-    lr: 1e-1
+    lr: 5e-2
     momentum: 0.9
     nesterov: false

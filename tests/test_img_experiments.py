@@ -105,7 +105,7 @@ def test_img_experiment_composes(exp, dataset):
     assert dataset in tags
 
 
-# The ramp knob each recipe holds the lr for; every other experiment anneals from epoch 0.
+# The sparsity-ramp knob each recipe reads; it must land on the first lr milestone.
 _RAMP_KNOB = {
     "pruning_mag_struct": "callbacks.model_pruning.epochs_to_ramp",
     "pruning_mag_unstruct": "callbacks.model_pruning.epochs_to_ramp",
@@ -115,30 +115,15 @@ _RAMP_KNOB = {
     "bregman_adabreg_quantile_progressive": "_bregman_ramp_epochs",
     "bregman_linbreg_quantile_progressive": "_bregman_ramp_epochs",
 }
-_BASE_LR = 0.1
-
-
-def _lr_trajectory(cfg):
-    """The per-epoch lr an experiment's configured scheduler produces."""
-    optimizer = torch.optim.SGD(
-        [torch.nn.Parameter(torch.zeros(1))], lr=_BASE_LR
-    )
-    scheduler = hydra.utils.instantiate(
-        cfg.module.lr_scheduler.scheduler, optimizer=optimizer
-    )
-    values = []
-    for _ in range(cfg.trainer.max_epochs):
-        values.append(optimizer.param_groups[0]["lr"])
-        scheduler.step()
-    return scheduler, values
 
 
 @pytest.mark.parametrize("dataset", sorted(_DATASETS))
 @pytest.mark.parametrize("exp", sorted(_RAMP_KNOB))
-def test_lr_is_held_flat_for_exactly_the_sparsity_ramp(exp, dataset):
-    """Ramped recipes hold the base lr over their own ramp, then anneal.
+def test_the_sparsity_ramp_spans_half_the_budget(exp, dataset):
+    """Every ramped recipe reaches its target sparsity at the halfway epoch.
 
-    Parametrized over datasets because the knob is a fraction of the budget.
+    Why: GraNet (Liu et al., NeurIPS 2021) measures that a pruned network
+    stops recovering after the second lr drop, so the ramp must end before it.
     """
     cfg = _compose(
         [
@@ -147,59 +132,34 @@ def test_lr_is_held_flat_for_exactly_the_sparsity_ramp(exp, dataset):
             "logger=[]",
         ]
     )
-    _, values = _lr_trajectory(cfg)
-
-    hold = OmegaConf.select(cfg, _RAMP_KNOB[exp], throw_on_missing=True)
-    assert cfg.module.lr_scheduler.scheduler.constant_epochs == hold
-    assert values[: hold + 1] == pytest.approx([_BASE_LR] * (hold + 1))
-    assert values[hold + 1] < _BASE_LR
-    assert values[-1] < 0.05 * _BASE_LR
-
-
-@pytest.mark.parametrize(
-    "exp", [e for e in _img_experiments() if e not in _RAMP_KNOB]
-)
-def test_lr_anneals_from_epoch_zero_when_unramped(exp):
-    """Every recipe outside ``_RAMP_KNOB`` anneals from epoch 0."""
-    cfg = _compose(
-        [f"experiment=img/{exp}", "datamodule=datasets/cifar100", "logger=[]"]
-    )
-    scheduler, values = _lr_trajectory(cfg)
-    assert isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR)
-    assert values[1] < _BASE_LR
+    ramp = OmegaConf.select(cfg, _RAMP_KNOB[exp], throw_on_missing=True)
+    assert ramp == int(cfg.trainer.max_epochs * 0.5)
 
 
 @pytest.mark.parametrize("exp", sorted(_RAMP_KNOB))
-def test_zero_hold_is_a_plain_cosine(exp):
-    """``_lr_constant_epochs=0`` composes to a bare ``CosineAnnealingLR``.
-
-    The trajectory equivalence itself is proven once, without Hydra, by
-    test_lr_schedulers.py::test_zero_constant_epochs_matches_plain_cosine_trajectory.
-    """
+def test_one_override_moves_every_ramp(exp):
+    """``_sparsity_ramp_epochs`` drives every ramp knob on its own."""
     cfg = _compose(
         [
             f"experiment=img/{exp}",
             "datamodule=datasets/cifar100",
             "logger=[]",
-            "_lr_constant_epochs=0",
+            "_sparsity_ramp_epochs=40",
         ]
     )
-    assert cfg.module.lr_scheduler.scheduler.constant_epochs == 0
-    scheduler, values = _lr_trajectory(cfg)
-    assert isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR)
-    assert values[1] < _BASE_LR
+    assert OmegaConf.select(cfg, _RAMP_KNOB[exp], throw_on_missing=True) == 40
 
 
-_SELECTION_GATES = ("model_checkpoint", "early_stopping")
+_SELECTION_GATES = ("model_checkpoint",)
 
 
 @pytest.mark.parametrize("dataset", ["cifar100", "imagenet"])
 @pytest.mark.parametrize("exp", _img_experiments())
 def test_selection_is_banded_and_validation_is_not(exp, dataset):
-    """Checkpointing and early stopping band the target; validation does not.
+    """Checkpointing bands the target; validation does not.
 
     Why: docs/pruning.md §3. ImageNet bands validation too, and a *_fixed run
-    has no setpoint to band, so it opens all three.
+    has no setpoint to band, so it opens both.
     """
     cfg = _compose(
         [
@@ -309,10 +269,7 @@ def test_configure_optimizers_dense():
     model = _instantiate_module("dense_sgd")
     out = model.configure_optimizers()
     assert out["optimizer"].__class__.__name__ == "SGD"
-    assert (
-        out["lr_scheduler"]["scheduler"].__class__.__name__
-        == "CosineAnnealingLR"
-    )
+    assert out["lr_scheduler"]["scheduler"].__class__.__name__ == "MultiStepLR"
     assert not hasattr(model, "pruning_manager")
 
 

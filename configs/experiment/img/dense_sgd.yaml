@@ -17,6 +17,8 @@ defaults:
 tags: ["img", "${datamodule.name}", "dense", "sgd"]
 seed: 42
 
+_lr_milestones: ${datamodule.lr_milestones} # epochs the lr drops on, from the dataset config
+
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
   min_epochs: 1
@@ -30,14 +32,15 @@ module:
   optimizer:
     _target_: torch.optim.SGD
     _partial_: True
-    lr: 0.1
+    lr: 0.05
     momentum: 0.9
     weight_decay: 5e-4
     nesterov: false
   lr_scheduler:
     scheduler:
-      _target_: torch.optim.lr_scheduler.CosineAnnealingLR
-      T_max: ${trainer.max_epochs}
+      _target_: torch.optim.lr_scheduler.MultiStepLR
+      milestones: ${_lr_milestones}
+      gamma: 0.1 # lr x0.1 at each milestone
     extras:
       interval: epoch
       frequency: ${trainer.check_val_every_n_epoch}

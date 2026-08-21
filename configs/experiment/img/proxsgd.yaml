@@ -1,9 +1,8 @@
 # @package _global_
 
 # ProxSGD: minimize loss + lambda*||theta||_1 (penalty method, dense start).
-# Inherits the AdaBreg parent; swaps the optimizer, starts dense
-# (_bregman_initial_sparsity 0.0) and runs without augmentation.
-# Run: python src/train.py experiment=sv/sv_bregman_proxsgd
+# Inherits the AdaBreg parent; swaps the optimizer and starts dense.
+# Run: python src/train.py experiment=img/proxsgd datamodule=datasets/cifar100
 
 defaults:
   - /experiment/img/bregman_adabreg
@@ -18,6 +17,6 @@ module:
   optimizer:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.ProxSGD
     _partial_: True
-    lr: 1e-1
+    lr: 5e-2
     momentum: 0.9
     nesterov: false

@@ -19,13 +19,14 @@ tags: ["img", "${datamodule.name}", "Bregman_learning", "Adabreg"]
 seed: 42
 
 # Single source of truth for Bregman sparsity targets and lambda values.
-_bregman_target_sparsity: 0.9 # target sparsity the feedback loop drives toward
+_bregman_target_sparsity: 0.95 # target sparsity the feedback loop drives toward
 _bregman_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1-this)*target <= sparsity <= (1+this)*target
 _bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
 _bregman_sparsity_metric: bregman/pruned_sparsity # gate signal: the metric lambda steers on (regularized groups); `sparsity` is whole-model
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
 _bregman_regularizer: RegL1 # readout on the regularized groups; RegL1 soft-thresholds
-_lr_constant_epochs: 0 # epochs to hold lr flat before the cosine leg; the progressive children set it to their ramp length
+_lr_milestones: ${datamodule.lr_milestones} # epochs the lr drops on, from the dataset config
+_sparsity_ramp_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'} # every sparsity ramp reaches its target here, independent of the lr milestones
 
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
@@ -58,15 +59,6 @@ callbacks:
       initial_lambda: ${_bregman_lambda}
       alpha_0: 1.0
       update_frequency: 50
-  early_stopping:
-    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
-    target_sparsity: ${_bregman_target_sparsity} # patience advances only while in-band around this
-    tolerance: ${_bregman_tolerance} # shared band half-width, as a fraction of the target
-    sparsity_metric: ${_bregman_sparsity_metric}
-    check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
   ramp_validation_gate:
     _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
     target_sparsity: ${_bregman_target_sparsity} # band centre
@@ -77,15 +69,15 @@ module:
   optimizer:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
     _partial_: true
-    lr: 1e-2
+    lr: 5e-3
     weight_decay: 5e-4 # mu: dense_sgd's L2, inherited by every img Bregman arm
-
   lr_scheduler:
     scheduler:
-      _target_: src.utils.lr_schedulers.constant_then_cosine
-      constant_epochs: ${_lr_constant_epochs}
+      _target_: src.utils.lr_schedulers.warmup_then_cosine
+      warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.1)'} # use 10% warmup
       max_epochs: ${trainer.max_epochs}
-
+      start_factor: 0.1 # first-epoch lr = 0.1 x module.optimizer.lr
+      eta_min: 1.0e-6
     extras:
       interval: epoch
       frequency: ${trainer.check_val_every_n_epoch}

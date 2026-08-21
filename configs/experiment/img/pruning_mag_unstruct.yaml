@@ -15,5 +15,6 @@ callbacks:
   model_pruning:
     pruning_fn: l1_unstructured # single global L1 ranking, not per-layer structures
     use_global_unstructured: true # single global ranking across all prunable parameters
+    prune_last_layer: true # element-wise pruning thins fc without dropping a class
     pruning_dim: null # not applicable to unstructured pruning
     pruning_norm: null # not applicable to unstructured pruning

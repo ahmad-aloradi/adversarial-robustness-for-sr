@@ -19,7 +19,8 @@ tags: ["img", "${datamodule.name}", "sparse_training", "rigl"]
 seed: 42
 
 _pruning_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1-this)*target <= sparsity <= (1+this)*target
-_lr_constant_epochs: 0 # epochs to hold lr flat before the cosine leg; pruning_granet sets it to its ramp length
+_lr_milestones: ${datamodule.lr_milestones} # epochs the lr drops on, from the dataset config
+_sparsity_ramp_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'} # every sparsity ramp reaches its target here, independent of the lr milestones
 
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
@@ -41,7 +42,7 @@ callbacks:
     every_n_epochs: 1
   model_pruning:
     _target_: src.callbacks.pruning.dst_pruner.DynamicSparsePruner
-    amount: 0.99 # final sparsity over all weight tensors (norms and biases aside), held from step 0
+    amount: 0.95 # final sparsity over all weight tensors (norms and biases aside), held from step 0
     mask_init: erk # RigL's Erdos-Renyi-Kernel layerwise budget
     growth: gradient # regrow the largest dense gradients; `random` is SET
     update_frequency: 100 # RigL's delta-T, in optimizer steps
@@ -49,15 +50,6 @@ callbacks:
     drop_fraction: 0.3 # RigL's alpha: share of active weights redrawn at step 0
     drop_end_fraction: 0.75 # cosine reaches drop_end_value here, so updates stop
     tolerance: ${_pruning_tolerance} # drift band asserted at every epoch end
-  early_stopping:
-    _target_: src.callbacks.pruning.sparsity_gating.SparsityGatedEarlyStopping
-    target_sparsity: ${callbacks.model_pruning.amount} # patience advances only while in-band around this
-    tolerance: ${_pruning_tolerance} # shared band half-width, as a fraction of the target
-    sparsity_metric: "pruning/sparsity" # gate signal (see model_checkpoint)
-    check_on_train_epoch_end: false # check at validation end, so suppressed epochs never accrue patience
-    mode: max
-    monitor: ${replace:"valid/__metric__"}
-    patience: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'}
   ramp_validation_gate:
     _target_: src.callbacks.pruning.sparsity_gating.RampValidationGate
     target_sparsity: ${callbacks.model_pruning.amount} # band centre
@@ -68,15 +60,17 @@ module:
   optimizer:
     _target_: torch.optim.SGD
     _partial_: True
-    lr: 0.1
+    lr: 0.05
     momentum: 0.9
     weight_decay: 5e-4
     nesterov: false
   lr_scheduler:
     scheduler:
-      _target_: src.utils.lr_schedulers.constant_then_cosine
-      constant_epochs: ${_lr_constant_epochs}
+      _target_: src.utils.lr_schedulers.warmup_then_cosine
+      warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.1)'} # use 10% warmup
       max_epochs: ${trainer.max_epochs}
+      start_factor: 0.1 # first-epoch lr = 0.1 x module.optimizer.lr
+      eta_min: 1.0e-6
     extras:
       interval: epoch
       frequency: ${trainer.check_val_every_n_epoch}
