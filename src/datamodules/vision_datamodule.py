@@ -24,20 +24,6 @@ from src import utils
 log = utils.get_pylogger(__name__)
 
 
-class GaussianNoise:
-    """Add Gaussian noise to a tensor."""
-
-    def __init__(self, mean=0.0, std=1.0):
-        self.mean = mean
-        self.std = std
-
-    def __call__(self, tensor):
-        return tensor + torch.randn_like(tensor) * self.std + self.mean
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}(mean={self.mean}, std={self.std})"
-
-
 class VisionDataModule(LightningDataModule):
     def __init__(self, **kwargs):
         super().__init__()
