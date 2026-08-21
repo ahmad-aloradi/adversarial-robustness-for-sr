@@ -1087,17 +1087,19 @@ IMG_WALLTIME = {
 }
 EPOCHS_IMG = {
     "mnist": 200,
-    "cifar10": 350,
-    "cifar100": 350,
-    "tinyimagenet": 300,
+    "cifar10": 200,
+    "cifar100": 200,
+    "tinyimagenet": 200,
     "imagenet": 100,
 }
+# Epochs the lr drops on, keyed by the budget above.
+LR_MILESTONES_IMG = {200: [60, 120, 160], 100: [30, 60, 90]}
 IMG_BATCH_SIZE = {
     "mnist": 128,
     "cifar10": 128,
     "cifar100": 128,
     "tinyimagenet": 128,
-    "imagenet": 256,
+    "imagenet": 1024,
 }
 
 
@@ -1130,17 +1132,20 @@ def _submit_img_job(
     assert (
         initial_sparsity is None
         or "bregman" in experiment
-        or experiment in ("pruning_granet", "pruning_mag_struct", "pruning_mag_unstruct")
+        or experiment
+        in ("pruning_granet", "pruning_mag_struct", "pruning_mag_unstruct")
     ), f"initial_sparsity needs a ramp to start; {experiment} has none"
 
     ramp_up_experiments = [
         "pruning_mag_struct",
         "pruning_mag_unstruct",
+        "pruning_granet",
         "bregman_adabreg_progressive",
         "bregman_linbreg_progressive",
         "bregman_adabreg_quantile_progressive",
+        "bregman_linbreg_quantile_progressive",
     ]
-    ramp_up_fraction = 0.75  # of the budget, as the img configs write it
+    ramp_up_fraction = 0.5  # of the budget, as the img configs write it
     schedule_type = "cubic"  # Options: 'cubic', 'constant', 'linear'
 
     settings = {
@@ -1159,6 +1164,7 @@ def _submit_img_job(
     # Handling epochs
     epochs_to_ramp = None
     max_epochs = EPOCHS_IMG[dataset_name]
+    lr_milestones = LR_MILESTONES_IMG[max_epochs]
     batch_size = IMG_BATCH_SIZE[dataset_name]
     if experiment in ramp_up_experiments:
         epochs_to_ramp = int(max_epochs * ramp_up_fraction)
@@ -1176,10 +1182,10 @@ def _submit_img_job(
         else sparsity_token(target_sparsity)
     )
     init_sparsity_str = initial_sparsity_token(initial_sparsity)
-    # An overridden lr hold is a different run.
-    lr_hold = (extra_overrides or {}).get("_lr_constant_epochs")
-    lr_hold_str = f"-const{lr_hold}" if lr_hold is not None else ""
-    exp_name = f"{experiment}{ramp_str}-{model_name}-{dataset_name}-bs{batch_size}{init_sparsity_str}{sparsity_str}{lr_hold_str}{job_name_suffix}"
+    # An overridden ramp end is a different run.
+    ramp_end = (extra_overrides or {}).get("_sparsity_ramp_epochs")
+    ramp_end_str = f"-tf{ramp_end}" if ramp_end is not None else ""
+    exp_name = f"{experiment}{ramp_str}-{model_name}-{dataset_name}-bs{batch_size}{init_sparsity_str}{sparsity_str}{ramp_end_str}{job_name_suffix}"
     job_name = f"{exp_name}-seed{seed}"  # unique per seed for SLURM dedup
     name = f"{dataset_name}/{model_name}/{exp_name}/seed_{seed}"  # results saved under their own seed
 
@@ -1197,6 +1203,8 @@ def _submit_img_job(
         "hydra.run.dir": f"{RESULTS_DIR}/train/runs/{name}",
         "trainer.num_sanity_val_steps": 0,
         "trainer.max_epochs": max_epochs,
+        # No spaces: the arguments are joined into one shell command line.
+        "_lr_milestones": f"[{','.join(map(str, lr_milestones))}]",
     }
 
     if target_sparsity is not None:
@@ -1216,14 +1224,13 @@ def _submit_img_job(
             ] = initial_sparsity
 
     if epochs_to_ramp:
+        # Every ramp knob reads this, so one override moves them together.
+        script_arguments["_sparsity_ramp_epochs"] = epochs_to_ramp
         # Same schedule, ramped through lambda by Bregman and the amount by magnitude.
+        # GraNet takes no schedule_type: cubic_prune_rate is its only ramp shape.
         if "bregman" in experiment:
-            script_arguments["_bregman_ramp_epochs"] = epochs_to_ramp
             script_arguments["_bregman_schedule_type"] = schedule_type
-        elif "pruning" in experiment:
-            script_arguments[
-                "callbacks.model_pruning.epochs_to_ramp"
-            ] = epochs_to_ramp
+        elif "mag" in experiment:
             script_arguments[
                 "callbacks.model_pruning.schedule_type"
             ] = schedule_type
@@ -1317,7 +1324,7 @@ def run_img():
     RUN_FIXED_BREGMAN_EXPS = False
     # Adaptive Bregman (lambda scheduler):
     RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
-    # Target ramped from the config's start over ramp_up_fraction of the budget.
+    # Target ramped from the config's start up to the first lr milestone.
     RUN_PROGRESSIVE_BREGMAN_EXPS = False
 
     # Initial-sparsity sweeps: same starting points, two ways of setting lambda.
@@ -1329,7 +1336,7 @@ def run_img():
     RUN_CONSTANT_LR_EXPS = False  # baseline with constant LR (no scheduler)
     INFLATE_CLASSIFIER_HEAD = False  # inflate the classifier head
     RUN_STRIPE_FIX_EXPS = False
-    EPS_HI_VALUE = 1e-3
+    EPS_HI_VALUE = 1e-5
 
     ########################
     # Experiment registry: a list of entries (same config may recur with

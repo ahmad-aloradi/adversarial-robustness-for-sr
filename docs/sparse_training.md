@@ -23,9 +23,8 @@ python src/train.py experiment=img/soft_threshold module.optimizer.weight_decay=
 | `soft_threshold` | Kusupati et al., ICML 2020 | dense, learned threshold per layer | continuous | **outcome, not a target** |
 
 `pruning_rigl.yaml` is the parent; the others are thin children that change one
-or two knobs. GraNet holds the lr flat through its prune+regrow ramp
-(`_lr_constant_epochs`), where the rest anneal from epoch 0 — see
-[image_benchmarks.md](image_benchmarks.md). The schedules live in
+or two knobs. Training is shared by every img recipe — see
+[image_benchmarks.md](image_benchmarks.md). The mask schedules live in
 `dst_schedules.py` and the layer budget in `utils/erk_sparsity.py`, both
 runnable on their own:
 
@@ -90,16 +89,10 @@ over Table 10's grid and report where each run lands.
 Below −89 `sigmoid(s)` underflows to exactly 0, so the loss gradient on `s` is
 *zero* and only decay moves it, multiplicatively:
 `s(t) = s_init · exp(−Σlr · wd / (1 − momentum))`. Call that exponent the decay
-budget. The paper's ResNet-50/ImageNet config (`lr 0.256`, 100 epochs, batch 256,
-momentum 0.875, `wd 2.2518e-5`, no separate `--st-decay`) has a budget of 11.5,
-and `ln(3200/89) = 3.6` of it is spent underflowed — the first third of the run
-is dense by design. This recipe (`lr 0.1`, 200 epochs, batch 128, momentum 0.9,
-45k train images) integrates to `Σlr = 3,538`, so the budget is `35,376 · wd`:
-**at the paper's `wd` it is 0.80, never reaches 3.6, and the run finishes 100 %
-dense.** Raising `wd` to 6e-4 to compensate overshoots the other way — budget 21,
-enough to drive every threshold to `sigmoid(0) = 0.5`, above every weight in the
-network. That run reached 94 % sparsity at epoch 42 and then thresholded
-`layer3.0.downsample.0` away entirely.
+budget. `s_init: -3200` spends `ln(3200/89) = 3.6` of the budget underflowed —
+on the paper's ImageNet recipe that is the first third of the run, dense by
+design. The img recipes have a much smaller budget, so the same `s_init` never
+leaves the underflow region and the run finishes 100 % dense.
 
 So `s_init: -8.0` here (threshold 3.4e-4, ~1 % of weights below it at init): the
 delay is gone and `wd` only has to hold the balance, not also travel 3,200 units.
@@ -129,8 +122,6 @@ an interrupted run can resume.
   too. A clip scales the loss gradient but never the weight decay or the
   regularizer, which shrinks the live weights' steps ~6× at 99 % sparsity and
   biases every STR threshold upward. No original implementation clips.
-- **The stem is dense, the head is not** (above). RigL keeps the first layer
-  dense; it prunes the classifier on ImageNet, and so do we everywhere.
 - **`pruning_set`** is SET's growth criterion under RigL's schedule — the
   controlled ablation of "does gradient-guided regrowth matter", not SET's
   published recipe (α 0.5, per-epoch updates, random init).

@@ -40,13 +40,13 @@ bash scripts/datasets/prep_imagenet.sh     # ~150 GB (~300 GB peak)
 |---|---|---|---|---|
 | CIFAR-10 | 32×32 | 10 | 200 | ≈95.5% |
 | CIFAR-100 | 32×32 | 100 | 200 | ≈77–78% |
-| MNIST | 32×32 (padded, gray→3ch) | 10 | 50 | ≈99.5% |
-| TinyImageNet | 64×64 | 200 | 120 | ≈60–65% |
-| ImageNet-1k | 224×224 | 1000 | 90 | — (see below) |
+| MNIST | 32×32 (padded, gray→3ch) | 10 | 120 | ≈99.5% |
+| TinyImageNet | 64×64 | 200 | 200 | ≈60–65% |
+| ImageNet-1k | 224×224 | 1000 | 100 | — (see below) |
 
-- Transforms, batch size and `max_epochs` live in
-  `configs/datamodule/datasets/<name>.yaml`; experiments read
-  `${datamodule.max_epochs}`, so swapping the dataset swaps the budget.
+- Transforms, batch size and the epoch/lr schedule live in
+  `configs/datamodule/datasets/<name>.yaml`; experiments read them, so swapping
+  the dataset swaps the whole budget.
 - `datamodule.augmentation=false` gives the train split the eval pipeline.
 - Validation is a class-stratified carve from train, sized by
   `valid_dataset.split` (10%; 2% on ImageNet, where 10% would hold back 128k
@@ -65,7 +65,7 @@ bash scripts/datasets/prep_imagenet.sh     # ~150 GB (~300 GB peak)
 | `bregman_linbreg` | LinBreg | adaptive λ |
 | `bregman_linbreg_fixed` | LinBreg | fixed λ |
 | `bregman_linbreg_progressive` | LinBreg | adaptive λ, target ramped 0.5 → target |
-| `proxsgd` | ProxSGD | adaptive λ; dense start, no augmentation |
+| `proxsgd` | ProxSGD | adaptive λ; dense start |
 | `proxsgd_fixed` | ProxSGD | fixed λ |
 | `pruning_mag_struct` | SGD | gradual magnitude pruning, `ln_structured`; 50% sparse start |
 | `pruning_mag_unstruct` | SGD | gradual magnitude pruning, global `l1_unstructured` |
@@ -82,49 +82,35 @@ bash scripts/datasets/prep_imagenet.sh     # ~150 GB (~300 GB peak)
   `pruning_mag_unstruct` inherits `pruning_mag_struct`.
 - `pruning_rigl.yaml` is the parent of the six sparse-training baselines; see
   [sparse_training.md](sparse_training.md).
-- Target sparsity: `_bregman_target_sparsity` (default 0.9). Fixed-λ runs scale λ
-  with `_bregman_lambda_factor`.
+- Target sparsity: `_bregman_target_sparsity` (Bregman) or
+  `callbacks.model_pruning.amount` (the rest). Fixed-λ runs scale λ with
+  `_bregman_lambda_factor`.
 
 ### The ramped recipes share one ramp
 
 `pruning_mag_struct` / `_unstruct`, `pruning_granet` and both `*_progressive`
-recipes share start (0.5), shape (cubic) and length (75% of the budget), so at
-epoch *t* they all aim at one sparsity — which is what makes their per-epoch
-validation curves comparable. Those curves exist because the validation gate is
-open on the img recipes while the selection gates band the target; see
-[pruning.md](pruning.md) §3.
+recipes share start (0.5), shape (cubic) and end, so at epoch *t* they all aim
+at one sparsity — which is what makes their per-epoch validation curves
+comparable. Those curves exist because the validation gate is open on the img
+recipes while the selection gates band the target; see [pruning.md](pruning.md)
+§3.
 
-### The lr is held flat while sparsity ramps
+Every ramp knob reads `_sparsity_ramp_epochs`, so one override moves them all:
 
-Every image experiment except `dense_sgd` and `soft_threshold` schedules its lr
-with `src.utils.lr_schedulers.constant_then_cosine`: flat at the base lr for
-`_lr_constant_epochs`, then `CosineAnnealingLR` to 0 over the rest. The recipes
-that ramp sparsity hold the lr up for the length of their own ramp, so the
-anneal starts once the target is reached:
-
-| Experiment | `_lr_constant_epochs` reads | ramp knob |
-| --- | --- | --- |
-| `pruning_mag_struct` / `_unstruct` | `callbacks.model_pruning.epochs_to_ramp` | 75% of the budget |
-| `pruning_granet` | `callbacks.model_pruning.final_prune_epoch` | 75% of the budget |
-| `bregman_{adabreg,linbreg}_progressive` | `_bregman_ramp_epochs` | 75% of the budget |
-
-Why: GraNet's plasticity result (Liu et al., NeurIPS 2021, Fig. 2) — connection
-regeneration stops recovering accuracy once the lr has decayed. Every other
-recipe leaves `_lr_constant_epochs` at 0, where `constant_then_cosine` builds a
-`CosineAnnealingLR` over the full budget. Set it to 0 to run a ramped recipe on
-the cosine alone:
+| Experiment | ramp knob reading `_sparsity_ramp_epochs` |
+| --- | --- |
+| `pruning_mag_struct` / `_unstruct` | `callbacks.model_pruning.epochs_to_ramp` |
+| `pruning_granet` | `callbacks.model_pruning.final_prune_epoch` |
+| `bregman_{adabreg,linbreg}_progressive` | `_bregman_ramp_epochs` |
 
 ```bash
-python src/train.py experiment=img/pruning_granet datamodule=datasets/cifar100 _lr_constant_epochs=0
+python src/train.py experiment=img/pruning_granet datamodule=datasets/cifar100 _sparsity_ramp_epochs=40
 ```
-
-The hold length is part of the run-dir tag — `-Const<N>Cosine` at N > 0,
-`-CosineAnnealing` at 0 — so the two schedules land in separate directories.
 
 ### What "sparsity" means
 
 Every method reports zeros over **all weight tensors, norms and biases aside**.
-Every recipe sparsifies all of them, so `amount: 0.99` means the same thing for
+Every recipe sparsifies all of them, so one `amount` means the same thing for
 RigL, GraNet, magnitude pruning and Bregman alike. A layer held dense would
 still count in that denominator at full size with no zeros. `sparsity` is the
 whole model including BatchNorm and biases, which no method sparsifies.
@@ -171,7 +157,7 @@ Config group `configs/module/img_model/` at package `module.model.net`, default
 - The λ table (`src/utils/bregman_utils.py`) was calibrated on speech — treat the
   first image runs as calibration.
 - Adaptive runs re-calibrate λ online. Fixed runs do not: `fixed_lambda` needs a
-  per-dataset sweep to reach the 0.9 sparsity target.
+  per-dataset sweep to reach the target.
 
 ## References
 
