@@ -39,7 +39,8 @@ transforms:
 
 name: mnist # dataset tag for logging
 num_classes: 10
-max_epochs: 50 # one budget for dense and Bregman (dense converges well before)
+max_epochs: 200 # one budget for dense and Bregman (dense converges well before)
+lr_milestones: [60, 120, 160] # epochs the lr drops on; experiments read this via ${datamodule.lr_milestones}
 
 loaders:
   train:

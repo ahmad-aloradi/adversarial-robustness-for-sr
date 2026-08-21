@@ -35,6 +35,7 @@ transforms:
 name: cifar100 # dataset tag for logging
 num_classes: 100
 max_epochs: 200 # standard literature budget; experiments read this via ${datamodule.max_epochs}
+lr_milestones: [60, 120, 160] # epochs the lr drops on; experiments read this via ${datamodule.lr_milestones}
 
 loaders:
   train:

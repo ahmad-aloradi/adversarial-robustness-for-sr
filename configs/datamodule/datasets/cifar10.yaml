@@ -30,11 +30,12 @@ transforms:
     - { _target_: torchvision.transforms.ToTensor }
     - _target_: torchvision.transforms.Normalize
       mean: [0.4914, 0.4822, 0.4465]
-      std: [0.2470, 0.2435, 0.2616]
+      std: [0.2023, 0.1994, 0.2010]
 
 name: cifar10 # dataset tag for logging
 num_classes: 10
 max_epochs: 200 # standard literature budget; experiments read this via ${datamodule.max_epochs}
+lr_milestones: [60, 120, 160] # epochs the lr drops on; experiments read this via ${datamodule.lr_milestones}
 
 loaders:
   train:

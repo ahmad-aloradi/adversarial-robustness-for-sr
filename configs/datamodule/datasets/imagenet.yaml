@@ -34,7 +34,8 @@ transforms:
 
 name: imagenet # dataset tag for logging; also picks the ResNet stem
 num_classes: 1000
-max_epochs: 90 # standard literature budget; experiments read this via ${datamodule.max_epochs}
+max_epochs: 100 # standard literature budget; experiments read this via ${datamodule.max_epochs}
+lr_milestones: [30, 60, 90] # epochs the lr drops on; experiments read this via ${datamodule.lr_milestones}
 
 loaders:
   train:

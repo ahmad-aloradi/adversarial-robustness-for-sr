@@ -33,6 +33,7 @@ transforms:
 name: tinyimagenet # dataset tag for logging
 num_classes: 200
 max_epochs: 200
+lr_milestones: [60, 120, 160] # epochs the lr drops on; experiments read this via ${datamodule.lr_milestones}
 
 loaders:
   train:
