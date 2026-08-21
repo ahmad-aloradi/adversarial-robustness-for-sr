@@ -4,6 +4,9 @@ from src import utils
 
 log = utils.get_pylogger(__name__)
 
+# Steps between sparsity scans when no scheduler sets a cadence (fixed lambda).
+SPARSITY_SCAN_FREQUENCY = 50
+
 
 class LambdaScheduler:
     """Feedback controller for the Bregman regularization strength λ.

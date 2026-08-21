@@ -24,6 +24,7 @@ from .bregman_report import (
     log_group_assignments,
     log_step_metrics,
 )
+from .lambda_scheduler import SPARSITY_SCAN_FREQUENCY
 
 log = utils.get_pylogger(__name__)
 
@@ -141,11 +142,8 @@ class BregmanPruner(Callback):
             return
 
         # The scans are the dominant per-batch cost, and step() discards the sparsity it gets between its own updates.
-        if (
-            self.lambda_scheduler is not None
-            and trainer.global_step % self.lambda_scheduler.update_frequency
-            and not trainer.is_last_batch
-        ):
+        frequency = self.lambda_scheduler.update_frequency if self.lambda_scheduler is not None else SPARSITY_SCAN_FREQUENCY
+        if trainer.global_step % frequency and not trainer.is_last_batch:
             return
 
         overall_sparsity = self._overall_sparsity()
