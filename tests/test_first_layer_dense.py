@@ -16,6 +16,7 @@ import torch.nn as nn
 from src.callbacks.pruning.dst_pruner import DynamicSparsePruner
 from src.callbacks.pruning.parameter_manager import (
     ParameterManager,
+    head_weight,
     stem_weight,
 )
 from src.callbacks.pruning.prune import MagnitudePruner
@@ -107,7 +108,8 @@ def test_no_weights_raises():
 
 
 def test_stem_below_min_param_elements_costs_only_itself():
-    """The size filter must not promote the second layer into the stem's slot."""
+    """The size filter must not promote the second layer into the stem's
+    slot."""
     model = nn.Sequential(
         nn.Conv2d(1, 8, 3), nn.Conv2d(8, 32, 3), nn.Linear(32, 10)
     )
@@ -115,3 +117,10 @@ def test_stem_below_min_param_elements_costs_only_itself():
     manager = ParameterManager(prune_first_layer=False, min_param_elements=100)
     kept = manager.collect_parameters(model)
     assert [m for m, _ in kept] == [model[1], model[2]]
+
+
+def test_last_layer_off_drops_exactly_the_head():
+    model = _net()
+    kept = ParameterManager(prune_last_layer=False).collect_parameters(model)
+    assert head_weight(model) == (model[5], "weight")
+    assert _qualnames(model, kept) == ["0.weight", "2.weight"]

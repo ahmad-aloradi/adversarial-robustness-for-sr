@@ -54,7 +54,7 @@ callbacks:
     use_global_unstructured: false # per-layer structured pruning, not a single global ranking
     prune_first_layer: true # SV prunes the encoder stem like any other layer
     make_pruning_permanent: true # fuse masks into weights at training end
-    pruning_dim: 1 # dimension pruned by ln_structured
+    pruning_dim: 0 # dimension pruned by ln_structured
     pruning_norm: 1 # Ln norm used to rank structures (L1)
     verbose: 1
     scheduled_pruning: true # ramp sparsity to `amount` over `epochs_to_ramp`

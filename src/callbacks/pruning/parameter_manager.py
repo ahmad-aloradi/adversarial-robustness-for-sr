@@ -10,22 +10,16 @@ from src.utils import get_pylogger
 logger = get_pylogger(__name__)
 
 
-def stem_weight(model: nn.Module) -> Tuple[nn.Module, str]:
-    """The model's first weight tensor, in module-definition order.
-
-    The single answer to "which layer is the stem", shared by the DST,
-    magnitude and STR selectors, so the three methods hold the same tensor
-    dense at ``prune_first_layer: false``.
+def _ordered_weights(model: nn.Module) -> List[Tuple[nn.Module, str]]:
+    """Every trainable ``weight`` outside a norm layer, in module-definition
+    order.
 
     Why it reads the module walk rather than a caller's target list: the size
     and dim filters run after this, so a stem below ``min_param_elements``
     would otherwise promote the second layer and hold two of them dense; and a
     group config that routes the stem to its fallback would otherwise hide it.
-
-    >>> net = nn.Sequential(nn.BatchNorm2d(3), nn.Conv2d(3, 8, 3), nn.Linear(8, 2))
-    >>> stem_weight(net)[0] is net[1]
-    True
     """
+    found = []
     for module in model.modules():
         if isinstance(module, torch.jit.ScriptModule):
             continue
@@ -33,11 +27,40 @@ def stem_weight(model: nn.Module) -> Tuple[nn.Module, str]:
             continue
         for name, param in module.named_parameters(recurse=False):
             if name == "weight" and param.requires_grad:
-                return module, name
-    raise ValueError(
-        f"{type(model).__name__} exposes no trainable weight tensor, so there "
-        f"is no stem to hold dense; set prune_first_layer=true"
-    )
+                found.append((module, name))
+    if not found:
+        raise ValueError(
+            f"{type(model).__name__} exposes no trainable weight tensor, so "
+            f"there is nothing to hold dense; set prune_first_layer=true"
+        )
+    return found
+
+
+def stem_weight(model: nn.Module) -> Tuple[nn.Module, str]:
+    """The model's first weight tensor, in module-definition order.
+
+    The single answer to "which layer is the stem", shared by the DST,
+    magnitude and STR selectors, so the three methods hold the same tensor
+    dense at ``prune_first_layer: false``.
+
+    >>> net = nn.Sequential(nn.BatchNorm2d(3), nn.Conv2d(3, 8, 3), nn.Linear(8, 2))
+    >>> stem_weight(net)[0] is net[1]
+    True
+    """
+    return _ordered_weights(model)[0]
+
+
+def head_weight(model: nn.Module) -> Tuple[nn.Module, str]:
+    """The model's last weight tensor, in module-definition order.
+
+    ``ln_structured`` at ``pruning_dim: 0`` removes output units, and on the
+    classifier those units are the classes.
+
+    >>> net = nn.Sequential(nn.BatchNorm2d(3), nn.Conv2d(3, 8, 3), nn.Linear(8, 2))
+    >>> head_weight(net)[0] is net[2]
+    True
+    """
+    return _ordered_weights(model)[-1]
 
 
 def regularizable_params(
@@ -66,7 +89,7 @@ def dense_held_numel(
     min_param_elements: int = 100,
 ) -> int:
     """Size of the weights inside the reported denominator that ``targets``
-    never touches — the stem, when it is held dense.
+    never touches — the stem or the head, when either is held dense.
 
     Keyed by (module, attribute) rather than tensor id: a pruned module
     recomputes ``weight`` every forward, so its id is not stable.
@@ -126,11 +149,13 @@ class ParameterManager:
         self,
         prune_bias: bool = False,
         prune_first_layer: bool = True,
+        prune_last_layer: bool = True,
         min_param_elements: int = 100,
         pruning_dim: Optional[int] = None,
     ):
         self.prune_bias = prune_bias
         self.prune_first_layer = prune_first_layer
+        self.prune_last_layer = prune_last_layer
         self.min_param_elements = min_param_elements
         self.pruning_dim = pruning_dim
         self.prunable_params: List[Tuple[nn.Module, str]] = []
@@ -161,7 +186,7 @@ class ParameterManager:
                     seen_params.add(id(param))
                 else:
                     self._record_skip(module, name, f"Manual: {reason}")
-            return self._keep_first_dense()
+            return self._hold_dense()
 
         # Strategy B: Automatic Discovery (Hybrid)
         for module in model.modules():
@@ -199,18 +224,22 @@ class ParameterManager:
                 else:
                     self._record_skip(module, name, reason)
 
-        return self._keep_first_dense()
+        return self._hold_dense()
 
-    def _keep_first_dense(self) -> List[Tuple[nn.Module, str]]:
-        """Drop the stem weight from the target set when asked."""
-        if self.prune_first_layer:
+    def _hold_dense(self) -> List[Tuple[nn.Module, str]]:
+        """Drop the stem and the head from the target set when asked."""
+        held = {}
+        if not self.prune_first_layer:
+            held[stem_weight(self._model)] = "First Layer Kept Dense"
+        if not self.prune_last_layer:
+            held[head_weight(self._model)] = "Last Layer Kept Dense"
+        if not held:
             return self.prunable_params
 
-        stem = stem_weight(self._model)
         kept = []
         for module, name in self.prunable_params:
-            if (module, name) == stem:
-                self._record_skip(module, name, "First Layer Kept Dense")
+            if (module, name) in held:
+                self._record_skip(module, name, held[(module, name)])
             else:
                 kept.append((module, name))
         self.prunable_params = kept

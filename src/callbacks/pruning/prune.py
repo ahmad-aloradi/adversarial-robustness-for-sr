@@ -42,6 +42,7 @@ class MagnitudePruner(Callback):
         pruning_norm: Optional[int] = 1,
         prune_bias: bool = False,
         prune_first_layer: bool = True,
+        prune_last_layer: bool = True,
         make_pruning_permanent: bool = True,
         min_param_elements: int = 100,
         verbose: int = 1,
@@ -83,6 +84,7 @@ class MagnitudePruner(Callback):
         self.manager = ParameterManager(
             prune_bias=prune_bias,
             prune_first_layer=prune_first_layer,
+            prune_last_layer=prune_last_layer,
             min_param_elements=min_param_elements,
             pruning_dim=pruning_dim,
         )
