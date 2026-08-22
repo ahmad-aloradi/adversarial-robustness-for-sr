@@ -45,7 +45,7 @@ callbacks:
     _target_: src.callbacks.pruning.prune.MagnitudePruner
     pruning_fn: ln_structured # torch.nn.utils.prune function: ln_structured, l1_unstructured, random_structured, random_unstructured
     amount: 0.95 # final sparsity once scheduled_pruning finishes ramping
-    initial_amount: 0.5 # ramp start; GraNet Table 4's s_i, shared by the ramped recipes
+    initial_amount: 0.0
     use_global_unstructured: false # per-layer structured pruning, not a single global ranking
     prune_first_layer: true # GMP sparsifies every conv and fc layer (Gale et al. 2019)
     prune_last_layer: false # ln_structured drops dim-0 output units; on fc those are the classes
