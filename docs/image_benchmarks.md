@@ -44,9 +44,10 @@ bash scripts/datasets/prep_imagenet.sh     # ~150 GB (~300 GB peak)
 | TinyImageNet | 64×64 | 200 | 200 | ≈60–65% |
 | ImageNet-1k | 224×224 | 1000 | 100 | — (see below) |
 
-- Transforms, batch size and the epoch/lr schedule live in
+- Transforms, batch size and the epoch budget live in
   `configs/datamodule/datasets/<name>.yaml`; experiments read them, so swapping
-  the dataset swaps the whole budget.
+  the dataset swaps the whole budget. The lr and its schedule live in the
+  experiment config, not the dataset one.
 - `datamodule.augmentation=false` gives the train split the eval pipeline.
 - Validation is a class-stratified carve from train, sized by
   `valid_dataset.split` (10%; 2% on ImageNet, where 10% would hold back 128k

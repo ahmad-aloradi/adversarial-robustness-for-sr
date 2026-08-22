@@ -17,25 +17,24 @@ dataset:
 
 augmentation: true # gates transforms.augment (spatial, train-only)
 transforms:
+  normalize: # one source for train and eval; both lists end on this node
+    _target_: torchvision.transforms.Normalize
+    mean: [0.5071, 0.4865, 0.4409]
+    std: [0.2673, 0.2564, 0.2762]
   base: # ToTensor + Normalize; the core shared by train and eval
     - { _target_: torchvision.transforms.ToTensor }
-    - _target_: torchvision.transforms.Normalize
-      mean: [0.5071, 0.4865, 0.4409]
-      std: [0.2673, 0.2564, 0.2762]
+    - ${..normalize}
   augment: # PIL-space, before ToTensor; gated by augmentation — matches GraNet's get_cifar100_dataloaders
     - { _target_: torchvision.transforms.RandomCrop, size: 32, padding: 4 }
     - { _target_: torchvision.transforms.RandomHorizontalFlip }
   augment_post: [] # tensor-space, after Normalize; gated by augmentation
   eval:
     - { _target_: torchvision.transforms.ToTensor }
-    - _target_: torchvision.transforms.Normalize
-      mean: [0.5071, 0.4865, 0.4409]
-      std: [0.2673, 0.2564, 0.2762]
+    - ${..normalize}
 
 name: cifar100 # dataset tag for logging
 num_classes: 100
 max_epochs: 200 # standard literature budget; experiments read this via ${datamodule.max_epochs}
-lr_milestones: [60, 120, 160] # epochs the lr drops on; experiments read this via ${datamodule.lr_milestones}
 
 loaders:
   train:

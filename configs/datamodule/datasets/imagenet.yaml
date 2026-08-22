@@ -15,11 +15,13 @@ dataset:
 
 augmentation: true # gates transforms.augment (spatial, train-only)
 transforms:
+  normalize: # one source for train and eval; both lists end on this node
+    _target_: torchvision.transforms.Normalize
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
   base: # ToTensor + Normalize; tail of the augmented train pipeline
     - { _target_: torchvision.transforms.ToTensor }
-    - _target_: torchvision.transforms.Normalize
-      mean: [0.485, 0.456, 0.406]
-      std: [0.229, 0.224, 0.225]
+    - ${..normalize}
   augment: # PIL-space, before ToTensor; gated by augmentation
     - { _target_: torchvision.transforms.RandomResizedCrop, size: 224 }
     - { _target_: torchvision.transforms.RandomHorizontalFlip }
@@ -28,14 +30,11 @@ transforms:
     - { _target_: torchvision.transforms.Resize, size: 256 }
     - { _target_: torchvision.transforms.CenterCrop, size: 224 }
     - { _target_: torchvision.transforms.ToTensor }
-    - _target_: torchvision.transforms.Normalize
-      mean: [0.485, 0.456, 0.406]
-      std: [0.229, 0.224, 0.225]
+    - ${..normalize}
 
 name: imagenet # dataset tag for logging; also picks the ResNet stem
 num_classes: 1000
 max_epochs: 100 # standard literature budget; experiments read this via ${datamodule.max_epochs}
-lr_milestones: [30, 60, 90] # epochs the lr drops on; experiments read this via ${datamodule.lr_milestones}
 
 loaders:
   train:

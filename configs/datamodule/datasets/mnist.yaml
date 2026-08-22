@@ -20,27 +20,26 @@ dataset:
 # 3x32x32 input contract as CIFAR — the model is identical across datasets.
 augmentation: false # no spatial augment for MNIST
 transforms:
+  normalize: # one source for train and eval; both lists end on this node
+    _target_: torchvision.transforms.Normalize
+    mean: [0.1307, 0.1307, 0.1307]
+    std: [0.3081, 0.3081, 0.3081]
   base: # only read when augmentation is on; MNIST trains on the eval pipeline
     - { _target_: torchvision.transforms.Pad, padding: 2 }
     - { _target_: torchvision.transforms.Grayscale, num_output_channels: 3 }
     - { _target_: torchvision.transforms.ToTensor }
-    - _target_: torchvision.transforms.Normalize
-      mean: [0.1307, 0.1307, 0.1307]
-      std: [0.3081, 0.3081, 0.3081]
+    - ${..normalize}
   augment: [] # no spatial augment for MNIST
   augment_post: [] # no tensor-space augment for MNIST
   eval:
     - { _target_: torchvision.transforms.Pad, padding: 2 }
     - { _target_: torchvision.transforms.Grayscale, num_output_channels: 3 }
     - { _target_: torchvision.transforms.ToTensor }
-    - _target_: torchvision.transforms.Normalize
-      mean: [0.1307, 0.1307, 0.1307]
-      std: [0.3081, 0.3081, 0.3081]
+    - ${..normalize}
 
 name: mnist # dataset tag for logging
 num_classes: 10
 max_epochs: 200 # one budget for dense and Bregman (dense converges well before)
-lr_milestones: [60, 120, 160] # epochs the lr drops on; experiments read this via ${datamodule.lr_milestones}
 
 loaders:
   train:

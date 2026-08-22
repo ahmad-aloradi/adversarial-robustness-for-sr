@@ -15,25 +15,24 @@ dataset:
 
 augmentation: true # gates transforms.augment (spatial, train-only)
 transforms:
+  normalize: # one source for train and eval; both lists end on this node
+    _target_: torchvision.transforms.Normalize
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
   base: # ToTensor + Normalize; the core shared by train and eval
     - { _target_: torchvision.transforms.ToTensor }
-    - _target_: torchvision.transforms.Normalize
-      mean: [0.485, 0.456, 0.406]
-      std: [0.229, 0.224, 0.225]
+    - ${..normalize}
   augment: # PIL-space, before ToTensor; gated by augmentation
     - { _target_: torchvision.transforms.RandomCrop, size: 64, padding: 4 }
     - { _target_: torchvision.transforms.RandomHorizontalFlip }
   augment_post: [] # tensor-space, after Normalize; gated by augmentation
   eval:
     - { _target_: torchvision.transforms.ToTensor }
-    - _target_: torchvision.transforms.Normalize
-      mean: [0.485, 0.456, 0.406]
-      std: [0.229, 0.224, 0.225]
+    - ${..normalize}
 
 name: tinyimagenet # dataset tag for logging
 num_classes: 200
 max_epochs: 200
-lr_milestones: [60, 120, 160] # epochs the lr drops on; experiments read this via ${datamodule.lr_milestones}
 
 loaders:
   train:
