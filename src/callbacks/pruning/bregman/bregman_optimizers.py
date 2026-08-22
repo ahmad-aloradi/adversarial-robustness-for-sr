@@ -25,15 +25,17 @@ class LinBreg(torch.optim.Optimizer):
     Nesterov formulas); the only difference is that the momentum-adjusted
     gradient drives the dual variable ``v`` and the weights come from its prox.
 
-    ``weight_decay`` (mu) is decoupled from momentum (AdamW-style: Loshchilov
-    & Hutter, ICLR 2019) -- it adds ``-lr*mu*w`` straight onto the dual, so
-    the momentum buffer only ever sees ``grad L``. On the support that is
-    ``w <- (1 - lr*mu*delta)*w``, unconditional on momentum; off the support
-    w is already 0, so mu contributes nothing there. It cannot go after the
-    prox -- w is a readout of v, recomputed every step -- and adding L2 to J
-    only rescales delta. It is also the only norm control: the L1 prox
-    translates v by a constant delta*lamda, which picks the support without
-    bounding the size of what survives. See docs/pruning.md 1.1.
+    ``weight_decay`` (mu) is coupled by default: ``mu*w`` joins ``grad L``
+    before the momentum buffer, exactly as ``torch.optim.SGD`` does it, so
+    momentum amplifies the decay by ``1/(1 - momentum)``.
+    ``decoupled_weight_decay=True`` adds ``-lr*mu*w`` straight onto the dual
+    instead (AdamW-style: Loshchilov & Hutter, ICLR 2019). The buffer then
+    sees ``grad L`` alone, and the support decays by ``(1 - lr*mu*delta)`` at
+    any momentum. Either way mu cannot go after the prox: w is a readout of v,
+    recomputed every step. Off the support w is already 0, so mu contributes
+    nothing there. mu is also the only norm control: the L1 prox translates v
+    by a constant delta*lamda, which picks the support without bounding the
+    size of what survives. See docs/pruning.md 1.1.
     """
 
     def __init__(
@@ -45,7 +47,8 @@ class LinBreg(torch.optim.Optimizer):
         momentum: float = 0.0,
         dampening: float = 0.0,  # SGD dampening on the momentum buffer
         nesterov: bool = False,  # Nesterov look-ahead on the momentum step
-        weight_decay: float = 0.0,  # mu: L2 on the surviving weights, decoupled from momentum
+        weight_decay: float = 0.0,  # mu: L2 on the surviving weights
+        decoupled_weight_decay: bool = False,  # mu onto the dual instead of into the momentum buffer
     ):
         if lr < 0.0:
             raise ValueError("Invalid learning rate")
@@ -69,6 +72,7 @@ class LinBreg(torch.optim.Optimizer):
             dampening=dampening,
             nesterov=nesterov,
             weight_decay=weight_decay,
+            decoupled_weight_decay=decoupled_weight_decay,
         )
         super().__init__(params, defaults)
 
@@ -88,6 +92,7 @@ class LinBreg(torch.optim.Optimizer):
             dampening = group["dampening"]
             nesterov = group["nesterov"]
             weight_decay = group["weight_decay"]
+            decoupled = group["decoupled_weight_decay"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -104,8 +109,11 @@ class LinBreg(torch.optim.Optimizer):
                 state["step"] += 1
                 sub_grad = state["sub_grad"]
 
-                # SGD momentum on the loss gradient only (see torch.optim.SGD);
-                # weight decay bypasses the buffer so it isn't smeared across steps.
+                # mu reaches the support only: prox makes p exactly 0 elsewhere.
+                if weight_decay != 0.0 and not decoupled:
+                    grad = grad.add(p, alpha=weight_decay)
+
+                # SGD momentum on the gradient (see torch.optim.SGD).
                 d_grad = grad
                 if momentum != 0.0:
                     buf = state["momentum_buffer"]
@@ -120,9 +128,9 @@ class LinBreg(torch.optim.Optimizer):
                     # nesterov: g ← g + μ·b_k ;  plain: g ← b_k
                     d_grad = grad.add(buf, alpha=momentum) if nesterov else buf
 
-                # Dual update: v^(k+1) = v^(k) − τ·g − τ·mu·p   (v = sub_grad)
+                # Dual update: v^(k+1) = v^(k) − τ·g   (v = sub_grad)
                 sub_grad.add_(d_grad, alpha=-step_size)
-                if weight_decay != 0.0:
+                if weight_decay != 0.0 and decoupled:
                     sub_grad.add_(p, alpha=-step_size * weight_decay)
 
                 # Primal update (prox): θ^(k+1) = prox(δ·v^(k+1))
@@ -166,8 +174,10 @@ class AdaBreg(torch.optim.Optimizer):
     Loshchilov & Hutter, ICLR 2019) -- it adds ``-lr*mu*w`` straight onto the
     dual, after the ``m/sqrt(v)`` normalization, so ``exp_avg``/``exp_avg_sq``
     only ever see ``grad L``. On the support that gives the same
-    ``(1 - lr*mu*delta)`` identity as LinBreg, with the Adam step standing in
-    for ``grad L``. See LinBreg for why decay must live in the dual.
+    ``(1 - lr*mu*delta)`` identity LinBreg gives under
+    ``decoupled_weight_decay=True``, with the Adam step standing in for
+    ``grad L``. AdaBreg has no coupled path: L2 inside the Adam moments is
+    what AdamW exists to remove.
     """
 
     def __init__(

@@ -35,11 +35,13 @@ Notation: `τ = lr`, `δ = delta`, `μ = weight_decay`, `S_a(x) = sign(x)·max(|
 
 ```text
 v⁰ = w⁰/δ + λ·sign(w⁰) ∈ ∂J(w⁰)      # initialize_sub_grad
-v ← v − τ·g − τμ·w                    # sub_grad; μw is a separate term, never in g's buffer
+v ← v − τ·g − τμ·w                    # sub_grad
 w ← ∇J*(v) = S_δλ(δ·v)                # p.copy_(reg.prox(delta * sub_grad, delta))
 ```
 
-`g` is the momentum- or Adam-processed loss step alone. μ is decoupled AdamW-style (Loshchilov & Hutter, ICLR 2019).
+**Where μ enters depends on the arm.** AdaBreg is always decoupled AdamW-style (Loshchilov & Hutter, ICLR 2019): `g` is the Adam step on `∇L` alone and `−τμ·w` is the separate term written above. LinBreg is coupled by default: `μ·w` joins `∇L` *inside* `g`, exactly as `torch.optim.SGD` does it, and `decoupled_weight_decay=True` moves it back out to the separate term.
+
+Coupling matters because momentum integrates it. At the same nominal μ, coupled decay is `1/(1 − momentum)` times decoupled — 10x at `momentum=0.9`. LinBreg's default is coupled so that one `weight_decay` value means the same thing in a LinBreg arm and in the SGD baselines it is benchmarked against. AdaBreg has no coupled path, so at `lr=5e-3` its decay is ~100x weaker than a `lr=0.05` SGD baseline at the same μ; its μ must be raised to match. `test_linbreg_default_mu_matches_sgd_bit_for_bit` asserts the LinBreg default against `torch.optim.SGD` over 50 steps.
 
 ##### The master equation
 
@@ -56,7 +58,8 @@ Fix a coordinate on the support and hold `s = sign(v)`. There the prox is affine
 | `g` | `Δw = −δτ·g − δτμ·w` gives |
 | --- | --- |
 | `∇L` (momentum = 0) | `w⁺ = (1 − δτμ)·w − δτ·∇L` |
-| `b`, momentum's buffer of `∇L` alone | `w⁺ = (1 − δτμ)·w − δτ·b` — the same `(1 − δτμ)` factor, for any momentum, since `μw` never enters `b` |
+| `b`, momentum's buffer of `∇L` alone (`decoupled_weight_decay=True`) | `w⁺ = (1 − δτμ)·w − δτ·b` — the same `(1 − δτμ)` factor, for any momentum, since `μw` never enters `b` |
+| `b`, momentum's buffer of `∇L + μw` (LinBreg's default) | `w⁺ = w − δτ·b`; `μw` is inside `b`, so the decay is smeared across steps and reaches `δτμ/(1 − momentum)` per step |
 | `adam_step = m̂/(√Ŝ + ε)` | `w⁺ = (1 − δτμ)·w − δτ·adam_step` — `exp_avg`/`exp_avg_sq` see `∇L` alone, so Adam's denominator never divides μ |
 | `g = 0` (any momentum, or Adam at `∇L = 0`) | `w⁺ = (1 − δτμ)·w` — ordinary multiplicative decay, identical across the three |
 | `w = 0`, off the support | `μ·w = 0`; the decay term is absent, no mask needed |
@@ -75,7 +78,7 @@ Stationarity follows too: `Δw = 0 ⟺ g = −μw`, which is stationarity of `L 
                                       # ∇J*, so this rescales δ, constant in k
 ```
 
-(G) and (H) rule out any post-prox edit to `w`. μ does not have to share a buffer with `g`: it reaches the dual every step at the full rate `τμ`, never smeared by momentum, never normalized by Adam's denominator.
+(G) and (H) rule out any post-prox edit to `w`, in both arms. What they do not fix is whether μ shares a buffer with `g`. Decoupled, it reaches the dual every step at the full rate `τμ`, never smeared by momentum, never normalized by Adam's denominator. Coupled, it rides `g`'s buffer and inherits its gain.
 
 ##### ProxSGD: the offset does not cancel
 

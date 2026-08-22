@@ -6,6 +6,8 @@ This test suite verifies that:
 - AdaBreg and LinBreg optimizers induce measurable sparsity
 - Optimizers correctly update subgradient state and parameters
 """
+import math
+
 import pytest
 import torch
 import torch.nn as nn
@@ -626,12 +628,17 @@ def test_mu_is_exactly_multiplicative_decay_on_the_support():
 
 def test_linbreg_mu_decay_is_exact_under_momentum():
     """Decoupling keeps mu*p out of the momentum buffer, so the multiplicative
-    decay identity holds even with momentum on -- unlike SGD+L2+momentum,
-    where the buffer would smear mu*w across steps."""
+    decay identity holds even with momentum on -- unlike SGD+L2+momentum, where
+    the buffer would smear mu*w across steps."""
     lr, mu, momentum = 0.1, 5e-4, 0.9
     p = nn.Parameter(torch.tensor([0.9, -0.6, 0.02, 0.0]))
     opt = LinBreg(
-        [p], lr=lr, reg=RegL1(lamda=0.05), weight_decay=mu, momentum=momentum
+        [p],
+        lr=lr,
+        reg=RegL1(lamda=0.05),
+        weight_decay=mu,
+        momentum=momentum,
+        decoupled_weight_decay=True,
     )
 
     p.grad = torch.zeros_like(p)
@@ -645,19 +652,24 @@ def test_linbreg_mu_decay_is_exact_under_momentum():
 
 def test_decay_only_trajectory_is_identical_across_momentum_and_adam():
     """Decoupling isolates mu's effect from the optimizer-specific machinery
-    entirely, not just approximately: with grad L == 0 throughout, LinBreg
-    (no momentum), LinBreg (momentum=0.9) and AdaBreg trace bit-for-bit
-    identical trajectories over many steps. The momentum buffer and the Adam
+    entirely, not just approximately: with grad L == 0 throughout, LinBreg (no
+    momentum), LinBreg (momentum=0.9) and AdaBreg trace bit-for-bit identical
+    trajectories over many steps.
+
+    The momentum buffer and the Adam
     moments both stay exactly 0.0 (nothing ever feeds them), so their
     contribution to the dual update is an exact +0.0/-0.0 no-op in every
-    variant, leaving only the shared ``-lr*mu*p`` term."""
+    variant, leaving only the shared ``-lr*mu*p`` term.
+    """
     lr, mu = 0.1, 0.5
     w0 = torch.tensor([0.9, -0.6, 0.02])
 
     def run(**kwargs):
         p = nn.Parameter(w0.clone())
         opt_cls = kwargs.pop("opt_cls")
-        opt = opt_cls([p], lr=lr, reg=RegL1(lamda=0.05), weight_decay=mu, **kwargs)
+        opt = opt_cls(
+            [p], lr=lr, reg=RegL1(lamda=0.05), weight_decay=mu, **kwargs
+        )
         trajectory = []
         for _ in range(60):
             p.grad = torch.zeros_like(p)
@@ -665,8 +677,10 @@ def test_decay_only_trajectory_is_identical_across_momentum_and_adam():
             trajectory.append(p.detach().clone())
         return torch.stack(trajectory)
 
-    linbreg_no_momentum = run(opt_cls=LinBreg)
-    linbreg_with_momentum = run(opt_cls=LinBreg, momentum=0.9)
+    linbreg_no_momentum = run(opt_cls=LinBreg, decoupled_weight_decay=True)
+    linbreg_with_momentum = run(
+        opt_cls=LinBreg, momentum=0.9, decoupled_weight_decay=True
+    )
     adabreg = run(opt_cls=AdaBreg)
 
     assert torch.equal(linbreg_no_momentum, linbreg_with_momentum)
@@ -706,8 +720,8 @@ def test_adabreg_mu_is_exactly_multiplicative_decay_on_the_support():
 
 
 def test_adabreg_mu_is_now_rate_dependent():
-    """Decoupled decay scales with mu; Adam's denominator no longer absorbs
-    it into a fixed lr*sign(w) step."""
+    """Decoupled decay scales with mu; Adam's denominator no longer absorbs it
+    into a fixed lr*sign(w) step."""
     lr = 1e-2
     steps = []
     for mu in (5e-4, 5e-2):
@@ -718,7 +732,65 @@ def test_adabreg_mu_is_now_rate_dependent():
             opt.step()
         steps.append(float(p.detach()[0]))
 
-    assert steps[0] != pytest.approx(steps[1], abs=1e-6)  # 100x mu, different step
+    assert steps[0] != pytest.approx(
+        steps[1], abs=1e-6
+    )  # 100x mu, different step
+
+
+def test_linbreg_default_mu_matches_sgd_bit_for_bit():
+    """The coupled default reproduces ``torch.optim.SGD``'s L2 exactly.
+
+    Why: RegNone makes the prox the identity, so w = delta*v and LinBreg's
+    dual update is SGD's own update on w. Any drift here is a benchmark bias,
+    because every SGD baseline runs the same nominal weight_decay.
+    """
+    lr, mu, momentum = 0.05, 5e-4, 0.9
+    w0 = torch.tensor([0.9, -0.6, 0.02, 0.5])
+    grads = [
+        torch.randn(4, generator=torch.Generator().manual_seed(k))
+        for k in range(50)
+    ]
+
+    p_breg = nn.Parameter(w0.clone())
+    breg = LinBreg(
+        [p_breg], lr=lr, reg=RegNone(), weight_decay=mu, momentum=momentum
+    )
+    p_sgd = nn.Parameter(w0.clone())
+    sgd = torch.optim.SGD([p_sgd], lr=lr, weight_decay=mu, momentum=momentum)
+
+    for g in grads:
+        p_breg.grad, p_sgd.grad = g.clone(), g.clone()
+        breg.step()
+        sgd.step()
+
+    assert torch.equal(p_breg.detach(), p_sgd.detach())
+
+
+def test_coupled_and_decoupled_mu_differ_by_the_momentum_factor():
+    """Momentum amplifies coupled decay by ``1/(1 - momentum)``; decoupled
+    decay bypasses the buffer and keeps the bare ``lr*mu`` rate."""
+    # The img recipes' lr and mu: w must decay enough to measure, but not so
+    # far that the buffer's lag behind a shrinking w compounds.
+    lr, mu, momentum, steps = 0.05, 5e-4, 0.9, 4000
+
+    def run(decoupled):
+        p = nn.Parameter(torch.tensor([1.0]))
+        opt = LinBreg(
+            [p],
+            lr=lr,
+            reg=RegNone(),
+            weight_decay=mu,
+            momentum=momentum,
+            decoupled_weight_decay=decoupled,
+        )
+        for _ in range(steps):
+            p.grad = torch.zeros(1)
+            opt.step()
+        return float(p.detach()[0])
+
+    # Both are pure contractions, so compare them in the exponent.
+    ratio = math.log(run(decoupled=False)) / math.log(run(decoupled=True))
+    assert ratio == pytest.approx(1.0 / (1.0 - momentum), rel=1e-2)
 
 
 @pytest.mark.parametrize("OptimizerClass", [LinBreg, AdaBreg])
