@@ -1,10 +1,25 @@
 #!/bin/bash
-# Download CIFAR-10-C (Hendrycks & Dietterich, 2019) into data/cifar10_c/.
+# Download CIFAR-10-C (Hendrycks & Dietterich, 2019) into <data-dir>/cifar10_c/.
+# --data-dir must match paths.data_dir; it defaults to the repo's data/.
 # Idempotent: skips work when the gaussian_noise.npy + labels.npy pair exists.
-# Layout after this script: data/cifar10_c/{corruption}.npy + labels.npy.
+# Layout after this script: <data-dir>/cifar10_c/{corruption}.npy + labels.npy.
 set -eu
 
-data_dir="data/cifar10_c"
+base_dir="data"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --data-dir)
+            base_dir="$2"
+            shift 2
+            ;;
+        *)
+            echo "usage: $0 [--data-dir DIR]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+data_dir="${base_dir}/cifar10_c"
 url="https://zenodo.org/records/2535967/files/CIFAR-10-C.tar?download=1"
 
 if [ -f "${data_dir}/gaussian_noise.npy" ] && [ -f "${data_dir}/labels.npy" ]; then

@@ -1,10 +1,25 @@
 #!/bin/bash
 # Download Tiny-ImageNet-C (Hendrycks & Dietterich, 2019) into
-# data/tinyimagenet_c/. Idempotent: skips when gaussian_noise/ exists.
-# Layout after this script: data/tinyimagenet_c/{corruption}/{severity}/{wnid}/*.
+# <data-dir>/tinyimagenet_c/. Idempotent: skips when gaussian_noise/ exists.
+# --data-dir must match paths.data_dir; it defaults to the repo's data/.
+# Layout: <data-dir>/tinyimagenet_c/{corruption}/{severity}/{wnid}/*.
 set -eu
 
-data_dir="data/tinyimagenet_c"
+base_dir="data"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --data-dir)
+            base_dir="$2"
+            shift 2
+            ;;
+        *)
+            echo "usage: $0 [--data-dir DIR]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+data_dir="${base_dir}/tinyimagenet_c"
 url="https://zenodo.org/records/2536630/files/Tiny-ImageNet-C.tar?download=1"
 
 if [ -d "${data_dir}/gaussian_noise/1" ]; then
