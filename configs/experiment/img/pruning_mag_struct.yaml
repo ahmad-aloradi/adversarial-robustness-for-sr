@@ -21,8 +21,7 @@ tags: ["img", "${datamodule.name}", "pruning", "ln_structured", "gradual"]
 seed: 42
 
 _pruning_tolerance: 0.005 # convergence band shared by the gates: in-band iff (1-this)*target <= sparsity <= (1+this)*target
-_lr_milestones: ${datamodule.lr_milestones} # epochs the lr drops on, from the dataset config
-_sparsity_ramp_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'} # every sparsity ramp reaches its target here, independent of the lr milestones
+_sparsity_ramp_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'} # every sparsity ramp reaches its target here, independent of the lr schedule
 
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config
@@ -68,15 +67,17 @@ module:
   optimizer:
     _target_: torch.optim.SGD
     _partial_: True
-    lr: 0.05
+    lr: 0.1
     momentum: 0.9
     weight_decay: 5e-4
     nesterov: false
   lr_scheduler:
     scheduler:
-      _target_: torch.optim.lr_scheduler.MultiStepLR
-      milestones: ${_lr_milestones}
-      gamma: 0.1 # lr x0.1 at each milestone
+      _target_: src.utils.lr_schedulers.warmup_then_cosine
+      warmup_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.1)'} # use 10% warmup
+      max_epochs: ${trainer.max_epochs}
+      start_factor: 0.1 # first-epoch lr = 0.1 x module.optimizer.lr
+      eta_min: 1.0e-6
     extras:
       interval: epoch
       frequency: ${trainer.check_val_every_n_epoch}

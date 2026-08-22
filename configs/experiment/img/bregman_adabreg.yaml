@@ -25,8 +25,7 @@ _bregman_initial_sparsity: 0.99 # initial weight sparsity applied at setup
 _bregman_sparsity_metric: bregman/pruned_sparsity # gate signal: the metric lambda steers on (regularized groups); `sparsity` is whole-model
 _bregman_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},initial_lambda}
 _bregman_regularizer: RegL1 # readout on the regularized groups; RegL1 soft-thresholds
-_lr_milestones: ${datamodule.lr_milestones} # epochs the lr drops on, from the dataset config
-_sparsity_ramp_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'} # every sparsity ramp reaches its target here, independent of the lr milestones
+_sparsity_ramp_epochs: ${oc.eval:'int(${trainer.max_epochs} * 0.5)'} # every sparsity ramp reaches its target here, independent of the lr schedule
 
 trainer:
   max_epochs: ${datamodule.max_epochs} # per-dataset budget from the dataset config

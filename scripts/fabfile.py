@@ -1092,8 +1092,6 @@ EPOCHS_IMG = {
     "tinyimagenet": 200,
     "imagenet": 100,
 }
-# Epochs the lr drops on, keyed by the budget above.
-LR_MILESTONES_IMG = {200: [60, 120, 160], 100: [30, 60, 90]}
 IMG_BATCH_SIZE = {
     "mnist": 128,
     "cifar10": 128,
@@ -1164,7 +1162,6 @@ def _submit_img_job(
     # Handling epochs
     epochs_to_ramp = None
     max_epochs = EPOCHS_IMG[dataset_name]
-    lr_milestones = LR_MILESTONES_IMG[max_epochs]
     batch_size = IMG_BATCH_SIZE[dataset_name]
     if experiment in ramp_up_experiments:
         epochs_to_ramp = int(max_epochs * ramp_up_fraction)
@@ -1199,12 +1196,11 @@ def _submit_img_job(
         "name": name,
         "logger": "many_loggers",
         "datamodule.loaders.train.batch_size": batch_size,
+        "datamodule.loaders.valid.batch_size": batch_size, # loaders.test interpolates valid
         "paths.log_dir": RESULTS_DIR,
         "hydra.run.dir": f"{RESULTS_DIR}/train/runs/{name}",
         "trainer.num_sanity_val_steps": 0,
         "trainer.max_epochs": max_epochs,
-        # No spaces: the arguments are joined into one shell command line.
-        "_lr_milestones": f"[{','.join(map(str, lr_milestones))}]",
     }
 
     if target_sparsity is not None:
@@ -1305,7 +1301,7 @@ def run_img():
     ########################
     # Switch controls (master switch per group of experiments)
     ########################
-    RUN_BASELINE_EXPS = False
+    RUN_BASELINE_EXPS = True
     RUN_PRUNING_EXPS = False
     # Sparse-training baselines (RigL/SET/Static/SNIP/GraNet), all sparse-to-sparse.
     RUN_DST_EXPS = False
@@ -1322,21 +1318,17 @@ def run_img():
     ]
     # Vanilla Bregman: fixed lambda, no scheduler (bregman_*_fixed).
     RUN_FIXED_BREGMAN_EXPS = False
-    # Adaptive Bregman (lambda scheduler):
-    RUN_ADAPTIVE_CLASSICAL = False  # adaptive, uniform allocation
-    # Target ramped from the config's start up to the first lr milestone.
+    # Adaptive Bregman: feedback and quantile scheduler, uniform allocation.
+    RUN_ADAPTIVE_CLASSICAL = False
+    # Target ramped from the config's start up to half the epoch budget.
     RUN_PROGRESSIVE_BREGMAN_EXPS = False
 
     # Initial-sparsity sweeps: same starting points, two ways of setting lambda.
     RUN_INIT_SPARSITY_FIXED_LAMBDA = False  # static lambda, sparsity floats
     RUN_INIT_SPARSITY_ADAPTIVE_LAMBDA = True  # adaptive, sparsity pinned
-    ADABREG_EPS_HI = True  # AdaBreg only: raise eps to EPS_HI_VALUE (stripe fix), named -epshi
 
     # Auxiliary experiments
     RUN_CONSTANT_LR_EXPS = False  # baseline with constant LR (no scheduler)
-    INFLATE_CLASSIFIER_HEAD = False  # inflate the classifier head
-    RUN_STRIPE_FIX_EXPS = False
-    EPS_HI_VALUE = 1e-5
 
     ########################
     # Experiment registry: a list of entries (same config may recur with
@@ -1415,7 +1407,12 @@ def run_img():
             )
 
     if RUN_ADAPTIVE_CLASSICAL:
-        for _exp in ("bregman_adabreg", "bregman_linbreg"):
+        for _exp in (
+            # "bregman_adabreg",
+            # "bregman_adabreg_quantile",
+            "bregman_linbreg",
+            "bregman_linbreg_quantile",
+        ):
             EXPERIMENTS.append(
                 {
                     "experiment": _exp,
@@ -1427,8 +1424,10 @@ def run_img():
 
     if RUN_PROGRESSIVE_BREGMAN_EXPS:
         for _exp in (
-            "bregman_adabreg_progressive",
+            # "bregman_adabreg_progressive",
+            # "bregman_adabreg_quantile_progressive",
             "bregman_linbreg_progressive",
+            "bregman_linbreg_quantile_progressive",
         ):
             EXPERIMENTS.append(
                 {
@@ -1457,77 +1456,21 @@ def run_img():
 
     # Adaptive lambda pins the final sparsity at the target; only the start s0 varies.
     if RUN_INIT_SPARSITY_ADAPTIVE_LAMBDA:
-        # for _exp in ("bregman_adabreg", "bregman_linbreg"):
-        for _exp in ("bregman_adabreg",):
-            entry = {
-                "experiment": _exp,
-                "dataset_names": dataset_names,
-                "model_name": model_names,
-                "sparsity_rates": sparsity_rates_sweep,
-                "initial_sparsities": initial_sparsity_sweep,
-            }
-            if ADABREG_EPS_HI and _exp == "bregman_adabreg":
-                entry["extra_overrides"] = {
-                    "++module.optimizer.eps": EPS_HI_VALUE
-                }
-                entry["suffix"] = f"-epshi{EPS_HI_VALUE}"
-            EXPERIMENTS.append(entry)
-
-    # Validates QuantileLambdaScheduler against the diagnosed feedback-controller
-    # oscillation (bregman_adabreg_progressive, sr95, eps sweep) on a real run.
-    # docs/quantile_topk_poc.py is the toy that motivated this; the existing
-    # feedback CSVs at eps=1e-8/1e-4 are the baseline these 2 jobs compare against.
-    RUN_QUANTILE_VALIDATION = False
-    if RUN_QUANTILE_VALIDATION:
-        for _eps in (1e-8, 1e-4):
-            EXPERIMENTS.append(
-                {
-                    "experiment": "bregman_adabreg_quantile_progressive",
-                    "dataset_names": ["cifar100"],
-                    "model_name": ["resnet18"],
-                    "sparsity_rates": [0.95],
-                    "initial_sparsities": [0.5],
-                    "extra_overrides": {"++module.optimizer.eps": _eps},
-                    "suffix": f"-epshi{_eps:g}" if _eps != 1e-8 else "",
-                }
-            )
-
-    if INFLATE_CLASSIFIER_HEAD:
         for _exp in (
-            "bregman_adabreg",
-            # "bregman_linbreg",
-            # "pruning_mag_unstruct",
+            # "bregman_adabreg",
+            # "bregman_adabreg_quantile",
+            "bregman_linbreg",
+            "bregman_linbreg_quantile",
         ):
             EXPERIMENTS.append(
                 {
                     "experiment": _exp,
-                    "dataset_names": ["cifar10", "tinyimagenet"],
-                    "model_name": ["resnet18"],
-                    "sparsity_rates": [0.99],
-                    "extra_overrides": {
-                        "datamodule.num_classes": 10000,
-                        "logger.wandb.tags": ["inflated_classifier_10k"],
-                    },
-                    "suffix": "-classifier_10k",
+                    "dataset_names": dataset_names,
+                    "model_name": model_names,
+                    "sparsity_rates": sparsity_rates_sweep,
+                    "initial_sparsities": initial_sparsity_sweep,
                 }
             )
-
-    if RUN_STRIPE_FIX_EXPS:
-        # Compare against the striped BN baseline (suffix -classifier_10k).
-        EXPERIMENTS.append(
-            {
-                "experiment": "bregman_adabreg",
-                "dataset_names": ["cifar10"],
-                "model_name": ["resnet18"],
-                "sparsity_rates": [0.99],
-                "extra_overrides": {
-                    "datamodule.num_classes": 10000,
-                    "logger.wandb.tags": ["inflated_classifier_10k"],
-                    "++module.optimizer.eps": 1e-4,
-                },
-                "suffix": "-classifier_10k-epshi",
-            }
-        )
 
     # --- Volume estimation ---
     total_jobs = sum(

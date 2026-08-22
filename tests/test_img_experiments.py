@@ -82,6 +82,29 @@ def _instantiate_module(exp):
     return hydra.utils.instantiate(cfg.module, _recursive_=False)
 
 
+@pytest.mark.parametrize("exp", _img_experiments())
+def test_every_img_recipe_uses_one_lr_schedule(exp):
+    """Warmup then cosine everywhere, so a method comparison is not also a
+    schedule comparison."""
+    cfg = _compose([f"experiment=img/{exp}", "logger=[]"])
+    assert (
+        cfg.module.lr_scheduler.scheduler._target_
+        == "src.utils.lr_schedulers.warmup_then_cosine"
+    )
+
+
+@pytest.mark.parametrize("exp", _img_experiments())
+def test_every_img_recipe_shares_one_base_lr(exp):
+    """0.1 for every gradient-scaled arm; AdaBreg is the one exception.
+
+    Why: AdaBreg's step is ``m/sqrt(v)``, which is close to unit norm, so lr
+    is the per-weight move itself rather than a multiplier on the gradient.
+    """
+    cfg = _compose([f"experiment=img/{exp}", "logger=[]"])
+    is_adabreg = cfg.module.optimizer._target_.endswith("AdaBreg")
+    assert cfg.module.optimizer.lr == (5e-3 if is_adabreg else 0.1)
+
+
 @pytest.mark.parametrize("dataset", sorted(_DATASETS))
 @pytest.mark.parametrize("exp", _img_experiments())
 def test_img_experiment_composes(exp, dataset):
@@ -105,7 +128,7 @@ def test_img_experiment_composes(exp, dataset):
     assert dataset in tags
 
 
-# The sparsity-ramp knob each recipe reads; it must land on the first lr milestone.
+# The sparsity-ramp knob each recipe reads; it must land at half the budget.
 _RAMP_KNOB = {
     "pruning_mag_struct": "callbacks.model_pruning.epochs_to_ramp",
     "pruning_mag_unstruct": "callbacks.model_pruning.epochs_to_ramp",
@@ -123,7 +146,8 @@ def test_the_sparsity_ramp_spans_half_the_budget(exp, dataset):
     """Every ramped recipe reaches its target sparsity at the halfway epoch.
 
     Why: GraNet (Liu et al., NeurIPS 2021) measures that a pruned network
-    stops recovering after the second lr drop, so the ramp must end before it.
+    stops recovering late in the run, so the ramp must end well before the end.
+    The ramp is decoupled from the lr schedule and does not track it.
     """
     cfg = _compose(
         [
@@ -192,6 +216,30 @@ def test_mnist_transform_contract():
         pipe = Compose([hydra.utils.instantiate(t) for t in specs])
         out = pipe(Image.new("L", (28, 28)))
         assert tuple(out.shape) == (3, 32, 32)
+
+
+@pytest.mark.parametrize("dataset", sorted(_DATASETS))
+def test_every_dataset_shares_one_normalize(dataset):
+    """`transforms.base` and `transforms.eval` end on the same Normalize node.
+
+    Why: `src/robustness/normalization.py` pops `transforms.eval[-1]` and
+    re-applies it inside the model, so a drifted mean/std rescales every
+    robustness number, and a trailing transform makes the pop refuse.
+    """
+    cfg = _compose(
+        [
+            "experiment=img/dense_sgd",
+            f"datamodule=datasets/{dataset}",
+            "logger=[]",
+        ]
+    )
+    transforms = cfg.datamodule.transforms
+    for key in ("base", "eval"):
+        target = transforms[key][-1]._target_
+        assert (
+            target == "torchvision.transforms.Normalize"
+        ), f"transforms.{key} must end on Normalize, got {target}"
+    assert transforms.base[-1] == transforms.eval[-1]
 
 
 @pytest.mark.parametrize("exp", _bregman_experiments())
@@ -269,7 +317,10 @@ def test_configure_optimizers_dense():
     model = _instantiate_module("dense_sgd")
     out = model.configure_optimizers()
     assert out["optimizer"].__class__.__name__ == "SGD"
-    assert out["lr_scheduler"]["scheduler"].__class__.__name__ == "MultiStepLR"
+    # warmup_then_cosine returns a SequentialLR of LinearLR then CosineAnnealingLR.
+    assert (
+        out["lr_scheduler"]["scheduler"].__class__.__name__ == "SequentialLR"
+    )
     assert not hasattr(model, "pruning_manager")
 
 
