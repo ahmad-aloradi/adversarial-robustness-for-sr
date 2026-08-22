@@ -78,6 +78,31 @@ def log_step_metrics(
         )
 
 
+def log_support_turnover(
+    pl_module: LightningModule, births: float, deaths: float
+) -> None:
+    """Log how much of the regularized support changed over the last epoch.
+
+    ``births`` is the share of the current support that was zero one epoch
+    ago; ``deaths`` is the share of last epoch's support that is zero now.
+    They differ while the sparsity target still ramps.
+    """
+    # Both are read off replicated parameters, so every rank has the same value.
+    pl_module.log_dict(
+        {
+            "bregman/support_births": births,
+            "bregman/support_deaths": deaths,
+        },
+        **{
+            **pl_module.logging_params,
+            "on_step": False,
+            "on_epoch": True,
+            "sync_dist": False,
+            "prog_bar": False,
+        },
+    )
+
+
 @rank_zero_only
 def log_configuration(
     optimizer,

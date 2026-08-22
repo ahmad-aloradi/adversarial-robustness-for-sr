@@ -23,6 +23,7 @@ from .bregman_report import (
     log_configuration,
     log_group_assignments,
     log_step_metrics,
+    log_support_turnover,
 )
 from .lambda_scheduler import SPARSITY_SCAN_FREQUENCY
 
@@ -43,7 +44,8 @@ class BregmanPruner(Callback):
     - Applies initial sparsity to the model (via PruningManager)
     - Optionally steers the regularization strength (lambda) per batch via a
       duck-typed lambda scheduler
-    - Logs sparsity metrics and checkpoints the scheduler state
+    - Logs sparsity and support-turnover metrics, and checkpoints the
+      scheduler state
     """
 
     def __init__(
@@ -81,6 +83,7 @@ class BregmanPruner(Callback):
         self._optimizer: Optional[torch.optim.Optimizer] = None
         self._initialized = False
         self._ckpt_scheduler_state: Optional[dict] = None
+        self._prev_support: Optional[List[torch.Tensor]] = None
 
     def on_fit_start(
         self, trainer: Trainer, pl_module: LightningModule
@@ -179,6 +182,26 @@ class BregmanPruner(Callback):
         trainer.callback_metrics["bregman/target_sparsity"] = torch.tensor(
             self._target_sparsity
         )
+
+        # Turnover needs two snapshots; the first epoch of a run, fresh or resumed, only stores one.
+        support = [
+            p.detach().abs() > self.sparsity_threshold
+            for p in self._regularized_parameters()
+        ]
+        if self._prev_support is not None:
+            pairs = list(zip(support, self._prev_support))
+            births = sum(int((now & ~was).sum()) for now, was in pairs)
+            deaths = sum(int((~now & was).sum()) for now, was in pairs)
+            active_now = sum(int(now.sum()) for now in support)
+            active_prev = sum(int(was.sum()) for was in self._prev_support)
+            assert active_now > 0 and active_prev > 0, (
+                "support turnover needs a non-empty support in both epochs, got "
+                f"{active_prev} weights last epoch and {active_now} now"
+            )
+            log_support_turnover(
+                pl_module, births / active_now, deaths / active_prev
+            )
+        self._prev_support = support
 
         if self.verbose > 0:
             log.info(

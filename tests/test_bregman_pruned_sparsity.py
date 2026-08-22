@@ -1,10 +1,13 @@
-"""Unit tests for BregmanPruner._pruned_sparsity.
+"""Unit tests for BregmanPruner's epoch-end measurements.
 
 Regression guard: in a pure-regularization run (sparsity_rate=0) the
 applier-based ``manager.get_pruned_parameters()`` is empty, which used to make
 ``bregman/pruned_sparsity`` report 0.000 even while ``bregman/sparsity`` showed
 ~0.99. The metric must instead measure the groups that carry an active
 regularizer (lambda_scale > 0).
+
+Support turnover is measured on the same groups: births against the new
+support, deaths against the old.
 """
 import pytest
 import torch
@@ -77,3 +80,87 @@ def test_pruned_sparsity_asserts_when_uninitialized():
     pruner = BregmanPruner(target_sparsity=0.9)
     with pytest.raises(AssertionError):
         pruner._pruned_sparsity()
+
+
+class _FakeTrainer:
+    def __init__(self):
+        self.callback_metrics = {}
+        self.current_epoch = 0
+
+
+class _FakeModule:
+    """Enough LightningModule surface for on_train_epoch_end: parameters to
+    measure, and a log_dict that records instead of writing to a logger."""
+
+    logging_params = {"on_step": False, "on_epoch": True, "sync_dist": True}
+
+    def __init__(self, params):
+        self._params = params
+        self.logged = {}
+
+    def parameters(self):
+        return iter(self._params)
+
+    def log_dict(self, metrics, **kwargs):
+        self.logged.update(metrics)
+
+
+def _turnover_pruner(w):
+    """A pruner wired to one regularized parameter, past on_fit_start."""
+    pruner = BregmanPruner(target_sparsity=0.9, verbose=0)
+    pruner._optimizer = _make_optimizer(
+        [{"params": [w], "reg": RegL1(lamda=0.1), "lambda_scale": 1.0}]
+    )
+    pruner._initialized = True
+    module = _FakeModule([w])
+    pruner.manager = type("_M", (), {"pl_module": module})()
+    return pruner, _FakeTrainer(), module
+
+
+def test_support_turnover_counts_births_and_deaths():
+    """Births are measured against the new support, deaths against the old."""
+    w = nn.Parameter(torch.tensor([1.0, 1.0, 1.0, 0.0, 0.0, 0.0]))
+    pruner, trainer, module = _turnover_pruner(w)
+
+    pruner.on_train_epoch_end(trainer, module)  # stores the first snapshot
+    # One survivor dies, two zeros are born: support 3 -> 4.
+    w.data = torch.tensor([1.0, 1.0, 0.0, 1.0, 1.0, 0.0])
+    pruner.on_train_epoch_end(trainer, module)
+
+    assert module.logged["bregman/support_births"] == pytest.approx(2 / 4)
+    assert module.logged["bregman/support_deaths"] == pytest.approx(1 / 3)
+
+
+def test_support_turnover_separates_the_two_denominators():
+    """A pure prune births nothing and normalizes deaths on the old support."""
+    w = nn.Parameter(torch.tensor([1.0, 1.0, 1.0, 1.0]))
+    pruner, trainer, module = _turnover_pruner(w)
+
+    pruner.on_train_epoch_end(trainer, module)
+    w.data = torch.tensor([1.0, 1.0, 0.0, 0.0])
+    pruner.on_train_epoch_end(trainer, module)
+
+    assert module.logged["bregman/support_births"] == 0.0
+    assert module.logged["bregman/support_deaths"] == pytest.approx(2 / 4)
+
+
+def test_support_turnover_is_silent_on_the_first_epoch():
+    """Nothing to compare against, so nothing is logged."""
+    w = nn.Parameter(torch.tensor([1.0, 0.0, 1.0]))
+    pruner, trainer, module = _turnover_pruner(w)
+
+    pruner.on_train_epoch_end(trainer, module)
+
+    assert "bregman/support_births" not in module.logged
+    assert pruner._prev_support is not None
+
+
+def test_support_turnover_rejects_an_empty_support():
+    """A support that empties out is the bug, not a case to report on."""
+    w = nn.Parameter(torch.tensor([1.0, 1.0]))
+    pruner, trainer, module = _turnover_pruner(w)
+
+    pruner.on_train_epoch_end(trainer, module)
+    w.data = torch.zeros(2)
+    with pytest.raises(AssertionError, match="non-empty support"):
+        pruner.on_train_epoch_end(trainer, module)
