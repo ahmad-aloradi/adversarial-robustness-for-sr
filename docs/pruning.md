@@ -41,7 +41,7 @@ w ← ∇J*(v) = S_δλ(δ·v)                # p.copy_(reg.prox(delta * sub_gra
 
 **Where μ enters depends on the arm.** AdaBreg is always decoupled AdamW-style (Loshchilov & Hutter, ICLR 2019): `g` is the Adam step on `∇L` alone and `−τμ·w` is the separate term written above. LinBreg is coupled by default: `μ·w` joins `∇L` *inside* `g`, exactly as `torch.optim.SGD` does it, and `decoupled_weight_decay=True` moves it back out to the separate term.
 
-Coupling matters because momentum integrates it. At the same nominal μ, coupled decay is `1/(1 − momentum)` times decoupled — 10x at `momentum=0.9`. LinBreg's default is coupled so that one `weight_decay` value means the same thing in a LinBreg arm and in the SGD baselines it is benchmarked against. AdaBreg has no coupled path, so at `lr=5e-3` its decay is ~100x weaker than a `lr=0.05` SGD baseline at the same μ; its μ must be raised to match. `test_linbreg_default_mu_matches_sgd_bit_for_bit` asserts the LinBreg default against `torch.optim.SGD` over 50 steps.
+Momentum integrates coupled decay. The coupled rate is therefore `1/(1 − momentum)` times the decoupled rate, which is 10x at `momentum=0.9`. LinBreg couples by default, so one `weight_decay` value means the same thing in a LinBreg arm and in an SGD baseline at the same lr. `test_linbreg_default_mu_matches_sgd_bit_for_bit` asserts that against `torch.optim.SGD` over 50 steps. AdaBreg only decouples: it decays at `τμ` against the baseline's `τμ/(1 − momentum)`, so it needs a larger μ to reach the same rate.
 
 ##### The master equation
 

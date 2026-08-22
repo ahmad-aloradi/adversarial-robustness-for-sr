@@ -8,11 +8,11 @@ BREGMAN_LAMBDA_CONFIGS = {
     "AdaBreg": {
         0.5: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
-            "fixed_lambda": 1.0,
+            "fixed_lambda": 5,
         },
         0.7: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
-            "fixed_lambda": 2.5,
+            "fixed_lambda": 8,
         },
         0.9: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
@@ -20,11 +20,11 @@ BREGMAN_LAMBDA_CONFIGS = {
         },
         0.95: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
-            "fixed_lambda": 7.5,
+            "fixed_lambda": 12,
         },
         0.99: {
             "initial_lambda": INIT_LAMBDA_ADABREG,
-            "fixed_lambda": 10.0,
+            "fixed_lambda": 15.0,
         },
     },
     "LinBreg": {

@@ -68,8 +68,8 @@ module:
   optimizer:
     _target_: src.callbacks.pruning.bregman.bregman_optimizers.AdaBreg
     _partial_: true
-    lr: 5e-3
-    weight_decay: 5e-4 # mu: dense_sgd's L2, inherited by every img Bregman arm
+    lr: 1e-2
+    weight_decay: 5e-4
   lr_scheduler:
     scheduler:
       _target_: src.utils.lr_schedulers.warmup_then_cosine
