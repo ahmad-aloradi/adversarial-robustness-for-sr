@@ -30,7 +30,7 @@ from src.utils.run_naming import (  # noqa: E402
 # Cluster configuration
 env.user = "dsnf101h"  # 'iwal021h'
 
-CLUSTER_NAME = "alex"  # Options: 'tinygpu', 'alex'
+CLUSTER_NAME = "tinygpu"  # Options: 'tinygpu', 'alex'
 env.hosts = (
     ["alex.nhr.fau.de"] if CLUSTER_NAME == "alex" else ["tinyx.nhr.fau.de"]
 )
@@ -1090,7 +1090,7 @@ IMG_BATCH_SIZE = {
     "cifar10": 128,
     "cifar100": 128,
     "tinyimagenet": 128,
-    "imagenet": 1024,
+    "imagenet": 256,
 }
 
 
@@ -1101,6 +1101,7 @@ def _submit_img_job(
     model_name="resnet18",
     target_sparsity=None,
     initial_sparsity=None,  # Bregman starting sparsity; None keeps the config's own value
+    gpu_device=GPU,  # SLURM partition this job asks for
     extra_overrides=None,
     job_name_suffix="",
 ):
@@ -1145,7 +1146,7 @@ def _submit_img_job(
         "path_project": PATH_PROJECT,
         "env_name": CONDA_ENV,
         "data_path": DATA_DIR,
-        "gpu": GPU,
+        "gpu": gpu_device,
         "num_nodes": 1,
         "walltime": IMG_WALLTIME[dataset_name],
         "num_gpus": 1,
@@ -1278,12 +1279,13 @@ def run_img():
     experiments sweep over sparsity rates; every experiment sweeps over seeds,
     each saved under its own `seed_{seed}` subdirectory.
     """
-    # dataset_names = ["mnist", "cifar10", "cifar100", "tinyimagenet", "imagenet"]
-    # model_names = ["wrn28_10", "resnet18", "resnet50"]
-    dataset_names = ["cifar100"]
-    model_names = ["resnet18"]
+    dataset_names = ["cifar100", "tinyimagenet"]
+    # dataset_names = ["imagenet"]
+    model_names = ["resnet50", "wrn28_10"] #resnet18
+    # model_names = ["resnet50"]
     sparsity_rates_sweep = [0.9, 0.95, 0.99]
-    default_seeds = [42]
+    # sparsity_rates_sweep = [0.95, 0.99]
+    default_seeds = [2026] #[42, 1994, 2026]
     # Starting sparsity sweep (Bregman `_bregman_initial_sparsity`, GraNet `initial_amount`)
     # initial_sparsity_sweep = [0.0, 0.5, 0.99]
     initial_sparsity_sweep = [0.99]
@@ -1291,31 +1293,20 @@ def run_img():
     ########################
     # Switch controls (master switch per group of experiments)
     ########################
-    RUN_BASELINE_EXPS = True
-    RUN_PRUNING_EXPS = False
+    RUN_BASELINE_EXPS = True # dense SGD/AdamW
+    RUN_PRUNING_EXPS = False # magnitude pruning (structured/unstructured)
     # Sparse-training baselines (RigL/SET/Static/SNIP/GraNet), all sparse-to-sparse.
-    RUN_DST_EXPS = False
+    RUN_DST_EXPS = True
     # STR: sparsity is an outcome of the weight decay, so sweep that instead.
     RUN_STR_EXPS = False
     # Table 10 rows spanning 79.55% to 99.10% sparse ResNet-50.
-    STR_WEIGHT_DECAYS = [
-        1.7e-5,
-        2.251757813e-5,
-        3.051757813e-5,
-        4.051757813e-5,
-        6.051757813e-5,
-        9.051757813e-5,
-    ]
-    # Vanilla Bregman: fixed lambda, no scheduler (bregman_*_fixed).
+    STR_WEIGHT_DECAYS = [5e-5, 1e-4]
+    # Vanilla Bregman over initial_sparsity_sweep: fixed lambda, sparsity floats.
     RUN_FIXED_BREGMAN_EXPS = False
-    # Adaptive Bregman: feedback and quantile scheduler, uniform allocation.
+    # Adaptive Bregman over initial_sparsity_sweep: sparsity pinned at the target.
     RUN_ADAPTIVE_CLASSICAL = False
     # Target ramped from the config's start up to half the epoch budget.
     RUN_PROGRESSIVE_BREGMAN_EXPS = False
-
-    # Initial-sparsity sweeps: same starting points, two ways of setting lambda.
-    RUN_INIT_SPARSITY_FIXED_LAMBDA = False  # static lambda, sparsity floats
-    RUN_INIT_SPARSITY_ADAPTIVE_LAMBDA = True  # adaptive, sparsity pinned
 
     # Auxiliary experiments
     RUN_CONSTANT_LR_EXPS = False  # baseline with constant LR (no scheduler)
@@ -1325,7 +1316,8 @@ def run_img():
     # different overrides).
     #   required: experiment, dataset_names, sparsity_rates
     #   optional: extra_overrides, suffix, seeds (defaults to default_seeds),
-    #             initial_sparsities (defaults to the config's own value)
+    #             initial_sparsities (defaults to the config's own value),
+    #             gpu (defaults to GPU)
     ########################
     EXPERIMENTS = []
 
@@ -1353,12 +1345,12 @@ def run_img():
 
     if RUN_DST_EXPS:
         for _exp in (
-            "pruning_rigl",
-            "pruning_set",
-            "pruning_static",
-            "pruning_snip_iter",
-            "pruning_snip",
-            "pruning_granet",
+            "pruning_rigl", # confirmed baseline
+            # "pruning_set",
+            # "pruning_static",
+            # "pruning_snip_iter",
+            # "pruning_snip",
+            "pruning_granet", # confirmed baseline
         ):
             EXPERIMENTS.append(
                 {
@@ -1382,17 +1374,24 @@ def run_img():
                 }
             )
 
+    # Static lambda, so sparsity is the outcome; target_sparsity only picks lambda.
     if RUN_FIXED_BREGMAN_EXPS:
-        for _exp in ("bregman_adabreg_fixed", "bregman_linbreg_fixed"):
+        for _exp in (
+            # "bregman_adabreg_fixed", 
+            "bregman_linbreg_fixed",
+            ):
             EXPERIMENTS.append(
                 {
                     "experiment": _exp,
                     "dataset_names": dataset_names,
                     "model_name": model_names,
                     "sparsity_rates": sparsity_rates_sweep,
+                    "initial_sparsities": initial_sparsity_sweep,
+                    "gpu": "a40",
                 }
             )
 
+    # Adaptive lambda pins the final sparsity at the target; only the start s0 varies.
     if RUN_ADAPTIVE_CLASSICAL:
         for _exp in (
             # "bregman_adabreg",
@@ -1406,6 +1405,8 @@ def run_img():
                     "dataset_names": dataset_names,
                     "model_name": model_names,
                     "sparsity_rates": sparsity_rates_sweep,
+                    "initial_sparsities": initial_sparsity_sweep,
+                    "gpu": "a40",
                 }
             )
 
@@ -1422,37 +1423,7 @@ def run_img():
                     "dataset_names": dataset_names,
                     "model_name": model_names,
                     "sparsity_rates": sparsity_rates_sweep,
-                }
-            )
-
-    # Static lambda, so sparsity is the outcome; target_sparsity only picks lambda.
-    if RUN_INIT_SPARSITY_FIXED_LAMBDA:
-        for _exp in ("bregman_linbreg_fixed", "bregman_adabreg_fixed"):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "dataset_names": dataset_names,
-                    "model_name": model_names,
-                    "sparsity_rates": sparsity_rates_sweep,
-                    "initial_sparsities": initial_sparsity_sweep,
-                }
-            )
-
-    # Adaptive lambda pins the final sparsity at the target; only the start s0 varies.
-    if RUN_INIT_SPARSITY_ADAPTIVE_LAMBDA:
-        for _exp in (
-            # "bregman_adabreg",
-            # "bregman_adabreg_quantile",
-            "bregman_linbreg",
-            "bregman_linbreg_quantile",
-        ):
-            EXPERIMENTS.append(
-                {
-                    "experiment": _exp,
-                    "dataset_names": dataset_names,
-                    "model_name": model_names,
-                    "sparsity_rates": sparsity_rates_sweep,
-                    "initial_sparsities": initial_sparsity_sweep,
+                    "gpu": "a100",
                 }
             )
 
@@ -1476,6 +1447,7 @@ def run_img():
         suffix = cfg.get("suffix", "")
         seeds = cfg.get("seeds", default_seeds)
         initial_sparsities = cfg.get("initial_sparsities", [None])
+        gpu_device = cfg.get("gpu", GPU)
 
         for dataset_name in cfg["dataset_names"]:
             for model_name in cfg["model_name"]:
@@ -1489,6 +1461,7 @@ def run_img():
                                 model_name=model_name,
                                 target_sparsity=sparsity,
                                 initial_sparsity=initial_sparsity,
+                                gpu_device=gpu_device,
                                 extra_overrides=extra_overrides,
                                 job_name_suffix=suffix,
                             )
@@ -1498,10 +1471,7 @@ def run_img():
         for dataset_name in dataset_names:
             for model_name in model_names:
                 for _exp in [
-                    "dense_sgd",
-                    "pruning_mag_unstruct",
-                    "bregman_adabreg",
-                    "bregman_linbreg",
+                    "bregman_linbreg_fixed"
                 ]:
                     _submit_img_job(
                         experiment=_exp,
