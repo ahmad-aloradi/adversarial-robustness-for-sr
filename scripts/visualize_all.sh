@@ -111,7 +111,7 @@ for eval_data in 'cnceleb'; do
                 "EER" \
                 # "train_loss"
                 "train/MulticlassAccuracy" "valid/MulticlassAccuracy" \
-                "bregman/global_lambda" "bregman/sparsity" #"sparsity"
+                "pruning/sparsity" "bregman/pruned_sparsity" "bregman/global_lambda"
                 # "lr" "train/margin"
                 )
 

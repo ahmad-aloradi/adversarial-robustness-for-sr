@@ -10,7 +10,7 @@ Examples
 >>> from src.vis.pruning_compare import (
 ...     read_pruning_experiment, render_layerwise_sparsity
 ... )
->>> data = read_pruning_experiment("/path/to/exp", info={})  # doctest: +SKIP
+>>> data = read_pruning_experiment("/path/to/exp", group)  # doctest: +SKIP
 >>> fig, ax = plt.subplots()  # doctest: +SKIP
 >>> render_layerwise_sparsity(data["layers_enriched"], ax)  # doctest: +SKIP
 >>> fig.savefig("out.pdf")  # doctest: +SKIP
@@ -22,6 +22,7 @@ import re
 import sys
 import time
 from collections import OrderedDict
+from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 # Allow direct execution: python src/vis/pruning_compare.py
@@ -42,15 +43,11 @@ from src.vis.common import (
     PARAM_BAR_COLOR,
     PERFECT_LINE_KW,
     RATE_LINESTYLES,
-    experiment_sort_key,
     export_standalone_legend,
-    get_style,
     layerwise_figsize,
-    make_label,
     panel_models,
     ylim_for_rate,
 )
-from src.vis.encoding import clear_sweep_styles
 
 log = logging.getLogger(__name__)
 
@@ -62,62 +59,38 @@ _TEST_CKPT_LOG_RE = re.compile(r"Test ckpt path:\s*(\S+\.ckpt)")
 # ---------------------------------------------------------------------------
 
 
-def find_best_ckpt(
-    exp_dir: str,
-    info: Optional[Dict] = None,
-) -> Optional[str]:
-    """Return the checkpoint that was used for testing in this run.
+def read_tested_ckpt(exp_dir: str) -> str:
+    """The checkpoint this run tested from, per its own ``train.log``.
 
-    For non-pruning runs, reads ``train.log`` for the ``Test ckpt path:``
-    line. Pruning runs always use ``last.ckpt`` because the final checkpoint
-    carries the fully-converged mask state.
-
-    Falls back to ``last.ckpt`` (or ``last-vN.ckpt``), then the
-    highest-epoch file, when the log is absent or has no match.
+    ``src/train.py`` logs ``Test ckpt path:`` with the file it loaded, so the log
+    states what the reported accuracy and sparsity describe. Every other
+    candidate — ``last.ckpt``, the highest-epoch file — holds different weights
+    and a different mask, so a run that cannot name its tested checkpoint raises
+    instead of standing in one.
 
     Args:
-        exp_dir: path to the experiment directory.
-        info: parsed experiment metadata dict; ``method_class`` is read
-            to decide whether this is a pruning run.
+        exp_dir: path to one seed's run directory.
 
     Returns:
-        Absolute path to the chosen checkpoint, or ``None`` if not found.
+        Absolute path to the tested checkpoint.
     """
-    is_pruning = "pruning" in (info or {}).get("method_class", "")
+    log_path = os.path.join(exp_dir, "train.log")
+    if not os.path.exists(log_path):
+        raise FileNotFoundError(f"the tested checkpoint is read from train.log, missing in {exp_dir}")
 
-    if not is_pruning:
-        log_path = os.path.join(exp_dir, "train.log")
-        if os.path.exists(log_path):
-            with open(log_path) as f:
-                for line in f:
-                    if "Test ckpt path:" not in line:
-                        continue
-                    m = _TEST_CKPT_LOG_RE.search(line)
-                    if m:
-                        local = os.path.join(
-                            exp_dir,
-                            "checkpoints",
-                            os.path.basename(m.group(1)),
-                        )
-                        if os.path.exists(local):
-                            return local
-        log.warning(
-            f"Best ckpt not found in train.log for {exp_dir} — falling back"
-        )
+    tested = None
+    with open(log_path) as f:
+        for line in f:
+            m = _TEST_CKPT_LOG_RE.search(line)
+            if m:
+                tested = m.group(1)
+    if tested is None:
+        raise ValueError(f"train.log states 'Test ckpt path:', not found — {exp_dir} never ran test")
 
-    ckpt_dir = os.path.join(exp_dir, "checkpoints")
-    if not os.path.isdir(ckpt_dir):
-        return None
-    files = [f for f in os.listdir(ckpt_dir) if f.endswith(".ckpt")]
-    if not files:
-        return None
-    last = sorted(f for f in files if f.startswith("last"))
-    if last:
-        return os.path.join(ckpt_dir, last[-1])
-    epoch_files = sorted(f for f in files if f.startswith("epoch"))
-    if epoch_files:
-        return os.path.join(ckpt_dir, epoch_files[-1])
-    return os.path.join(ckpt_dir, files[0])
+    local = os.path.join(exp_dir, "checkpoints", os.path.basename(tested))
+    if not os.path.exists(local):
+        raise FileNotFoundError(f"the tested checkpoint {os.path.basename(tested)} is on disk, missing in {exp_dir}/checkpoints")
+    return local
 
 
 def extract_pruned_layers(
@@ -209,35 +182,31 @@ def extract_pruned_layers(
 
 def read_pruning_experiment(
     exp_dir: str,
-    info: Dict,
+    group: Any,
     *,
     include_all_layers: bool = False,
-) -> Optional[Dict]:
+) -> Dict:
     """Load checkpoint and compute per-layer and aggregate pruning stats.
 
     Args:
         exp_dir: path to the experiment directory.
-        info: parsed experiment metadata dict.
+        group: the RunGroup this directory belongs to.
         include_all_layers: pass through to ``extract_pruned_layers``.
 
     Returns:
-        Dict with keys: ``exp_dir``, ``info``, ``ckpt``, ``agg``,
+        Dict with keys: ``exp_dir``, ``group``, ``ckpt``, ``agg``,
         ``layers_enriched`` (full layers with weight/mask/stats),
         ``layers_lean`` (scalars only, for JSON/cross-exp plots).
-        Returns ``None`` if no checkpoint is found.
     """
-    ckpt = find_best_ckpt(exp_dir, info=info)
-    if ckpt is None:
-        log.warning(f"No checkpoint found in {exp_dir} — skipping")
-        return None
+    ckpt = read_tested_ckpt(exp_dir)
 
-    log.info(f"→ {info['dirname']}")
+    log.info(f"→ {group.dirname}")
     log.info(f"   ckpt: {os.path.relpath(ckpt, exp_dir)}")
 
     raw_layers = extract_pruned_layers(ckpt, include_all=include_all_layers)
     if not raw_layers:
         log.warning(
-            f"No prunable layers in {info['dirname']} — recording as dense baseline"
+            f"No prunable layers in {group.dirname} — recording as dense baseline"
         )
 
     layers_enriched = []
@@ -267,7 +236,7 @@ def read_pruning_experiment(
 
     return dict(
         exp_dir=exp_dir,
-        info={k: v for k, v in info.items() if not k.startswith("_")},
+        group=group,
         ckpt=ckpt,
         agg=agg,
         layers_enriched=layers_enriched,
@@ -277,19 +246,20 @@ def read_pruning_experiment(
 
 def read_eer_lookup(
     model_name: Optional[str],
-    test_set: Optional[str],
+    test_set: str,
     repo_root: str,
 ) -> Dict[str, float]:
-    """Return a mapping of experiment name → EER from the leaderboard CSV.
+    """Return a mapping of experiment name → EER for one test set.
 
-    Reads ``results/test_eval/metrics/{model}/eer_leaderboard.csv``
-    produced by ``scripts/aggregate_json_scores.py``.
+    Reads ``results/test_eval/metrics/{model}/test_metrics.csv`` from
+    ``scripts/aggregate_json_scores.py``. One test set only: Vox1-H EER is
+    near twice Vox1-O EER, so a map over several sets compares runs that
+    were never measured alike.
 
     Args:
-        model_name: ``"ecapa_tdnn"`` or ``"resnet34"``; returns empty
+        model_name: ``"ecapa_tdnn"`` or ``"resnet34"``; returns an empty
             dict when ``None``.
-        test_set: filter to this dataset name, e.g.
-            ``"cnceleb_concatenated"``; ``None`` keeps all rows.
+        test_set: the dataset column value, e.g. ``"cnceleb_multi"``.
         repo_root: root of the repository.
 
     Returns:
@@ -297,29 +267,25 @@ def read_eer_lookup(
     """
     if not model_name:
         return {}
+    assert test_set, "read_eer_lookup needs one test set, got none"
     csv_path = os.path.join(
         repo_root,
         "results",
         "test_eval",
         "metrics",
         model_name,
-        "eer_leaderboard.csv",
+        "test_metrics.csv",
     )
     if not os.path.exists(csv_path):
+        log.warning(f"No test metrics at {csv_path} — EER readout skipped")
         return {}
     df = pd.read_csv(csv_path)
-    if "is_latest" in df.columns:
-        df = df[df["is_latest"] == True]  # noqa: E712
-    if test_set:
-        df = df[df["dataset"] == test_set]
-    if df.empty:
-        return {}
+    df = df[(df["dataset"] == test_set)]
     eer_col = "EER_raw" if "EER_raw" in df.columns else "EER"
-    return {
-        row["exp"]: float(row[eer_col])
-        for _, row in df.iterrows()
-        if pd.notna(row[eer_col])
-    }
+    scored = df[df[eer_col].notna()]
+    lookup = {row["exp"]: float(row[eer_col]) for _, row in scored.iterrows()}
+    assert len(lookup) == len(scored), f"one row per exp on {test_set}, got {len(scored)} rows for {len(lookup)} exps"
+    return lookup
 
 
 def read_rtf(
@@ -606,10 +572,8 @@ def _fmt_params(n: int) -> str:
     return str(n)
 
 
-def _infer_model_name(
-    experiments: List[Tuple[str, Dict]],
-) -> Optional[str]:
-    names = [info["dirname"] for _, info in experiments]
+def _infer_model_name(groups: List[Any]) -> Optional[str]:
+    names = [g.dirname for g in groups]
     if any("ecapa_tdnn" in n for n in names):
         return "ecapa_tdnn"
     if any("resnet34" in n for n in names):
@@ -618,6 +582,8 @@ def _infer_model_name(
 
 
 def _json_safe(o: Any) -> Any:
+    if is_dataclass(o) and not isinstance(o, type):
+        return asdict(o)
     if isinstance(o, np.integer):
         return int(o)
     if isinstance(o, np.floating):
@@ -632,15 +598,15 @@ def _scatter_with_styles(
     summaries: List[Dict],
     xfn: Any,
     yfn: Any,
+    enc: Any,
 ) -> None:
     seen_labels: set = set()
     for s in summaries:
-        info = s["info"]
         x, y = xfn(s), yfn(s)
         if x is None or y is None or not np.isfinite(x) or not np.isfinite(y):
             continue
-        color, marker, _ = get_style(info)
-        label = make_label(info)
+        color, marker, _ = enc.style(s["group"])
+        label = enc.label(s["group"])
         kwargs: Dict[str, Any] = dict(
             color=color, marker=marker, s=60, linewidth=0.8, zorder=3
         )
@@ -885,12 +851,14 @@ def render_mask_heatmaps(
 
 def render_flops_vs_sparsity(
     summaries: List[Dict],
+    enc: Any,
     ax: "plt.Axes",
 ) -> None:
     """Render realizable compute reduction vs nominal sparsity scatter.
 
     Args:
-        summaries: list of summary dicts, each with ``info`` and ``agg``.
+        summaries: list of summary dicts, each with ``group`` and ``agg``.
+        enc: the Encoding that labels and styles these runs.
         ax: axes to draw on.
     """
     ax.plot(
@@ -904,6 +872,7 @@ def render_flops_vs_sparsity(
         summaries,
         xfn=lambda s: s["agg"]["nominal_sparsity"] * 100,
         yfn=lambda s: (1 - s["agg"]["structural_density"]) * 100,
+        enc=enc,
     )
     ax.set_xlim(-2, 102)
     ax.set_ylim(-2, 102)
@@ -925,12 +894,14 @@ def render_flops_vs_sparsity(
 
 def render_structural_density_vs_sparsity(
     summaries: List[Dict],
+    enc: Any,
     ax: "plt.Axes",
 ) -> None:
     """Render realizable compute density vs nominal sparsity scatter.
 
     Args:
-        summaries: list of summary dicts with ``info`` and ``agg``.
+        summaries: list of summary dicts with ``group`` and ``agg``.
+        enc: the Encoding that labels and styles these runs.
         ax: axes to draw on.
     """
     ax.plot(
@@ -944,6 +915,7 @@ def render_structural_density_vs_sparsity(
         summaries,
         xfn=lambda s: s["agg"]["nominal_sparsity"] * 100,
         yfn=lambda s: s["agg"]["structural_density"] * 100,
+        enc=enc,
     )
     ax.set_xlim(-2, 102)
     ax.set_ylim(-2, 102)
@@ -963,13 +935,20 @@ def render_structural_density_vs_sparsity(
 
 def render_eer_vs_effective_flops(
     summaries: List[Dict],
+    enc: Any,
     ax: "plt.Axes",
+    test_set: str,
 ) -> None:
     """Render EER Pareto over realizable compute density (log scale).
 
+    ``test_set`` reaches the title, because an EER means nothing without the
+    protocol that measured it.
+
     Args:
         summaries: list of summary dicts; each may have ``eer`` key.
+        enc: the Encoding that labels and styles these runs.
         ax: axes to draw on.
+        test_set: the protocol every EER here comes from.
     """
 
     def _x(s):
@@ -980,7 +959,7 @@ def render_eer_vs_effective_flops(
         eer = s.get("eer")
         return eer * 100 if eer is not None else None
 
-    _scatter_with_styles(ax, summaries, xfn=_x, yfn=_y)
+    _scatter_with_styles(ax, summaries, xfn=_x, yfn=_y, enc=enc)
 
     dense = [
         s
@@ -1002,17 +981,21 @@ def render_eer_vs_effective_flops(
     ax.set_xlabel("Realizable compute density (log scale)")
     usetex = plt.rcParams.get("text.usetex")
     ax.set_ylabel(r"EER (\%)" if usetex else "EER (%)")
-    ax.set_title("Pareto: EER vs realizable compute", fontsize=9)
+    ax.set_title(
+        f"Pareto: EER vs realizable compute ({test_set})", fontsize=9
+    )
     ax.legend(fontsize=7, loc="best", frameon=True, framealpha=0.5)
 
 
 def render_rtf_vs_sparsity(
     summaries: List[Dict],
+    enc: Any,
     ax: "plt.Axes",
 ) -> bool:
     """Render median RTF vs nominal sparsity scatter.
 
     Args:
+        enc: the Encoding that labels and styles these runs.
         summaries: list of summary dicts; those without ``rtf`` are
             skipped.
         ax: axes to draw on.
@@ -1028,6 +1011,7 @@ def render_rtf_vs_sparsity(
         has_rtf,
         xfn=lambda s: s["agg"]["nominal_sparsity"] * 100,
         yfn=lambda s: s["rtf"]["rtf_median"],
+        enc=enc,
     )
     dense = [s for s in has_rtf if s["agg"]["nominal_sparsity"] < 0.01]
     if dense:
@@ -1057,6 +1041,7 @@ def render_rtf_vs_sparsity(
 def render_layerwise_panel(
     ax: "plt.Axes",
     members: List[Dict],
+    enc: Any,
     *,
     rate_linestyles: Optional[Dict[int, Any]] = None,
     target_rates: Optional[List[int]] = None,
@@ -1068,6 +1053,7 @@ def render_layerwise_panel(
     Args:
         ax: axes to draw on.
         members: summary dicts for this panel (same backbone).
+        enc: the Encoding that labels and styles these runs.
         rate_linestyles: if set, override per-curve linestyle by integer
             sparsity rate (overlay-rates mode).
         target_rates: horizontal reference lines at these integer rates;
@@ -1106,14 +1092,13 @@ def render_layerwise_panel(
         ax.set_zorder(twin_ax.get_zorder() + 1)
         ax.patch.set_visible(False)
 
-    legend_handles: "OrderedDict[str, Tuple[Any, Dict]]" = OrderedDict()
+    legend_handles: "OrderedDict[str, Tuple[Any, Any]]" = OrderedDict()
     for s in members:
-        info_local = dict(s["info"])
-        clear_sweep_styles([(None, info_local)])
-        color, marker, ls = get_style(info_local)
+        group = s["group"]
+        color, marker, ls = enc.style(group)
         if rate_linestyles is not None:
-            ls = rate_linestyles.get(info_local.get("sparsity"), ls)
-        label = make_label(info_local)
+            ls = rate_linestyles.get(group.sparsity, ls)
+        label = enc.label(group)
         lookup = {l["name"]: l["nominal_sparsity"] * 100 for l in s["layers"]}
         ys = [lookup.get(name, np.nan) for name in canon_names]
         (line,) = ax.plot(
@@ -1128,20 +1113,14 @@ def render_layerwise_panel(
             zorder=3,
         )
         if label not in legend_handles:
-            legend_handles[label] = (line, info_local)
+            legend_handles[label] = (line, group)
 
     target_handle = None
     if show_target_lines:
         rates = (
             target_rates
             if target_rates is not None
-            else sorted(
-                {
-                    s["info"].get("sparsity")
-                    for s in members
-                    if s["info"].get("sparsity") is not None
-                }
-            )
+            else sorted({s["group"].sparsity for s in members if s["group"].sparsity is not None})
         )
         for r in rates:
             ax.axhline(r, **PERFECT_LINE_KW)
@@ -1179,7 +1158,7 @@ def render_layerwise_panel(
 
 
 def assemble_layerwise_legend(
-    legend_handles: "OrderedDict[str, Tuple[Any, Dict]]",
+    legend_handles: "OrderedDict[str, Tuple[Any, Any]]",
     *,
     target_handle: Optional[Any] = None,
     target_label: Optional[str] = None,
@@ -1189,7 +1168,7 @@ def assemble_layerwise_legend(
     """Sort method handles by experiment order, then append target/bar.
 
     Args:
-        legend_handles: OrderedDict mapping label → (handle, info).
+        legend_handles: OrderedDict mapping label → (handle, RunGroup).
         target_handle: optional Line2D for the target-rate reference.
         target_label: legend text for target_handle.
         bar_handle: optional bar patch for the n_params twin axis.
@@ -1198,10 +1177,7 @@ def assemble_layerwise_legend(
     Returns:
         ``(handles, labels)`` lists ready for ``fig.legend``.
     """
-    sorted_items = sorted(
-        legend_handles.items(),
-        key=lambda kv: experiment_sort_key(kv[1][1]),
-    )
+    sorted_items = sorted(legend_handles.items(), key=lambda kv: kv[1][1].sort_key)
     ordered_labels = [label for label, _ in sorted_items]
     ordered_handles = [h for _, (h, _) in sorted_items]
     if target_handle is not None and target_label is not None:

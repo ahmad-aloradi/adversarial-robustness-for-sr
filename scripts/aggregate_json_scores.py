@@ -1,3 +1,16 @@
+"""Collect every run's test metrics into one table.
+
+Walks ``<base>/<exp>/test_artifacts/<dataset>/<timestamp>/`` and reads each
+``*_metrics.json``. Writes ``test_metrics.csv``: one row per (exp, dataset),
+newest timestamp, no ranking. Every figure that plots EER or minDCF reads it.
+
+Run it with::
+
+    python scripts/aggregate_json_scores.py \\
+        --base_dirs /data/aloradad/results/cnceleb \\
+        --output_dir results/test_eval/metrics/ecapa_tdnn
+"""
+
 import argparse
 import json
 import os
@@ -205,18 +218,9 @@ if __name__ == "__main__":
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    # Collect results; if you want a CSV output, pass a path like "collected_metrics.csv"
-    results = collect_metrics_from_bases(base_dirs, save_csv=None)
+    df = pd.DataFrame(collect_metrics_from_bases(base_dirs, save_csv=None))
 
-    # Convert list of dicts to DataFrame
-    df = pd.DataFrame(results)
-
-    # Mark the latest run per (exp, dataset) based on run_ts
-    df["is_latest"] = df.groupby(["exp", "dataset"])["run_ts"].transform(
-        lambda x: x == x.max()
-    )
-
-    # Detect all metric columns present (EER, EER_raw, EER_norm, minDCF, etc.)
+    # Every metric column present: EER, EER_raw, EER_norm, minDCF, …
     all_metric_cols = [
         c
         for c in df.columns
@@ -225,61 +229,20 @@ if __name__ == "__main__":
     for col in all_metric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Unified EER for ranking: prefer _raw when available, fall back to unqualified
-    if "EER_raw" in df.columns and "EER" in df.columns:
-        df["EER_rank"] = df["EER_raw"].fillna(df["EER"])
-    elif "EER_raw" in df.columns:
-        df["EER_rank"] = df["EER_raw"]
-    else:
-        df["EER_rank"] = df["EER"]
-    eer_col = "EER_rank"
-
-    # Convert timestamp to datetime for proper sorting
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"], format="%Y%m%d_%H%M%S"
-        )
-
-    # ---------------------------------------------------------
-    # 1️⃣ Global ranking (across all datasets)
-    # ---------------------------------------------------------
-
-    df_sorted = df.sort_values(eer_col, ascending=True).reset_index(drop=True)
-    df_sorted["rank"] = df_sorted[eer_col].rank(method="min")
-
-    display_cols = ["rank", "exp", "dataset"] + all_metric_cols
-    print("\n=== Global Ranking (Lower EER = Better) ===")
-    print(df_sorted[display_cols])
-
-    df_sorted.to_csv(f"{output_dir}/eer_global_ranking.csv", index=False)
-
-    # ---------------------------------------------------------
-    # 2️⃣ Ranking per dataset (recommended in research)
-    # ---------------------------------------------------------
-
-    df_per_dataset = (
-        df.sort_values(["dataset", eer_col])
-        .groupby("dataset", group_keys=False)
-        .apply(lambda x: x.assign(rank=x[eer_col].rank(method="min")))
+    # One row per (exp, dataset). A force-retest keeps the older timestamp dirs
+    # on disk, so the newest run_ts is the test the run reports.
+    before = len(df)
+    df = (
+        df.sort_values(["exp", "dataset", "run_ts"])
+        .drop_duplicates(subset=["exp", "dataset"], keep="last")
+        .sort_values(["exp", "dataset"])
         .reset_index(drop=True)
     )
+    if before > len(df):
+        print(f"Kept the newest run_ts for {before - len(df)} re-tested (exp, dataset) pair(s).")
 
-    display_cols_ds = ["dataset", "rank", "exp"] + all_metric_cols
-    print("\n=== Per-Dataset Ranking ===")
-    print(df_per_dataset[display_cols_ds])
-
-    df_per_dataset.to_csv(
-        f"{output_dir}/eer_per_dataset_ranking.csv", index=False
-    )
-
-    # ---------------------------------------------------------
-    # 3️⃣ Optional: Compact leaderboard view
-    # ---------------------------------------------------------
-
-    leaderboard = df_per_dataset.sort_values(["dataset", "rank"])[
-        display_cols_ds
-    ]
-
-    print("\n=== Leaderboard ===")
-    print(leaderboard)
-    leaderboard.to_csv(f"{output_dir}/eer_leaderboard.csv", index=False)
+    out_path = f"{output_dir}/test_metrics.csv"
+    print(f"\n=== Test metrics ({len(df)} rows) ===")
+    print(df[["exp", "dataset", "run_ts"] + all_metric_cols])
+    df.to_csv(out_path, index=False)
+    print(f"Saved: {out_path}")

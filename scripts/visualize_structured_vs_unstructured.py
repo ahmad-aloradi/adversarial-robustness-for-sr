@@ -18,7 +18,7 @@ has classes.
 Cross-experiment plots (in {output}/cross_exp/):
     flops_vs_sparsity.pdf
     structural_density_vs_sparsity.pdf
-    eer_vs_effective_flops.pdf
+    eer_vs_effective_flops.pdf   (--test_set only)
     rtf_vs_sparsity.pdf          (--rtf only)
 
 Usage:
@@ -49,26 +49,22 @@ import logging
 import os
 import sys
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(_SCRIPTS_DIR)
-sys.path.insert(0, _SCRIPTS_DIR)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
-from visualize import discover_experiments  # noqa: E402
-
 from src.vis.common import (  # noqa: E402
     RATE_LINESTYLES,
     layerwise_figsize,
-    make_label,
     panel_models,
     setup_matplotlib,
     ylim_for_rate,
 )
+from src.vis.encoding import Encoding  # noqa: E402
 from src.vis.head_anatomy import (  # noqa: E402
     find_checkpoints,
     read_head_anatomy,
@@ -81,6 +77,7 @@ from src.vis.head_anatomy import (  # noqa: E402
     render_pooled_features,
     summarize,
 )
+from src.vis.runs import discover  # noqa: E402
 from src.vis.pruning_compare import (  # noqa: E402
     _infer_model_name,
     _json_safe,
@@ -208,27 +205,25 @@ def _emit_head_anatomy(
 
 def _process_experiment(
     exp_dir: str,
-    info: Dict,
+    group: Any,
+    enc: Encoding,
     out_root: str,
     rtf_args: Optional[Dict],
     *,
     annotate_layerwise: bool = False,
     include_all_layers: bool = False,
     head_anatomy_opts: Optional[Dict] = None,
-) -> Optional[Dict]:
+) -> Dict:
     data = read_pruning_experiment(
         exp_dir,
-        info,
+        group,
         include_all_layers=include_all_layers,
     )
-    if data is None:
-        return None
-
     layers_enriched = data["layers_enriched"]
     agg = data["agg"]
-    out_dir = os.path.join(out_root, info["dirname"])
+    out_dir = os.path.join(out_root, group.dirname)
     os.makedirs(out_dir, exist_ok=True)
-    title = make_label(info)
+    title = enc.label(group)
 
     if layers_enriched:
         n = len(layers_enriched)
@@ -321,7 +316,7 @@ def _process_experiment(
 
     summary = dict(
         exp_dir=exp_dir,
-        info=data["info"],
+        group=data["group"],
         ckpt=data["ckpt"],
         agg=agg,
         layers=[
@@ -343,7 +338,7 @@ def _process_experiment(
         json.dump(summary, f, indent=2, default=_json_safe)
 
     return dict(
-        info=info,
+        group=group,
         agg=agg,
         rtf=rtf,
         exp_dir=exp_dir,
@@ -377,6 +372,7 @@ def _emit_overlay_rates(
     summaries: List[Dict],
     out_path: str,
     *,
+    enc: Encoding,
     legend_mode: str,
     show_param_bars: bool,
     show_target_lines: bool,
@@ -385,7 +381,7 @@ def _emit_overlay_rates(
     members = [
         s
         for s in summaries
-        if s.get("layers") and s["info"].get("sparsity") is not None
+        if s.get("layers") and s["group"].sparsity is not None
     ]
     if not members:
         return
@@ -395,8 +391,9 @@ def _emit_overlay_rates(
     panel = render_layerwise_panel(
         ax,
         members,
+        enc,
         rate_linestyles=RATE_LINESTYLES,
-        target_rates=sorted({s["info"]["sparsity"] for s in members}),
+        target_rates=sorted({s["group"].sparsity for s in members}),
         show_param_bars=show_param_bars,
         show_target_lines=show_target_lines,
     )
@@ -440,6 +437,7 @@ def _emit_per_rate_cross_model(
     summaries: List[Dict],
     out_dir: str,
     *,
+    enc: Encoding,
     legend_mode: str,
     show_param_bars: bool,
     show_target_lines: bool,
@@ -448,7 +446,7 @@ def _emit_per_rate_cross_model(
     usetex = plt.rcParams.get("text.usetex", False)
     groups: Dict[int, List[Dict]] = defaultdict(list)
     for s in summaries:
-        rate = s["info"].get("sparsity")
+        rate = s["group"].sparsity
         if rate is None or not s.get("layers"):
             continue
         groups[rate].append(s)
@@ -456,7 +454,7 @@ def _emit_per_rate_cross_model(
     for rate, members in sorted(groups.items()):
         by_model: Dict[str, List[Dict]] = defaultdict(list)
         for s in members:
-            model = s["info"].get("model")
+            model = s["group"].model
             if model:
                 by_model[model].append(s)
         models = panel_models(by_model)
@@ -482,6 +480,7 @@ def _emit_per_rate_cross_model(
             panel = render_layerwise_panel(
                 ax,
                 by_model[model],
+                enc,
                 target_rates=[rate],
                 show_param_bars=show_param_bars,
                 show_target_lines=show_target_lines,
@@ -533,6 +532,7 @@ def _emit_no_bucket(
     summaries: List[Dict],
     out_path: str,
     *,
+    enc: Encoding,
     legend_mode: str,
     show_param_bars: bool,
     show_target_lines: bool,
@@ -541,7 +541,7 @@ def _emit_no_bucket(
     usetex = plt.rcParams.get("text.usetex", False)
     by_model: Dict[str, List[Dict]] = defaultdict(list)
     for s in summaries:
-        m = s["info"].get("model")
+        m = s["group"].model
         if not m or not s.get("layers"):
             continue
         by_model[m].append(s)
@@ -569,6 +569,7 @@ def _emit_no_bucket(
         panel = render_layerwise_panel(
             ax,
             by_model[model],
+            enc,
             show_param_bars=show_param_bars,
             show_target_lines=show_target_lines,
         )
@@ -639,7 +640,11 @@ def main() -> int:
     ap.add_argument(
         "--test_set",
         default=None,
-        help="Test set name for EER readout (e.g. cnceleb_concatenated)",
+        help=(
+            "One dataset name from test_metrics.csv (e.g. cnceleb_multi). "
+            "Draws eer_vs_effective_flops.pdf. Without it that figure is skipped, "
+            "because an EER pooled over protocols compares unlike measurements."
+        ),
     )
     ap.add_argument(
         "--legend-mode",
@@ -723,11 +728,15 @@ def main() -> int:
     log.info(
         f"Discovering experiments under {args.base_dirs} matching {args.experiments}"
     )
-    experiments = discover_experiments(args.base_dirs, args.experiments)
-    if not experiments:
+    groups = discover(args.base_dirs, args.experiments)
+    if not groups:
         log.error("No experiments matched the patterns.")
         return 1
-    log.info(f"Matched {len(experiments)} experiments")
+    log.info(f"Matched {len(groups)} experiments")
+    enc = Encoding(groups)
+    # A layerwise panel keys its dash on the sparsity rate, so the sweep may not
+    # also claim the dash there. The scatter figures keep it.
+    enc_flat = Encoding(groups, sweep=False)
 
     rtf_args = None
     if args.rtf:
@@ -749,43 +758,46 @@ def main() -> int:
             activation_device=args.activation_device,
         )
 
-    summaries: List[Dict] = []
-    for exp_dir, info in experiments:
-        s = _process_experiment(
-            exp_dir,
-            info,
+    # The mask comes from the checkpoint the run tested from, so a run that
+    # cannot name one stops the figure rather than contributing another epoch's mask.
+    summaries: List[Dict] = [
+        _process_experiment(
+            group.dirs[0],
+            group,
+            enc,
             args.output,
             rtf_args,
             annotate_layerwise=args.annotate_layerwise,
             include_all_layers=args.all_layers,
             head_anatomy_opts=head_anatomy_opts,
         )
-        if s is not None:
-            summaries.append(s)
+        for group in groups
+    ]
 
-    if not summaries:
-        log.error("No experiments produced summaries — nothing to aggregate.")
-        return 1
-
+    # The EER figure needs one named test set. Without it the map would pool
+    # every protocol under one exp key and the last one read would win.
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    model_name = _infer_model_name(experiments)
-    eer_lookup = read_eer_lookup(model_name, args.test_set, repo_root)
-    if not eer_lookup:
-        eer_lookup = read_eer_lookup(model_name, None, repo_root)
-    n_eer_matched = sum(
-        1 for s in summaries if s["info"]["dirname"] in eer_lookup
-    )
-    log.info(
-        f"EER readout: {n_eer_matched}/{len(summaries)} experiments matched in leaderboard"
-    )
+    eer_lookup = {}
+    if args.test_set:
+        eer_lookup = read_eer_lookup(
+            _infer_model_name(groups), args.test_set, repo_root
+        )
+        n_matched = sum(
+            1 for s in summaries if s["group"].dirname in eer_lookup
+        )
+        log.info(
+            f"EER readout on {args.test_set}: {n_matched}/{len(summaries)} experiments matched"
+        )
+    else:
+        log.info("No --test_set given — skipping eer_vs_effective_flops.pdf")
     for s in summaries:
-        s["eer"] = eer_lookup.get(s["info"]["dirname"])
+        s["eer"] = eer_lookup.get(s["group"].dirname)
 
     cross_dir = os.path.join(args.output, "cross_exp")
     os.makedirs(cross_dir, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(5.2, 4.0))
-    render_flops_vs_sparsity(summaries, ax)
+    render_flops_vs_sparsity(summaries, enc, ax)
     fig.tight_layout()
     fig.savefig(
         os.path.join(cross_dir, "flops_vs_sparsity.pdf"),
@@ -793,7 +805,7 @@ def main() -> int:
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(5.2, 4.0))
-    render_structural_density_vs_sparsity(summaries, ax)
+    render_structural_density_vs_sparsity(summaries, enc, ax)
     fig.tight_layout()
     fig.savefig(
         os.path.join(
@@ -803,18 +815,20 @@ def main() -> int:
     )
     plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(5.2, 4.0))
-    render_eer_vs_effective_flops(summaries, ax)
-    fig.tight_layout()
-    fig.savefig(
-        os.path.join(cross_dir, "eer_vs_effective_flops.pdf"),
-    )
-    plt.close(fig)
+    if eer_lookup:
+        fig, ax = plt.subplots(figsize=(5.2, 4.0))
+        render_eer_vs_effective_flops(summaries, enc, ax, args.test_set)
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(cross_dir, "eer_vs_effective_flops.pdf"),
+        )
+        plt.close(fig)
 
     layerwise_ylim = (
         tuple(args.layerwise_ylim) if args.layerwise_ylim else None
     )
     common_kw = dict(
+        enc=enc_flat,
         legend_mode=args.legend_mode,
         show_param_bars=args.show_param_bars,
         show_target_lines=args.show_target_lines,
@@ -844,7 +858,7 @@ def main() -> int:
         )
     if rtf_args is not None:
         fig, ax = plt.subplots(figsize=(5.2, 4.0))
-        drew = render_rtf_vs_sparsity(summaries, ax)
+        drew = render_rtf_vs_sparsity(summaries, enc, ax)
         if drew:
             fig.tight_layout()
             fig.savefig(

@@ -171,7 +171,7 @@ input_dir/
 
 - **Input discovery**: walks `--input_dir` for `*_metrics.json` files. The spec name is parsed from a path component using the `SPEC_RE` regex (`scripts/visualize_quantization.py:64-65`).
 - **X-axis order**: hard-coded `SPEC_ORDER` list places FP32 leftmost, then FP16, then descending bit-widths × {w, wa} (see lines 38-49).
-- **Note** vs. the pruning visualizers, which read pre-aggregated `eer_leaderboard.csv`: this is intentional. Quant sweeps do not yet have a leaderboard CSV; the per-run JSONs are sufficient.
+- **Note** vs. the pruning visualizers, which read the aggregated `test_metrics.csv`: this is intentional. Quant sweeps are not aggregated; the per-run JSONs are sufficient.
 
 ---
 

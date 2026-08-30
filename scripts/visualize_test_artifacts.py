@@ -40,9 +40,10 @@ from scipy.cluster.hierarchy import (
 )
 from scipy.spatial.distance import squareform
 
-# Reuse shared utilities from visualize.py
-sys.path.insert(0, os.path.dirname(__file__))
-from visualize import discover_experiments, make_label, setup_matplotlib
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.vis.common import setup_matplotlib  # noqa: E402
+from src.vis.encoding import Encoding  # noqa: E402
+from src.vis.runs import discover  # noqa: E402
 
 matplotlib.use("pdf")
 
@@ -858,28 +859,29 @@ def main():
 
     setup_matplotlib(args.font_size)
 
-    experiments = discover_experiments(args.base_dirs, args.experiments)
-    if not experiments:
+    groups = discover(args.base_dirs, args.experiments)
+    enc = Encoding(groups)
+    if not groups:
         print("No experiments matched the given patterns.")
         return
 
-    print(f"Found {len(experiments)} experiments:")
-    for _, info in experiments:
-        print(f"  {info['dirname']}  ->  {make_label(info)}")
+    print(f"Found {len(groups)} experiments:")
+    for g in groups:
+        print(f"  {g.dirname}  ->  {enc.label(g)}")
 
-    for exp_dir, info in experiments:
-        exp_label = make_label(info)
+    for g in groups:
+        exp_dir, exp_label = g.dirs[0], enc.label(g)
         test_sets = discover_test_sets(exp_dir)
         if not test_sets:
-            print(f"\n[skip] {info['dirname']}: no test artifacts")
+            print(f"\n[skip] {g.dirname}: no test artifacts")
             continue
 
         for test_set_name, artifacts_dir in test_sets:
             if args.test_sets and test_set_name not in args.test_sets:
                 continue
 
-            print(f"\n--- {info['dirname']} / {test_set_name} ---")
-            out_dir = os.path.join(args.output, info["dirname"], test_set_name)
+            print(f"\n--- {g.dirname} / {test_set_name} ---")
+            out_dir = os.path.join(args.output, g.dirname, test_set_name)
             os.makedirs(out_dir, exist_ok=True)
 
             title_prefix = f"{exp_label} — {test_set_name}"

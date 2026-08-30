@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Line plots of EER / minDCF vs target for each method.
+"""Line plots of EER / minDCF against sparsity, one PDF per (dataset, metric).
 
-Reads eer_leaderboard.csv (produced by aggregate_json_scores.py) and generates
-publication-quality line plots — one PDF per (train_dataset, metric) pair.
+Reads test_metrics.csv from scripts/aggregate_json_scores.py. One line is one
+method arm across the sparsity levels. A dense baseline draws as a horizontal
+dashed line, because it sits at no level.
 
-Each PDF is a 2×2 grid: Vox1-O, Vox1-E, Vox1-H, CNCeleb.
-Each line represents one method class (AdaBreg, LinBreg, etc.) across sparsity
-levels. Dense baselines (vanilla, wespeaker) appear as horizontal dashed lines.
+Run it with::
 
-Usage:
     python scripts/visualize_sparsity_trend.py \\
-        --input_dir results/cross_exp_comparison/test_metrics
+        --input_dir results/test_eval/metrics/ecapa_tdnn
 """
 
 import argparse
@@ -20,25 +18,21 @@ import sys
 import numpy as np
 import pandas as pd
 
-# Import shared utilities from visualize.py (same directory)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from visualize import (
-    DENSE_METHOD_CLASSES,
-    METHOD_CLASS_COLORS,
-    METHOD_DISPLAY_NAMES,
+
+from src.vis.common import export_standalone_legend, setup_matplotlib  # noqa: E402
+from src.vis.encoding import (  # noqa: E402
+    METHOD_BY_KEY,
     SPARSITY_SYM,
-    assign_label_visibility,
-    assign_sweep_styles,
-    export_standalone_legend,
-    get_style,
-    info_from_csv_row,
-    make_label,
-    resolve_sparsity_level,
-    setup_matplotlib,
+    Encoding,
+    variant_for,
 )
+from src.vis.runs import RunGroup, resolve_sparsity_level  # noqa: E402
 from visualize_test_metrics import (
+    _arm_cond,
     filter_by_exp_patterns,
     parse_dataset_protocol,
     parse_train_dataset_protocol,
@@ -55,6 +49,9 @@ VOXCELEB_SUBPLOTS = [
     (1, 0, "VoxCeleb", "Vox1-H"),
 ]
 CNCELEB_POS = (1, 1)
+
+# Dense baselines draw as horizontal reference lines, not as points on the trend.
+DENSE_METHOD_KEYS = frozenset(k for k, m in METHOD_BY_KEY.items() if m.family == "dense")
 
 # Method ordering for consistent legend
 METHOD_ORDER = [
@@ -134,13 +131,13 @@ def plot_sparsity_trends(
         ]
 
         # --- Baselines: horizontal dashed lines ---
-        for method in sorted(DENSE_METHOD_CLASSES):
+        for method in sorted(DENSE_METHOD_KEYS):
             bl = sub[sub["method_class"] == method]
             if bl.empty:
                 continue
             val = bl[metric_col].mean() * 100
-            color = METHOD_CLASS_COLORS.get(method, "#333333")
-            label = METHOD_DISPLAY_NAMES.get(method, method)
+            color = METHOD_BY_KEY[method].color
+            label = METHOD_BY_KEY[method].display
             line = ax.axhline(
                 val,
                 color=color,
@@ -153,7 +150,7 @@ def plot_sparsity_trends(
                 legend_entries[label] = line
 
         # --- Sparsity curves: one line per (method, variant, sweep value) ---
-        sparse_df = sub[~sub["method_class"].isin(DENSE_METHOD_CLASSES)].copy()
+        sparse_df = sub[~sub["method_class"].isin(DENSE_METHOD_KEYS)].copy()
         sparse_df = sparse_df.dropna(subset=[metric_col, "sparsity"])
 
         methods = sorted(
@@ -194,57 +191,58 @@ def plot_sparsity_trends(
                 sweep_param = cand
                 break
 
+        # A fixed-lambda arm is its own curve: it walks its lambda values along
+        # the x-axis, so it must not merge with its adaptive sibling.
         curve_units = []
         for method in methods:
             mdf = sparse_df[sparse_df["method_class"] == method]
-            for var_key in sorted(mdf["variant"].fillna("__none__").unique()):
-                vrows = mdf[mdf["variant"].fillna("__none__") == var_key]
+            arms = sorted(
+                {
+                    (bool(r.is_fixed), r.variant if pd.notna(r.variant) else "__none__")
+                    for r in mdf.itertuples()
+                }
+            )
+            for is_fixed, var_key in arms:
+                vrows = mdf[_arm_cond(mdf, method, is_fixed, var_key)]
                 if sweep_param and vrows[sweep_param].notna().any():
                     for v in sorted(
                         vrows[sweep_param].dropna().unique().tolist()
                     ):
-                        curve_units.append((method, var_key, v))
+                        curve_units.append((method, is_fixed, var_key, v))
                 else:
-                    curve_units.append((method, var_key, None))
+                    curve_units.append((method, is_fixed, var_key, None))
 
-        # Build per-unit info dicts and route labels and styling through the
-        # shared visualize.py helpers, so this figure agrees with the others.
-        # Sparsity is stripped because it's the x-axis here.
+        # Labels and styling route through src.vis.encoding, so this figure
+        # describes a run the way every sibling figure does. Sparsity is
+        # stripped because it is the x-axis here.
         curve_unit_infos = []
-        for method, var_key, sweep_val in curve_units:
-            cond = (sparse_df["method_class"] == method) & (
-                sparse_df["variant"].fillna("__none__") == var_key
-            )
+        for method, is_fixed, var_key, sweep_val in curve_units:
+            cond = _arm_cond(sparse_df, method, is_fixed, var_key)
             if sweep_param and sweep_val is not None:
                 cond &= sparse_df[sweep_param] == sweep_val
             matching = sparse_df[cond]
             if matching.empty:
-                info = {
-                    "method_class": method,
-                    "sparsity": None,
-                    "variant": None if var_key == "__none__" else var_key,
-                    "alpha": None,
-                    "f": None,
-                    "initial_sparsity": None,
-                    "fixed_lambda": None,
-                }
+                info = RunGroup(
+                    dirname=f"{method}-{var_key}",
+                    method=METHOD_BY_KEY[method],
+                    flavor=variant_for("fixed") if is_fixed else None,
+                    variant=None if var_key == "__none__" else var_key,
+                    alpha=None,
+                    f=None,
+                )
                 if sweep_param:
-                    info[sweep_param] = sweep_val
+                    setattr(info, sweep_param, sweep_val)
             else:
-                info = dict(matching["info"].iloc[0])
-                info["sparsity"] = None
+                info = matching["info"].iloc[0].without_sparsity()
                 # One curve spans several lambdas, so no single one labels it.
                 if matching["fixed_lambda"].nunique(dropna=True) > 1:
-                    info["fixed_lambda"] = None
+                    info.fixed_lambda = None
             curve_unit_infos.append(info)
-        assign_label_visibility([(None, info) for info in curve_unit_infos])
-        assign_sweep_styles([(None, info) for info in curve_unit_infos])
-        curve_labels = [make_label(info) for info in curve_unit_infos]
+        curve_enc = Encoding(curve_unit_infos)
+        curve_labels = [curve_enc.label(info) for info in curve_unit_infos]
 
-        for unit_idx, (method, var_key, sweep_val) in enumerate(curve_units):
-            base_mask = (sparse_df["method_class"] == method) & (
-                sparse_df["variant"].fillna("__none__") == var_key
-            )
+        for unit_idx, (method, is_fixed, var_key, sweep_val) in enumerate(curve_units):
+            base_mask = _arm_cond(sparse_df, method, is_fixed, var_key)
             if sweep_param and sweep_val is not None:
                 mdf = sparse_df[
                     base_mask & (sparse_df[sweep_param] == sweep_val)
@@ -261,7 +259,6 @@ def plot_sparsity_trends(
             # main() via resolve_actual_sparsity. Falls back to target if
             # unresolved (e.g. --base_dirs not given).
             x_target = mdf["sparsity"].values.astype(float)
-            is_fixed = var_key == "fixed"
             if "actual_sparsity" in mdf.columns and (
                 is_fixed or sparsity_label == "actual"
             ):
@@ -282,7 +279,7 @@ def plot_sparsity_trends(
 
             # Sparsity is this plot's x-axis, so the method owns the marker and
             # the swept field owns lightness plus the dash pattern.
-            color, marker, linestyle = get_style(
+            color, marker, linestyle = curve_enc.style(
                 curve_unit_infos[unit_idx], marker_by="method"
             )
             label = curve_labels[unit_idx]
@@ -424,7 +421,7 @@ def main():
     parser.add_argument(
         "--input_dir",
         default="results/cross_exp_comparison/test_metrics",
-        help="Directory containing eer_leaderboard.csv",
+        help="Directory holding test_metrics.csv",
     )
     parser.add_argument(
         "--output_dir",
@@ -438,8 +435,8 @@ def main():
         default=None,
         help=(
             "Optional experiment root dir(s), used to resolve each run's "
-            "realized sparsity and its _bregman_lambda. Without them, "
-            "fixed-lambda runs have no sparsity level to be plotted at."
+            "realized sparsity. Without them, fixed-lambda runs have no "
+            "sparsity level to be plotted at."
         ),
     )
     parser.add_argument(
@@ -470,18 +467,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--fixed_lambda_test_ckpt",
-        choices=["best", "last"],
-        default="best",
-        help=(
-            "For Bregman fixed-lambda runs only: how the test was performed. "
-            "'best' parses the sr fraction from the test ckpt path in "
-            "train.log (same as non-fixed runs). 'last' uses the last "
-            "bregman/sparsity from csv/version_*/metrics.csv, since last.ckpt "
-            "has no sr in its filename."
-        ),
-    )
-    parser.add_argument(
         "--legend-mode",
         dest="legend_mode",
         choices=["inline", "split"],
@@ -506,7 +491,7 @@ def main():
     output_dir = args.output_dir or os.path.join(args.input_dir, "figures")
 
     # Load data
-    csv_path = os.path.join(args.input_dir, "eer_leaderboard.csv")
+    csv_path = os.path.join(args.input_dir, "test_metrics.csv")
     df = pd.read_csv(csv_path)
     df = filter_by_exp_patterns(df, args.experiments)
     if args.experiments:
@@ -523,29 +508,27 @@ def main():
         )
         for name in kept:
             print(f"  - {name}")
-    df = df.drop_duplicates(subset=["dataset", "exp"])
+    # aggregate_json_scores.py writes one row per (exp, dataset). A second row
+    # means the two disagree about one measurement, so say which.
+    dupes = df[df.duplicated(subset=["dataset", "exp"], keep=False)]
+    assert dupes.empty, f"one row per (exp, dataset) in {csv_path}, got {sorted(set(dupes['exp']))}"
 
-    # Parse experiment names. info_from_csv_row also loads _bregman_lambda from
-    # config_tree.log when --base_dirs is given, as a fallback for older names
-    # that predate the -lam token.
-    parsed = df["exp"].apply(lambda e: info_from_csv_row(e, args.base_dirs))
+    parsed = df["exp"].apply(RunGroup.from_name)
     df["info"] = parsed
-    df["method_class"] = parsed.apply(lambda x: x["method_class"])
-    df["sparsity"] = parsed.apply(lambda x: x["sparsity"])
-    df["alpha"] = parsed.apply(lambda x: x.get("alpha"))
-    df["f"] = parsed.apply(lambda x: x.get("f"))
-    df["initial_sparsity"] = parsed.apply(lambda x: x.get("initial_sparsity"))
-    df["fixed_lambda"] = parsed.apply(lambda x: x.get("fixed_lambda"))
-    df["variant"] = parsed.apply(lambda x: x.get("variant"))
+    df["method_class"] = parsed.apply(lambda g: g.method.key)
+    df["is_fixed"] = parsed.apply(lambda g: g.is_fixed_lambda)
+    df["sparsity"] = parsed.apply(lambda g: g.sparsity)
+    df["alpha"] = parsed.apply(lambda g: g.alpha)
+    df["f"] = parsed.apply(lambda g: g.f)
+    df["initial_sparsity"] = parsed.apply(lambda g: g.initial_sparsity)
+    df["fixed_lambda"] = parsed.apply(lambda g: g.fixed_lambda)
+    df["variant"] = parsed.apply(lambda g: g.variant)
 
-    # Realized sparsity per run (best ckpt's sr, or last logged for
-    # fixed-lambda + last.ckpt). Falls back to None if base_dirs not given
-    # or the source files aren't present; the curve then drops back to the
-    # target sparsity on the x-axis for that point.
+    # Realized sparsity per run, the seed mean of the tested checkpoint's
+    # pruned_sparsity. None without --base_dirs or without results.json; the
+    # curve then drops back to the target sparsity on the x-axis for that point.
     df["actual_sparsity"] = df.apply(
-        lambda r: resolve_actual_sparsity(
-            r["exp"], args.base_dirs, r["info"], args.fixed_lambda_test_ckpt
-        ),
+        lambda r: resolve_actual_sparsity(r["exp"], args.base_dirs, r["info"]),
         axis=1,
     )
     resolve_sparsity_level(df)
@@ -556,10 +539,10 @@ def main():
     df["protocol"] = dp.apply(lambda x: x[1])
     df["train_dataset"] = df["exp"].apply(parse_train_dataset_protocol)
 
-    # Ensure metric columns are numeric. Norm-cohort variants are
-    # intentionally ignored: trends only plot the raw metric.
+    # Which score column every curve reads. src/vis/pruning_compare.py prefers
+    # EER_raw, so the two figures do not read one column.
     base_metrics = ["EER", "minDCF"]
-    SCORES = "norm"  # "raw" "norm"
+    SCORES = "norm"  # 'norm' or 'raw'
     for base in base_metrics:
         for col in [base, f"{base}_{SCORES}"]:
             if col in df.columns:

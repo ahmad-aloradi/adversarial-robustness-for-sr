@@ -15,16 +15,10 @@ import sys
 
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from visualize import (  # noqa: E402
-    DENSE_METHOD_CLASSES,
-    discover_experiments,
-    experiment_sort_key,
-    export_standalone_legend,
-    get_style,
-    make_label,
-    setup_matplotlib,
-)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.vis.common import export_standalone_legend, setup_matplotlib  # noqa: E402
+from src.vis.encoding import Encoding  # noqa: E402
+from src.vis.runs import discover  # noqa: E402
 
 BASE_DIRS = ["/data/aloradad/results/cnceleb"]
 MODEL = "ecapa_tdnn"
@@ -43,21 +37,16 @@ def main():
     ]
 
     setup_matplotlib(font_size=16)
-    experiments = discover_experiments(BASE_DIRS, patterns)
-    experiments = [
-        (d, info)
-        for d, info in experiments
-        if info["method_class"] not in DENSE_METHOD_CLASSES
-    ]
-    experiments.sort(key=lambda item: experiment_sort_key(item[1]))
+    groups = [g for g in discover(BASE_DIRS, patterns) if not g.is_dense]
+    enc = Encoding(groups)
 
     handles, labels, seen = [], [], set()
-    for _, info in experiments:
-        label = make_label(info)
+    for g in groups:
+        label = enc.label(g)
         if label in seen:
             continue
         seen.add(label)
-        color, marker, ls = get_style(info)
+        color, marker, ls = enc.style(g)
         (h,) = plt.plot(
             [0, 1],
             [0, 1],

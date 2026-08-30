@@ -25,16 +25,15 @@ import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 
-# Reuse shared utilities from visualize.py + visualize_common.py
-sys.path.insert(0, os.path.dirname(__file__))
-from visualize import (
-    clear_sweep_styles,
-    discover_experiments,
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.vis.common import (  # noqa: E402
+    MODEL_REGISTRY,
     export_standalone_legend,
-    make_label,
     setup_matplotlib,
+    ylim_for_rate,
 )
-from visualize_common import MODEL_REGISTRY, ylim_for_rate
+from src.vis.encoding import Encoding  # noqa: E402
+from src.vis.runs import discover  # noqa: E402
 
 matplotlib.use("pdf")
 
@@ -195,25 +194,20 @@ def plot_weight_norms_comparison(all_data, output_path, legend_mode="inline"):
 
 
 def plot_sparsity_comparison(all_data, output_path, legend_mode="inline"):
-    """Per-layer-group sparsity comparison across experiments.
+    """Per-layer-group sparsity across experiments, one panel per group.
 
-    Layout: 1 row x 3 columns, one panel per layer group.
-    Dense baselines (sparsity target = None) are excluded — their curves
-    are flat at 0 and add no information.
-    Y-axis is shared across panels and zooms to the lowest target sparsity:
-    ``ylim_lo = ((min_target - 19) // 5) * 5 / 100`` (e.g., 99 → 0.80,
-    95 → 0.75, 90 → 0.70, 75 → 0.55).
+    A dense run draws nothing: its curve is flat at zero. The shared y-axis
+    comes from :func:`~src.vis.common.ylim_for_rate` at the lowest target in
+    the set, so every panel reads on one scale.
     """
     FSIZE = 16
     in_percent = True
 
-    sparse_data = [
-        item for item in all_data if item[3].get("sparsity") is not None
-    ]
+    sparse_data = [item for item in all_data if item[3].sparsity is not None]
     if not sparse_data:
         print(f"  [skip] {output_path}: no sparse experiments to compare")
         return
-    targets = [item[3]["sparsity"] for item in sparse_data]
+    targets = [item[3].sparsity for item in sparse_data]
     ylim_lo, ylim_hi = ylim_for_rate(min(targets), scale="fraction")
 
     n_groups = len(LAYER_GROUPS)
@@ -236,7 +230,6 @@ def plot_sparsity_comparison(all_data, output_path, legend_mode="inline"):
                 markersize=3.5,
                 markevery=max(1, len(df) // 10),
             )
-        ax.axvline(8, color="red", linewidth=1.0, zorder=1)
         ax.set_xlabel("Epoch", fontsize=FSIZE)
         if i == 0:
             prct_str = r"$\mathsf{s}(\theta)$ $[\%]$" if in_percent else r"$\mathsf{s}(\theta)$"
@@ -320,57 +313,50 @@ def main():
 
     setup_matplotlib(args.font_size)
 
-    experiments = discover_experiments(args.base_dirs, args.experiments)
-    if not experiments:
+    groups = discover(args.base_dirs, args.experiments)
+    if not groups:
         print("No experiments matched the given patterns.")
         return
 
-    print(f"Found {len(experiments)} experiments:")
-    for _, info in experiments:
-        print(f"  {info['dirname']}  ->  {make_label(info)}")
-
-    # Import styling for comparison plot
-    from visualize import get_style
-
-    distinct_models = {info.get("model") for _, info in experiments}
+    distinct_models = {g.model for g in groups}
     cross_model = len(distinct_models) > 1
     if cross_model:
         print(f"\nCross-model mode: {sorted(distinct_models)}")
-        # Strip the sweep styling assigned by discover_experiments. In cross-model
-        # mode, alpha/f differences across backbones are config artifacts (e.g.
-        # ResNet uses regl1_conv-alpha0.25-f50, ECAPA uses defaults), not a
-        # deliberate sweep. The gradient misfires — AdaBreg's already-dark green
-        # base clamps to near-black on the darker side, while LinBreg's brighter
-        # blue stays recognizable, producing inconsistent shading across methods.
-        # Marker + linestyle encode the model instead; color stays method-driven.
-        clear_sweep_styles(experiments)
+    # In cross-model mode the marker and the dash encode the backbone, so the
+    # sweep may not also claim them. An alpha/f difference across backbones is a
+    # config artifact, not a deliberate sweep, and the ramp would shade the
+    # methods inconsistently: AdaBreg's already-dark green clamps to near-black
+    # while LinBreg's brighter blue stays readable.
+    enc = Encoding(groups, sweep=not cross_model)
+
+    print(f"Found {len(groups)} experiments:")
+    for g in groups:
+        print(f"  {g.dirname}  ->  {enc.label(g)}")
 
     # Per-experiment plots + collect data for comparison
     comparison_data = []
-    for exp_dir, info in experiments:
-        df = load_weight_norms(exp_dir)
+    for g in groups:
+        df = load_weight_norms(g.dirs[0])
         if df is None:
-            print(f"\n[skip] {info['dirname']}: no weight_norms.csv")
+            print(f"\n[skip] {g.dirname}: no weight_norms.csv")
             continue
 
-        print(f"\n--- {info['dirname']} ---")
-        exp_label = make_label(info)
-        out_dir = os.path.join(args.output, info["dirname"])
+        print(f"\n--- {g.dirname} ---")
+        exp_label = enc.label(g)
+        out_dir = os.path.join(args.output, g.dirname)
         plot_weight_norms(
             df,
             os.path.join(out_dir, "weight_norms.pdf"),
             title=exp_label,
         )
 
-        color, marker, ls = get_style(info)
+        color, marker, ls = enc.style(g)
         if cross_model:
-            model = info.get("model", "")
-            entry = MODEL_REGISTRY.get(model, {})
+            entry = MODEL_REGISTRY.get(g.model, {})
             marker = entry.get("marker", marker)
             ls = entry.get("linestyle", ls)
-            model_name = entry.get("display_name", model)
-            exp_label = f"{exp_label} [{model_name}]"
-        comparison_data.append((exp_label, (color, marker, ls), df, info))
+            exp_label = f"{exp_label} [{entry.get('display_name', g.model)}]"
+        comparison_data.append((exp_label, (color, marker, ls), df, g))
 
     # Cross-experiment comparisons (separate figures)
     if len(comparison_data) > 1:

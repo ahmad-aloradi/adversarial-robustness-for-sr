@@ -1,45 +1,44 @@
 #!/usr/bin/env python3
-"""Visualize cross-experiment EER / minDCF scores from aggregated CSV
-leaderboards.
+"""Grouped bar charts of EER / minDCF, one PDF per (dataset, metric) pair.
 
-Reads eer_leaderboard.csv (produced by aggregate_json_scores.py) and generates
-publication-quality grouped bar charts — one PDF per (dataset, metric) pair.
+Reads test_metrics.csv from scripts/aggregate_json_scores.py. A dataset with
+several protocols draws them as side-by-side subplots on one y-axis.
 
-Datasets with multiple evaluation protocols (e.g. CNCeleb concatenated vs multi)
-are shown as side-by-side subplots sharing a y-axis.
+Run it with::
 
-Usage:
     python scripts/visualize_test_metrics.py \\
-        --input_dir results/cross_exp_comparison/test_metrics
+        --input_dir results/test_eval/metrics/ecapa_tdnn
 """
 
 import argparse
 import fnmatch
+import glob
 import os
-import re
 import sys
 
 import numpy as np
 import pandas as pd
 
-# Import shared utilities from visualize.py (same directory)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FixedLocator
-from visualize import (
-    DENSE_METHOD_CLASSES,
+
+from src.vis.common import setup_matplotlib  # noqa: E402
+from src.vis.encoding import (  # noqa: E402
+    METHOD_BY_KEY,
     SHOW_ALPHA,
     SHOW_f,
-    assign_label_visibility,
-    assign_sweep_styles,
-    get_style,
-    info_from_csv_row,
-    is_dense,
-    load_csv_metrics,
-    make_label,
-    resolve_sparsity_level,
-    setup_matplotlib,
+    Encoding,
+    variant_for,
 )
+from src.vis.runs import (  # noqa: E402
+    RunGroup,
+    read_landed_sparsity,
+    resolve_sparsity_level,
+)
+
+# Dense baselines carry no sparsity level, so they never join a per-rate group.
+DENSE_METHOD_KEYS = frozenset(k for k, m in METHOD_BY_KEY.items() if m.family == "dense")
 
 # ---------------------------------------------------------------------------
 # Dataset / protocol parsing
@@ -111,69 +110,28 @@ GROUP_GAP = 0.9
 # ---------------------------------------------------------------------------
 # Actual-sparsity resolution
 #
-# Bar ticks should show the realized sparsity rather than the target written
-# in the experiment name (e.g. an "sr90" run typically lands at 89.5–90.5%).
-# Two sources, picked per-experiment:
-#   - test ckpt path embedded in train.log → parse "sr0.900" from filename
-#   - csv/version_*/metrics.csv → last recorded bregman/sparsity (used for
-#     fixed-lambda runs whose test was run from last.ckpt rather than the
-#     monitor-best ckpt, which doesn't carry sparsity in its filename)
+# A bar tick shows the realized sparsity, not the target written in the name —
+# an "sr90" run typically lands at 89.5–90.5%. It comes from results.json's
+# best_checkpoint, so the tick, the legend and the sparsity curve all report the
+# one pruned_sparsity (docs/image_benchmarks.md).
 # ---------------------------------------------------------------------------
 
-CKPT_SR_PATTERN = re.compile(r"-sr([\d.]+)\.ckpt")
 
+def resolve_actual_sparsity(exp_name, base_dirs, info):
+    """Mean realized sparsity (0–1) over one experiment's seeds, or None.
 
-def _sparsity_from_test_ckpt_log(exp_dir):
-    """Find 'Test ckpt path:' in train.log and parse the sr fraction from it.
-
-    Handles the multiple-ckpts-with-same-val case (the log records exactly
-    which file was loaded for testing) without us having to replay the
-    monitor's tiebreak.
+    The ckpt filename's ``sr`` tag is whole-model sparsity, so it is not read
+    here. A dense run states no level and returns None.
     """
-    log_path = os.path.join(exp_dir, "train.log")
-    if not os.path.exists(log_path):
-        return None
-    with open(log_path) as f:
-        for line in f:
-            if "Test ckpt path:" not in line:
-                continue
-            m = CKPT_SR_PATTERN.search(line)
-            if m:
-                return float(m.group(1))
-    return None
-
-
-def _last_sparsity_from_csv(exp_dir):
-    """Last non-null bregman sparsity recorded across CSVLogger versions."""
-    df = load_csv_metrics(exp_dir)
-    if df is None:
-        return None
-    for col in ("bregman/sparsity", "bregman/pruned_sparsity"):
-        if col in df.columns:
-            series = df[col].dropna()
-            if len(series) > 0:
-                return float(series.iloc[-1])
-    return None
-
-
-def resolve_actual_sparsity(exp_name, base_dirs, info, fixed_lambda_test_ckpt):
-    """Return realized sparsity (0–1) for one row, or None if undeterminable.
-
-    Fixed-lambda runs evaluated from last.ckpt: read the last logged
-    bregman/sparsity from CSV, since last.ckpt's filename has no sr suffix.
-    Everything else (including fixed-lambda runs tested from the best ckpt):
-    parse the sr value out of the test ckpt path in train.log.
-    """
-    is_fixed = info.get("variant") == "fixed"
-    if not base_dirs or is_dense(info):
+    if not base_dirs or info.is_dense:
         return None
     for bd in base_dirs:
         exp_dir = os.path.join(bd, exp_name)
         if not os.path.isdir(exp_dir):
             continue
-        if is_fixed and fixed_lambda_test_ckpt == "last":
-            return _last_sparsity_from_csv(exp_dir)
-        return _sparsity_from_test_ckpt_log(exp_dir)
+        seed_dirs = sorted(glob.glob(os.path.join(exp_dir, "seed_*"))) or [exp_dir]
+        landed = [v for v in (read_landed_sparsity(d) for d in seed_dirs) if v is not None]
+        return float(np.mean(landed)) if landed else None
     return None
 
 
@@ -207,22 +165,17 @@ def parse_dataset_protocol(raw_name):
     raise ValueError(f"Unknown dataset in experiment name: {raw_name}")
 
 
-def _method_key(method_class, variant):
-    """Effective bucket for ordering and group lookup.
+def _method_key(method_class, is_fixed):
+    """The bucket METHOD_ORDER and METHOD_GROUPS key on.
 
-    The shared parser collapses both regular and fixed-lambda Bregman runs
-    into the same `method_class` (e.g. 'adabreg') and tags fixed runs with
-    `variant='fixed'`. We re-expand here so METHOD_ORDER / METHOD_GROUPS
-    can position fixed-lambda runs separately (typically alongside the
-    sparse pruning baselines instead of with the proposed Bregman group).
+    The parser gives a fixed-lambda run the same ``method_class`` as its
+    adaptive sibling, so this re-expands the two into separate buckets.
     """
-    if variant == "fixed":
-        return f"{method_class}_fixed"
-    return method_class
+    return f"{method_class}_fixed" if is_fixed else method_class
 
 
-def _method_sort_key(method_class, variant=None):
-    key = _method_key(method_class, variant)
+def _method_sort_key(method_class, is_fixed):
+    key = _method_key(method_class, is_fixed)
     try:
         return METHOD_ORDER.index(key)
     except ValueError:
@@ -236,11 +189,20 @@ def _protocol_sort_key(p):
         return len(PROTOCOL_ORDER)
 
 
-def _build_units(sub):
-    """Enumerate (method, variant, sweep_value, sparsity) bars for a slice.
+def _arm_cond(sub, method, is_fixed, var_key):
+    """Rows of one method arm. ``is_fixed`` parts a fixed-lambda run from its
+    adaptive sibling, which shares the method class."""
+    return (
+        (sub["method_class"] == method)
+        & (sub["is_fixed"] == is_fixed)
+        & (sub["variant"].fillna("__none__") == var_key)
+    )
 
-    Lifted out of plot_metric_for_dataset so figure sizing can scale with the
-    actual bar count instead of just n_protocols.
+
+def _build_units(sub):
+    """Enumerate (method, is_fixed, variant, sweep_value, sparsity) bars.
+
+    One unit is one bar. Figure sizing counts them before anything is drawn.
     """
     sweep_param = None
     for cand in ("initial_sparsity", "fixed_lambda", "alpha", "f"):
@@ -248,28 +210,15 @@ def _build_units(sub):
             sweep_param = cand
             break
     units = []
-    # Iterate (method, variant) pairs sorted by their effective method_key
-    # so that fixed-lambda runs ('adabreg' + variant='fixed' →
-    # 'adabreg_fixed') land at the position METHOD_ORDER assigns them
-    # rather than next to the regular Bregman runs.
-    pairs = (
-        sub[["method_class", "variant"]]
+    arms = (
+        sub[["method_class", "is_fixed", "variant"]]
         .assign(variant=sub["variant"].fillna("__none__"))
         .drop_duplicates()
         .itertuples(index=False, name=None)
     )
-    pairs = sorted(
-        pairs,
-        key=lambda mv: (
-            _method_sort_key(mv[0], None if mv[1] == "__none__" else mv[1]),
-            mv[1],
-        ),
-    )
-    for method, var_key in pairs:
-        vrows = sub[
-            (sub["method_class"] == method)
-            & (sub["variant"].fillna("__none__") == var_key)
-        ]
+    arms = sorted(arms, key=lambda a: (_method_sort_key(a[0], a[1]), a[2]))
+    for method, is_fixed, var_key in arms:
+        vrows = sub[_arm_cond(sub, method, is_fixed, var_key)]
         spars_levels = sorted(vrows["sparsity"].dropna().unique().tolist())
         if vrows["sparsity"].isna().any():
             spars_levels = [None] + spars_levels
@@ -281,70 +230,67 @@ def _build_units(sub):
             )
             if sweep_param and srows[sweep_param].notna().any():
                 for v in sorted(srows[sweep_param].dropna().unique()):
-                    units.append((method, var_key, v, sp))
+                    units.append((method, is_fixed, var_key, v, sp))
             else:
-                units.append((method, var_key, None, sp))
+                units.append((method, is_fixed, var_key, None, sp))
     return units, sweep_param
 
 
 def _unit_rows(sub, units, sweep_param):
-    """The leaderboard rows behind each unit, in unit order."""
+    """The test-metric rows behind each unit, in unit order."""
     rows = []
-    for method, var_key, sweep_val, sp in units:
-        cond = (sub["method_class"] == method) & (
-            sub["variant"].fillna("__none__") == var_key
-        )
+    for method, is_fixed, var_key, sweep_val, sp in units:
+        cond = _arm_cond(sub, method, is_fixed, var_key)
         cond &= sub["sparsity"].isna() if sp is None else sub["sparsity"] == sp
         if sweep_param and sweep_val is not None:
             cond &= sub[sweep_param] == sweep_val
-        rows.append(sub[cond])
+        matched = sub[cond]
+        if len(matched) > 1:
+            print(f"  [warn] {len(matched)} rows share one bar; drawing the first: {sorted(matched['exp'])}")
+        rows.append(matched)
     return rows
 
 
 def _unit_infos(units, unit_rows, sweep_param):
-    """One info dict per unit, styled and label-gated as a set.
+    """One RunGroup per unit, plus the Encoding that labels them as a set.
 
-    Sparsity is stripped because the per-bar tick already carries it, so
-    ``make_label`` contributes only the method and what varies within it.
+    Sparsity is stripped because the per-bar tick already carries it, so the
+    label contributes only the method and what varies within it.
     """
     infos = []
-    for (method, var_key, sweep_val, _), rows in zip(units, unit_rows):
+    for (method, is_fixed, var_key, sweep_val, _), rows in zip(units, unit_rows):
         if rows.empty:
-            info = {
-                "method_class": method,
-                "sparsity": None,
-                "variant": None if var_key == "__none__" else var_key,
-                "alpha": None,
-                "f": None,
-                "initial_sparsity": None,
-                "fixed_lambda": None,
-            }
+            info = RunGroup(
+                dirname=f"{method}-{var_key}",
+                method=METHOD_BY_KEY[method],
+                flavor=variant_for("fixed") if is_fixed else None,
+                variant=None if var_key == "__none__" else var_key,
+                alpha=None,
+                f=None,
+            )
             # SHOW_ALPHA/SHOW_f gate alpha/f display; the others always show.
             if sweep_param in ("initial_sparsity", "fixed_lambda"):
-                info[sweep_param] = sweep_val
+                setattr(info, sweep_param, sweep_val)
             elif sweep_param == "alpha" and SHOW_ALPHA:
-                info["alpha"] = sweep_val
+                info.alpha = sweep_val
             elif sweep_param == "f" and SHOW_f:
-                info["f"] = sweep_val
+                info.f = sweep_val
         else:
-            info = dict(rows["info"].iloc[0])
-            info["sparsity"] = None
+            info = rows["info"].iloc[0].without_sparsity()
         infos.append(info)
-    assign_label_visibility([(None, info) for info in infos])
-    assign_sweep_styles([(None, info) for info in infos])
-    return infos
+    return infos, Encoding(infos)
 
 
 def _unit_x_positions(units, gap=GROUP_GAP):
-    """X-coordinates for each unit with `gap` inserted at group boundaries."""
+    """X-coordinates for each unit, with ``gap`` between method arms."""
     n = len(units)
     if n == 0:
         return np.zeros(0, dtype=float)
     x = np.zeros(n, dtype=float)
     cur = 0.0
-    prev_key = (units[0][0], units[0][1])
+    prev_key = units[0][:3]
     for i in range(1, n):
-        cur_key = (units[i][0], units[i][1])
+        cur_key = units[i][:3]
         cur += 1.0 + (gap if cur_key != prev_key else 0.0)
         x[i] = cur
         prev_key = cur_key
@@ -373,7 +319,6 @@ def plot_metric_for_dataset(
     font_size=16,
     fig_height=8.0,
     sparsity_label="target",
-    fixed_lambda_test_ckpt="best",
 ):
     """Grouped bar chart for one dataset.
 
@@ -410,7 +355,7 @@ def plot_metric_for_dataset(
     # Sparsity buckets present anywhere in the figure — drives the legend.
     # Dense is listed first so its legend entry leads.
     sparsity_levels = sorted(df["sparsity"].dropna().unique().tolist())
-    has_dense = df["method_class"].isin(DENSE_METHOD_CLASSES).any()
+    has_dense = df["method_class"].isin(DENSE_METHOD_KEYS).any()
     sparsity_buckets = ([None] if has_dense else []) + sparsity_levels
 
     # Fixed y-axis: always 0–20% with ticks at 0/5/10/15/20 so figures
@@ -458,7 +403,7 @@ def plot_metric_for_dataset(
         # One resolution of rows → infos per protocol, shared by the bar colors
         # and the labels below, so the two can never disagree about a unit.
         unit_rows = _unit_rows(sub, units, sweep_param)
-        unit_infos = _unit_infos(units, unit_rows, sweep_param)
+        unit_infos, unit_enc = _unit_infos(units, unit_rows, sweep_param)
 
         bar_width = 0.7
         x = _unit_x_positions(units)
@@ -466,12 +411,12 @@ def plot_metric_for_dataset(
         colors = ["#cccccc"] * n_units
         hatches = [""] * n_units
         actual_sps = [None] * n_units  # realized sparsity (0–1) or None
-        for i, ((_, _, _, sp), rows, info) in enumerate(
+        for i, ((*_, sp), rows, info) in enumerate(
             zip(units, unit_rows, unit_infos)
         ):
             if not rows.empty:
                 vals[i] = float(rows[metric].values[0]) * 100.0
-                colors[i] = get_style(info)[0]
+                colors[i] = unit_enc.style(info)[0]
                 if "actual_sparsity" in rows.columns:
                     asp = rows["actual_sparsity"].values[0]
                     if pd.notna(asp):
@@ -577,13 +522,9 @@ def plot_metric_for_dataset(
         # --- Two-tier x labels ---
         # Top tier (per-bar tick): the target sparsity ("90") by default,
         # or the realized sparsity to one decimal ("89.5") when the user
-        # opts in via --sparsity_label actual. Fixed-lambda runs follow
-        # the same toggle, with one exception: when they were tested from
-        # last.ckpt (--fixed_lambda_test_ckpt last), we always show the
-        # realized sparsity, since the run wasn't snapped to a monitor
-        # checkpoint near the target and the realized value is what the
-        # comparison actually measures. Blank for dense baselines so they
-        # get just a single method label below.
+        # opts in via --sparsity_label actual. A fixed-lambda run always
+        # shows the realized value: it aimed at no target. Blank for dense
+        # baselines so they get just a single method label below.
         # Bottom tier: method/variant name written ONCE, centered under
         # each consecutive run of bars sharing it (e.g. AdaBreg's four
         # sparsity bars get one "AdaBreg" label spanning them). Saves
@@ -591,10 +532,10 @@ def plot_metric_for_dataset(
         use_latex_x = plt.rcParams.get("text.usetex", False)
         pct_str_tick = r"\%" if use_latex_x else "%"
         bar_tick_labels = []
-        for (_, var_key, _, sp), asp in zip(units, actual_sps):
-            is_fixed = var_key == "fixed"
-            force_actual = is_fixed
-            want_actual = force_actual or sparsity_label == "actual"
+        for (_, is_fixed, _, _, sp), asp in zip(units, actual_sps):
+            # A fixed-lambda run holds no target, so its realized value is the
+            # only sparsity it has.
+            want_actual = is_fixed or sparsity_label == "actual"
             if want_actual and asp is not None:
                 bar_tick_labels.append(f"{asp * 100:.1f}{pct_str_tick}")
             elif sp is None:  # dense baseline — no sparsity to print
@@ -602,7 +543,7 @@ def plot_metric_for_dataset(
             else:
                 bar_tick_labels.append(f"{int(sp)}{pct_str_tick}")
 
-        group_labels = [make_label(info) for info in unit_infos]
+        group_labels = [unit_enc.label(info) for info in unit_infos]
 
         ax.set_xticks(x)
         ax.set_xticklabels(
@@ -649,7 +590,7 @@ def plot_metric_for_dataset(
         # group is rendered vertically just to the right of its separator.
         unit_groups = [
             METHOD_GROUPS.get(
-                _method_key(info.get("method_class"), info.get("variant")),
+                _method_key(info.method.key, info.is_fixed_lambda),
                 "main",
             )
             for info in unit_infos
@@ -744,7 +685,7 @@ def main():
     parser.add_argument(
         "--input_dir",
         default="results/cross_exp_comparison/test_metrics",
-        help="Directory containing eer_leaderboard.csv",
+        help="Directory holding test_metrics.csv",
     )
     parser.add_argument(
         "--output_dir",
@@ -758,8 +699,8 @@ def main():
         default=None,
         help=(
             "Optional experiment root dir(s), used to resolve each run's "
-            "realized sparsity and its _bregman_lambda. Without them, "
-            "fixed-lambda runs have no sparsity level to be grouped at."
+            "realized sparsity. Without them, fixed-lambda runs have no "
+            "sparsity level to be grouped at."
         ),
     )
     parser.add_argument(
@@ -767,10 +708,9 @@ def main():
         nargs="+",
         default=None,
         help=(
-            "Optional fnmatch glob patterns to keep only matching `exp` rows "
-            "from the leaderboard CSV. Use the same patterns you pass to "
-            "scripts/visualize.py so the bar charts match the convergence "
-            "curves."
+            "Optional fnmatch glob patterns to keep only matching `exp` rows. "
+            "Use the same patterns you pass to scripts/visualize.py so the bar "
+            "charts match the convergence curves."
         ),
     )
     parser.add_argument(
@@ -781,21 +721,8 @@ def main():
             "Per-bar tick label for sparse runs: 'target' (default) prints "
             "the integer from the experiment name (e.g. '90'); 'actual' "
             "prints the realized sparsity to one decimal (e.g. '89.5'). "
-            "Fixed-lambda runs follow this toggle too — except when their "
-            "test ran from last.ckpt (--fixed_lambda_test_ckpt last), in "
-            "which case the realized sparsity is always shown."
-        ),
-    )
-    parser.add_argument(
-        "--fixed_lambda_test_ckpt",
-        choices=["best", "last"],
-        default="best",
-        help=(
-            "For Bregman fixed-lambda runs only: how the test was performed. "
-            "'best' parses the sr fraction from the test ckpt path in "
-            "train.log (same as non-fixed runs). 'last' uses the last "
-            "bregman/sparsity from csv/version_*/metrics.csv, since last.ckpt "
-            "has no sr in its filename."
+            "A fixed-lambda run always shows the realized value: it aimed "
+            "at no target."
         ),
     )
     parser.add_argument(
@@ -812,8 +739,7 @@ def main():
 
     output_dir = args.output_dir or os.path.join(args.input_dir, "figures")
 
-    # Load data --> de-duplicate based on is_latest flag (keep only the latest)
-    csv_path = os.path.join(args.input_dir, "eer_leaderboard.csv")
+    csv_path = os.path.join(args.input_dir, "test_metrics.csv")
     df = pd.read_csv(csv_path)
     df = filter_by_exp_patterns(df, args.experiments)
     if args.experiments:
@@ -832,44 +758,30 @@ def main():
             print(f"  - {name}")
     if args.exclude_cnceleb_concatenated:
         df = df[df["dataset"] != "cnceleb_concatenated"].copy()
-    if "is_latest" in df.columns:
-        stale = df[~df["is_latest"].astype(bool)]
-        for _, row in stale.iterrows():
-            print(
-                f"  [warn] skipping older run: exp={row['exp']}, dataset={row['dataset']}, run_ts={row.get('run_ts', '?')}"
-            )
-        df = df[df["is_latest"].astype(bool)]
 
-    dupes = df[df.duplicated(subset=["dataset", "exp"], keep="first")]
-    for _, row in dupes.iterrows():
-        print(
-            f"  [warn] unexpected duplicate after is_latest filter: exp={row['exp']}, dataset={row['dataset']}"
-        )
-    df = df.drop_duplicates(subset=["dataset", "exp"], keep="first")
+    # aggregate_json_scores.py writes one row per (exp, dataset). A second row
+    # means the two disagree about one measurement, so say which.
+    dupes = df[df.duplicated(subset=["dataset", "exp"], keep=False)]
+    assert dupes.empty, f"one row per (exp, dataset) in {csv_path}, got {sorted(set(dupes['exp']))}"
 
-    # Parse names into method_class, sparsity, initial_sparsity, alpha, f, variant.
-    # Use info_from_csv_row so fixed-lambda runs pick up _bregman_lambda from
-    # config_tree.log when --base_dirs is provided. The scalar columns are
-    # kept for downstream pandas filtering; the full info dict lives in the
-    # "info" column and is the input to make_label.
-    parsed = df["exp"].apply(lambda e: info_from_csv_row(e, args.base_dirs))
+    # The RunGroup lives in the "info" column and is what the Encoding labels.
+    # The scalar columns beside it are what pandas groups and filters on.
+    parsed = df["exp"].apply(RunGroup.from_name)
     df["info"] = parsed
-    df["method_class"] = parsed.apply(lambda x: x["method_class"])
-    df["sparsity"] = parsed.apply(lambda x: x["sparsity"])
-    df["alpha"] = parsed.apply(lambda x: x.get("alpha"))
-    df["f"] = parsed.apply(lambda x: x.get("f"))
-    df["initial_sparsity"] = parsed.apply(lambda x: x.get("initial_sparsity"))
-    df["fixed_lambda"] = parsed.apply(lambda x: x.get("fixed_lambda"))
-    df["variant"] = parsed.apply(lambda x: x.get("variant"))
+    df["method_class"] = parsed.apply(lambda g: g.method.key)
+    df["is_fixed"] = parsed.apply(lambda g: g.is_fixed_lambda)
+    df["sparsity"] = parsed.apply(lambda g: g.sparsity)
+    df["alpha"] = parsed.apply(lambda g: g.alpha)
+    df["f"] = parsed.apply(lambda g: g.f)
+    df["initial_sparsity"] = parsed.apply(lambda g: g.initial_sparsity)
+    df["fixed_lambda"] = parsed.apply(lambda g: g.fixed_lambda)
+    df["variant"] = parsed.apply(lambda g: g.variant)
 
-    # Realized sparsity per run (best ckpt's sr, or last logged for
-    # fixed-lambda + last.ckpt). Falls back to None if base_dirs not given
-    # or the source files aren't present; the plot then drops back to the
-    # target sparsity for that bar.
+    # Realized sparsity per run, the seed mean of the tested checkpoint's
+    # pruned_sparsity. None without --base_dirs or without results.json; the
+    # plot then drops back to the target sparsity for that bar.
     df["actual_sparsity"] = df.apply(
-        lambda r: resolve_actual_sparsity(
-            r["exp"], args.base_dirs, r["info"], args.fixed_lambda_test_ckpt
-        ),
+        lambda r: resolve_actual_sparsity(r["exp"], args.base_dirs, r["info"]),
         axis=1,
     )
     resolve_sparsity_level(df)
@@ -882,10 +794,10 @@ def main():
         df.loc[df["dataset"] == "cnceleb_multi", "protocol"] = "CNCeleb-E"
     df["train_dataset"] = df["exp"].apply(parse_train_dataset_protocol)
 
-    # Ensure all metric columns are numeric. Norm-cohort variants are
-    # intentionally ignored: the bar charts only plot the raw metric.
+    # Which score column every bar reads. src/vis/pruning_compare.py prefers
+    # EER_raw, so the two figures do not read one column.
     base_metrics = ["EER", "minDCF"]
-    SCORES = "norm"  # 'norm' 'raw'
+    SCORES = "norm"  # 'norm' or 'raw'
     for base in base_metrics:
         for col in [base, f"{base}_{SCORES}"]:
             if col in df.columns:
@@ -925,7 +837,6 @@ def main():
                     if len(protocols) > 1
                     else args.font_size,
                     sparsity_label=args.sparsity_label,
-                    fixed_lambda_test_ckpt=args.fixed_lambda_test_ckpt,
                 )
 
 

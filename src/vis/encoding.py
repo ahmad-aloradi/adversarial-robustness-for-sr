@@ -1,8 +1,9 @@
 """The visual-encoding contract: one label and one style per run.
 
 Every figure in the project reads its colors, markers, dash patterns and legend
-text from here, so two plots of the same run can never disagree. Callers supply
-the ``info`` dict that ``scripts/visualize.py:parse_experiment_name`` builds.
+text from here, so two plots of the same run can never disagree. A method is one
+:class:`Method` row and a flavor is one :class:`Variant` row. A row carries every
+field a figure needs, so no method can reach a plot with a color but no marker.
 
 Channels, in the order they are claimed:
     hue        the method class
@@ -11,97 +12,47 @@ Channels, in the order they are claimed:
                sparsity is already an axis)
     dash       the swept field, else the variant, else the sparsity level
 
+:class:`Encoding` decides what a legend shows and which field owns the sweep. It
+reads the whole matched set once, and answers per run. Ask it about a run it was
+not built from and it raises.
+
 Examples
 --------
->>> color, marker, ls = get_style(
-...     {"method_class": "pruning_struct", "sparsity": 90, "variant": None}
-... )
->>> make_label({"method_class": "linbreg", "sparsity": None, "variant": None})
-'LinBreg'
+>>> method_for("bregman_linbreg_quantile").key
+'linbreg'
+>>> flavor_for("bregman_linbreg_quantile").key
+'quantile'
+>>> method_for("pruning_str")
+Traceback (most recent call last):
+ValueError: a run name states one registered method (see METHODS), got 'pruning_str'
 """
 
 import colorsys
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import Any, Tuple
 
 import matplotlib.pyplot as plt
 
-# Alpha and f are swept rarely and clutter every other legend, so they stay off
-# until a sweep actually needs them.
+# Alpha, f and the starting sparsity are swept rarely and clutter every other
+# legend, so they stay off until a sweep actually needs them.
 SHOW_ALPHA = False
 SHOW_f = False
-
-METHOD_CLASS_COLORS = {
-    "linbreg": "#1f77b4",  # deep blue
-    "adabreg": "#2A662B",  # vibrant cyan
-    "pruning_struct": "#ed8d61",  # strong red
-    "pruning_unstruct": "#ff7f0e",  # bright orange
-    "vanilla": "#61291e",  # distinct brown (baseline)
-    "wespeaker": "#9C4F4F",  # dark charcoal
-    "dense": "#7f7f7f",  # neutral grey — image dense (SGD) baseline
-    # Sparse-training baselines share a purple/teal family so they read as one group.
-    "rigl": "#9467bd",  # purple
-    "set": "#c5b0d5",  # light purple — RigL's growth ablation
-    "static": "#bcbd22",  # olive
-    "snip": "#17becf",  # cyan
-    "granet": "#e377c2",  # pink
-    "str": "#d62728",  # red
-    # forget about those other methods for now, just make them black so they stand out as "other"
-    "proxsgd": "#000000",  # light gray
-}
-
-METHOD_DISPLAY_NAMES = {
-    "linbreg": "LinBreg",
-    "adabreg": "AdaBreg",
-    "pruning_struct": "Str. Prun.",
-    "pruning_unstruct": "Unst. Prun.",
-    "rigl": "RigL",
-    "set": "SET",
-    "static": "Static-ERK",
-    "snip": "SNIP",
-    "granet": "GraNet",
-    "str": "STR",
-    "proxsgd": "ProxSGD",
-    "vanilla": "AdamW",
-    "wespeaker": "SGD",
-    "dense": "Dense",
-}
-
-# Method classes that train dense. A run is dense because of its *method*, never
-# because its name lacks a sparsity tag — fixed-lambda runs lack one too.
-DENSE_METHOD_CLASSES = frozenset({"dense", "vanilla", "wespeaker"})
-
-# Method classes carrying the Bregman knobs (alpha, f, initial sparsity).
-# ProxSGD inherits the Bregman parent config, so it belongs here despite the name.
-BREGMAN_METHOD_CLASSES = frozenset({"adabreg", "linbreg", "proxsgd"})
-
-# Notation shared by labels, group headers and axis titles. Math mode renders
-# under both usetex and the mathtext fallback (see setup_matplotlib).
-SPARSITY_SYM = r"$\mathsf{s}^{\ast}$"
-INIT_SPARSITY_SYM = r"$\mathsf{s}^{0}$"
-LAMBDA_SYM = r"$\lambda$"
-ALPHA_SYM = r"$\alpha$"
-F_SYM = r"$f$"
-
-
-def is_dense(info):
-    """Whether this run trains dense (no sparsity level to place it at)."""
-    return info["method_class"] in DENSE_METHOD_CLASSES
-
-
-def pct_sym():
-    """``%``, escaped when LaTeX is doing the typesetting."""
-    return r"\%" if plt.rcParams.get("text.usetex") else "%"
-
-
-def is_fixed_lambda(info):
-    """Whether this run holds lambda static, per its method token."""
-    return "fixed" in (info.get("method_variant"), info.get("variant"))
-
+SHOW_INIT_SPARSITY = False
 
 # Bar groups, in reading order. Grouping on the method rather than the sparsity
 # level keeps a fixed-lambda run out of the dense group and stops each realized
 # sparsity from opening a group of its own.
 TIER_DENSE, TIER_SPARSE_BASELINE, TIER_FIXED, TIER_ADAPTIVE = range(4)
+
+# Notation shared by labels, group headers and axis titles. Math mode renders
+# under both usetex and the mathtext fallback (see setup_matplotlib).
+SPARSITY_SYM = r"$\mathsf{s}(\theta^{\ast})$"
+INIT_SPARSITY_SYM = r"$\mathsf{s}^{(0)}$"
+LAMBDA_SYM = r"$\lambda$"
+ALPHA_SYM = r"$\alpha$"
+F_SYM = r"$f$"
+
 TIER_LABELS = (
     "Dense",
     "Sparse baselines",
@@ -110,37 +61,172 @@ TIER_LABELS = (
 )
 
 
-def method_tier(info):
-    """Which bar group this run belongs to (see :data:`TIER_LABELS`).
+# ---------------------------------------------------------------------------
+# 1. The method registry — one row per method
+# ---------------------------------------------------------------------------
 
-    Anything sparse that isn't Bregman is a baseline, so pruning — and RigL,
-    SET and friends when they land — group together without needing to be
-    listed.
+
+@dataclass(frozen=True)
+class Method:
+    """One method: how its runs are named, and how every figure draws it.
+
+    ``tokens`` are the substrings of a run name that select this method. A
+    method carries several where the launcher renamed it and finished runs keep
+    the old spelling. What follows the matched token in the name is the flavor
+    (see :class:`Variant`), so a new flavor costs no row here.
+
+    ``family`` decides the bar group and which hyperparameters the run carries:
+    ``dense`` trains dense, ``bregman`` carries alpha, f and lambda, ``baseline``
+    is anything else that trains sparse.
     """
-    if is_dense(info):
-        return TIER_DENSE
-    if info["method_class"] not in BREGMAN_METHOD_CLASSES:
-        return TIER_SPARSE_BASELINE
-    return TIER_FIXED if is_fixed_lambda(info) else TIER_ADAPTIVE
+
+    key: str
+    tokens: Tuple[str, ...]
+    display: str
+    color: str
+    marker: str
+    family: str
 
 
-# Method class → marker, for plots where sparsity is an axis and so cannot also
-# drive the marker (see get_style's ``marker_by``).
-METHOD_MARKERS = {
-    "adabreg": "o",
-    "linbreg": "D",
-    "proxsgd": "^",
-    "pruning_struct": "v",
-    "pruning_unstruct": "P",
-    "rigl": "*",
-    "set": "X",
-    "static": "d",
-    "snip": "p",
-    "granet": "h",
-    "str": "<",
+# Reading order everywhere. A row's position is its sort rank. Every token an
+# experiment config or scripts/fabfile.py can put in a run name has a row.
+METHODS = (
+    Method("dense", ("dense_sgd",), "SGD", "#7f7f7f", "s", "dense"),
+    Method("vanilla", ("dense_adamw", "vanilla"), "AdamW", "#61291e", ">", "dense"),
+    Method("wespeaker", ("wespeaker",), "SGD", "#9C4F4F", "8", "dense"),
+    Method("pruning_struct", ("pruning_mag_struct",), "Str. Prun.", "#ed8d61", "v", "baseline"),
+    Method("pruning_unstruct", ("pruning_mag_unstruct",), "Unst. Prun.", "#ff7f0e", "P", "baseline"),
+    Method("static", ("pruning_static",), "Static-ERK", "#bcbd22", "d", "baseline"),
+    Method("snip", ("pruning_snip",), "SNIP", "#17becf", "p", "baseline"),
+    Method("set", ("pruning_set",), "SET", "#c5b0d5", "X", "baseline"),
+    Method("rigl", ("pruning_rigl",), "RigL", "#9467bd", "*", "baseline"),
+    Method("granet", ("pruning_granet",), "GraNet", "#e377c2", "h", "baseline"),
+    Method("str", ("soft_threshold",), "STR", "#d62728", "<", "baseline"),
+    Method("linbreg", ("linbreg",), "LinBreg", "#1f77b4", "D", "bregman"),
+    Method("adabreg", ("adabreg",), "AdaBreg", "#2A662B", "o", "bregman"),
+    Method("proxsgd", ("proxsgd",), "ProxSGD", "#000000", "^", "bregman"),
+)
+
+METHOD_BY_KEY = {m.key: m for m in METHODS}
+# Longest token first, so pruning_mag_unstruct wins over any shorter prefix.
+_METHOD_TOKENS = sorted(((m, t) for m in METHODS for t in m.tokens), key=lambda mt: -len(mt[1]))
+
+assert len(METHOD_BY_KEY) == len(METHODS), "every Method needs a unique key"
+assert len({t for _, t in _METHOD_TOKENS}) == len(_METHOD_TOKENS), "every Method token needs a unique row"
+assert len({m.color for m in METHODS}) == len(METHODS), "every Method needs a unique color"
+assert len({m.marker for m in METHODS}) == len(METHODS), "every Method needs a unique marker"
+assert {m.family for m in METHODS} <= {"dense", "baseline", "bregman"}, "family is dense, baseline or bregman"
+
+METHOD_SORT_RANK = {m.key: i for i, m in enumerate(METHODS)}
+
+# A (method, flavor) pair that is a method of its own, not an ablation of the
+# base. SGap names the feedback controller on the sparsity gap. TopK names the
+# K-th order statistic of the dual. A fixed-lambda run runs neither controller,
+# so it keeps the bare method name.
+METHOD_VARIANT_DISPLAY_NAMES = {
+    ("linbreg", None): "LinBregSGap",
+    ("linbreg", "progressive"): "LinBregSGap + Ramp",
+    ("linbreg", "quantile"): "LinBregTopK",
+    ("linbreg", "quantile_progressive"): "LinBregTopK + Ramp",
+    ("adabreg", None): "AdaBregSGap",
+    ("adabreg", "progressive"): "AdaBregSGap + Ramp",
+    ("adabreg", "quantile"): "AdaBregTopK",
+    ("adabreg", "quantile_progressive"): "AdaBregTopK + Ramp",
 }
 
-# Sparsity → marker shape  (consistent everywhere)
+
+def _match_method(token):
+    """The Method a run-name token selects, and the token text that selected it.
+
+    Matches on the longest token, so ``bregman_linbreg_quantile`` resolves to
+    LinBreg and everything after the token stays for :func:`flavor_for`. An
+    unregistered name raises: a silent fallback drew a sparse run as a dense
+    baseline, with no sparsity and in the wrong bar group.
+    """
+    for m, matched in _METHOD_TOKENS:
+        if matched in token:
+            return m, matched
+    raise ValueError(f"a run name states one registered method (see METHODS), got {token!r}")
+
+
+def method_for(token):
+    """The Method a run-name token selects. Raises on an unregistered name."""
+    return _match_method(token)[0]
+
+
+# ---------------------------------------------------------------------------
+# 2. The variant registry — one row per method flavor
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Variant:
+    """One method flavor: its legend tag, its dash pattern and its hue shift.
+
+    ``display`` is empty where the name already says it — a fixed-lambda run is
+    named by its lambda, so a "fixed" tag would say it twice. ``color_shift`` is
+    ``(hue, saturation, lightness)``; hue wraps the wheel, the other two add.
+    """
+
+    key: str
+    display: str
+    linestyle: Any
+    color_shift: Tuple[float, float, float]
+
+
+VARIANTS = (
+    Variant("fixed", "", "-", (0.12, 0.0, 0.18)),
+    Variant("progressive", "Prog.", (0, (6, 2)), (0.05, 0.0, -0.12)),
+    Variant("quantile", "Quant.", (0, (6, 1, 1, 1)), (-0.10, 0.10, 0.05)),
+    Variant("quantile_progressive", "Quant. Prog.", (0, (6, 1, 1, 1, 1, 1)), (-0.10, 0.10, -0.10)),
+    Variant("iter", "Iter.", (0, (4, 2)), (0.05, 0.0, -0.12)),
+    Variant("onetime", "One-shot", (0, (2, 2)), (-0.05, 0.0, 0.15)),
+    Variant("constant_lr", "Const. lr", "-", (0.0, 0.0, 0.0)),
+)
+
+VARIANT_BY_KEY = {v.key: v for v in VARIANTS}
+_VARIANT_KEYS_LONGEST_FIRST = sorted(VARIANT_BY_KEY, key=len, reverse=True)
+
+assert len(VARIANT_BY_KEY) == len(VARIANTS), "every Variant needs a unique key"
+
+
+def variant_for(key):
+    """The Variant a key names, or an unstyled row carrying the key verbatim.
+
+    An ad hoc name suffix (``cls_scale2``) has no row, so it prints as written
+    and takes no dash or hue of its own.
+    """
+    if key is None:
+        return None
+    return VARIANT_BY_KEY.get(key) or Variant(key, key, "-", (0.0, 0.0, 0.0))
+
+
+def flavor_for(token):
+    """The Variant that follows the method token in a run name, or None.
+
+    ``bregman_linbreg_quantile_progressive`` gives ``quantile_progressive``. The
+    flavor ends at the next ``-``, so a following name segment such as the ramp
+    tag in ``linbreg_progressive-ramp100_cubic`` stays out of it. It also ends at
+    the next ``_``, so an older name that glued its settings on —
+    ``linbreg_fixed_lam0.15_noScheduler`` — still reads as fixed. The longest key
+    wins, so ``quantile_progressive`` never resolves to ``quantile``. A dense run
+    names its optimizer in that slot instead, so it has no flavor.
+    """
+    method, matched = _match_method(token)
+    if method.family == "dense":
+        return None
+    tail = token.split(matched, 1)[1].lstrip("_").split("-")[0]
+    for key in _VARIANT_KEYS_LONGEST_FIRST:
+        if tail == key or tail.startswith(key + "_"):
+            return VARIANT_BY_KEY[key]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 3. Sparsity and sweep channels
+# ---------------------------------------------------------------------------
+
+# Sparsity → marker shape (consistent everywhere)
 SPARSITY_MARKERS = {
     None: "s",  # square  — dense / baseline
     0: "s",
@@ -149,12 +235,6 @@ SPARSITY_MARKERS = {
     90: "v",  # triangle down
     95: "o",  # circle
     99: "x",  # x-mark
-}
-
-# Variant → marker shape override.  Fixed-lambda runs land at an uncontrolled
-# sparsity, so their marker should not encode a sparsity level.
-VARIANT_MARKERS = {
-    "fixed": "*",  # star — visually distinct from every sparsity marker
 }
 
 # Sparsity → line dash pattern
@@ -168,20 +248,9 @@ SPARSITY_LINESTYLES = {
     99: (0, (1, 1)),
 }
 
-# Variant → line dash pattern (used in sweep mode to keep same-alpha curves
-# from different variants visually distinct).
-VARIANT_LINESTYLES = {
-    None: "-",
-    "regl1_conv": "-",  # (0, (5, 2)),
-    "poor_init": (0, (3, 1, 1, 1)),
-    "rescale_prox": (0, (1, 1)),
-    "rescale_prox_v2": (0, (3, 1, 1, 1, 1, 1)),
-    "subgrad_corr_v2": (0, (5, 1, 1, 1)),
-    "subgrad_corr_v3": (0, (5, 2, 1, 2)),
-    "subgrad_corr_v4": (0, (1, 2, 5, 2)),
-    "fixed": "-",  # (0, (4, 2, 1, 2, 1, 2)),
-    "iter": (0, (4, 2)),
-}
+# A fixed-lambda run lands at an uncontrolled sparsity, so its marker must not
+# encode a level. The star is distinct from every sparsity marker.
+FIXED_LAMBDA_MARKER = "*"
 
 # Sweep rank → marker / dash pattern. A group sweeping one field (initial
 # sparsity, fixed lambda, alpha, f) varies all three channels over it, so runs
@@ -196,87 +265,36 @@ SWEEP_LINESTYLES = (
     (0, (5, 1, 1, 1)),
 )
 
-VARIANT_DISPLAY_NAMES = {
-    "poor_init": "poor init",
-    "fixed": "",  # the lambda value names these runs, so no redundant tag
-    "progressive": "Prog.",
-    "iter": "Iter.",  # SNIP over T prune steps vs the paper's single ranking
-    "regl1_conv": "",
-    "constant_lr": "Const. lr",
-    "RoP": "RoP",
-    "rescale_prox": "Rescale Prox.",
-    "rescale_prox_v2": "Rescale Prox. V2",
-    "rescale_prox_V2": "SubGrad Corr.",
-    "subgrad_corr_v2": "SubGrad Corr. V2",
-    "subgrad_corr_v3": "SubGrad Corr. V3",
-    "subgrad_corr_v4": "SubGrad Corr. V4",
-}
+# Lightness of the first and the last sweep rank. Absolute, so a base color that
+# already sits light or dark cannot push a rank off either end of the scale.
+SWEEP_LIGHTNESS = (0.72, 0.20)
+
+# Fields a group can sweep, in the order they win a tie.
+SWEEP_FIELDS = ("initial_sparsity", "fixed_lambda", "alpha", "f")
 
 
-def _variant_display_parts(info):
-    """Distinct variant display strings for info, method flavor (e.g.
-    progressive/fixed) first, then any ad hoc suffix tag (e.g. constant_lr) —
-    so a run tagged with both keeps both in its label instead of the suffix tag
-    silently overwriting the method flavor."""
-    parts = []
-    for token in (info.get("method_variant"), info.get("variant")):
-        if not token or token in parts:
-            continue
-        parts.append(token)
-    return [
-        VARIANT_DISPLAY_NAMES.get(p, p)
-        for p in parts
-        if VARIANT_DISPLAY_NAMES.get(p, p)
-    ]
+def pct_sym():
+    """``%``, escaped when LaTeX is doing the typesetting."""
+    return r"\%" if plt.rcParams.get("text.usetex") else "%"
 
 
-# Variant color adjustments: (hue_shift, saturation_shift, lightness_shift)
-# Hue rotates the color wheel (0-1 wraps), saturation/lightness are additive.
-# This keeps variants visually related to their base method but clearly distinct.
-VARIANT_COLOR_ADJUSTMENTS = {
-    "poor_init": (
-        -0.08,
-        -0.15,
-        -0.12,
-    ),  # shift hue toward red, desaturate, darken
-    "rescale_prox": (
-        0.10,
-        0.05,
-        0.15,
-    ),  # shift hue toward cyan, slightly brighter
-    "rescale_prox_v2": (
-        0.10,
-        0.05,
-        0.15,
-    ),  # shift hue toward cyan, slightly brighter
-    "rescale_prox_V2": (
-        0.18,
-        -0.10,
-        -0.05,
-    ),  # shift hue further, slightly muted
-    "subgrad_corr_v2": (
-        0.18,
-        -0.10,
-        -0.05,
-    ),  # shift hue further, slightly muted,
-    "subgrad_corr_v3": (
-        0.36,
-        -0.20,
-        -0.1,
-    ),  # shift hue further, slightly muted,
-    "subgrad_corr_v4": (-0.18, 0.10, 0.05),
-    "fixed": (0.12, -0.0, 0.18),  # shift hue toward purple, slightly darker
-    "progressive": (
-        0.05,
-        0.0,
-        -0.12,
-    ),  # slightly darker sibling of the base method
-    "iter": (
-        0.05,
-        0.0,
-        -0.12,
-    ),  # slightly darker sibling of the base method
-}
+def _lightness(hex_color):
+    """The HLS lightness of a hex color, so a caller can shift to an absolute one."""
+    r, g, b = (int(hex_color.lstrip("#")[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+    return colorsys.rgb_to_hls(r, g, b)[1]
+
+
+def _variant_color(base, variant_key):
+    """``base`` shifted by the variant's hue, or ``base`` untouched.
+
+    A variant that asks for no shift must not go through :func:`_adjust_color`:
+    the HLS round trip truncates, so it moves a color by a step and lifts pure
+    black off zero.
+    """
+    if variant_key is None:
+        return base
+    shift = variant_for(variant_key).color_shift
+    return _adjust_color(base, *shift) if any(shift) else base
 
 
 def _adjust_color(hex_color, hue_shift, sat_shift, light_shift):
@@ -291,222 +309,241 @@ def _adjust_color(hex_color, hue_shift, sat_shift, light_shift):
     return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
 
-def make_label(info):
-    """The one legend/tick label builder: ``Method`` plus what varies, in
-    parens.
+@dataclass(frozen=True)
+class _Sweep:
+    """The three channels one sweep rank claims."""
 
-    Reads e.g. ``LinBreg (s*=99%, s0=99%)`` — the sparsity level the run sits at,
-    then its Bregman starting sparsity, then the static lambda of a fixed-lambda
-    run, then alpha/f, then any variant tag. Fields absent or constant across the
-    matched set are dropped (see :func:`assign_label_visibility`); lambda always
-    shows, since it is what identifies a fixed-lambda run. A dense run names its
-    optimizer, the only thing that tells two of them apart.
+    color: str
+    marker: str
+    linestyle: Any
+
+
+@dataclass(frozen=True)
+class _Shown:
+    """Which optional fields a label prints for one run."""
+
+    sparsity: bool
+    init_sparsity: bool
+    alpha: bool
+    f: bool
+
+
+# ---------------------------------------------------------------------------
+# 4. The encoding of one matched set
+# ---------------------------------------------------------------------------
+
+
+class Encoding:
+    """Label and style for every run in one matched set.
+
+    What varies across the set decides which fields a label prints, and which
+    field owns the sweep channels. Both are properties of the set, so they are
+    computed once here rather than stamped onto each run — a renderer that draws
+    a subset builds its own Encoding over that subset and gets labels that
+    describe it.
+
+    ``sweep=False`` hands the marker and dash channels back to the sparsity
+    level, for a figure that encodes the swept field on an axis instead.
     """
-    name = METHOD_DISPLAY_NAMES.get(info["method_class"], info["method_class"])
-    if is_dense(info) and info.get("optimizer"):
-        name = info["optimizer"].upper()
 
-    parts = []
-    if info["sparsity"] is not None:
-        parts.append(f"{SPARSITY_SYM}={info['sparsity']:g}{pct_sym()}")
-    if info.get("_show_init_sparsity"):
-        parts.append(
-            f"{INIT_SPARSITY_SYM}={info['initial_sparsity']:g}{pct_sym()}"
-        )
-    if info.get("fixed_lambda") is not None:
-        parts.append(f"{LAMBDA_SYM}={info['fixed_lambda']:g}")
-    if info.get("_show_alpha"):
-        parts.append(f"{ALPHA_SYM}={info['alpha']:g}")
-    if info.get("_show_f"):
-        parts.append(f"{F_SYM}={info['f']}")
-    parts += _variant_display_parts(info)
-    return f"{name} ({', '.join(parts)})" if parts else name
+    def __init__(self, groups, *, sweep=True):
+        self._groups = list(groups)
+        self._shown = self._assign_labels(self._groups)
+        self._sweep = self._assign_sweep(self._groups) if sweep else {}
 
+    def __len__(self):
+        return len(self._groups)
 
-def get_style(info, *, marker_by="sparsity"):
-    """Return (color, marker, linestyle) — deterministic from metadata.
+    def _of(self, group, table):
+        """Look one run up, or raise — a run this Encoding never saw has no
+        answer, and a silent default would label it against the wrong set."""
+        key = id(group)
+        if key not in table:
+            raise KeyError(f"Encoding covers the runs it was built from, got {group.dirname}")
+        return table[key]
 
-    Hue names the method. A swept field (see :func:`assign_sweep_styles`) claims
-    lightness, marker *and* dash pattern, so runs differing only in their initial
-    sparsity or their lambda never collapse onto one line shape. Without a sweep
-    the sparsity level drives marker and dash, and fixed-lambda runs take the star
-    so they read as their own family.
+    @staticmethod
+    def _assign_labels(groups):
+        """Print a field where it takes >=2 distinct values across the set.
 
-    ``marker_by="method"`` hands the marker to the method instead — for plots
-    where sparsity is an axis and so cannot also encode it.
-    """
-    variant = info.get("variant")
-    color = info.get("_sweep_color")
-    if color is None:
-        color = METHOD_CLASS_COLORS.get(info["method_class"], "#333333")
-        adj = VARIANT_COLOR_ADJUSTMENTS.get(variant)
-        if adj:
-            color = _adjust_color(color, *adj)
+        For alpha, f and the starting sparsity, None counts as a distinct value —
+        mixed presence is still variation. Only Bregman methods carry those three,
+        so a dense baseline never gets them stamped on its label.
 
-    if marker_by == "method":
-        marker = METHOD_MARKERS.get(info["method_class"], "o")
-    elif info.get("_sweep_marker") is not None:
-        marker = info["_sweep_marker"]
-    elif is_fixed_lambda(info):
-        marker = VARIANT_MARKERS["fixed"]
-    else:
-        marker = SPARSITY_MARKERS.get(info["sparsity"], "x")
+        The target set holds only the runs that hold a target. A dense baseline
+        has none, and a fixed-lambda run reached its sparsity instead of asking
+        for it, so neither may decide the tag for the runs that did ask. A
+        fixed-lambda run then always shows what it reached: that value is its
+        identity, the way lambda is.
+        """
+        show_alpha = len({g.alpha for g in groups}) >= 2
+        show_f = len({g.f for g in groups}) >= 2
+        show_init = len({g.initial_sparsity for g in groups}) >= 2
+        targets = {g.sparsity for g in groups if g.sparsity is not None and not g.is_fixed_lambda}
+        show_sparsity = len(targets) >= 2
 
-    if info.get("_sweep_linestyle") is not None:
-        ls = info["_sweep_linestyle"]
-    elif variant is not None:
-        ls = VARIANT_LINESTYLES.get(variant, "-")
-    else:
-        ls = SPARSITY_LINESTYLES.get(info["sparsity"], "-")
-    return color, marker, ls
+        shown = {}
+        for g in groups:
+            bregman = g.method.family == "bregman"
+            shown[id(g)] = _Shown(
+                sparsity=g.sparsity is not None and (show_sparsity or g.is_fixed_lambda),
+                init_sparsity=show_init and g.initial_sparsity is not None and bregman and SHOW_INIT_SPARSITY,
+                alpha=show_alpha and g.alpha is not None and bregman and SHOW_ALPHA,
+                f=show_f and g.f is not None and bregman and SHOW_f,
+            )
+        return shown
 
+    @staticmethod
+    def _sweep_field(members):
+        """Which field this group sweeps, or None.
 
-def _sweep_members(members, param):
-    """The subset of ``members`` that legitimately carries ``param``.
+        A fixed-lambda run uses default alpha/f and joins no such sweep; pooling
+        it with the others would build a spurious two-point sweep and drag it to
+        the dark end of the ramp. The starting sparsity and the lambda come from
+        the run name, so they count for every variant that carries them.
+        """
+        for field in SWEEP_FIELDS:
+            pool = Encoding._sweep_members(members, field)
+            if len({getattr(m, field) for m in pool if getattr(m, field) is not None}) >= 2:
+                return field
+        return None
 
-    Fixed-lambda runs use default alpha/f (1.0/50) and aren't part of any such
-    sweep; pooling them with non-fixed runs at the same sparsity creates a
-    spurious 2-point "sweep" that maps the fixed run to the darkest end of the
-    gradient (visually black) and overrides VARIANT_COLOR_ADJUSTMENTS["fixed"]
-    in get_style. Initial sparsity and the fixed lambda are read from the run
-    name, so they count for every variant that has them.
+    @staticmethod
+    def _sweep_members(members, field):
+        """The subset of ``members`` that legitimately carries ``field``."""
+        if field in ("initial_sparsity", "fixed_lambda"):
+            return members
+        return [m for m in members if not m.is_fixed_lambda]
 
-    >>> _sweep_members([{"variant": "fixed"}, {"variant": None}], "alpha")
-    [{'variant': None}]
-    """
-    if param in ("initial_sparsity", "fixed_lambda"):
-        return members
-    return [m for m in members if not is_fixed_lambda(m)]
+    @staticmethod
+    def _assign_sweep(groups):
+        """Give the swept field all three channels, within each (method, level).
 
+        Keying on the swept *value* rather than the position in the list styles
+        two runs sharing a value alike, whatever else differs between them. The
+        ramp keeps the variant's own hue and spans SWEEP_LIGHTNESS, so no rank
+        lands too pale or too near black.
+        """
+        buckets = defaultdict(list)
+        for g in groups:
+            # A fixed-lambda run holds no target, so its level is an outcome and must not split the sweep.
+            level = None if g.is_fixed_lambda else g.sparsity
+            buckets[(g.method.key, level)].append(g)
 
-def sweep_param(members):
-    """Which field this group sweeps, or None.
-
-    Initial sparsity wins ties, then the fixed lambda.
-    """
-    for cand in ("initial_sparsity", "fixed_lambda", "alpha", "f"):
-        pool = _sweep_members(members, cand)
-        vals = {m.get(cand) for m in pool if m.get(cand) is not None}
-        if len(vals) >= 2:
-            return cand
-    return None
-
-
-def assign_sweep_styles(experiments):
-    """Stamp ``_sweep_color``/``_sweep_marker``/``_sweep_linestyle`` per run.
-
-    Within each (method_class, sparsity) group, whichever of {initial_sparsity,
-    fixed_lambda, alpha, f} varies drives all three channels. Keying on the
-    swept *value* rather than the position in the list keeps two runs sharing a
-    value styled alike no matter what else differs between them.
-    """
-    groups = defaultdict(list)
-    for _, info in experiments:
-        groups[(info["method_class"], info.get("sparsity"))].append(info)
-
-    for (method, _), members in groups.items():
-        param = sweep_param(members)
-        if param is None:
-            continue
-        members = _sweep_members(members, param)
-        values = sorted(
-            {m[param] for m in members if m.get(param) is not None}
-        )
-        if len(values) < 2:
-            continue
-        base = METHOD_CLASS_COLORS.get(method, "#333333")
-        for info in members:
-            v = info.get(param)
-            if v is None:
+        sweeps = {}
+        for members in buckets.values():
+            field = Encoding._sweep_field(members)
+            if field is None:
                 continue
-            rank = values.index(v)
-            t = rank / (len(values) - 1)
-            info["_sweep_color"] = _adjust_color(base, 0, 0, 0.30 - 0.55 * t)
-            info["_sweep_marker"] = SWEEP_MARKERS[rank % len(SWEEP_MARKERS)]
-            info["_sweep_linestyle"] = SWEEP_LINESTYLES[
-                rank % len(SWEEP_LINESTYLES)
-            ]
+            members = Encoding._sweep_members(members, field)
+            values = sorted({getattr(m, field) for m in members if getattr(m, field) is not None})
+            if len(values) < 2:
+                continue
+            for g in members:
+                v = getattr(g, field)
+                if v is None:
+                    continue
+                rank = values.index(v)
+                t = rank / (len(values) - 1)
+                base = _variant_color(g.method.color, g.style_variant)
+                light, dark = SWEEP_LIGHTNESS
+                sweeps[id(g)] = _Sweep(
+                    color=_adjust_color(base, 0, 0, light + (dark - light) * t - _lightness(base)),
+                    marker=SWEEP_MARKERS[rank % len(SWEEP_MARKERS)],
+                    linestyle=SWEEP_LINESTYLES[rank % len(SWEEP_LINESTYLES)],
+                )
+        return sweeps
+
+    def label(self, group):
+        """The one legend/tick label: ``Method`` plus what varies, in parens.
+
+        Reads e.g. ``LinBregTopK (s(θ*)=99%, λ=0.9)`` — the sparsity level it
+        sits at, then its Bregman starting sparsity, then the static lambda of a
+        fixed-lambda run, then alpha/f, then any variant tag. A dense run reads
+        as its optimizer, the only thing that tells two of them apart.
+
+        A run whose sparsity is an outcome rather than a target prints the seed
+        mean and its spread. ``sparsity`` stays the rounded integer that keys the
+        marker and dash tables, so the printed value drives no style lookup.
+        """
+        shown = self._of(group, self._shown)
+        flavor = group.flavor.key if group.flavor else None
+        name = METHOD_VARIANT_DISPLAY_NAMES.get((group.method.key, flavor)) or group.method.display
+
+        parts = []
+        if shown.sparsity:
+            if group.sparsity_is_outcome:
+                value = f"{100 * group.landed_sparsity:.2f}"
+                if group.landed_sparsity_std is not None:
+                    value += rf"$\pm${100 * group.landed_sparsity_std:.2f}"
+            else:
+                value = f"{group.sparsity:g}"
+            parts.append(f"{SPARSITY_SYM}={value}{pct_sym()}")
+        if shown.init_sparsity:
+            parts.append(f"{INIT_SPARSITY_SYM}={group.initial_sparsity:g}{pct_sym()}")
+        if group.fixed_lambda is not None:
+            parts.append(f"{LAMBDA_SYM}={group.fixed_lambda:g}")
+        if shown.alpha:
+            parts.append(f"{ALPHA_SYM}={group.alpha:g}")
+        if shown.f:
+            parts.append(f"{F_SYM}={group.f}")
+        parts += self._variant_tags(group)
+        return f"{name} ({', '.join(parts)})" if parts else name
+
+    @staticmethod
+    def _variant_tags(group):
+        """The variant tags a label appends: the method flavor, then any ad hoc
+        suffix. A flavor that METHOD_VARIANT_DISPLAY_NAMES already names drops
+        out, because the name carries it and the tag would say it twice."""
+        flavor = group.flavor.key if group.flavor else None
+        named = (group.method.key, flavor) in METHOD_VARIANT_DISPLAY_NAMES
+        tags = []
+        for key in (flavor, group.variant):
+            if not key or key in tags or (named and key == flavor):
+                continue
+            tags.append(key)
+        return [d for d in (variant_for(k).display for k in tags) if d]
+
+    def style(self, group, *, marker_by="sparsity"):
+        """Return (color, marker, linestyle) for one run.
+
+        Hue names the method. A swept field claims lightness, marker *and* dash,
+        so runs differing only in their starting sparsity or their lambda never
+        collapse onto one line shape. Without a sweep the sparsity level drives
+        marker and dash, and a fixed-lambda run takes the star.
+
+        ``marker_by="method"`` hands the marker to the method instead — for plots
+        where sparsity is an axis and so cannot also encode it.
+        """
+        assert marker_by in ("sparsity", "method"), f"marker_by is sparsity or method, got {marker_by!r}"
+        sweep = self._sweep.get(id(group))
+        self._of(group, self._shown)  # a run outside this set has no style either
+
+        color = sweep.color if sweep else _variant_color(group.method.color, group.style_variant)
+
+        if marker_by == "method":
+            marker = group.method.marker
+        elif sweep is not None:
+            marker = sweep.marker
+        elif group.is_fixed_lambda:
+            marker = FIXED_LAMBDA_MARKER
+        else:
+            marker = SPARSITY_MARKERS.get(group.sparsity, "x")
+
+        if sweep is not None:
+            ls = sweep.linestyle
+        elif group.style_variant is not None:
+            ls = variant_for(group.style_variant).linestyle
+        else:
+            ls = SPARSITY_LINESTYLES.get(group.sparsity, "-")
+        return color, marker, ls
 
 
-def clear_sweep_styles(experiments):
-    """Drop the stamped sweep styling so another encoding can own the
-    channels."""
-    for _, info in experiments:
-        for key in ("_sweep_color", "_sweep_marker", "_sweep_linestyle"):
-            info.pop(key, None)
-
-
-def assign_label_visibility(experiments):
-    """Set the ``_show_*`` flags per info based on whether the field takes >=2
-    distinct values across the full matched set.
-
-    Covers alpha, f and the initial sparsity. None counts as a distinct value
-    (mixed presence is still variation). Only Bregman methods carry these — they
-    are Bregman-only hyperparameters, so dense baselines and pruning runs never
-    get them stamped on the label even when alpha varies elsewhere in the matched
-    set. The fixed lambda has no flag: it identifies a fixed-lambda run, so
-    :func:`make_label` always shows it.
-    """
-    if not experiments:
-        return
-    infos = [info for _, info in experiments]
-    show_alpha = len({i.get("alpha") for i in infos}) >= 2
-    show_f = len({i.get("f") for i in infos}) >= 2
-    show_init = len({i.get("initial_sparsity") for i in infos}) >= 2
-    for info in infos:
-        is_bregman = info["method_class"] in BREGMAN_METHOD_CLASSES
-        info["_show_alpha"] = (
-            show_alpha
-            and info.get("alpha") is not None
-            and is_bregman
-            and SHOW_ALPHA
-        )
-        info["_show_f"] = (
-            show_f and info.get("f") is not None and is_bregman and SHOW_f
-        )
-        info["_show_init_sparsity"] = (
-            show_init
-            and info.get("initial_sparsity") is not None
-            and is_bregman
-        )
-
-
-EXPERIMENT_ORDER = [
-    "dense",
-    "vanilla",
-    "wespeaker",
-    "pruning_struct",
-    "pruning_unstruct",
-    "static",
-    "snip",
-    "set",
-    "rigl",
-    "granet",
-    "str",
-    "linbreg",
-    "adabreg",
-]
-
-
-def experiment_sort_key(info):
-    """Sort key placing a run in its bar group and ordering it within.
-
-    Groups read dense, sparse baselines, fixed lambda, adaptive lambda; inside
-    a group runs sort by method, so LinBreg and AdaBreg stay in blocks. Lambda
-    then orders the fixed-lambda runs and the sparsity level orders the rest —
-    one key serves both, since lambda is constant where it is unset.
-
-    Reused by downstream scripts so they can re-sort their own legend handles
-    to match this ordering.
-    """
-    mc = info.get("method_class", "")
-    lam, sparsity = info.get("fixed_lambda"), info.get("sparsity")
-    return (
-        method_tier(info),
-        EXPERIMENT_ORDER.index(mc) if mc in EXPERIMENT_ORDER else 99,
-        lam if lam is not None else -1.0,
-        sparsity if sparsity is not None else -1,
-        info.get("variant") or "",
-        info["alpha"] if info.get("alpha") is not None else -1.0,
-        info["f"] if info.get("f") is not None else -1,
-    )
+if __name__ == "__main__":
+    for token in ("bregman_linbreg_quantile_progressive", "pruning_snip_iter", "dense_sgd", "sv_dense_adamw", "soft_threshold"):
+        m, v = method_for(token), flavor_for(token)
+        print(f"{token:<40} -> {m.key:<18} {v.key if v else None}")
+    try:
+        method_for("pruning_str")
+    except ValueError as e:
+        print(f"unregistered name -> {e}")

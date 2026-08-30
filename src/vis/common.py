@@ -1,38 +1,19 @@
 """Shared matplotlib configuration, backbone registry, and layout helpers.
 
-Used by all renderer modules under ``src/vis/``. Colors, markers and legend text
-come from :mod:`src.vis.encoding` and are re-exported here, so every figure
-labels and styles a run identically whichever renderer draws it.
+Every figure that needs rcParams, a legend file, the backbone registry or the
+layerwise sizes reads them here. Colors, markers and legend text are not here —
+they come from :mod:`src.vis.encoding`, the one place a run's appearance is set.
 
 Examples
 --------
->>> from src.vis.common import setup_matplotlib, get_style
+>>> from src.vis.common import setup_matplotlib
 >>> setup_matplotlib(font_size=10)
->>> color, marker, ls = get_style(
-...     {"method_class": "pruning_struct", "sparsity": 90, "variant": None}
-... )
 """
 
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
-
-from src.vis.encoding import (  # noqa: F401
-    EXPERIMENT_ORDER,
-    METHOD_CLASS_COLORS,
-    METHOD_DISPLAY_NAMES,
-    SPARSITY_LINESTYLES,
-    SPARSITY_MARKERS,
-    VARIANT_COLOR_ADJUSTMENTS,
-    VARIANT_DISPLAY_NAMES,
-    VARIANT_LINESTYLES,
-    VARIANT_MARKERS,
-    _adjust_color,
-    experiment_sort_key,
-    get_style,
-    make_label,
-)
 
 # ---------------------------------------------------------------------------
 # rcParams — only permitted module-level state in src/vis/
@@ -149,7 +130,7 @@ def export_standalone_legend(
 
 
 # ---------------------------------------------------------------------------
-# Backbone registry (from visualize_common.py)
+# Backbone registry — marker and dash encode the model in a cross-model figure
 # ---------------------------------------------------------------------------
 
 MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -186,7 +167,7 @@ def panel_models(by_model: Dict[str, Any]) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Layerwise plot constants (from visualize_common.py)
+# Layerwise plot constants
 # ---------------------------------------------------------------------------
 
 PERFECT_LINE_KW: Dict[str, Any] = dict(
