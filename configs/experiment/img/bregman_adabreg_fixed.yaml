@@ -10,8 +10,7 @@ defaults:
 tags: ["img", "${datamodule.name}", "Bregman_learning", "Adabreg", "fixed"]
 
 _bregman_fixed_lambda: ${bregman_lambda:AdaBreg,${_bregman_target_sparsity},fixed_lambda}
-_bregman_lambda_factor: 1 # scales _bregman_fixed_lambda; override for lambda sweeps
-_bregman_lambda: ${oc.eval:'${_bregman_fixed_lambda} * ${_bregman_lambda_factor}'}
+_bregman_lambda: ${_bregman_fixed_lambda}
 
 callbacks:
   model_pruning:

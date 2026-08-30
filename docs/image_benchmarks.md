@@ -84,8 +84,8 @@ bash scripts/datasets/prep_imagenet.sh     # ~150 GB (~300 GB peak)
 - `pruning_rigl.yaml` is the parent of the six sparse-training baselines; see
   [sparse_training.md](sparse_training.md).
 - Target sparsity: `_bregman_target_sparsity` (Bregman) or
-  `callbacks.model_pruning.amount` (the rest). Fixed-λ runs scale λ with
-  `_bregman_lambda_factor`.
+  `callbacks.model_pruning.amount` (the rest). A fixed-λ run sets λ directly
+  with `_bregman_fixed_lambda`.
 
 ### The ramped recipes share one ramp
 

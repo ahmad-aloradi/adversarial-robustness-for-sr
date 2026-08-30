@@ -72,12 +72,11 @@ SYNC_DIR_REMOTE = os.path.join(RESULTS_DIR, f"train/runs/{dataset}/*")
 SYNC_DIR_LOCAL = f"/dataHDD/ahmad/comfort26_sem/{dataset}"
 
 
-def fixed_lambda_for(experiment, target_sparsity, extra_overrides):
+def fixed_lambda_for(experiment, target_sparsity):
     """Static lambda a ``*_fixed`` experiment holds, or None when it isn't one.
 
-    Mirrors the configs — BREGMAN_LAMBDA_CONFIGS' ``fixed_lambda`` column scaled
-    by ``_bregman_lambda_factor`` — so the launcher spells ``-lam<value>``
-    exactly as ``python src/train.py`` would.
+    Mirrors the configs — BREGMAN_LAMBDA_CONFIGS' ``fixed_lambda`` column — so
+    the launcher spells ``-lam<value>`` exactly as ``python src/train.py`` would.
     """
     if not is_fixed_lambda(experiment):
         return None
@@ -91,11 +90,7 @@ def fixed_lambda_for(experiment, target_sparsity, extra_overrides):
     }
     matches = [name for key, name in optimizers.items() if key in experiment]
     assert matches, f"no Bregman optimizer named in {experiment}"
-    factor = (extra_overrides or {}).get("_bregman_lambda_factor", 1)
-    return (
-        get_bregman_lambda(matches[0], target_sparsity, "fixed_lambda")
-        * factor
-    )
+    return get_bregman_lambda(matches[0], target_sparsity, "fixed_lambda")
 
 
 def timestamp():
@@ -765,9 +760,7 @@ def _submit_sv_job(
     ramp_str = (
         f"-ramp{epochs_to_ramp}_{schedule_type}" if epochs_to_ramp else ""
     )
-    fixed_lambda = fixed_lambda_for(
-        experiment, target_sparsity, extra_overrides
-    )
+    fixed_lambda = fixed_lambda_for(experiment, target_sparsity)
     # A fixed-lambda run lands wherever lambda takes it, so name it by lambda.
     sparsity_str = (
         lambda_token(fixed_lambda)
@@ -1169,9 +1162,7 @@ def _submit_img_job(
     ramp_str = (
         f"-ramp{epochs_to_ramp}_{schedule_type}" if epochs_to_ramp else ""
     )
-    fixed_lambda = fixed_lambda_for(
-        experiment, target_sparsity, extra_overrides
-    )
+    fixed_lambda = fixed_lambda_for(experiment, target_sparsity)
     # A fixed-lambda run lands wherever lambda takes it, so name it by lambda.
     sparsity_str = (
         lambda_token(fixed_lambda)
@@ -1293,7 +1284,6 @@ def run_img():
     model_names = ["resnet18"]
     sparsity_rates_sweep = [0.9, 0.95, 0.99]
     default_seeds = [42]
-    lambda_factor_k = 0.4  # scales BREGMAN_LAMBDA_CONFIGS' fixed_lambda
     # Starting sparsity sweep (Bregman `_bregman_initial_sparsity`, GraNet `initial_amount`)
     # initial_sparsity_sweep = [0.0, 0.5, 0.99]
     initial_sparsity_sweep = [0.99]
@@ -1400,9 +1390,6 @@ def run_img():
                     "dataset_names": dataset_names,
                     "model_name": model_names,
                     "sparsity_rates": sparsity_rates_sweep,
-                    "extra_overrides": {
-                        "_bregman_lambda_factor": lambda_factor_k
-                    },
                 }
             )
 
@@ -1448,9 +1435,6 @@ def run_img():
                     "model_name": model_names,
                     "sparsity_rates": sparsity_rates_sweep,
                     "initial_sparsities": initial_sparsity_sweep,
-                    # "extra_overrides": {
-                    #     "_bregman_lambda_factor": lambda_factor_k
-                    # },
                 }
             )
 
