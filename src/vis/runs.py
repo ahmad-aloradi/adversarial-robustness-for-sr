@@ -53,12 +53,6 @@ SEED_RE = re.compile(r"^seed_?(\d+)$")
 # Either marker makes a directory a leaf run, and the walk stops descending.
 RUN_ARTIFACT_MARKERS = ("config_tree.log", "train_log.txt")
 
-# src/train.py logs the checkpoint it tested from (see pruning_compare.read_tested_ckpt).
-TESTED_CKPT_RE = re.compile(r"Test ckpt path:\s*(\S+\.ckpt)")
-
-# The benchmark sparsity, under the key each pruner writes (docs/image_benchmarks.md).
-PRUNED_SPARSITY_COLUMNS = ("bregman/pruned_sparsity", "pruning/sparsity")
-
 # Artifact subdirs that never contain a nested run — pruned while walking.
 WALK_SKIP_DIRS = {"checkpoints", "csv", "metadata", "tensorboard", "test_artifacts", ".hydra"}
 
@@ -397,54 +391,38 @@ def read_landed_sparsity(seed_dir):
     """Pruned sparsity (fraction 0–1) at this seed's tested checkpoint, or None.
 
     ``pruned_sparsity`` covers every weight tensor, norms and biases aside. That is
-    the figure the benchmark compares, and each pruner logs it under its own key
-    (``docs/image_benchmarks.md``). ``overall_sparsity`` dilutes it with the
-    unprunable parameters and would place a run below where its method put it.
+    the figure the benchmark compares (``docs/image_benchmarks.md``).
+    ``overall_sparsity`` dilutes it with the unprunable parameters and would place
+    a run below where its method put it.
 
-    ``src/modules/img.py`` writes the value into ``results.json`` against the epoch
-    the monitor selected — the same checkpoint the reported accuracy comes from.
-    ``src/modules/sv.py`` writes no such file, so an SV run reads the epoch its
-    tested checkpoint names and takes that epoch's pruner column. The two sources
-    are the same quantity; the second samples inside the epoch, so it can differ
-    in the fourth decimal.
+    Each task writes it against the checkpoint it tested. ``src/modules/img.py``
+    writes ``results.json`` for the epoch the monitor selected;
+    ``src/modules/sv.py`` writes it into every test set's metrics JSON. A run that
+    never tested has neither file and reports no landed sparsity.
     """
     path = os.path.join(seed_dir, "results.json")
     if os.path.exists(path):
         with open(path) as f:
             return json.load(f)["best_checkpoint"]["pruned_sparsity"]
-    return _sparsity_at_tested_epoch(seed_dir)
+    return _sparsity_from_test_metrics(seed_dir)
 
 
-def _sparsity_at_tested_epoch(seed_dir):
-    """The pruner's own sparsity at the epoch this seed's tested ckpt names, or None.
+def _sparsity_from_test_metrics(seed_dir):
+    """Pruned sparsity out of this seed's newest test-metrics JSON, or None.
 
-    The ckpt filename's ``sr`` tag is whole-model sparsity, so the epoch is what is
-    read out of it. A run that never tested, or that logged no pruner column,
-    reports no landed sparsity.
+    Every test set of one run scores the same weights, so the newest file answers
+    for all of them. A file written before ``sv.py`` reported its sparsity raises:
+    re-run the test rather than plot the wrong quantity.
     """
-    log_path = os.path.join(seed_dir, "train.log")
-    if not os.path.exists(log_path):
+    paths = glob.glob(os.path.join(seed_dir, "test_artifacts", "*", "*", "*_metrics.json"))
+    if not paths:
         return None
-    tested = None
-    with open(log_path, errors="ignore") as f:
-        for line in f:
-            m = TESTED_CKPT_RE.search(line)
-            if m:
-                tested = m.group(1)
-    m_epoch = re.search(r"epoch(\d+)", os.path.basename(tested)) if tested else None
-    if m_epoch is None:
-        return None
-
-    for path in sorted(glob.glob(os.path.join(seed_dir, "csv", "version_*", "metrics.csv"))):
-        header = pd.read_csv(path, nrows=0).columns
-        col = next((c for c in PRUNED_SPARSITY_COLUMNS if c in header), None)
-        if col is None or "epoch" not in header:
-            continue
-        at_epoch = pd.read_csv(path, usecols=["epoch", col])
-        at_epoch = at_epoch[at_epoch["epoch"] == int(m_epoch.group(1))][col].dropna()
-        if len(at_epoch):
-            return float(at_epoch.iloc[-1])
-    return None
+    newest = max(paths, key=lambda p: os.path.basename(os.path.dirname(p)))
+    with open(newest) as f:
+        metrics = json.load(f)
+    if "pruned_sparsity" not in metrics:
+        raise KeyError(f"a test-metrics JSON states pruned_sparsity (re-run test with +module.force_retest=true), missing in {newest}")
+    return metrics["pruned_sparsity"]
 
 
 def load_train_log(exp_dir):
@@ -473,8 +451,10 @@ def load_csv_metrics(exp_dir):
     """Step-level metrics from csv/version_*/metrics.csv → DataFrame.
 
     Lightning's CSVLogger opens a fresh ``version_N`` on every run or resume. All
-    non-empty versions merge into one continuous curve; where step ranges overlap
-    the highest version wins, because it superseded the earlier one.
+    non-empty versions merge into one continuous curve in index order, which is
+    the order they were written; where step ranges overlap the highest version
+    wins, because it superseded the earlier one. A name that states no index
+    raises: it has no place in that order.
     """
     csv_root = os.path.join(exp_dir, "csv")
     if not os.path.isdir(csv_root):
@@ -484,7 +464,7 @@ def load_csv_metrics(exp_dir):
     for entry in sorted(os.listdir(csv_root)):
         m = re.match(r"version_(\d+)$", entry)
         if not m:
-            continue
+            raise ValueError(f"csv/ holds version_<N> directories only, got {entry!r} in {csv_root}")
         path = os.path.join(csv_root, entry, "metrics.csv")
         if os.path.exists(path) and os.path.getsize(path) > 0:
             version_files.append((int(m.group(1)), path))

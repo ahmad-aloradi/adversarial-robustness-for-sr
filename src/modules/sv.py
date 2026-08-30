@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from src import utils
+from src.callbacks.pruning.shared_prune_utils import reported_sparsities
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 from src.datamodules.components.utils import (
     BaseDataset,
@@ -1155,9 +1156,12 @@ class SpeakerVerification(pl.LightningModule):
             f"Finalizing '{test_filename}': saved embeddings in {time.perf_counter() - t_save0:.1f}s"
         )
 
-        # Save test metrics as a JSON file
+        # Save test metrics as a JSON file. Test runs on the selected checkpoint, so this sparsity is that checkpoint's.
+        overall_sparsity, pruned_sparsity = reported_sparsities(self)
         metrics_for_save = {
             "test_set": test_filename,
+            "overall_sparsity": overall_sparsity,
+            "pruned_sparsity": pruned_sparsity,
             "norm": {
                 k: v.item() if torch.is_tensor(v) else v
                 for k, v in norm_metrics.items()

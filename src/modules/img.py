@@ -8,7 +8,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from src import utils
-from src.callbacks.pruning.shared_prune_utils import compute_sparsity
+from src.callbacks.pruning.shared_prune_utils import reported_sparsities
 from src.callbacks.pruning.utils.pruning_manager import PruningManager
 
 log = utils.get_pylogger(__name__)
@@ -170,7 +170,7 @@ class ImageClassification(pl.LightningModule):
             **self.logging_params,
         )
 
-        overall_sparsity, pruned_sparsity = self._compute_sparsities()
+        overall_sparsity, pruned_sparsity = reported_sparsities(self)
         snapshot = {
             "epoch": self.current_epoch,
             "train_accuracy": train_acc,
@@ -210,39 +210,6 @@ class ImageClassification(pl.LightningModule):
 
     def on_train_end(self) -> None:
         self._write_results()
-
-    def _compute_sparsities(self) -> tuple[float, float]:
-        """Whole-model sparsity and sparsity over every weight tensor — all but
-        norms and biases (matching the logged pruning/sparsity).
-
-        The second figure is what the benchmark compares. Without a pruner it
-        is the dense model's.
-        """
-        from src.callbacks.pruning.bregman.bregman_pruner import BregmanPruner
-        from src.callbacks.pruning.dst_pruner import DynamicSparsePruner
-        from src.callbacks.pruning.parameter_manager import (
-            regularizable_params,
-        )
-        from src.callbacks.pruning.prune import MagnitudePruner
-        from src.callbacks.pruning.str_pruner import STRPruner
-
-        overall = compute_sparsity(self)
-        pruned = compute_sparsity(regularizable_params(self))
-        for cb in self.trainer.callbacks:
-            if isinstance(cb, MagnitudePruner) and cb._target_params:
-                pruned = cb._reported_sparsity(self)
-                break
-            if isinstance(cb, BregmanPruner):
-                pruned = cb._pruned_sparsity()
-                break
-            if isinstance(cb, DynamicSparsePruner):
-                pruned = cb.pruned_sparsity()
-                break
-            # STR's stored w stays dense during training, so both figures come from the thresholded weights.
-            if isinstance(cb, STRPruner):
-                overall, pruned = cb.sparsities()
-                break
-        return overall, pruned
 
     def _write_results(self) -> None:
         """Save best/last epoch train/val (plus best-ckpt test) accuracy as

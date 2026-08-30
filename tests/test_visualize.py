@@ -1069,26 +1069,45 @@ def test_the_legend_covers_every_panel(tmp_path, monkeypatch):
     assert set(drawn) == {enc.label(g) for g in groups}
 
 
-def test_an_sv_run_reads_its_landed_sparsity_from_the_tested_epoch(tmp_path):
-    # src/modules/sv.py writes no results.json, so the value comes from the epoch
-    # the tested checkpoint names. The filename's own sr tag is whole-model.
-    run = _make_tested_run(tmp_path / "run", ckpt_name="epoch041-metric_valid0.93-sr0.897.ckpt")
-    version = run / "csv" / "version_0"
-    version.mkdir(parents=True)
-    (version / "metrics.csv").write_text(
-        "step,epoch,bregman/sparsity,bregman/pruned_sparsity\n"
-        "10,40,0.80,0.85\n20,41,0.897,0.9123\n30,42,0.91,0.93\n"
-    )
+def _write_test_metrics(run_dir, test_set="cnceleb_multi", timestamp="20260830_120000", **keys):
+    """One test set's metrics JSON, as src/modules/sv.py writes it."""
+    out = run_dir / "test_artifacts" / test_set / timestamp
+    out.mkdir(parents=True)
+    (out / f"{test_set}_metrics.json").write_text(json.dumps({"test_set": test_set, **keys}))
+    return out
+
+
+def test_an_sv_run_reads_its_landed_sparsity_from_its_test_metrics(tmp_path):
+    # src/modules/sv.py writes no results.json. It states the sparsity of the
+    # checkpoint it tested in every test set's metrics JSON instead.
+    run = _make_tested_run(tmp_path / "run")
+    _write_test_metrics(run, overall_sparsity=WRONG_SPARSITY, pruned_sparsity=0.9123)
     assert read_landed_sparsity(str(run)) == pytest.approx(0.9123)
 
 
+def test_the_newest_test_run_answers_for_the_sparsity(tmp_path):
+    # Every test set of one run scores the same weights, but an older timestamp
+    # can hold a different run's model.
+    run = _make_tested_run(tmp_path / "run")
+    _write_test_metrics(run, timestamp="20260101_090000", pruned_sparsity=0.5)
+    _write_test_metrics(run, test_set="cnceleb_concat", timestamp="20260830_120000", pruned_sparsity=0.9123)
+    assert read_landed_sparsity(str(run)) == pytest.approx(0.9123)
+
+
+def test_a_test_metrics_json_without_the_sparsity_raises(tmp_path):
+    # Written before sv.py reported it. Plotting the run would state a sparsity
+    # that came from somewhere else.
+    run = _make_tested_run(tmp_path / "run")
+    _write_test_metrics(run, norm={"eer": 0.05})
+    with pytest.raises(KeyError, match="force_retest"):
+        read_landed_sparsity(str(run))
+
+
 def test_results_json_wins_where_the_task_writes_one(tmp_path):
-    # The image task computes it from the tested checkpoint's own weights, so it
-    # is the record; the csv only samples inside the epoch.
-    run = _make_tested_run(tmp_path / "run", ckpt_name="epoch041-metric_valid0.93-sr0.897.ckpt")
-    version = run / "csv" / "version_0"
-    version.mkdir(parents=True)
-    (version / "metrics.csv").write_text("step,epoch,pruning/sparsity\n20,41,0.9123\n")
+    # The image task computes it against the epoch the monitor selected, so it is
+    # the record for an image run.
+    run = _make_tested_run(tmp_path / "run")
+    _write_test_metrics(run, pruned_sparsity=0.5)
     (run / "results.json").write_text(
         json.dumps({"best_checkpoint": {"overall_sparsity": WRONG_SPARSITY, "pruned_sparsity": 0.99}})
     )
@@ -1098,3 +1117,13 @@ def test_results_json_wins_where_the_task_writes_one(tmp_path):
 def test_a_run_with_neither_source_reports_no_landed_sparsity(tmp_path):
     run = _make_tested_run(tmp_path / "run", logged=False)
     assert read_landed_sparsity(str(run)) is None
+
+
+def test_csv_holds_version_directories_only(tmp_path):
+    # The versions merge in index order. A name that states no index has no place
+    # in that order, so it cannot be merged silently.
+    (tmp_path / "csv" / "version_0").mkdir(parents=True)
+    (tmp_path / "csv" / "version_0" / "metrics.csv").write_text("step,epoch,train_loss\n0,0,2.5\n")
+    (tmp_path / "csv" / "version_2_backup").mkdir()
+    with pytest.raises(ValueError, match="version_<N>"):
+        load_csv_metrics(str(tmp_path))

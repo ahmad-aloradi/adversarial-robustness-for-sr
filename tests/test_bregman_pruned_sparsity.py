@@ -9,12 +9,15 @@ regularizer (lambda_scale > 0).
 Support turnover is measured on the same groups: births against the new
 support, deaths against the old.
 """
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
 
 from src.callbacks.pruning.bregman.bregman_pruner import BregmanPruner
 from src.callbacks.pruning.bregman.bregman_regularizers import RegL1, RegNone
+from src.callbacks.pruning.shared_prune_utils import reported_sparsities
 
 
 def _make_optimizer(groups):
@@ -164,3 +167,48 @@ def test_support_turnover_rejects_an_empty_support():
     w.data = torch.zeros(2)
     with pytest.raises(AssertionError, match="non-empty support"):
         pruner.on_train_epoch_end(trainer, module)
+
+
+# ---------------------------------------------------------------------------
+# reported_sparsities — the pair src/modules/{img,sv}.py write out
+# ---------------------------------------------------------------------------
+
+
+class _ReportingModule(nn.Module):
+    """A model with norms and biases, plus the callback list the report reads."""
+
+    def __init__(self, callbacks):
+        super().__init__()
+        self.body = nn.Sequential(
+            nn.Linear(20, 20), nn.BatchNorm1d(20), nn.Linear(20, 20)
+        )
+        for layer in (self.body[0], self.body[2]):
+            layer.weight.data.fill_(1.0)
+            layer.weight.data[:10] = 0.0  # half the weights of each Linear
+            layer.bias.data.fill_(1.0)
+        self.trainer = SimpleNamespace(callbacks=callbacks)
+
+
+def test_reported_sparsities_measures_weights_without_a_pruner():
+    """Both figures come from the model when no callback claims the weights."""
+    overall, pruned = reported_sparsities(_ReportingModule([]))
+
+    # 400 zeros of 800 Linear weights. overall adds the 80 norm and bias entries,
+    # 20 of which the BatchNorm bias starts at zero — no method put them there.
+    assert pruned == pytest.approx(0.5)
+    assert overall == pytest.approx(420 / 880)
+
+
+def test_reported_sparsities_takes_the_pruners_own_figure():
+    """Only the callback knows which weights it holds dense, so it states the
+    pruned figure."""
+    w = nn.Parameter(torch.tensor([0.0, 0.0, 0.0, 1.0]))  # 75% zero
+    pruner = BregmanPruner(target_sparsity=0.9)
+    pruner._optimizer = _make_optimizer(
+        [{"params": [w], "reg": RegL1(lamda=0.1), "lambda_scale": 1.0}]
+    )
+
+    overall, pruned = reported_sparsities(_ReportingModule([pruner]))
+
+    assert pruned == pytest.approx(0.75)  # the model's own weights read 0.5
+    assert overall == pytest.approx(420 / 880)  # unchanged: the model states it

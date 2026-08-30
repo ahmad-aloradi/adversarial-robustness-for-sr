@@ -1,4 +1,4 @@
-"""Shared sparsity computation for pruners."""
+"""Shared sparsity computation for pruners and for the modules that report it."""
 
 from typing import Dict, Iterator, List, Tuple, Union
 
@@ -103,6 +103,39 @@ def collapse_pruning_reparam(
             state_dict[stem + "_orig"] * state_dict[stem + "_mask"]
         )
     return collapsed
+
+
+def reported_sparsities(pl_module) -> Tuple[float, float]:
+    """Whole-model sparsity and sparsity over every weight tensor — all but
+    norms and biases (matching the logged pruning/sparsity).
+
+    The second figure is what the benchmark compares. A sparsifier states it
+    itself, because only the callback knows which weights it holds dense.
+    Without a pruner both come from the dense model.
+    """
+    from src.callbacks.pruning.bregman.bregman_pruner import BregmanPruner
+    from src.callbacks.pruning.dst_pruner import DynamicSparsePruner
+    from src.callbacks.pruning.parameter_manager import regularizable_params
+    from src.callbacks.pruning.prune import MagnitudePruner
+    from src.callbacks.pruning.str_pruner import STRPruner
+
+    overall = compute_sparsity(pl_module)
+    pruned = compute_sparsity(regularizable_params(pl_module))
+    for cb in pl_module.trainer.callbacks:
+        if isinstance(cb, MagnitudePruner) and cb._target_params:
+            pruned = cb._reported_sparsity(pl_module)
+            break
+        if isinstance(cb, BregmanPruner):
+            pruned = cb._pruned_sparsity()
+            break
+        if isinstance(cb, DynamicSparsePruner):
+            pruned = cb.pruned_sparsity()
+            break
+        # STR's stored w stays dense during training, so both figures come from the thresholded weights.
+        if isinstance(cb, STRPruner):
+            overall, pruned = cb.sparsities()
+            break
+    return overall, pruned
 
 
 def _iter_tensors(target) -> Iterator[torch.Tensor]:
