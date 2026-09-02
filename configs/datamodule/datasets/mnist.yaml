@@ -40,6 +40,8 @@ transforms:
 name: mnist # dataset tag for logging
 num_classes: 10
 max_epochs: 200 # one budget for dense and Bregman (dense converges well before)
+label_smoothing: 0.0 # CrossEntropyLoss epsilon; the MNIST recipe does not smooth
+weight_decay: 5e-4 # SGD decay; the standard small-image value
 
 loaders:
   train:

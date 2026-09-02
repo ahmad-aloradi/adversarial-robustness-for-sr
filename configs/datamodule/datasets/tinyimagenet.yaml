@@ -33,6 +33,8 @@ transforms:
 name: tinyimagenet # dataset tag for logging
 num_classes: 200
 max_epochs: 200
+label_smoothing: 0.0 # CrossEntropyLoss epsilon; the TinyImageNet recipe does not smooth
+weight_decay: 5e-4 # SGD decay; the standard small-image value
 
 loaders:
   train:

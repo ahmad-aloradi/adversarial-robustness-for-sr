@@ -35,6 +35,8 @@ transforms:
 name: cifar10 # dataset tag for logging
 num_classes: 10
 max_epochs: 200 # standard literature budget; experiments read this via ${datamodule.max_epochs}
+label_smoothing: 0.0 # CrossEntropyLoss epsilon; the CIFAR recipes do not smooth
+weight_decay: 5e-4 # SGD decay; the standard CIFAR value
 
 loaders:
   train:

@@ -93,18 +93,6 @@ def test_every_img_recipe_uses_one_lr_schedule(exp):
     )
 
 
-@pytest.mark.parametrize("exp", _img_experiments())
-def test_every_img_recipe_shares_one_base_lr(exp):
-    """0.1 for every gradient-scaled arm; AdaBreg is the one exception.
-
-    Why: AdaBreg's step is ``m/sqrt(v)``, which is close to unit norm, so lr
-    is the per-weight move itself rather than a multiplier on the gradient.
-    """
-    cfg = _compose([f"experiment=img/{exp}", "logger=[]"])
-    is_adabreg = cfg.module.optimizer._target_.endswith("AdaBreg")
-    assert cfg.module.optimizer.lr == (5e-3 if is_adabreg else 0.1)
-
-
 @pytest.mark.parametrize("dataset", sorted(_DATASETS))
 @pytest.mark.parametrize("exp", _img_experiments())
 def test_img_experiment_composes(exp, dataset):

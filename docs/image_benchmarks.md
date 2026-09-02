@@ -50,8 +50,13 @@ bash scripts/datasets/prep_imagenet.sh     # ~150 GB (~300 GB peak)
   experiment config, not the dataset one.
 - `datamodule.augmentation=false` gives the train split the eval pipeline.
 - Validation is a class-stratified carve from train, sized by
-  `valid_dataset.split` (10%; 2% on ImageNet, where 10% would hold back 128k
-  images) and seeded by `valid_dataset.split_seed`.
+  `valid_dataset.split` (10%; 2% on ImageNet) and seeded by `valid_dataset.split_seed`.
+- `label_smoothing` is a per-dataset constant read by
+  `module.criterion.train_criterion`. ImageNet uses 0.1, which RigL and GraNet
+  both use. Every other dataset uses 0.0.
+- `weight_decay` is a per-dataset constant read by `module.optimizer`. ImageNet
+  uses 1e-4 and every other dataset uses 5e-4. `soft_threshold` sets its own value,
+  because STR reads `weight_decay` as its λ rather than as regularization.
 - No ImageNet reference number: the published ≈70% top-1 at 90 epochs uses weight
   decay 1e-4, this shared recipe keeps CIFAR's 5e-4. First run is calibration.
 

@@ -8,6 +8,7 @@ defaults:
 criterion:
   train_criterion:
     _target_: torch.nn.CrossEntropyLoss
+    label_smoothing: ${datamodule.label_smoothing} # per-dataset constant; every vision dataset config must set it
   # For the `replace` resolver (__loss__). Non-`_partial_` so it resolves to
   # the class name, not "partial".
   loss: ${module.criterion.train_criterion}

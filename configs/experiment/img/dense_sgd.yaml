@@ -32,7 +32,7 @@ module:
     _partial_: True
     lr: 0.1
     momentum: 0.9
-    weight_decay: 5e-4
+    weight_decay: ${datamodule.weight_decay} # per-dataset; 1e-4 on ImageNet, 5e-4 elsewhere
     nesterov: false
   lr_scheduler:
     scheduler:

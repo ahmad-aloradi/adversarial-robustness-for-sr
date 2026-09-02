@@ -35,6 +35,8 @@ transforms:
 name: imagenet # dataset tag for logging; also picks the ResNet stem
 num_classes: 1000
 max_epochs: 100 # standard literature budget; experiments read this via ${datamodule.max_epochs}
+label_smoothing: 0.1 # CrossEntropyLoss epsilon; RigL's ImageNet default and GraNet's ImageNet command both use 0.1
+weight_decay: 1e-4 # 1.28M images need less decay than CIFAR's 50k; RigL and GraNet both run 1e-4 here
 
 loaders:
   train:
